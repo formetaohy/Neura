@@ -1,0 +1,393 @@
+use neura_program::{Graph, Init, Shape, Value};
+use neura_runtime::Runtime;
+
+#[path = "support/mod.rs"]
+mod support;
+
+use support::{assert_close, matmul_reference, open, random, softmax_reference};
+
+#[test]
+fn independent_tasks_collapse_into_one_wave() {
+    let graph = Graph::new();
+    let wide = graph.parameter(Shape::vector(65_536), Init::Zero);
+    let activated = graph.relu(wide);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    assert_eq!(program.task_count(), 64);
+    assert_eq!(program.wave_count(), 1);
+    runtime.run(&program);
+    let out = runtime.read(&program, activated);
+    assert_eq!(out.len(), 65_536);
+    assert!(out.iter().all(|value| *value == 0.0));
+}
+
+#[test]
+fn a_matmul_matches_a_cpu_reference() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(7, 5), Init::Zero);
+    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero);
+    let out = graph.matmul(left, right);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let left_data = random(35, 11);
+    let right_data = random(45, 29);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    let product = runtime.read(&program, out);
+    assert_close(
+        &product,
+        &matmul_reference(&left_data, &right_data, 7, 5, 9),
+        1e-5,
+    );
+}
+
+#[test]
+fn a_bias_broadcasts_over_every_row() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(4, 8));
+    let bias = graph.parameter(Shape::vector(8), Init::Zero);
+    let scale = graph.parameter(Shape::scalar(), Init::Zero);
+    let shifted = graph.add(data, bias);
+    let scaled = graph.mul(shifted, scale);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let data_values = random(32, 7);
+    let bias_values = random(8, 13);
+    runtime.write(&program, data, &data_values);
+    runtime.write(&program, bias, &bias_values);
+    runtime.write(&program, scale, &[3.0]);
+    runtime.run(&program);
+    let out = runtime.read(&program, scaled);
+    let expected = data_values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (value + bias_values[index % 8]) * 3.0)
+        .collect::<Vec<_>>();
+    assert_close(&out, &expected, 1e-5);
+}
+
+#[test]
+fn a_softmax_row_sums_to_one() {
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
+    let probabilities = graph.softmax(logits);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let logits_values = random(54, 3);
+    runtime.write(&program, logits, &logits_values);
+    runtime.run(&program);
+    let out = runtime.read(&program, probabilities);
+    assert_close(&out, &softmax_reference(&logits_values, 9), 1e-5);
+    for row in out.chunks(9) {
+        assert!((row.iter().sum::<f32>() - 1.0).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn the_loss_gradient_of_a_matmul_is_the_column_sum_of_its_operand() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(4, 3), Init::Zero);
+    let right = graph.parameter(Shape::matrix(3, 5), Init::Zero);
+    let loss = graph.sum(graph.matmul(left, right));
+    let grads = graph.backward(loss);
+    graph.retain(grads.of(left));
+    graph.retain(grads.of(right));
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let left_data = random(12, 5);
+    let right_data = random(15, 17);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    let left_grad = runtime.read(&program, grads.of(left));
+    let right_grad = runtime.read(&program, grads.of(right));
+    let mut expected_left = vec![0.0f32; 12];
+    for row in 0..4u32 {
+        for column in 0..3u32 {
+            expected_left[(row * 3 + column) as usize] = (0..5u32)
+                .map(|other| right_data[(column * 5 + other) as usize])
+                .sum();
+        }
+    }
+    let mut expected_right = vec![0.0f32; 15];
+    for step in 0..3u32 {
+        for column in 0..5u32 {
+            expected_right[(step * 5 + column) as usize] = (0..4u32)
+                .map(|row| left_data[(row * 3 + step) as usize])
+                .sum();
+        }
+    }
+    assert_close(&left_grad, &expected_left, 1e-4);
+    assert_close(&right_grad, &expected_right, 1e-4);
+    let loss_value = runtime.read(&program, loss);
+    let expected_loss = left_data
+        .iter()
+        .zip(expected_left.iter())
+        .map(|(value, grad)| value * grad)
+        .sum::<f32>();
+    assert_close(&loss_value, &[expected_loss], 1e-3);
+}
+
+#[test]
+fn a_bias_gradient_folds_every_row_it_was_added_to() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(5, 4));
+    let bias = graph.parameter(Shape::vector(4), Init::Zero);
+    let loss = graph.sum(graph.add(data, bias));
+    let grads = graph.backward(loss);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &random(20, 23));
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, grads.of(bias)), &[5.0; 4], 1e-5);
+}
+
+#[test]
+fn a_rectifier_gradient_keeps_the_sign_of_its_input() {
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let loss = graph.sum(graph.relu(data));
+    let grads = graph.backward(loss);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let values = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 3.0];
+    runtime.write(&program, data, &values);
+    runtime.run(&program);
+    let expected = values
+        .iter()
+        .map(|value| f32::from(*value > 0.0))
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, grads.of(data)), &expected, 1e-6);
+}
+
+#[test]
+fn the_loss_gradient_of_a_softmax_row_vanishes() {
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(4, 6), Init::Zero);
+    let loss = graph.sum(graph.softmax(logits));
+    let grads = graph.backward(loss);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, logits, &random(24, 31));
+    runtime.run(&program);
+    let gradient = runtime.read(&program, grads.of(logits));
+    assert_close(&gradient, &[0.0; 24], 1e-5);
+}
+
+#[test]
+fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let root = graph.sqrt(data);
+    let reciprocal = graph.recip(root);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &[1.0, 4.0, 9.0, 16.0]);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, reciprocal),
+        &[1.0, 0.5, 1.0 / 3.0, 0.25],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_shape_change_never_declares_another_kernel() {
+    let runtime = open();
+    let mut results = Vec::new();
+    for batch in [8u32, 64] {
+        let graph = Graph::new();
+        let weight = graph.parameter(
+            Shape::matrix(5, 3),
+            Init::Uniform {
+                low: -0.5,
+                high: 0.5,
+            },
+        );
+        let data = graph.input(Shape::matrix(batch, 5));
+        let out = graph.softmax(graph.matmul(data, weight));
+        let program = runtime.compile(&graph);
+        let data_values = random(batch * 5, batch);
+        runtime.write(&program, data, &data_values);
+        runtime.run(&program);
+        results.push(runtime.read(&program, out));
+        assert_eq!(
+            runtime.declared_kernels(),
+            1,
+            "the device program is assembled once, whatever the shape",
+        );
+    }
+    assert_eq!(results[0].len(), 8 * 3);
+    assert_eq!(results[1].len(), 64 * 3);
+}
+
+#[test]
+fn an_update_in_place_replays_on_every_run() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let update = graph.fill(Shape::vector(4), 0.25);
+    graph.add_into(weight, update);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, weight, &[1.0; 4]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, weight), &[1.25; 4], 1e-6);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, weight), &[1.5; 4], 1e-6);
+}
+
+#[test]
+fn a_tape_runs_a_whole_training_step_in_one_submission() {
+    let graph = Graph::new();
+    let weight = graph.parameter(
+        Shape::matrix(4, 3),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let bias = graph.parameter(Shape::vector(3), Init::Zero);
+    let data = graph.input(Shape::matrix(6, 4));
+    let hidden = graph.relu(graph.add(graph.matmul(data, weight), bias));
+    let loss = graph.sum(hidden);
+    let grads = graph.backward(loss);
+    let learning_rate = graph.fill(Shape::scalar(), -0.001);
+    let weight_step = graph.mul(grads.of(weight), learning_rate);
+    let bias_step = graph.mul(grads.of(bias), learning_rate);
+    graph.add_into(weight, weight_step);
+    graph.add_into(bias, bias_step);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &random(24, 41));
+    runtime.run(&program);
+    let first = (runtime.read(&program, loss), runtime.read(&program, weight));
+    runtime.run(&program);
+    let second = (runtime.read(&program, loss), runtime.read(&program, weight));
+    assert!(
+        second.0[0] < first.0[0],
+        "a step of descent lowered the loss from {} to {}",
+        first.0[0],
+        second.0[0],
+    );
+    assert_ne!(second.1, first.1, "the step moved the weights");
+    assert!(
+        program.wave_count() < program.task_count(),
+        "{} tasks were dispatched in {} waves",
+        program.task_count(),
+        program.wave_count(),
+    );
+}
+
+#[test]
+fn reading_two_tensors_costs_one_submission() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let doubled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
+    let shifted = graph.add(doubled, graph.fill(Shape::vector(4), 1.0));
+    graph.retain(doubled);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    let values = runtime.read_many(&program, &[doubled, shifted]);
+    assert_close(&values[0], &[2.0, 4.0, 6.0, 8.0], 1e-6);
+    assert_close(&values[1], &[3.0, 5.0, 7.0, 9.0], 1e-6);
+}
+
+#[test]
+fn a_graph_without_tasks_is_refused_by_the_runtime() {
+    let graph = Graph::new();
+    graph.input(Shape::vector(4));
+    let runtime = open();
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.compile(&graph)));
+    assert!(
+        outcome.is_err(),
+        "a program with an empty tape was compiled"
+    );
+}
+
+#[test]
+fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4096));
+    let out = graph.mul(data, graph.fill(Shape::vector(4096), 1.0));
+    let runtime = pollster::block_on(Runtime::open(neura_runtime::RuntimeRequest {
+        arena_bytes: 1 << 20,
+        readback_bytes: 256,
+        ..Default::default()
+    }))
+    .expect("a device with a small staging buffer");
+    let program = runtime.compile(&graph);
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.read(&program, out)));
+    assert!(
+        outcome.is_err(),
+        "a read wider than the staging buffer was accepted"
+    );
+}
+
+#[test]
+fn a_reclaimed_temporary_is_refused_and_a_retained_one_reads_back() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let scaled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
+    let squared = graph.mul(scaled, scaled);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.read(&program, scaled)
+    }));
+    assert!(
+        refused.is_err(),
+        "a temporary whose storage a later task took over was handed back",
+    );
+    assert_close(
+        &runtime.read(&program, squared),
+        &[4.0, 16.0, 36.0, 64.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_retained_gradient_reads_back_after_the_step_that_consumed_it() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0));
+    let data = graph.input(Shape::vector(4));
+    let loss = graph.sum(graph.mul(data, weight));
+    let grads = graph.backward(loss);
+    let gradient = grads.of(weight);
+    graph.retain(gradient);
+    let step = graph.mul(gradient, graph.fill(Shape::vector(4), -0.5));
+    graph.add_into(weight, step);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, gradient),
+        &[1.0, 2.0, 3.0, 4.0],
+        1e-6,
+    );
+    assert_close(
+        &runtime.read(&program, weight),
+        &[0.5, 0.0, -0.5, -1.0],
+        1e-6,
+    );
+    assert_close(&runtime.read(&program, loss), &[10.0], 1e-5);
+}
+
+#[test]
+fn a_parameter_read_before_any_run_holds_its_seed() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(2.5));
+    let out: Value = graph.relu(weight);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    assert_close(&runtime.read(&program, weight), &[2.5; 4], 1e-6);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[2.5; 4], 1e-6);
+}

@@ -1,0 +1,19 @@
+[package]
+name = "neura-shader"
+version.workspace = true
+edition.workspace = true
+description = "Assembly and reflection of the single device program the framework dispatches"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+neura-kernels = { workspace = true }
+
+[dependencies]
+naga = { workspace = true }
+neura-abi = { workspace = true }
+neura-gpu = { workspace = true }
+neura-kernels = { workspace = true }

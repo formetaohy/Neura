@@ -1,0 +1,17 @@
+[package]
+name = "neura-nn"
+version.workspace = true
+edition.workspace = true
+description = "Layers, losses and optimizers over the Neura graph"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+neura-runtime = { workspace = true }
+pollster = { workspace = true }
+
+[dependencies]
+neura-program = { workspace = true }

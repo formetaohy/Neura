@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+description = "GPU-driven deep learning framework for games"
+license = "MIT"
+repository = "https://github.com/formetaohy/Neura"
+
+[workspace.dependencies]
+bytemuck = { version = "1", features = ["derive"] }
+naga = { version = "30", default-features = false, features = ["wgsl-in"] }
+pollster = "0.4"
+wgpu = { version = "30", default-features = false, features = [
+    "std",
+    "parking_lot",
+    "dx12",
+    "metal",
+    "vulkan",
+    "wgsl",
+] }
+neura-abi = { version = "0.1.0", path = "crates/neura-abi" }
+neura-kernels = { version = "0.1.0", path = "crates/neura-kernels" }
+neura-shader = { version = "0.1.0", path = "crates/neura-shader" }
+neura-gpu = { version = "0.1.0", path = "crates/neura-gpu" }
+neura-program = { version = "0.1.0", path = "crates/neura-program" }
+neura-runtime = { version = "0.1.0", path = "crates/neura-runtime" }
+neura-nn = { version = "0.1.0", path = "crates/neura-nn" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[package]
+name = "neura"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+neura-program = { workspace = true }
+neura-runtime = { workspace = true }
+neura-nn = { workspace = true }
+neura-gpu = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
+
+[[example]]
+name = "train"
+path = "examples/train.rs"
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[lints]
+workspace = true

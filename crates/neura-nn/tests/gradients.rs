@@ -1,0 +1,263 @@
+use neura_nn::{Linear, mse_loss};
+use neura_program::{Graph, Init, Shape, Value};
+use neura_runtime::{Runtime, RuntimeRequest};
+
+fn open() -> Runtime {
+    pollster::block_on(Runtime::open(RuntimeRequest {
+        arena_bytes: 8 << 20,
+        readback_bytes: 1 << 16,
+        ..Default::default()
+    }))
+    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
+}
+
+fn sampled(elements: usize) -> impl Iterator<Item = usize> {
+    let stride = (elements / 4).max(1);
+    (0..elements).step_by(stride).take(4)
+}
+
+#[test]
+fn analytic_gradients_match_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let first = Linear::new(
+        &graph,
+        2,
+        4,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let second = Linear::new(
+        &graph,
+        4,
+        1,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let inputs = graph.input(Shape::matrix(4, 2));
+    let targets = graph.input(Shape::matrix(4, 1));
+    let hidden = graph.relu(first.forward(&graph, inputs));
+    let loss = mse_loss(&graph, second.forward(&graph, hidden), targets);
+    let gradients = graph.backward(loss);
+    let parameters = first
+        .parameters()
+        .into_iter()
+        .chain(second.parameters())
+        .collect::<Vec<Value>>();
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let program = runtime.compile(&graph);
+    runtime.write(
+        &program,
+        inputs,
+        &[0.1, -0.4, 0.7, 0.2, -0.3, 0.9, 0.5, -0.8],
+    );
+    runtime.write(&program, targets, &[1.0, -0.5, 0.25, -0.75]);
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 1e-2,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+
+#[test]
+fn analytic_gradients_of_a_deep_stack_match_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let model = neura_nn::Mlp::new(
+        &graph,
+        &[3, 5, 4, 2],
+        Init::Uniform {
+            low: -0.6,
+            high: 0.6,
+        },
+    );
+    let inputs = graph.input(Shape::matrix(4, 3));
+    let targets = graph.input(Shape::matrix(4, 2));
+    let loss = mse_loss(&graph, model.forward(&graph, inputs), targets);
+    let gradients = graph.backward(loss);
+    let parameters = model.parameters();
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let program = runtime.compile(&graph);
+    runtime.write(
+        &program,
+        inputs,
+        &[
+            0.2, -0.5, 0.3, -0.7, 0.1, 0.6, 0.4, 0.8, -0.2, -0.9, 0.5, -0.3,
+        ],
+    );
+    runtime.write(
+        &program,
+        targets,
+        &[0.5, -0.5, -0.25, 0.75, 0.9, 0.1, -0.8, -0.4],
+    );
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 1e-2,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+
+#[test]
+fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let first = Linear::new(
+        &graph,
+        64,
+        32,
+        Init::Uniform {
+            low: -0.2,
+            high: 0.2,
+        },
+    );
+    let second = Linear::new(
+        &graph,
+        32,
+        16,
+        Init::Uniform {
+            low: -0.2,
+            high: 0.2,
+        },
+    );
+    let samples = 256;
+    let inputs = graph.input(Shape::matrix(samples, 64));
+    let targets = graph.input(Shape::matrix(samples, 16));
+    let hidden = graph.relu(first.forward(&graph, inputs));
+    let loss = mse_loss(&graph, second.forward(&graph, hidden), targets);
+    let gradients = graph.backward(loss);
+    let parameters = first
+        .parameters()
+        .into_iter()
+        .chain(second.parameters())
+        .collect::<Vec<Value>>();
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let program = runtime.compile(&graph);
+    let inputs_data = (0..samples * 64)
+        .map(|index| (index as f32 * 0.017).sin() * 0.5)
+        .collect::<Vec<_>>();
+    let targets_data = (0..samples * 16)
+        .map(|index| (index as f32 * 0.031).cos() * 0.5)
+        .collect::<Vec<_>>();
+    runtime.write(&program, inputs, &inputs_data);
+    runtime.write(&program, targets, &targets_data);
+    runtime.run(&program);
+    assert!(
+        program.task_count() > 64,
+        "a step this wide spans many tasks, and {} is too few",
+        program.task_count(),
+    );
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.05);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 1e-3,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+
+#[test]
+fn one_step_of_adam_moves_a_weight_against_its_gradient() {
+    let runtime = open();
+    let graph = Graph::new();
+    let layer = Linear::new(
+        &graph,
+        2,
+        1,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let inputs = graph.input(Shape::matrix(4, 2));
+    let targets = graph.input(Shape::matrix(4, 1));
+    let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
+    let gradients = graph.backward(loss);
+    let mut optimizer = neura_nn::Adam::new(&graph, 0.1, 0.9, 0.999, 1e-8);
+    optimizer.track_all(&graph, &layer.parameters());
+    optimizer.step(&graph, &gradients);
+    graph.retain(loss);
+    let program = runtime.compile(&graph);
+    runtime.write(
+        &program,
+        inputs,
+        &[1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, -1.0],
+    );
+    runtime.write(&program, targets, &[1.0, -1.0, -1.0, 1.0]);
+    runtime.run(&program);
+    let before = runtime.read(&program, loss)[0];
+    for _ in 0..200 {
+        runtime.run(&program);
+    }
+    let after = runtime.read(&program, loss)[0];
+    assert!(
+        after < before,
+        "two hundred steps of adam moved the loss from {before} to {after}",
+    );
+}

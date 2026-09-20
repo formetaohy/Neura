@@ -1,0 +1,22 @@
+[package]
+name = "neura-runtime"
+version.workspace = true
+edition.workspace = true
+description = "Device execution of an encoded program: arena, tape buffers and wave dispatch"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+bytemuck = { workspace = true }
+neura-nn = { workspace = true }
+pollster = { workspace = true }
+
+[dependencies]
+bytemuck = { workspace = true }
+neura-abi = { workspace = true }
+neura-gpu = { workspace = true }
+neura-program = { workspace = true }
+neura-shader = { workspace = true }

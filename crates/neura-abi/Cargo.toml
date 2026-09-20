@@ -1,0 +1,16 @@
+[package]
+name = "neura-abi"
+version.workspace = true
+edition.workspace = true
+description = "Device layouts, kinds and counters the Neura megakernel reads from the tape"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+naga = { workspace = true }
+
+[dependencies]
+bytemuck = { workspace = true }

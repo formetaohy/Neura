@@ -1,0 +1,13 @@
+[package]
+name = "neura-gpu"
+version.workspace = true
+edition.workspace = true
+description = "Device, buffers, pipelines and readback the framework builds its arena on"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+wgpu = { workspace = true }
