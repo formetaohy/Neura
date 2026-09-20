@@ -314,7 +314,6 @@ fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
     let data = graph.input(Shape::vector(4096));
     let out = graph.mul(data, graph.fill(Shape::vector(4096), 1.0));
     let runtime = pollster::block_on(Runtime::open(neura_runtime::RuntimeRequest {
-        arena_bytes: 1 << 20,
         readback_bytes: 256,
         ..Default::default()
     }))
@@ -390,4 +389,71 @@ fn a_parameter_read_before_any_run_holds_its_seed() {
     assert_close(&runtime.read(&program, weight), &[2.5; 4], 1e-6);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &[2.5; 4], 1e-6);
+}
+
+#[test]
+fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(1024));
+    let out = graph.relu(graph.mul(data, data));
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.write(&program, data, &[2.0; 1024]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out)[..4], &[4.0; 4], 1e-6);
+    assert_eq!(program.arena().size(), program.arena_bytes());
+    assert_eq!(program.arena_bytes(), 8192);
+    assert!(
+        program.device_bytes() > program.arena_bytes(),
+        "a tape carries {} bytes of device memory beside its {} byte arena",
+        program.device_bytes(),
+        program.arena_bytes(),
+    );
+}
+
+#[test]
+fn two_programs_hold_their_own_memory() {
+    let runtime = open();
+    let first = Graph::new();
+    let weight = first.parameter(Shape::vector(4), Init::Constant(2.5));
+    let scaled = first.mul(weight, first.fill(Shape::vector(4), 3.0));
+    let a = runtime.compile(&first);
+    runtime.run(&a);
+    assert_close(&runtime.read(&a, scaled), &[7.5; 4], 1e-6);
+
+    let second = Graph::new();
+    let data = second.input(Shape::vector(16));
+    let doubled = second.mul(data, second.fill(Shape::vector(16), 2.0));
+    let b = runtime.compile(&second);
+    runtime.write(&b, data, &[1.0; 16]);
+    runtime.run(&b);
+    assert_close(&runtime.read(&b, doubled), &[2.0; 16], 1e-6);
+
+    runtime.run(&a);
+    assert_close(&runtime.read(&a, scaled), &[7.5; 4], 1e-6);
+    assert_ne!(
+        a.arena().allocation(),
+        b.arena().allocation(),
+        "two programs were handed one arena",
+    );
+    assert!(
+        a.arena_bytes() < b.arena_bytes(),
+        "a plan of {} bytes reached as wide as a plan of {} bytes",
+        a.arena_bytes(),
+        b.arena_bytes(),
+    );
+}
+
+#[test]
+fn a_fresh_program_holds_zeros_until_the_host_writes() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let out = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[0.0; 4], 1e-6);
+    runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[2.0, 4.0, 6.0, 8.0], 1e-6);
 }

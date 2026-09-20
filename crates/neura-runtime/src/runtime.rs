@@ -12,13 +12,10 @@ use neura_shader::{ARENA, BOUNDS, CURSOR, Megakernel, STEPS, TASKS, VALUES};
 use std::mem::size_of;
 
 pub const WORKGROUP_BUDGET: u32 = 1024;
-pub const DEFAULT_ARENA_BYTES: u64 = 64 << 20;
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
-const MINIMUM_ARENA_BYTES: u64 = 4096;
 
 pub struct RuntimeRequest {
     pub gpu: GpuRequest,
-    pub arena_bytes: u64,
     pub readback_bytes: u64,
 }
 
@@ -26,7 +23,6 @@ impl Default for RuntimeRequest {
     fn default() -> Self {
         Self {
             gpu: GpuRequest::default(),
-            arena_bytes: DEFAULT_ARENA_BYTES,
             readback_bytes: DEFAULT_READBACK_BYTES,
         }
     }
@@ -34,54 +30,58 @@ impl Default for RuntimeRequest {
 
 pub struct Runtime {
     context: GpuContext,
-    arena: GpuBuffer,
     kernel: PipelineHandle,
     readback: Readback,
     alignment: u64,
-    capacity: u64,
 }
 
 impl Runtime {
     pub async fn open(request: RuntimeRequest) -> Result<Self, GpuUnavailable> {
         let context = GpuContext::open(&request.gpu).await?;
-        Ok(Self::of_context(
-            context,
-            request.arena_bytes,
-            request.readback_bytes,
-        ))
+        Ok(Self::of_context(context, request.readback_bytes))
     }
 
-    pub fn adopt(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        info: wgpu::AdapterInfo,
-        arena_bytes: u64,
-    ) -> Self {
+    pub fn adopt(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo) -> Self {
         Self::of_context(
             GpuContext::adopt(device, queue, info),
-            arena_bytes,
             DEFAULT_READBACK_BYTES,
         )
     }
 
-    fn of_context(context: GpuContext, arena_bytes: u64, readback_bytes: u64) -> Self {
+    fn of_context(context: GpuContext, readback_bytes: u64) -> Self {
+        let kernel = context.declare(Megakernel::assemble().program());
+        Self {
+            alignment: context.binding_alignment(),
+            readback: Readback::new(context.device(), readback_bytes),
+            context,
+            kernel,
+        }
+    }
+
+    pub fn compile(&self, graph: &Graph) -> Program {
+        self.context.assert_alive();
+        let encoding = graph.encode(self.alignment);
         assert!(
-            arena_bytes >= MINIMUM_ARENA_BYTES && arena_bytes.is_multiple_of(WORD_BYTES),
-            "an arena of {arena_bytes} bytes is below the {MINIMUM_ARENA_BYTES} byte floor or off the word grid",
+            encoding.task_count() > 0,
+            "a program whose tape holds no task has nothing for the device to run",
         );
-        let limits = context.limits();
+        let arena_bytes = encoding.arena_bytes();
+        let limits = self.context.limits();
         assert!(
             arena_bytes <= limits.max_storage_buffer_binding_size,
-            "the device binds at most {} bytes of storage, so an arena of {arena_bytes} bytes cannot be bound",
+            "a tape of {} tasks lays out {arena_bytes} bytes of arena, and the device binds at most {} bytes of storage",
+            encoding.task_count(),
             limits.max_storage_buffer_binding_size,
         );
         assert!(
             arena_bytes <= limits.max_buffer_size,
-            "the device holds buffers of at most {} bytes, so an arena of {arena_bytes} bytes cannot be created",
+            "a tape of {} tasks lays out {arena_bytes} bytes of arena, and the device holds buffers of at most {} bytes",
+            encoding.task_count(),
             limits.max_buffer_size,
         );
+        let device = self.context.device();
         let arena = GpuBuffer::new(
-            context.device(),
+            device,
             "neura arena",
             arena_bytes,
             BufferUsages::STORAGE
@@ -90,25 +90,6 @@ impl Runtime {
                 | BufferUsages::VERTEX
                 | BufferUsages::INDIRECT,
         );
-        let kernel = context.declare(Megakernel::assemble().program());
-        Self {
-            alignment: context.binding_alignment(),
-            readback: Readback::new(context.device(), readback_bytes),
-            context,
-            arena,
-            kernel,
-            capacity: arena_bytes,
-        }
-    }
-
-    pub fn compile(&self, graph: &Graph) -> Program {
-        self.context.assert_alive();
-        let encoding = graph.encode(self.alignment, self.capacity);
-        assert!(
-            encoding.task_count() > 0,
-            "a program whose tape holds no task has nothing for the device to run",
-        );
-        let device = self.context.device();
         let tape = GpuBuffer::new(
             device,
             "neura tape",
@@ -146,12 +127,8 @@ impl Runtime {
         if !encoding.steps().is_empty() {
             steps.write(queue, encoding.steps());
         }
-        let mut submission = Submission::new(device, "neura compile");
-        submission.clear_buffer(self.arena.buffer(), 0, None);
-        submission.submit(queue);
         for (offset, data) in encoding.initial() {
-            self.arena
-                .write_at(queue, *offset, bytemuck::cast_slice(data));
+            arena.write_at(queue, *offset, bytemuck::cast_slice(data));
         }
         let group = self.kernel.bind_group(&[
             BindGroupEntry {
@@ -164,7 +141,7 @@ impl Runtime {
             },
             BindGroupEntry {
                 binding: ARENA,
-                resource: self.arena.resource(0, self.arena.size()),
+                resource: arena.resource(0, arena.size()),
             },
             BindGroupEntry {
                 binding: CURSOR,
@@ -181,16 +158,19 @@ impl Runtime {
         ]);
         Program {
             encoding,
-            group,
+            arena,
+            tape,
+            values,
+            bounds,
+            steps,
             cursor,
+            group,
         }
     }
 
     pub fn run(&self, program: &Program) {
         self.context.assert_alive();
         let device = self.context.device();
-        let queue = self.context.queue();
-        let waves = program.encoding.waves();
         let mut submission = Submission::new(device, "neura program");
         submission.clear_buffer(program.cursor.buffer(), 0, None);
         let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
@@ -198,21 +178,20 @@ impl Runtime {
             timestamp_writes: None,
         });
         pass.set_pipeline(self.kernel.pipeline());
+        let waves = program.encoding.waves();
         let mut first = 0;
         for (index, end) in waves.iter().enumerate() {
-            let grid = (end - first).min(WORKGROUP_BUDGET);
-            let offset = (index as u64 * self.alignment) as u32;
-            pass.set_bind_group(0, &program.group, &[offset]);
-            pass.dispatch_workgroups(grid, 1, 1);
+            pass.set_bind_group(0, &program.group, &[(index as u64 * self.alignment) as u32]);
+            pass.dispatch_workgroups((end - first).min(WORKGROUP_BUDGET), 1, 1);
             first = *end;
         }
         drop(pass);
-        submission.submit(queue);
+        submission.submit(self.context.queue());
     }
 
     pub fn write(&self, program: &Program, value: Value, data: &[f32]) {
         assert!(
-            program.encoding.readable(value),
+            program.readable(value),
             "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to write it",
             value.id(),
         );
@@ -224,7 +203,7 @@ impl Runtime {
             data.len(),
             span.elements,
         );
-        self.arena.write_at(
+        program.arena.write_at(
             self.context.queue(),
             span.offset,
             bytemuck::cast_slice(data),
@@ -241,7 +220,7 @@ impl Runtime {
         assert!(!values.is_empty(), "a read names at least one tensor");
         for value in values {
             assert!(
-                program.encoding.readable(*value),
+                program.readable(*value),
                 "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to read it back",
                 value.id(),
             );
@@ -267,7 +246,7 @@ impl Runtime {
         for span in &spans {
             let bytes = u64::from(span.elements) * WORD_BYTES;
             submission.copy_buffer_to_buffer(
-                self.arena.buffer(),
+                program.arena.buffer(),
                 span.offset,
                 self.readback.staging().buffer(),
                 at,
@@ -301,12 +280,8 @@ impl Runtime {
             .collect()
     }
 
-    pub fn arena(&self) -> &GpuBuffer {
-        &self.arena
-    }
-
-    pub fn capacity(&self) -> u64 {
-        self.capacity
+    pub fn context(&self) -> &GpuContext {
+        &self.context
     }
 
     pub fn alignment(&self) -> u64 {
@@ -315,10 +290,6 @@ impl Runtime {
 
     pub fn readback_capacity(&self) -> u64 {
         self.readback.capacity()
-    }
-
-    pub fn context(&self) -> &GpuContext {
-        &self.context
     }
 
     pub fn declared_kernels(&self) -> usize {

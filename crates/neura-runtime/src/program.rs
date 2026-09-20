@@ -6,9 +6,31 @@ pub struct Program {
     pub(crate) encoding: Encoding,
     pub(crate) group: BindGroup,
     pub(crate) cursor: GpuBuffer,
+    pub(crate) arena: GpuBuffer,
+    pub(crate) tape: GpuBuffer,
+    pub(crate) values: GpuBuffer,
+    pub(crate) bounds: GpuBuffer,
+    pub(crate) steps: GpuBuffer,
 }
 
 impl Program {
+    pub fn arena(&self) -> &GpuBuffer {
+        &self.arena
+    }
+
+    pub fn arena_bytes(&self) -> u64 {
+        self.encoding.arena_bytes()
+    }
+
+    pub fn device_bytes(&self) -> u64 {
+        self.arena.size()
+            + self.tape.size()
+            + self.values.size()
+            + self.bounds.size()
+            + self.steps.size()
+            + self.cursor.size()
+    }
+
     pub fn task_count(&self) -> u32 {
         self.encoding.task_count()
     }
@@ -23,10 +45,6 @@ impl Program {
 
     pub fn value_count(&self) -> u32 {
         self.encoding.value_count()
-    }
-
-    pub fn arena_bytes(&self) -> u64 {
-        self.encoding.arena_bytes()
     }
 
     pub fn work(&self) -> u64 {

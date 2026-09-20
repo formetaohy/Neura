@@ -5,11 +5,10 @@ use neura_abi::{
 use neura_program::{Encoding, Graph, Init, Shape};
 use std::mem::size_of;
 
-const ARENA: u64 = 1 << 20;
 const ALIGNMENT: u64 = 256;
 
 fn encoding(graph: &Graph) -> Encoding {
-    graph.encode(ALIGNMENT, ARENA)
+    graph.encode(ALIGNMENT)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -169,19 +168,20 @@ fn a_chain_of_temporaries_holds_one_tensor() {
 }
 
 #[test]
-fn a_capacity_short_of_the_graph_is_refused() {
-    let graph = Graph::new();
-    let first = graph.parameter(Shape::vector(4096), Init::Zero);
-    let second = graph.parameter(Shape::vector(4096), Init::Zero);
-    let sum = graph.add(first, second);
-    let product = graph.mul(first, second);
-    graph.add(sum, product);
-    let required = graph.encode(ALIGNMENT, ARENA).arena_bytes();
+fn a_plan_sizes_its_own_arena() {
+    let small = Graph::new();
+    let parameter = small.parameter(Shape::vector(256), Init::Zero);
+    small.relu(parameter);
+    let large = Graph::new();
+    let parameter = large.parameter(Shape::vector(4096), Init::Zero);
+    large.relu(parameter);
+    let small = encoding(&small);
+    let large = encoding(&large);
+    assert_eq!(small.arena_bytes(), 256 * 4 + 256 * 4);
+    assert_eq!(large.arena_bytes(), 4096 * 4 + 4096 * 4);
     assert!(
-        refuses(|| {
-            let _ = graph.encode(ALIGNMENT, required - 1);
-        }),
-        "an arena one byte short of the graph was accepted",
+        small.arena_bytes() < large.arena_bytes(),
+        "a wider tensor asks for a wider arena",
     );
 }
 
@@ -400,7 +400,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     graph.backward(graph.sum(out));
     let encoding = encoding(&graph);
     assert_eq!(encoding.value_count() as usize, graph.value_count());
-    assert!(encoding.arena_bytes() <= ARENA);
+    assert!(encoding.arena_bytes() > 0);
     assert!(encoding.work() > 0);
     let seed = encoding
         .initial()
@@ -435,4 +435,35 @@ fn a_non_scalar_loss_is_refused() {
         }),
         "a vector was accepted as a loss",
     );
+}
+
+#[test]
+fn every_tensor_a_plan_names_lies_inside_its_arena() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
+    let data = graph.input(Shape::matrix(2, 8));
+    let out = graph.softmax(graph.add(
+        graph.matmul(data, weight),
+        graph.fill(Shape::vector(4), 1.0),
+    ));
+    graph.retain(out);
+    let grads = graph.backward(graph.sum(out));
+    graph.retain(grads.of(weight));
+    let encoding = encoding(&graph);
+    for value in [weight, data, out, grads.of(weight)] {
+        let span = encoding.span(value);
+        assert!(
+            span.offset + span.bytes <= encoding.arena_bytes(),
+            "tensor {} of {} bytes at {} leaves the {} byte arena",
+            value.id(),
+            span.bytes,
+            span.offset,
+            encoding.arena_bytes(),
+        );
+        assert_eq!(
+            span.offset % ALIGNMENT,
+            0,
+            "a tensor lies off the block grid"
+        );
+    }
 }

@@ -4,7 +4,6 @@ use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
-        arena_bytes: 8 << 20,
         readback_bytes: 1 << 16,
         ..Default::default()
     }))

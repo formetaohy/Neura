@@ -1,4 +1,4 @@
-use neura_program::{Gradients, Graph, Shape, Value};
+use neura_program::{Gradients, Graph, Init, Shape, Value};
 
 pub struct Sgd {
     descent: Value,
@@ -74,8 +74,8 @@ impl Adam {
         );
         let moments = Moments {
             parameter,
-            mean: graph.input(graph.shape(parameter)),
-            variance: graph.input(graph.shape(parameter)),
+            mean: graph.parameter(graph.shape(parameter), Init::Zero),
+            variance: graph.parameter(graph.shape(parameter), Init::Zero),
         };
         self.moments.push(moments);
         moments

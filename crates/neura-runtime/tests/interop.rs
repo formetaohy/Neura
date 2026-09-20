@@ -26,7 +26,6 @@ fn fragment_main(@location(0) payload: f32) -> @location(0) f32 {
 #[test]
 fn a_game_pipeline_draws_a_tensor_straight_out_of_the_arena() {
     let runtime = pollster::block_on(neura_runtime::Runtime::open(RuntimeRequest {
-        arena_bytes: 1 << 20,
         readback_bytes: 1 << 12,
         ..Default::default()
     }))
@@ -130,7 +129,7 @@ fn a_game_pipeline_draws_a_tensor_straight_out_of_the_arena() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, runtime.arena().buffer().slice(span.offset..));
+        pass.set_vertex_buffer(0, program.arena().buffer().slice(span.offset..));
         pass.draw(0..4, 0..1);
     }
     encoder.copy_texture_to_buffer(

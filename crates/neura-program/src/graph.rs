@@ -344,9 +344,9 @@ impl Graph {
         self.state.borrow().tasks.len()
     }
 
-    pub fn encode(&self, alignment: u64, capacity: u64) -> Encoding {
+    pub fn encode(&self, alignment: u64) -> Encoding {
         let state = self.state.borrow();
-        Encoding::plan(&state, alignment, capacity)
+        Encoding::plan(&state, alignment)
     }
 
     pub fn backward(&self, loss: Value) -> Gradients {

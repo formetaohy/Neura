@@ -15,6 +15,60 @@ struct Block {
     bytes: u64,
 }
 
+struct Blocks {
+    free: Vec<Block>,
+    end: u64,
+}
+
+impl Blocks {
+    fn new() -> Self {
+        Self {
+            free: Vec::new(),
+            end: 0,
+        }
+    }
+
+    fn bytes(&self) -> u64 {
+        self.end
+    }
+
+    fn reserve(&mut self, bytes: u64, alignment: u64) -> u64 {
+        for index in 0..self.free.len() {
+            let block = &self.free[index];
+            let offset = block.offset.next_multiple_of(alignment);
+            let end = block.offset + block.bytes;
+            if offset + bytes > end {
+                continue;
+            }
+            if offset + bytes == end {
+                self.free.remove(index);
+            } else {
+                self.free[index].offset = offset + bytes;
+                self.free[index].bytes = end - offset - bytes;
+            }
+            return offset;
+        }
+        let offset = self.end.next_multiple_of(alignment);
+        self.end = offset + bytes;
+        offset
+    }
+
+    fn release(&mut self, offset: u64, bytes: u64) {
+        self.free.push(Block { offset, bytes });
+        self.free.sort_by_key(|block| block.offset);
+        let mut merged: Vec<Block> = Vec::with_capacity(self.free.len());
+        for block in self.free.drain(..) {
+            match merged.last_mut() {
+                Some(last) if last.offset + last.bytes >= block.offset => {
+                    last.bytes = last.bytes.max(block.offset + block.bytes - last.offset);
+                }
+                _ => merged.push(block),
+            }
+        }
+        self.free = merged;
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Live {
     first: usize,
@@ -36,7 +90,7 @@ pub struct Encoding {
 }
 
 impl Encoding {
-    pub(crate) fn plan(state: &GraphState, alignment: u64, capacity: u64) -> Self {
+    pub(crate) fn plan(state: &GraphState, alignment: u64) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
@@ -54,7 +108,11 @@ impl Encoding {
             neura_abi::MAX_WAVES,
         );
         let live = storage_liveness(state, &tasks, &order);
-        let (offsets, arena_bytes) = allocate(state, &live, &waves, alignment, capacity);
+        let (offsets, arena_bytes) = allocate(state, &live, &waves, alignment);
+        assert!(
+            arena_bytes.is_multiple_of(WORD_BYTES),
+            "a plan of {arena_bytes} bytes leaves the word grid the device indexes",
+        );
 
         let mut values = Vec::new();
         for info in state.values.iter() {
@@ -364,20 +422,14 @@ fn allocate(
     live: &[Option<Live>],
     waves: &[u32],
     alignment: u64,
-    capacity: u64,
 ) -> (Vec<u64>, u64) {
     let wave_of = |position: usize| waves.partition_point(|end| *end <= position as u32) as u32;
-    let mut free = vec![Block {
-        offset: 0,
-        bytes: capacity,
-    }];
+    let mut arena = Blocks::new();
     let mut offsets = vec![0u64; live.len()];
     let owners = (0..state.values.len()).filter(|id| state.values[*id].storage as usize == *id);
-    let mut arena_bytes = 0u64;
     for id in owners.clone() {
         if state.values[id].retained || held(state, id) {
-            offsets[id] = reserve(&mut free, storage_bytes(state, id), alignment, capacity);
-            arena_bytes = arena_bytes.max(offsets[id] + storage_bytes(state, id));
+            offsets[id] = arena.reserve(storage_bytes(state, id), alignment);
         }
     }
     let mut pending = live
@@ -389,58 +441,18 @@ fn allocate(
     pending.sort_by_key(|(_, live)| (live.first, live.last));
     let mut active = Vec::<(u32, Option<usize>, Block)>::new();
     for (storage, live) in pending {
-        let wave = wave_of(live.first);
         active.retain(|(last_wave, aliased_at, block)| {
-            if *last_wave < wave || *aliased_at == Some(live.first) {
-                release(&mut free, block);
+            if *last_wave < wave_of(live.first) || *aliased_at == Some(live.first) {
+                arena.release(block.offset, block.bytes);
                 false
             } else {
                 true
             }
         });
         let bytes = storage_bytes(state, storage);
-        let offset = reserve(&mut free, bytes, alignment, capacity);
+        let offset = arena.reserve(bytes, alignment);
         offsets[storage] = offset;
-        arena_bytes = arena_bytes.max(offset + bytes);
         active.push((wave_of(live.last), live.aliased_at, Block { offset, bytes }));
     }
-    (offsets, arena_bytes)
-}
-
-fn reserve(free: &mut Vec<Block>, bytes: u64, alignment: u64, capacity: u64) -> u64 {
-    for index in 0..free.len() {
-        let block = &free[index];
-        let offset = block.offset.next_multiple_of(alignment);
-        if offset + bytes <= block.offset + block.bytes {
-            let trimmed = offset - block.offset;
-            free[index].offset = offset;
-            free[index].bytes -= trimmed;
-            if free[index].bytes == bytes {
-                free.remove(index);
-            } else {
-                free[index].offset += bytes;
-                free[index].bytes -= bytes;
-            }
-            return offset;
-        }
-    }
-    panic!("an arena of {capacity} bytes cannot hold {bytes} more bytes of tensor storage")
-}
-
-fn release(free: &mut Vec<Block>, block: &Block) {
-    free.push(Block {
-        offset: block.offset,
-        bytes: block.bytes,
-    });
-    free.sort_by_key(|block| block.offset);
-    let mut merged: Vec<Block> = Vec::with_capacity(free.len());
-    for block in free.drain(..) {
-        match merged.last_mut() {
-            Some(last) if last.offset + last.bytes >= block.offset => {
-                last.bytes = last.bytes.max(block.offset + block.bytes - last.offset);
-            }
-            _ => merged.push(block),
-        }
-    }
-    *free = merged;
+    (offsets, arena.bytes())
 }

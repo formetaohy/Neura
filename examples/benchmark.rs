@@ -96,11 +96,8 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
 }
 
 fn main() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        arena_bytes: 256 << 20,
-        ..Default::default()
-    }))
-    .expect("a device to measure");
+    let runtime =
+        pollster::block_on(Runtime::open(RuntimeRequest::default())).expect("a device to measure");
     let info = runtime.context().adapter_info();
     println!(
         "device: {} ({:?}, {:?})",

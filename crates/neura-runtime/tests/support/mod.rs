@@ -3,7 +3,6 @@ use neura_program::Init;
 pub fn open() -> neura_runtime::Runtime {
     pollster::block_on(neura_runtime::Runtime::open(
         neura_runtime::RuntimeRequest {
-            arena_bytes: 8 << 20,
             readback_bytes: 4 << 20,
             ..Default::default()
         },
