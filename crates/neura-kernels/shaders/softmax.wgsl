@@ -16,7 +16,7 @@ fn run_softmax(task: Task, lid: u32) {
         }
         let row_sum = softmax_row_sum(lid, local_sum);
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            arena[output_base + column] = exp(arena[source_base + column] - row_max) / row_sum;
+            arena[output_base + column] = chained(task, row * output.dims.w + column, exp(arena[source_base + column] - row_max) / row_sum);
         }
         workgroupBarrier();
     }
@@ -39,7 +39,7 @@ fn run_softmax_grad(task: Task, lid: u32) {
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
             let y = arena[probability_base + column];
             let g = arena[gradient_base + column];
-            arena[output_base + column] = y * (g - row_dot);
+            arena[output_base + column] = chained(task, row * output.dims.w + column, y * (g - row_dot));
         }
         workgroupBarrier();
     }

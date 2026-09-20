@@ -14,6 +14,7 @@ pub const VALUES: u32 = 1;
 pub const ARENA: u32 = 2;
 pub const CURSOR: u32 = 3;
 pub const BOUNDS: u32 = 4;
+pub const STEPS: u32 = 5;
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -52,6 +53,12 @@ pub const BINDINGS: &[KernelBinding] = &[
         kind: BindingKind::ReadOnlyStorage,
         dynamic_offset: true,
         name: "bounds",
+    },
+    KernelBinding {
+        binding: STEPS,
+        kind: BindingKind::ReadOnlyStorage,
+        dynamic_offset: false,
+        name: "steps",
     },
 ];
 

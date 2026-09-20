@@ -5,12 +5,21 @@ use neura_abi::{
 };
 
 pub const INDEX: &str = include_str!("../shaders/index.wgsl");
+pub const CHAIN: &str = include_str!("../shaders/chain.wgsl");
 pub const MATMUL: &str = include_str!("../shaders/matmul.wgsl");
 pub const ELEMENTWISE: &str = include_str!("../shaders/elementwise.wgsl");
 pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
 
-pub const FRAGMENTS: &[&str] = &[INDEX, MATMUL, ELEMENTWISE, REDUCE, SOFTMAX];
+pub const FRAGMENTS: &[&str] = &[INDEX, CHAIN, MATMUL, ELEMENTWISE, REDUCE, SOFTMAX];
+
+pub const CHAIN_OPS: &[&str] = &[
+    "CHAIN_ADD",
+    "CHAIN_MUL",
+    "CHAIN_RELU",
+    "CHAIN_SQRT",
+    "CHAIN_RECIP",
+];
 
 pub struct Kernel {
     pub kind: u32,

@@ -4,7 +4,8 @@ use crate::shape::Shape;
 use neura_abi::{
     BINARY_ADD, BINARY_MUL, KIND_BINARY, KIND_BROADCAST, KIND_EXPAND, KIND_FILL, KIND_MATMUL,
     KIND_SOFTMAX, KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD,
-    MATMUL_COL_TILE, MATMUL_DEPTH_TILE, MATMUL_ROW_TILE, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
+    MATMUL_COL_TILE, MATMUL_DEPTH_TILE, MATMUL_ROW_TILE, NO_VALUE, StepRecord, UNARY_RECIP,
+    UNARY_RELU, UNARY_SQRT,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,7 +14,6 @@ pub const ELEMENT_TILE: u32 = 1024;
 pub const REDUCE_TILE: u32 = 4096;
 pub const MATMUL_TILES_PER_TASK: u32 = 8;
 pub const ROWS_PER_TASK: u32 = 8;
-pub const NO_VALUE: u32 = u32::MAX;
 
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
@@ -41,7 +41,7 @@ pub(crate) enum Residency {
     View,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub(crate) struct TaskInfo {
     pub(crate) kind: u32,
     pub(crate) flags: u32,
@@ -53,6 +53,8 @@ pub(crate) struct TaskInfo {
     pub(crate) param: f32,
     pub(crate) work: u64,
     pub(crate) in_place: bool,
+    pub(crate) chain: Vec<StepRecord>,
+    pub(crate) time: u32,
 }
 
 impl TaskInfo {
@@ -77,7 +79,17 @@ impl TaskInfo {
             param,
             work,
             in_place: false,
+            chain: Vec::new(),
+            time: 0,
         }
+    }
+
+    pub(crate) fn reads(&self) -> impl Iterator<Item = u32> + '_ {
+        self.inputs
+            .iter()
+            .copied()
+            .chain(self.chain.iter().map(|step| step.operand))
+            .filter(|value| *value != NO_VALUE)
     }
 }
 
@@ -258,6 +270,10 @@ impl Graph {
         );
         let elements = self.shape(value).elements();
         let chunks = elements.div_ceil(REDUCE_TILE);
+        assert!(
+            chunks <= REDUCE_TILE,
+            "a sum over {elements} elements leaves {chunks} partial sums, more than the {REDUCE_TILE} one more level folds",
+        );
         let partials = self.fresh(Shape::vector(chunks), Residency::Derived, false);
         self.state.borrow_mut().values[partials.id() as usize].partials_of =
             Some((value, REDUCE_TILE));
@@ -437,7 +453,7 @@ impl Graph {
                             task.flags,
                             (first, count),
                             out.id(),
-                            [source.id(), gradient.id(), NO_VALUE],
+                            [task.out, gradient.id(), NO_VALUE],
                             0.0,
                             u64::from(count),
                         ));
@@ -650,7 +666,7 @@ impl Graph {
     }
 
     fn task(&self, index: usize) -> TaskInfo {
-        self.state.borrow().tasks[index]
+        self.state.borrow().tasks[index].clone()
     }
 
     fn hold(&self, shape: Shape, residency: Residency, initial: Option<Vec<f32>>) -> Value {

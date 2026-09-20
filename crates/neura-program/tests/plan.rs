@@ -1,19 +1,67 @@
 use neura_abi::{
     KIND_BINARY, KIND_EXPAND, KIND_MATMUL, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY,
-    KIND_UNARY_GRAD, TaskRecord,
+    KIND_UNARY_GRAD, StepRecord, TaskRecord,
 };
-use neura_program::{Graph, Init, Shape};
+use neura_program::{Encoding, Graph, Init, Shape};
+use std::mem::size_of;
 
 const ARENA: u64 = 1 << 20;
 const ALIGNMENT: u64 = 256;
 
-fn tape(graph: &Graph) -> Vec<TaskRecord> {
-    let encoding = graph.encode(ALIGNMENT, ARENA);
-    bytemuck::cast_slice::<u8, TaskRecord>(encoding.tasks()).to_vec()
+fn encoding(graph: &Graph) -> Encoding {
+    graph.encode(ALIGNMENT, ARENA)
 }
 
-fn kinds(graph: &Graph) -> Vec<u32> {
-    tape(graph).iter().map(|task| task.kind).collect()
+fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
+    bytes
+        .chunks_exact(width)
+        .map(bytemuck::pod_read_unaligned)
+        .collect()
+}
+
+fn tape(encoding: &Encoding) -> Vec<TaskRecord> {
+    records(encoding.tasks(), size_of::<TaskRecord>())
+}
+
+fn steps(encoding: &Encoding) -> Vec<StepRecord> {
+    records(encoding.steps(), size_of::<StepRecord>())
+}
+
+fn kinds(encoding: &Encoding) -> Vec<u32> {
+    tape(encoding).iter().map(|task| task.kind).collect()
+}
+
+fn wave_of(encoding: &Encoding, task: usize) -> u32 {
+    encoding
+        .waves()
+        .iter()
+        .position(|end| task < *end as usize)
+        .expect("every task belongs to a wave") as u32
+}
+
+fn writers(encoding: &Encoding, value: u32) -> Vec<usize> {
+    tape(encoding)
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| task.out == value)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn readers(encoding: &Encoding, value: u32) -> Vec<usize> {
+    let tape = tape(encoding);
+    let steps = steps(encoding);
+    tape.iter()
+        .enumerate()
+        .filter(|(_, task)| {
+            task.a == value
+                || task.b == value
+                || task.c == value
+                || (task.chain..task.chain + task.steps)
+                    .any(|step| steps[step as usize].operand == value)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn refuses(action: impl FnOnce()) -> bool {
@@ -21,16 +69,69 @@ fn refuses(action: impl FnOnce()) -> bool {
 }
 
 #[test]
-fn a_chain_draws_one_wave_per_dependency() {
+fn a_chain_of_rectifiers_fuses_into_one_task() {
     let graph = Graph::new();
     let mut value = graph.parameter(Shape::vector(4), Init::Zero);
     for _ in 0..4 {
         value = graph.relu(value);
     }
-    let encoding = graph.encode(ALIGNMENT, ARENA);
-    assert_eq!(encoding.task_count(), 4);
-    assert_eq!(encoding.wave_count(), 4);
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 1);
+    assert_eq!(encoding.wave_count(), 1);
+    assert_eq!(encoding.step_count(), 3);
     assert_eq!(value.shape().elements(), 4);
+}
+
+#[test]
+fn a_dense_layer_fuses_its_epilogue_into_the_product() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero);
+    let data = graph.input(Shape::matrix(3, 4));
+    let activated = graph.relu(graph.add(graph.matmul(data, weight), bias));
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 1);
+    assert_eq!(encoding.wave_count(), 1);
+    assert_eq!(kinds(&encoding), vec![KIND_MATMUL]);
+    let tape = tape(&encoding);
+    assert_eq!(
+        tape[0].steps, 2,
+        "the bias and the rectifier ride the product"
+    );
+    let steps = steps(&encoding);
+    assert_eq!(steps[tape[0].chain as usize].operand, bias.id());
+    assert_eq!(steps[tape[0].chain as usize + 1].operand, u32::MAX);
+    assert_eq!(tape[0].out, activated.id());
+}
+
+#[test]
+fn a_value_two_tasks_read_stays_on_the_tape() {
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let squared = graph.mul(data, data);
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 1);
+    assert_eq!(kinds(&encoding), vec![KIND_BINARY]);
+    assert_eq!(readers(&encoding, data.id()), vec![0]);
+    assert_eq!(tape(&encoding)[0].out, squared.id());
+}
+
+#[test]
+fn a_retained_value_is_never_folded_away() {
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let doubled = graph.mul(data, graph.fill(Shape::vector(8), 2.0));
+    graph.retain(doubled);
+    let activated = graph.relu(doubled);
+    graph.retain(activated);
+    let encoding = encoding(&graph);
+    let reader = writers(&encoding, activated.id());
+    assert_eq!(reader.len(), 1, "the rectifier keeps a task of its own");
+    assert_eq!(kinds(&encoding)[reader[0]], KIND_UNARY);
+    assert!(
+        readers(&encoding, doubled.id()).contains(&reader[0]),
+        "the rectifier reads the value the graph retains",
+    );
 }
 
 #[test]
@@ -40,8 +141,11 @@ fn independent_tasks_share_a_wave() {
     let right = graph.parameter(Shape::vector(64), Init::Zero);
     let sum = graph.add(left, right);
     let product = graph.mul(left, right);
+    graph.retain(sum);
+    graph.retain(product);
     let out = graph.add(sum, product);
-    let encoding = graph.encode(ALIGNMENT, ARENA);
+    graph.retain(out);
+    let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 3);
     assert_eq!(encoding.wave_count(), 2);
     assert_eq!(encoding.waves(), &[2, 3]);
@@ -49,17 +153,18 @@ fn independent_tasks_share_a_wave() {
 }
 
 #[test]
-fn a_chain_of_temporaries_reuses_one_storage() {
+fn a_chain_of_temporaries_holds_one_tensor() {
     let graph = Graph::new();
     let mut value = graph.parameter(Shape::vector(256), Init::Zero);
     for _ in 0..16 {
         value = graph.relu(value);
     }
-    let encoding = graph.encode(ALIGNMENT, ARENA);
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 1);
     assert_eq!(
         encoding.arena_bytes(),
         256 * 4 + 256 * 4,
-        "a chain of sixteen temporaries holds one intermediate at a time",
+        "the parameter and the value the fused chain produces",
     );
 }
 
@@ -113,14 +218,14 @@ fn a_matmul_tiles_its_output() {
     let right = graph.parameter(Shape::matrix(32, 48), Init::Zero);
     let out = graph.matmul(left, right);
     assert_eq!(out.shape(), Shape::matrix(64, 48));
-    let encoding = graph.encode(ALIGNMENT, ARENA);
+    let encoding = encoding(&graph);
     let tiles: u32 = 4 * 3;
     assert_eq!(
         encoding.task_count(),
         tiles.div_ceil(neura_program::MATMUL_TILES_PER_TASK),
     );
-    assert_eq!(kinds(&graph).len(), encoding.task_count() as usize);
-    assert!(kinds(&graph).iter().all(|kind| *kind == KIND_MATMUL));
+    assert_eq!(kinds(&encoding).len(), encoding.task_count() as usize);
+    assert!(kinds(&encoding).iter().all(|kind| *kind == KIND_MATMUL));
 }
 
 #[test]
@@ -137,7 +242,7 @@ fn a_backward_pass_reaches_every_parameter() {
     assert_eq!(grads.of(weight).shape(), Shape::matrix(4, 8));
     assert_eq!(grads.of(bias).shape(), Shape::vector(8));
 
-    let kinds = kinds(&graph);
+    let kinds = kinds(&encoding(&graph));
     assert!(
         kinds.contains(&KIND_MATMUL),
         "the weight gradient is a matmul"
@@ -167,18 +272,44 @@ fn a_parameter_updated_in_place_feeds_the_tasks_that_follow() {
     let scaled = graph.mul(grads.of(weight), graph.fill(Shape::scalar(), -0.1));
     graph.add_into(weight, scaled);
     let read_back = graph.relu(weight);
-    let encoding = graph.encode(ALIGNMENT, ARENA);
-    let records = tape(&graph);
-    let update = records
-        .iter()
-        .position(|task| task.out == weight.id() && task.kind == KIND_BINARY)
-        .expect("the update task is on the tape");
-    let reader = records
-        .iter()
-        .position(|task| task.out == read_back.id() && task.kind == KIND_UNARY)
-        .expect("the reader task is on the tape");
-    assert!(update < reader, "a reader follows the update it observes");
-    assert!(encoding.wave_count() >= 2);
+    graph.retain(read_back);
+    let encoding = encoding(&graph);
+    let update = writers(&encoding, weight.id());
+    assert!(!update.is_empty(), "the update writes the parameter");
+    let reader = writers(&encoding, read_back.id());
+    assert_eq!(reader.len(), 1, "the reader holds a task of its own");
+    assert!(
+        update
+            .iter()
+            .all(|task| wave_of(&encoding, *task) < wave_of(&encoding, reader[0])),
+        "a reader observes the update it follows",
+    );
+}
+
+#[test]
+fn an_update_in_place_never_shares_a_wave_with_its_readers() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(8), Init::Zero);
+    let input = graph.input(Shape::vector(8));
+    let read = graph.mul(input, weight);
+    let loss = graph.sum(read);
+    let grads = graph.backward(loss);
+    graph.add_into(weight, grads.of(weight));
+    let read_back = graph.relu(weight);
+    graph.retain(read_back);
+    let encoding = encoding(&graph);
+    let update = writers(&encoding, weight.id());
+    assert_eq!(update.len(), 1, "the update writes the parameter once");
+    let before = wave_of(&encoding, writers(&encoding, read.id())[0]);
+    let after = wave_of(&encoding, writers(&encoding, read_back.id())[0]);
+    assert!(
+        before < wave_of(&encoding, update[0]),
+        "an update in place follows every reader of the value it replaces",
+    );
+    assert!(
+        after > wave_of(&encoding, update[0]),
+        "a reader that follows the update observes it",
+    );
 }
 
 #[test]
@@ -196,38 +327,12 @@ fn a_graph_updated_in_place_is_refused_a_later_backward() {
 }
 
 #[test]
-fn an_update_in_place_never_shares_a_wave_with_its_readers() {
-    let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(8), Init::Zero);
-    let input = graph.input(Shape::vector(8));
-    let loss = graph.sum(graph.mul(input, weight));
-    let grads = graph.backward(loss);
-    graph.add_into(weight, grads.of(weight));
-    let encoding = graph.encode(ALIGNMENT, ARENA);
-    let records = tape(&graph);
-    let update = records
-        .iter()
-        .position(|task| task.out == weight.id() && task.kind == KIND_BINARY)
-        .expect("the update task is on the tape");
-    let wave = encoding
-        .waves()
-        .iter()
-        .position(|end| update < *end as usize)
-        .expect("the update task belongs to a wave");
-    assert_eq!(
-        wave as u32,
-        encoding.wave_count() - 1,
-        "an update in place must follow every reader",
-    );
-}
-
-#[test]
 fn a_view_shares_the_storage_of_its_source() {
     let graph = Graph::new();
     let matrix = graph.parameter(Shape::matrix(8, 4), Init::Zero);
     let transposed = graph.transpose(matrix);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
-    let encoding = graph.encode(ALIGNMENT, ARENA);
+    let encoding = encoding(&graph);
     assert_eq!(encoding.span(matrix).bytes, 32 * 4);
     assert!(
         refuses(|| {
@@ -293,7 +398,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     let input = graph.input(Shape::matrix(2, 4));
     let out = graph.softmax(graph.matmul(input, weight));
     graph.backward(graph.sum(out));
-    let encoding = graph.encode(ALIGNMENT, ARENA);
+    let encoding = encoding(&graph);
     assert_eq!(encoding.value_count() as usize, graph.value_count());
     assert!(encoding.arena_bytes() <= ARENA);
     assert!(encoding.work() > 0);
@@ -303,6 +408,21 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
         .find(|(offset, _)| *offset == encoding.span(weight).offset)
         .expect("the weight carries its initial samples");
     assert_eq!(seed.1.len(), 16);
+}
+
+#[test]
+fn a_sum_wider_than_two_levels_is_refused() {
+    let graph = Graph::new();
+    let wide = graph.parameter(
+        Shape::vector(neura_program::REDUCE_TILE * neura_program::REDUCE_TILE + 1),
+        Init::Zero,
+    );
+    assert!(
+        refuses(|| {
+            let _ = graph.sum(wide);
+        }),
+        "a sum whose partial sums need a third level was accepted",
+    );
 }
 
 #[test]

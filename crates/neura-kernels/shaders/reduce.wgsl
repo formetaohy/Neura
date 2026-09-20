@@ -15,7 +15,7 @@ fn run_expand(task: Task, lid: u32) {
     let source = values[task.a];
     let output = values[task.out];
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        arena[output.base + index] = arena[source.base + index / task.flags];
+        arena[output.base + index] = chained(task, index, arena[source.base + index / task.flags]);
     }
 }
 
@@ -45,6 +45,6 @@ fn run_sum_to(task: Task, lid: u32) {
                 }
             }
         }
-        arena[output.base + index] = total;
+        arena[output.base + index] = chained(task, index, total);
     }
 }

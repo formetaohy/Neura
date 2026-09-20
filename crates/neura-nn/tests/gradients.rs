@@ -192,9 +192,9 @@ fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences()
     runtime.write(&program, targets, &targets_data);
     runtime.run(&program);
     assert!(
-        program.task_count() > 64,
+        graph.task_count() > 64,
         "a step this wide spans many tasks, and {} is too few",
-        program.task_count(),
+        graph.task_count(),
     );
     for parameter in &parameters {
         let values = runtime.read(&program, *parameter);

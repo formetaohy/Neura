@@ -61,10 +61,10 @@ fn the_program_identity_is_stable() {
 }
 
 #[test]
-fn the_program_hands_the_device_one_group_of_five_buffers() {
+fn the_program_hands_the_device_one_group_of_six_buffers() {
     let kernel = Megakernel::assemble();
     let program = kernel.program();
-    assert_eq!(program.bindings().len(), 5);
+    assert_eq!(program.bindings().len(), 6);
     assert!(
         program
             .bindings()
@@ -72,6 +72,32 @@ fn the_program_hands_the_device_one_group_of_five_buffers() {
             .filter(|binding| binding.dynamic_offset)
             .count()
             == 1
+    );
+}
+
+#[test]
+fn the_device_chain_applies_every_declared_chain_op() {
+    let kernel = Megakernel::assemble();
+    assert_eq!(
+        neura_kernels::CHAIN_OPS.len() as u32,
+        neura_abi::CHAIN_COUNT
+    );
+    for op in neura_kernels::CHAIN_OPS {
+        assert!(
+            kernel.source().contains(&format!("case {op}:")),
+            "the device chain never applies {op}",
+        );
+    }
+}
+
+#[test]
+fn every_kernel_body_carries_its_chain() {
+    let kernel = Megakernel::assemble();
+    let chained = kernel.source().matches("chained(task,").count();
+    assert_eq!(
+        chained,
+        neura_kernels::KERNELS.len() - 1,
+        "every elementwise body ends in its chain, and a reduction does not",
     );
 }
 

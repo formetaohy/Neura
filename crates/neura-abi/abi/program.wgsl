@@ -10,6 +10,10 @@ const BOUNDS_WORDS: u32 = 3u;
 const CURSOR_REFUSED: u32 = 0u;
 const CURSOR_WAVE_BASE: u32 = 1u;
 
+const REFUSED_CHAIN: u32 = 0xffffu;
+
+const NO_VALUE: u32 = 0xffffffffu;
+
 const KIND_MATMUL: u32 = 0u;
 const KIND_BINARY: u32 = 1u;
 const KIND_UNARY: u32 = 2u;
@@ -30,6 +34,13 @@ const UNARY_RELU: u32 = 0u;
 const UNARY_SQRT: u32 = 1u;
 const UNARY_RECIP: u32 = 2u;
 
+const CHAIN_ADD: u32 = 0u;
+const CHAIN_MUL: u32 = 1u;
+const CHAIN_RELU: u32 = 2u;
+const CHAIN_SQRT: u32 = 3u;
+const CHAIN_RECIP: u32 = 4u;
+const CHAIN_COUNT: u32 = 5u;
+
 struct Value {
     base: u32,
     dims: vec4<u32>,
@@ -47,6 +58,13 @@ struct Task {
     b: u32,
     c: u32,
     param: f32,
+    chain: u32,
+    steps: u32,
+}
+
+struct Step {
+    op: u32,
+    operand: u32,
 }
 
 struct Bounds {
@@ -60,3 +78,4 @@ struct Bounds {
 @group(0) @binding(2) var<storage, read_write> arena: array<f32>;
 @group(0) @binding(3) var<storage, read_write> cursor: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> bounds: Bounds;
+@group(0) @binding(5) var<storage, read> steps: array<Step>;

@@ -13,6 +13,10 @@ impl Program {
         self.encoding.task_count()
     }
 
+    pub fn step_count(&self) -> u32 {
+        self.encoding.step_count()
+    }
+
     pub fn wave_count(&self) -> u32 {
         self.encoding.wave_count()
     }

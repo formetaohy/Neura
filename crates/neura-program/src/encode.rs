@@ -1,5 +1,6 @@
-use crate::graph::{GraphState, NO_VALUE, Residency, Value};
-use neura_abi::{BoundsRecord, TaskRecord, ValueRecord, WORD_BYTES};
+use crate::fuse;
+use crate::graph::{GraphState, Residency, TaskInfo, Value};
+use neura_abi::{BoundsRecord, KIND_SUM_CHUNK, StepRecord, TaskRecord, ValueRecord, WORD_BYTES};
 use std::cmp::Reverse;
 use std::mem::size_of;
 
@@ -25,6 +26,7 @@ pub struct Encoding {
     tasks: Vec<u8>,
     values: Vec<u8>,
     bounds: Vec<u8>,
+    steps: Vec<u8>,
     waves: Vec<u32>,
     spans: Vec<Option<Span>>,
     readable: Vec<bool>,
@@ -39,9 +41,10 @@ impl Encoding {
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let depths = wave_depths(state);
-        let mut order = (0..state.tasks.len()).collect::<Vec<_>>();
-        order.sort_by_key(|index| (depths[*index], Reverse(state.tasks[*index].work)));
+        let tasks = fuse::fuse(state);
+        let depths = wave_depths(state, &tasks);
+        let mut order = (0..tasks.len()).collect::<Vec<_>>();
+        order.sort_by_key(|index| (depths[*index], Reverse(tasks[*index].work)));
 
         let waves = wave_ends(&depths, &order);
         assert!(
@@ -50,7 +53,7 @@ impl Encoding {
             waves.len(),
             neura_abi::MAX_WAVES,
         );
-        let live = storage_liveness(state, &order);
+        let live = storage_liveness(state, &tasks, &order);
         let (offsets, arena_bytes) = allocate(state, &live, &waves, alignment, capacity);
 
         let mut values = Vec::new();
@@ -62,10 +65,15 @@ impl Encoding {
             values.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
-        let mut tasks = Vec::with_capacity(state.tasks.len() * size_of::<TaskRecord>());
+        let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
+        let mut steps = Vec::new();
         let mut work = 0;
         for index in &order {
-            let task = &state.tasks[*index];
+            let task = &tasks[*index];
+            assert!(
+                task.kind != KIND_SUM_CHUNK || task.chain.is_empty(),
+                "a reduction task writes one slot per task and carries no chain",
+            );
             let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
             record.kind = task.kind;
             record.flags = task.flags;
@@ -77,8 +85,13 @@ impl Encoding {
             record.b = task.inputs[1];
             record.c = task.inputs[2];
             record.param = task.param;
+            record.chain = (steps.len() / size_of::<StepRecord>()) as u32;
+            record.steps = task.chain.len() as u32;
+            for step in &task.chain {
+                steps.extend_from_slice(bytemuck::bytes_of(step));
+            }
             work += task.work;
-            tasks.extend_from_slice(bytemuck::bytes_of(&record));
+            tape.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
         let mut bounds = Vec::new();
@@ -96,7 +109,7 @@ impl Encoding {
         let mut readable = vec![false; state.values.len()];
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
         for index in &order {
-            let task = &state.tasks[*index];
+            let task = &tasks[*index];
             let storage = state.values[task.out as usize].storage as usize;
             last_writer.insert(offsets[storage], task.out);
         }
@@ -126,9 +139,10 @@ impl Encoding {
         }
 
         Self {
-            tasks,
+            tasks: tape,
             values,
             bounds,
+            steps,
             waves,
             spans,
             readable,
@@ -148,6 +162,10 @@ impl Encoding {
 
     pub fn bounds(&self) -> &[u8] {
         &self.bounds
+    }
+
+    pub fn steps(&self) -> &[u8] {
+        &self.steps
     }
 
     pub fn waves(&self) -> &[u32] {
@@ -186,6 +204,10 @@ impl Encoding {
         (self.tasks.len() / size_of::<TaskRecord>()) as u32
     }
 
+    pub fn step_count(&self) -> u32 {
+        (self.steps.len() / size_of::<StepRecord>()) as u32
+    }
+
     pub fn value_count(&self) -> u32 {
         (self.values.len() / size_of::<ValueRecord>()) as u32
     }
@@ -199,32 +221,56 @@ impl Encoding {
     }
 }
 
-fn wave_depths(state: &GraphState) -> Vec<u32> {
+fn wave_depths(state: &GraphState, tasks: &[TaskInfo]) -> Vec<u32> {
+    assert_writers_precede_readers(state, tasks);
     let mut available = vec![0u32; state.values.len()];
     let mut deepest_read = vec![0u32; state.values.len()];
-    let mut depths = vec![0u32; state.tasks.len()];
-    for (index, task) in state.tasks.iter().enumerate() {
-        let mut depth = 0u32;
-        for input in task.inputs {
-            if input == NO_VALUE {
-                continue;
-            }
-            depth = depth.max(available[state.values[input as usize].storage as usize]);
-        }
+    let mut depths = vec![0u32; tasks.len()];
+    for (index, task) in tasks.iter().enumerate() {
+        let reads = task.reads().collect::<Vec<_>>();
+        let mut depth = reads
+            .iter()
+            .map(|value| available[state.values[*value as usize].storage as usize])
+            .max()
+            .unwrap_or(0);
         if task.in_place {
             depth = depth.max(deepest_read[state.values[task.out as usize].storage as usize] + 1);
         }
         depths[index] = depth;
-        for input in task.inputs {
-            if input == NO_VALUE || task.in_place && input == task.out {
+        for value in reads {
+            if task.in_place && value == task.out {
                 continue;
             }
-            let storage = state.values[input as usize].storage as usize;
+            let storage = state.values[value as usize].storage as usize;
             deepest_read[storage] = deepest_read[storage].max(depth);
         }
         available[state.values[task.out as usize].storage as usize] = depth + 1;
     }
     depths
+}
+
+fn assert_writers_precede_readers(state: &GraphState, tasks: &[TaskInfo]) {
+    let mut last_writer = vec![None::<usize>; state.values.len()];
+    for (position, task) in tasks.iter().enumerate() {
+        let out = state.values[task.out as usize].storage as usize;
+        for value in task.reads() {
+            let storage = state.values[value as usize].storage as usize;
+            if task.in_place && storage == out {
+                continue;
+            }
+            match last_writer[storage] {
+                Some(writer) => assert!(
+                    tasks[writer].time < task.time,
+                    "task {position} reads a tensor that its own tape only writes later",
+                ),
+                None => assert!(
+                    held(state, storage),
+                    "task {position} reads a tensor no task of the tape writes before it",
+                ),
+            }
+        }
+        last_writer[out] = Some(position);
+    }
 }
 
 fn wave_ends(depths: &[u32], order: &[usize]) -> Vec<u32> {
@@ -240,16 +286,13 @@ fn wave_ends(depths: &[u32], order: &[usize]) -> Vec<u32> {
     ends
 }
 
-fn storage_liveness(state: &GraphState, order: &[usize]) -> Vec<Option<Live>> {
+fn storage_liveness(state: &GraphState, tasks: &[TaskInfo], order: &[usize]) -> Vec<Option<Live>> {
     let mut live = vec![None::<Live>; state.values.len()];
     for (position, index) in order.iter().enumerate() {
-        let task = &state.tasks[*index];
+        let task = &tasks[*index];
         let aliases = reads_every_element_in_place(state, task);
         touch(state, &mut live, task.out, position, position, None);
-        for input in task.inputs {
-            if input == NO_VALUE {
-                continue;
-            }
+        for input in task.reads() {
             if aliases && input != task.out {
                 touch(
                     state,
@@ -267,16 +310,14 @@ fn storage_liveness(state: &GraphState, order: &[usize]) -> Vec<Option<Live>> {
     live
 }
 
-fn reads_every_element_in_place(state: &GraphState, task: &crate::graph::TaskInfo) -> bool {
+fn reads_every_element_in_place(state: &GraphState, task: &TaskInfo) -> bool {
     if !neura_abi::pointwise(task.kind) {
         return false;
     }
     let out = &state.values[task.out as usize];
-    task.inputs.iter().all(|input| {
-        *input == NO_VALUE || {
-            let input = &state.values[*input as usize];
-            input.shape == out.shape && input.strides == out.strides
-        }
+    task.reads().all(|value| {
+        let value = &state.values[value as usize];
+        value.shape == out.shape && value.strides == out.strides
     })
 }
 
@@ -332,9 +373,11 @@ fn allocate(
     }];
     let mut offsets = vec![0u64; live.len()];
     let owners = (0..state.values.len()).filter(|id| state.values[*id].storage as usize == *id);
+    let mut arena_bytes = 0u64;
     for id in owners.clone() {
         if state.values[id].retained || held(state, id) {
             offsets[id] = reserve(&mut free, storage_bytes(state, id), alignment, capacity);
+            arena_bytes = arena_bytes.max(offsets[id] + storage_bytes(state, id));
         }
     }
     let mut pending = live
@@ -358,12 +401,9 @@ fn allocate(
         let bytes = storage_bytes(state, storage);
         let offset = reserve(&mut free, bytes, alignment, capacity);
         offsets[storage] = offset;
+        arena_bytes = arena_bytes.max(offset + bytes);
         active.push((wave_of(live.last), live.aliased_at, Block { offset, bytes }));
     }
-    let arena_bytes = owners
-        .map(|id| offsets[id] + storage_bytes(state, id))
-        .max()
-        .unwrap_or(0);
     (offsets, arena_bytes)
 }
 

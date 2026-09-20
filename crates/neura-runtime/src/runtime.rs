@@ -1,11 +1,14 @@
 use crate::program::Program;
-use neura_abi::{BoundsRecord, CURSOR_BYTES, CURSOR_REFUSED, KIND_COUNT, WORD_BYTES, slot_offset};
+use neura_abi::{
+    BoundsRecord, CURSOR_BYTES, CURSOR_REFUSED, KIND_COUNT, REFUSED_CHAIN, StepRecord, WORD_BYTES,
+    slot_offset,
+};
 use neura_gpu::{
     BindGroupEntry, BufferUsages, ComputePassDescriptor, GpuBuffer, GpuContext, GpuRequest,
     GpuUnavailable, PipelineHandle, Readback, Submission, wgpu,
 };
 use neura_program::{Graph, Value};
-use neura_shader::{ARENA, BOUNDS, CURSOR, Megakernel, TASKS, VALUES};
+use neura_shader::{ARENA, BOUNDS, CURSOR, Megakernel, STEPS, TASKS, VALUES};
 use std::mem::size_of;
 
 pub const WORKGROUP_BUDGET: u32 = 1024;
@@ -130,10 +133,19 @@ impl Runtime {
             CURSOR_BYTES,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
+        let steps = GpuBuffer::new(
+            device,
+            "neura steps",
+            (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64),
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
         let queue = self.context.queue();
         tape.write(queue, encoding.tasks());
         values.write(queue, encoding.values());
         bounds.write(queue, encoding.bounds());
+        if !encoding.steps().is_empty() {
+            steps.write(queue, encoding.steps());
+        }
         let mut submission = Submission::new(device, "neura compile");
         submission.clear_buffer(self.arena.buffer(), 0, None);
         submission.submit(queue);
@@ -162,6 +174,10 @@ impl Runtime {
                 binding: BOUNDS,
                 resource: bounds.resource(0, size_of::<BoundsRecord>() as u64),
             },
+            BindGroupEntry {
+                binding: STEPS,
+                resource: steps.resource(0, steps.size()),
+            },
         ]);
         Program {
             encoding,
@@ -177,23 +193,29 @@ impl Runtime {
         let waves = program.encoding.waves();
         let mut submission = Submission::new(device, "neura program");
         submission.clear_buffer(program.cursor.buffer(), 0, None);
+        let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("neura tape"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(self.kernel.pipeline());
         let mut first = 0;
         for (index, end) in waves.iter().enumerate() {
             let grid = (end - first).min(WORKGROUP_BUDGET);
             let offset = (index as u64 * self.alignment) as u32;
-            let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("neura wave"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(self.kernel.pipeline());
             pass.set_bind_group(0, &program.group, &[offset]);
             pass.dispatch_workgroups(grid, 1, 1);
             first = *end;
         }
+        drop(pass);
         submission.submit(queue);
     }
 
     pub fn write(&self, program: &Program, value: Value, data: &[f32]) {
+        assert!(
+            program.encoding.readable(value),
+            "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to write it",
+            value.id(),
+        );
         let span = program.span(value);
         assert_eq!(
             data.len(),
@@ -307,6 +329,9 @@ impl Runtime {
 fn refusal_message(word: u32) -> String {
     let kind = word >> 16;
     let code = (word & 0xffff) - 1;
+    if kind == REFUSED_CHAIN {
+        return format!("the device refused epilogue op {code}");
+    }
     if kind < KIND_COUNT {
         format!(
             "the device refused op code {code} of the {} task",

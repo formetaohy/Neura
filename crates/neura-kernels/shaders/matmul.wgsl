@@ -49,7 +49,7 @@ fn run_matmul(task: Task, lid: u32) {
             let row = base_row + thread_row + unit / 2u;
             let column = base_column + thread_column + unit % 2u;
             if (row < rows && column < columns) {
-                arena[output.base + row * columns + column] = sums[unit];
+                arena[output.base + row * columns + column] = chained(task, row * columns + column, sums[unit]);
             }
         }
     }
