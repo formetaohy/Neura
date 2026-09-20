@@ -1,6 +1,6 @@
 mod reflection;
 
-use neura_abi::{CURSOR_WAVE_BASE, Geometry, TAPE_WGSL};
+use neura_abi::{CURSOR_WAVE_BASE, Geometry, TAPE_WGSL, kind, op};
 use neura_gpu::{BindingKind, BindingSpec, ComputeProgram};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -72,13 +72,13 @@ impl Megakernel {
     pub fn assemble(geometry: Geometry) -> Self {
         let mut source = String::from(TAPE_WGSL);
         source.push('\n');
+        source.push_str(&kind::declarations());
+        source.push_str(&op::declarations());
         source.push_str(&geometry.declarations());
         for fragment in neura_kernels::fragments(geometry.clone()) {
             source.push_str(&fragment);
             source.push('\n');
         }
-        source.push_str(&neura_kernels::reductions());
-        source.push('\n');
         source.push_str(&dispatch());
         source.push_str(&task_loop());
         let source = Arc::<str>::from(source);
@@ -133,11 +133,12 @@ fn dispatch() -> String {
     let mut out = String::from(
         "fn run_task(index: u32, lid: u32) {\n    let task = tasks[index];\n    switch (task.kind) {\n",
     );
-    for kernel in neura_kernels::KERNELS {
+    for kind in kind::KINDS {
         writeln!(
             out,
             "        case {}: {{ {}(task, lid); }}",
-            kernel.constant, kernel.body,
+            kind.constant,
+            neura_kernels::body(kind.code),
         )
         .unwrap();
     }

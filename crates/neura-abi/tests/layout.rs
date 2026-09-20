@@ -1,7 +1,7 @@
+use neura_abi::kind::{self, KINDS};
+use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
-    BINARY_ADD, BINARY_MUL, BoundsRecord, CHAIN_ADD, CHAIN_COUNT, CHAIN_MUL, CHAIN_RELU,
-    CHAIN_SQRT, Geometry, KIND_COUNT, KIND_MATMUL, KIND_SOFTMAX, KIND_UNARY, MEDIUM, MatmulTile,
-    NARROW, PROFILES, Profile, StepRecord, TaskRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
+    BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, StepRecord, TaskRecord,
     ValueRecord, WIDE, WORD_BYTES,
 };
 use std::mem::{align_of, offset_of, size_of};
@@ -17,15 +17,17 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
     assert_eq!(size_of::<TaskRecord>(), 52);
+    assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
     assert_eq!(offset_of!(TaskRecord, a), 28);
     assert_eq!(offset_of!(TaskRecord, param), 40);
     assert_eq!(offset_of!(TaskRecord, chain), 44);
     assert_eq!(offset_of!(TaskRecord, steps), 48);
-    assert_eq!(size_of::<StepRecord>(), 8);
+    assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
+    assert_eq!(offset_of!(StepRecord, swapped), 8);
     assert_eq!(size_of::<BoundsRecord>(), 12);
     assert_eq!(offset_of!(BoundsRecord, first_task), 0);
     assert_eq!(offset_of!(BoundsRecord, task_count), 4);
@@ -36,63 +38,133 @@ fn records_follow_the_shader_layout() {
 }
 
 #[test]
-fn every_task_kind_is_named() {
-    assert_eq!(KIND_COUNT, 10);
-    for kind in 0..KIND_COUNT {
-        assert!(!neura_abi::kind_name(kind).is_empty());
+fn every_task_kind_is_declared_once() {
+    assert_eq!(kind::COUNT as usize, KINDS.len());
+    for (code, entry) in KINDS.iter().enumerate() {
+        assert_eq!(
+            entry.code, code as u32,
+            "the {} kind leaves a hole",
+            entry.name
+        );
+        assert_eq!(kind::of(entry.code), entry);
+        assert_eq!(kind::constant(entry.code), entry.constant);
+        assert!(!entry.name.is_empty());
     }
-    assert_eq!(neura_abi::kind_name(KIND_MATMUL), "matmul");
-    assert_eq!(neura_abi::kind_name(KIND_SOFTMAX), "softmax");
-    assert_eq!(neura_abi::kind_name(neura_abi::KIND_SUM_TO), "sum_to");
+    let mut names = KINDS.iter().map(|entry| entry.name).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), KINDS.len(), "two kinds share a name");
+    assert_eq!(kind::name(kind::MATMUL), "matmul");
+    assert_eq!(kind::name(kind::LOG_SOFTMAX), "log_softmax");
+    assert!(kind::pointwise(kind::PARTIAL));
+    assert!(!kind::pointwise(kind::MATMUL));
+    assert!(kind::of(kind::BINARY).chainable);
+    assert!(!kind::of(kind::PARTIAL).chainable);
+    assert!(refuses(|| {
+        let _ = kind::of(kind::COUNT);
+    }));
 }
 
 #[test]
-fn every_op_code_is_named() {
-    for op in neura_abi::BINARY_OPS {
-        let _ = neura_abi::binary_name(*op);
+fn every_pointwise_op_is_declared_once() {
+    assert_eq!(op::COUNT as usize, OPS.len());
+    for (code, entry) in OPS.iter().enumerate() {
+        assert_eq!(
+            entry.code, code as u32,
+            "the {} op leaves a hole",
+            entry.name
+        );
+        assert_eq!(op::of(entry.code), entry);
+        assert_eq!(op::name(entry.code), entry.name);
+        assert_eq!(op::kind(entry.code), entry.family.kind());
+        assert!(!entry.apply.is_empty());
+        assert_eq!(
+            entry.partials.len() as u32,
+            entry.family.operands(),
+            "the {} op declares a partial for every operand it reads",
+            entry.name,
+        );
+        for slot in 0..entry.family.operands() {
+            let _ = entry.partial(slot);
+        }
+        assert!(refuses(|| {
+            let _ = entry.partial(entry.family.operands());
+        }));
     }
-    for op in neura_abi::UNARY_OPS {
-        let _ = neura_abi::unary_name(*op);
-    }
-    for op in neura_abi::CHAIN_OPS {
-        let _ = neura_abi::chain_name(*op);
-    }
-    assert_eq!(neura_abi::binary_name(BINARY_ADD), "add");
-    assert_eq!(neura_abi::binary_name(BINARY_MUL), "mul");
-    assert_eq!(neura_abi::unary_name(UNARY_RELU), "relu");
-    assert_eq!(neura_abi::unary_name(UNARY_SQRT), "sqrt");
-    assert_eq!(neura_abi::unary_name(UNARY_RECIP), "recip");
-    assert_eq!(neura_abi::chain_name(CHAIN_ADD), "add");
-    assert_eq!(neura_abi::chain_name(CHAIN_MUL), "mul");
-    assert_eq!(neura_abi::chain_name(CHAIN_RELU), "relu");
-    assert_eq!(neura_abi::chain_name(CHAIN_SQRT), "sqrt");
-    assert_eq!(neura_abi::chain_name(neura_abi::CHAIN_RECIP), "recip");
+    let mut names = OPS.iter().map(|entry| entry.name).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), OPS.len(), "two ops share a name");
+    assert_eq!(op::name(op::ADD), "add");
+    assert_eq!(op::name(op::RELU), "relu");
+    assert_eq!(op::name(op::SIGMOID), "sigmoid");
+    assert!(refuses(|| {
+        let _ = op::of(op::COUNT);
+    }));
+    assert!(refuses(|| {
+        let _ = op::of(op::NONE);
+    }));
 }
 
 #[test]
-fn every_elementwise_op_reaches_a_chain_op() {
-    let mut reached = Vec::new();
-    for op in neura_abi::BINARY_OPS {
-        reached.push(neura_abi::chain_op(neura_abi::KIND_BINARY, *op));
+fn every_partial_reads_exactly_the_roles_it_names() {
+    for op in OPS {
+        for slot in 0..op.family.operands() {
+            let partial = op.partial(slot);
+            let roles = partial.roles();
+            assert!(
+                !(roles.contains(&Role::Operand) && roles.contains(&Role::Result)),
+                "the {} partial {slot} differentiates an operand and its own result at once",
+                op.name,
+            );
+            assert!(
+                !roles.contains(&Role::Result) || roles.len() == 1,
+                "the {} partial {slot} reads its own result next to an operand",
+                op.name,
+            );
+            if op.family == op::Family::Unary {
+                assert!(
+                    !roles.contains(&Role::Other),
+                    "the {} partial {slot} reads a second operand its op never has",
+                    op.name,
+                );
+            }
+            let Some(formula) = partial.formula() else {
+                assert!(
+                    roles.is_empty(),
+                    "the {} partial {slot} reads a role it never asks to be handed",
+                    op.name,
+                );
+                continue;
+            };
+            assert!(
+                mentions(formula, "g"),
+                "the {} partial {slot} ignores the gradient it descends from",
+                op.name,
+            );
+            for role in roles {
+                assert!(
+                    mentions(formula, role.name()),
+                    "the {} partial {slot} asks for {} it never reads",
+                    op.name,
+                    role.name(),
+                );
+            }
+        }
     }
-    for op in neura_abi::UNARY_OPS {
-        reached.push(neura_abi::chain_op(KIND_UNARY, *op));
-    }
-    reached.sort_unstable();
-    reached.dedup();
-    let mut declared = neura_abi::CHAIN_OPS.to_vec();
-    declared.sort_unstable();
-    assert_eq!(
-        reached, declared,
-        "every elementwise op must land on a chain op the device can run",
-    );
-    assert_eq!(declared.len() as u32, CHAIN_COUNT);
+}
+
+fn mentions(formula: &str, name: &str) -> bool {
+    formula
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|word| word == name)
 }
 
 #[test]
 fn a_record_declares_what_the_device_reads() {
     let mut task: TaskRecord = bytemuck::Zeroable::zeroed();
-    task.kind = KIND_MATMUL;
+    task.kind = kind::MATMUL;
+    task.op = op::MUL;
     task.geometry = 2;
     task.first = 3;
     task.count = 5;
@@ -107,8 +179,9 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(bytes.len(), 52);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
-        KIND_MATMUL
+        kind::MATMUL
     );
+    assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), op::MUL);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 5);
     assert_eq!(f32::from_ne_bytes(bytes[40..44].try_into().unwrap()), 0.5);
@@ -119,16 +192,18 @@ fn a_record_declares_what_the_device_reads() {
 #[test]
 fn a_step_declares_what_the_device_applies() {
     let step = StepRecord {
-        op: CHAIN_RELU,
+        op: op::RELU,
         operand: 9,
+        swapped: 1,
     };
     let bytes = bytemuck::bytes_of(&step);
-    assert_eq!(bytes.len(), 8);
+    assert_eq!(bytes.len(), 12);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
-        CHAIN_RELU
+        op::RELU
     );
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 9);
+    assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 1);
 }
 
 #[test]

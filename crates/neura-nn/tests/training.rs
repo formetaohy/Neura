@@ -1,4 +1,4 @@
-use neura_nn::{Adam, Linear, Mlp, Sgd, mse_loss};
+use neura_nn::{Adam, Linear, Mlp, Sgd, cross_entropy, mse_loss};
 use neura_program::{Graph, Init, Shape};
 use neura_runtime::{Runtime, RuntimeRequest};
 
@@ -132,4 +132,84 @@ fn moments_track_each_parameter_once() {
         outcome.is_err(),
         "one parameter carried two pairs of moments"
     );
+}
+
+fn actions(samples: u32) -> (Vec<f32>, Vec<f32>) {
+    let mut observations = Vec::with_capacity(samples as usize * 2);
+    let mut targets = Vec::with_capacity(samples as usize * 3);
+    for sample in 0..samples {
+        let action = sample % 3;
+        let angle = action as f32 * core::f32::consts::TAU / 3.0;
+        let reach = 0.9 + 0.05 * (sample % 5) as f32;
+        observations.push(angle.cos() * reach);
+        observations.push(angle.sin() * reach);
+        for class in 0..3 {
+            targets.push(f32::from(class == action));
+        }
+    }
+    (observations, targets)
+}
+
+fn chosen(logits: &[f32]) -> usize {
+    let mut best = 0;
+    for class in 1..logits.len() {
+        if logits[class] > logits[best] {
+            best = class;
+        }
+    }
+    best
+}
+
+#[test]
+fn a_network_learns_the_action_it_was_shown() {
+    let runtime = open();
+    let graph = Graph::new();
+    let model = Mlp::new(
+        &graph,
+        &[2, 16, 3],
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let observations = graph.input(Shape::matrix(24, 2));
+    let targets = graph.input(Shape::matrix(24, 3));
+    let logits = model.forward(&graph, observations);
+    graph.retain(logits);
+    let loss = cross_entropy(&graph, logits, targets);
+    let gradients = graph.backward(loss);
+    let mut optimizer = Adam::new(&graph, 0.05, 0.9, 0.999, 1e-8);
+    optimizer.track_all(&graph, &model.parameters());
+    optimizer.step(&graph, &gradients);
+    let program = runtime.compile(&graph);
+    let (observation_data, target_data) = actions(24);
+    runtime.write(&program, observations, &observation_data);
+    runtime.write(&program, targets, &target_data);
+    let mut start = None;
+    let mut end = 0.0;
+    for step in 0..400 {
+        runtime.run(&program);
+        if step % 50 == 0 || step == 399 {
+            end = runtime.read(&program, loss)[0];
+            start.get_or_insert(end);
+        }
+    }
+    let start = start.expect("a first loss");
+    assert!(
+        start.is_finite() && start > 0.0,
+        "the loss started at {start}"
+    );
+    assert!(
+        end < start * 0.2,
+        "the loss fell from {start} to {end} over four hundred steps",
+    );
+    let learned = runtime.read(&program, logits);
+    for sample in 0..24 {
+        assert_eq!(
+            chosen(&learned[sample * 3..sample * 3 + 3]),
+            sample % 3,
+            "sample {sample} was shown action {}",
+            sample % 3,
+        );
+    }
 }

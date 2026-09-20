@@ -3,8 +3,7 @@ use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::lower;
 use crate::lower::Task;
 use neura_abi::{
-    BoundsRecord, KIND_MATMUL, KIND_SUM_CHUNK, MatmulTile, Profile, StepRecord, TaskRecord,
-    ValueRecord, WORD_BYTES,
+    BoundsRecord, MatmulTile, Profile, StepRecord, TaskRecord, ValueRecord, WORD_BYTES, kind,
 };
 use std::cmp::Reverse;
 use std::mem::size_of;
@@ -141,7 +140,7 @@ impl Encoding {
         for index in &order {
             let task = &tasks[*index];
             let geometry = match task.kind {
-                KIND_MATMUL => {
+                kind::MATMUL => {
                     let geometry = used
                         .iter()
                         .position(|tile| *tile == profile.ladder()[task.geometry as usize])
@@ -152,12 +151,12 @@ impl Encoding {
                 _ => 0,
             };
             assert!(
-                task.kind != KIND_SUM_CHUNK || task.chain.is_empty(),
+                task.kind != kind::SUM_CHUNK || task.chain.is_empty(),
                 "a reduction task writes one slot per task and carries no chain",
             );
             let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
             record.kind = task.kind;
-            record.flags = task.flags;
+            record.op = task.op;
             record.geometry = geometry;
             record.first = task.first;
             record.count = task.count;
@@ -329,7 +328,7 @@ fn used_tiles(profile: Profile, tasks: &[Task], order: &[usize]) -> Vec<MatmulTi
         .filter(|tile| {
             order.iter().any(|index| {
                 let task = &tasks[*index];
-                task.kind == KIND_MATMUL && profile.ladder()[task.geometry as usize] == **tile
+                task.kind == kind::MATMUL && profile.ladder()[task.geometry as usize] == **tile
             })
         })
         .copied()
@@ -426,7 +425,7 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[usize]) -> Ve
 }
 
 fn reads_every_element_in_place(values: &[ValueInfo], task: &Task) -> bool {
-    if !neura_abi::pointwise(task.kind) {
+    if !kind::pointwise(task.kind) {
         return false;
     }
     let out = &values[task.out as usize];

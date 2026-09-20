@@ -5,7 +5,7 @@ fn run_sum_chunk(task: Task, lid: u32) {
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         local = local + arena[source.base + index];
     }
-    let total = reduce_chunk_sum(lid, local);
+    let total = workgroup_sum(lid, local);
     if (lid == 0u) {
         arena[output.base + task.slot] = total;
     }

@@ -1,5 +1,5 @@
 use crate::graph::{GraphState, Residency, TaskInfo};
-use neura_abi::{KIND_BINARY, KIND_SUM_CHUNK, KIND_UNARY, NO_VALUE, StepRecord, chain_op};
+use neura_abi::{NO_VALUE, StepRecord, kind};
 
 const CHAIN_SLOT: u32 = u32::MAX;
 
@@ -66,9 +66,9 @@ fn absorb(
         let consumer = tasks[consumer_index]
             .as_ref()
             .expect("a consumer is live while it is absorbed");
-        if producer.kind == KIND_SUM_CHUNK
+        if producer.kind == kind::SUM_CHUNK
             || producer.in_place
-            || !absorbable(consumer.kind)
+            || !kind::of(consumer.kind).chainable
             || state.values[consumer.out as usize].shape != state.values[value as usize].shape
             || consumer
                 .inputs
@@ -127,11 +127,12 @@ fn absorb(
 
 fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
     match consumer.kind {
-        KIND_UNARY => Some(StepRecord {
-            op: chain_op(consumer.kind, consumer.flags),
+        kind::UNARY => Some(StepRecord {
+            op: consumer.op,
             operand: NO_VALUE,
+            swapped: 0,
         }),
-        KIND_BINARY => {
+        kind::BINARY => {
             let slot = consumer
                 .inputs
                 .iter()
@@ -142,16 +143,13 @@ fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
                 return None;
             }
             Some(StepRecord {
-                op: chain_op(consumer.kind, consumer.flags),
+                op: consumer.op,
                 operand,
+                swapped: u32::from(slot == 1),
             })
         }
         _ => None,
     }
-}
-
-fn absorbable(kind: u32) -> bool {
-    matches!(kind, KIND_BINARY | KIND_UNARY)
 }
 
 fn pinned(state: &GraphState, value: u32) -> bool {

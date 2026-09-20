@@ -1,28 +1,87 @@
 mod matmul;
+mod ops;
 
-use neura_abi::{
-    Geometry, KIND_BINARY, KIND_BROADCAST, KIND_COUNT, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
-    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD,
-};
+use neura_abi::{Geometry, kind};
 
-pub const INDEX: &str = include_str!("../shaders/index.wgsl");
-pub const CHAIN: &str = include_str!("../shaders/chain.wgsl");
-pub const ELEMENTWISE: &str = include_str!("../shaders/elementwise.wgsl");
+pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
+pub const POINTWISE: &str = include_str!("../shaders/pointwise.wgsl");
 pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
 
-pub const CHAIN_OPS: &[&str] = &[
-    "CHAIN_ADD",
-    "CHAIN_MUL",
-    "CHAIN_RELU",
-    "CHAIN_SQRT",
-    "CHAIN_RECIP",
+pub struct Body {
+    pub kind: u32,
+    pub function: &'static str,
+}
+
+pub const BODIES: &[Body] = &[
+    Body {
+        kind: kind::MATMUL,
+        function: "run_matmul",
+    },
+    Body {
+        kind: kind::BINARY,
+        function: "run_binary",
+    },
+    Body {
+        kind: kind::UNARY,
+        function: "run_unary",
+    },
+    Body {
+        kind: kind::PARTIAL,
+        function: "run_partial",
+    },
+    Body {
+        kind: kind::FILL,
+        function: "run_fill",
+    },
+    Body {
+        kind: kind::BROADCAST,
+        function: "run_broadcast",
+    },
+    Body {
+        kind: kind::SUM_CHUNK,
+        function: "run_sum_chunk",
+    },
+    Body {
+        kind: kind::SUM_TO,
+        function: "run_sum_to",
+    },
+    Body {
+        kind: kind::SOFTMAX,
+        function: "run_softmax",
+    },
+    Body {
+        kind: kind::SOFTMAX_GRAD,
+        function: "run_softmax_grad",
+    },
+    Body {
+        kind: kind::LOG_SOFTMAX,
+        function: "run_log_softmax",
+    },
+    Body {
+        kind: kind::LOG_SOFTMAX_GRAD,
+        function: "run_log_softmax_grad",
+    },
 ];
 
-pub struct Kernel {
-    pub kind: u32,
-    pub constant: &'static str,
-    pub body: &'static str,
+pub fn body(code: u32) -> &'static str {
+    BODIES
+        .iter()
+        .find(|body| body.kind == code)
+        .unwrap_or_else(|| panic!("no device body runs the {} task", kind::name(code)))
+        .function
+}
+
+pub fn fragments(geometry: Geometry) -> Vec<String> {
+    vec![
+        REFUSE.to_owned(),
+        ops::fragment(),
+        POINTWISE.to_owned(),
+        matmul::family(geometry),
+        REDUCE.to_owned(),
+        SOFTMAX.to_owned(),
+        reductions(),
+    ]
 }
 
 struct Reduction {
@@ -32,93 +91,14 @@ struct Reduction {
 
 const REDUCTIONS: &[Reduction] = &[
     Reduction {
-        function: "reduce_chunk_sum",
+        function: "workgroup_sum",
         combine: "{left} + {right}",
     },
     Reduction {
-        function: "softmax_row_sum",
-        combine: "{left} + {right}",
-    },
-    Reduction {
-        function: "softmax_row_max",
+        function: "workgroup_max",
         combine: "max({left}, {right})",
     },
 ];
-
-pub const KERNELS: &[Kernel] = &[
-    Kernel {
-        kind: KIND_MATMUL,
-        constant: "KIND_MATMUL",
-        body: "run_matmul",
-    },
-    Kernel {
-        kind: KIND_BINARY,
-        constant: "KIND_BINARY",
-        body: "run_binary",
-    },
-    Kernel {
-        kind: KIND_UNARY,
-        constant: "KIND_UNARY",
-        body: "run_unary",
-    },
-    Kernel {
-        kind: KIND_UNARY_GRAD,
-        constant: "KIND_UNARY_GRAD",
-        body: "run_unary_grad",
-    },
-    Kernel {
-        kind: KIND_FILL,
-        constant: "KIND_FILL",
-        body: "run_fill",
-    },
-    Kernel {
-        kind: KIND_BROADCAST,
-        constant: "KIND_BROADCAST",
-        body: "run_broadcast",
-    },
-    Kernel {
-        kind: KIND_SUM_CHUNK,
-        constant: "KIND_SUM_CHUNK",
-        body: "run_sum_chunk",
-    },
-    Kernel {
-        kind: KIND_SUM_TO,
-        constant: "KIND_SUM_TO",
-        body: "run_sum_to",
-    },
-    Kernel {
-        kind: KIND_SOFTMAX,
-        constant: "KIND_SOFTMAX",
-        body: "run_softmax",
-    },
-    Kernel {
-        kind: KIND_SOFTMAX_GRAD,
-        constant: "KIND_SOFTMAX_GRAD",
-        body: "run_softmax_grad",
-    },
-];
-
-pub fn fragments(geometry: Geometry) -> Vec<String> {
-    vec![
-        INDEX.to_owned(),
-        CHAIN.to_owned(),
-        matmul::family(geometry),
-        ELEMENTWISE.to_owned(),
-        REDUCE.to_owned(),
-        SOFTMAX.to_owned(),
-    ]
-}
-
-pub fn kernel(kind: u32) -> &'static Kernel {
-    KERNELS
-        .iter()
-        .find(|kernel| kernel.kind == kind)
-        .unwrap_or_else(|| panic!("kind {kind} has no kernel body"))
-}
-
-pub fn kind_count() -> u32 {
-    KIND_COUNT
-}
 
 pub fn reductions() -> String {
     let mut source = String::from(

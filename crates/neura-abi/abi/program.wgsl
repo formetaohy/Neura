@@ -6,35 +6,7 @@ const BOUNDS_WORDS: u32 = 3u;
 const CURSOR_REFUSED: u32 = 0u;
 const CURSOR_WAVE_BASE: u32 = 1u;
 
-const REFUSED_CHAIN: u32 = 0xffffu;
-
 const NO_VALUE: u32 = 0xffffffffu;
-
-const KIND_MATMUL: u32 = 0u;
-const KIND_BINARY: u32 = 1u;
-const KIND_UNARY: u32 = 2u;
-const KIND_UNARY_GRAD: u32 = 3u;
-const KIND_FILL: u32 = 4u;
-const KIND_BROADCAST: u32 = 5u;
-const KIND_SUM_CHUNK: u32 = 6u;
-const KIND_SUM_TO: u32 = 7u;
-const KIND_SOFTMAX: u32 = 8u;
-const KIND_SOFTMAX_GRAD: u32 = 9u;
-const KIND_COUNT: u32 = 10u;
-
-const BINARY_ADD: u32 = 0u;
-const BINARY_MUL: u32 = 1u;
-
-const UNARY_RELU: u32 = 0u;
-const UNARY_SQRT: u32 = 1u;
-const UNARY_RECIP: u32 = 2u;
-
-const CHAIN_ADD: u32 = 0u;
-const CHAIN_MUL: u32 = 1u;
-const CHAIN_RELU: u32 = 2u;
-const CHAIN_SQRT: u32 = 3u;
-const CHAIN_RECIP: u32 = 4u;
-const CHAIN_COUNT: u32 = 5u;
 
 struct Value {
     base: u32,
@@ -44,7 +16,7 @@ struct Value {
 
 struct Task {
     kind: u32,
-    flags: u32,
+    op: u32,
     geometry: u32,
     first: u32,
     count: u32,
@@ -61,6 +33,7 @@ struct Task {
 struct Step {
     op: u32,
     operand: u32,
+    swapped: u32,
 }
 
 struct Bounds {

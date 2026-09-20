@@ -1,4 +1,5 @@
-use neura_abi::{Geometry, KIND_COUNT, PROFILES, Profile};
+use neura_abi::op::OPS;
+use neura_abi::{Geometry, PROFILES, Profile, kind};
 use neura_shader::{BINDINGS, Megakernel, reflect};
 use std::collections::BTreeSet;
 
@@ -48,39 +49,127 @@ fn every_profile_declares_its_own_device_constants() {
 }
 
 #[test]
+fn the_program_declares_the_taxonomy_it_dispatches() {
+    let kernel = assemble(PROFILES[0]);
+    for kind in kind::KINDS {
+        assert!(
+            kernel
+                .source()
+                .contains(&format!("const {}: u32 = {}u;", kind.constant, kind.code)),
+            "a device program never declares the {} task",
+            kind.name,
+        );
+    }
+    for op in OPS {
+        assert!(
+            kernel
+                .source()
+                .contains(&format!("const {}: u32 = {}u;", op.constant, op.code)),
+            "a device program never declares the {} op",
+            op.name,
+        );
+    }
+}
+
+#[test]
 fn every_declared_kind_has_a_body() {
-    let covered = neura_kernels::KERNELS
+    let covered = neura_kernels::BODIES
         .iter()
-        .map(|kernel| kernel.kind)
+        .map(|body| body.kind)
         .collect::<BTreeSet<_>>();
-    let declared = (0..neura_kernels::kind_count()).collect::<BTreeSet<_>>();
+    let declared = kind::KINDS
+        .iter()
+        .map(|kind| kind.code)
+        .collect::<BTreeSet<_>>();
     assert_eq!(
         covered, declared,
         "every kind the tape can name needs a body the megakernel can run",
     );
-    assert_eq!(declared.len() as u32, KIND_COUNT);
 }
 
 #[test]
 fn the_megakernel_dispatches_every_kind_by_its_declared_constant() {
     for profile in PROFILES {
         let kernel = assemble(*profile);
-        for body in neura_kernels::KERNELS {
+        for kind in kind::KINDS {
             assert!(
                 kernel
                     .source()
-                    .contains(&format!("case {}:", body.constant)),
-                "the megakernel never dispatches {}",
-                body.body,
+                    .contains(&format!("case {}:", kind.constant)),
+                "the megakernel never dispatches the {} task",
+                kind.name,
             );
             assert!(
-                kernel
-                    .source()
-                    .contains(&format!("{}(task, lid)", body.body)),
-                "the megakernel never calls {}",
-                body.body,
+                kernel.source().contains(&format!(
+                    "case {}: {{ {}(task, lid); }}",
+                    kind.constant,
+                    neura_kernels::body(kind.code),
+                )),
+                "the megakernel never runs the {} body",
+                kind.name,
             );
         }
+    }
+}
+
+#[test]
+fn the_device_applies_every_declared_op() {
+    let kernel = assemble(PROFILES[0]);
+    let head = "fn run_partial(task: Task, lid: u32) {";
+    let rest = &kernel.source()[kernel.source().find(head).expect(head) + head.len()..];
+    let partials = &rest[..rest
+        .find(
+            "
+fn ",
+        )
+        .expect("a partial kernel ends")];
+    for op in OPS {
+        assert!(
+            kernel
+                .source()
+                .contains(&format!("case {}: {{ return {}; }}", op.constant, op.apply)),
+            "the device never applies the {} op",
+            op.name,
+        );
+        for slot in 0..op.family.operands() {
+            let ordinal = op.code * 2 + slot;
+            let arm = format!("case {ordinal}u: {{");
+            let Some(formula) = op.partial(slot).formula() else {
+                assert!(
+                    !partials.contains(&arm),
+                    "the device carries a partial for {} operand {slot} the host never asks for",
+                    op.name,
+                );
+                continue;
+            };
+            let start = partials.find(&arm).unwrap_or_else(|| {
+                panic!(
+                    "the device never differentiates {} over operand {slot}",
+                    op.name
+                )
+            }) + arm.len();
+            let case = &partials[start..];
+            let case = &case[..case.find(" }").expect("every partial case ends")];
+            assert!(
+                case.contains(&format!("result = {formula};")),
+                "the device misses the {formula} of {} over operand {slot}",
+                op.name,
+            );
+            for role in op.partial(slot).roles() {
+                assert!(
+                    case.contains(&format!("let {} = arena[", role.name())),
+                    "the device never hands {} the {} its partial reads",
+                    op.name,
+                    role.name(),
+                );
+            }
+        }
+        assert_eq!(
+            op.partials.len() as u32,
+            op.family.operands(),
+            "the {} op declares a partial for every operand it reads",
+            op.name,
+        );
     }
 }
 
@@ -132,7 +221,7 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
         assert!(
             kernel
                 .source()
-                .contains("default: { refuse(KIND_MATMUL, task.geometry); }")
+                .contains("default: { refuse(MATMUL, task.geometry); }")
         );
         assert!(
             kernel.source().matches("workgroupBarrier()").count() >= profile.ladder().len() * 2,
@@ -211,26 +300,11 @@ fn the_program_hands_the_device_one_group_of_six_buffers() {
 }
 
 #[test]
-fn the_device_chain_applies_every_declared_chain_op() {
-    let kernel = assemble(PROFILES[0]);
-    assert_eq!(
-        neura_kernels::CHAIN_OPS.len() as u32,
-        neura_abi::CHAIN_COUNT
-    );
-    for op in neura_kernels::CHAIN_OPS {
-        assert!(
-            kernel.source().contains(&format!("case {op}:")),
-            "the device chain never applies {op}",
-        );
-    }
-}
-
-#[test]
 fn every_kernel_body_carries_its_chain() {
     let kernel = assemble(PROFILES[0]);
     let chained = kernel.source().matches("chained(task,").count();
     assert!(
-        chained >= neura_kernels::KERNELS.len() - 1,
+        chained >= neura_kernels::BODIES.len() - 3,
         "every elementwise body ends in its chain, and a reduction does not",
     );
 }

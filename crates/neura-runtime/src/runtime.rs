@@ -1,7 +1,5 @@
 use crate::program::Program;
-use neura_abi::{
-    CURSOR_REFUSED, KIND_COUNT, PROFILES, Profile, REFUSED_CHAIN, WORD_BYTES, slot_offset,
-};
+use neura_abi::{CURSOR_REFUSED, PROFILES, Profile, WORD_BYTES, kind, op, slot_offset};
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
 };
@@ -261,17 +259,26 @@ impl Runtime {
 }
 
 fn refusal_message(word: u32) -> String {
-    let kind = word >> 16;
+    let refused = word >> 16;
     let code = (word & 0xffff) - 1;
-    if kind == REFUSED_CHAIN {
-        return format!("the device refused epilogue op {code}");
+    if refused >= kind::COUNT {
+        return format!("the device refused kind {refused} with code {code}");
     }
-    if kind < KIND_COUNT {
-        format!(
-            "the device refused op code {code} of the {} task",
-            neura_abi::kind_name(kind),
-        )
-    } else {
-        format!("the device refused task kind {kind} with op code {code}")
+    match refused {
+        kind::BINARY | kind::UNARY => format!(
+            "the device refused the {} op of the {} task",
+            op::name(code),
+            kind::name(refused),
+        ),
+        kind::PARTIAL => format!(
+            "the device refused the partial of the {} op over operand {} of the {} task",
+            op::name(code / 2),
+            code % 2,
+            kind::name(refused),
+        ),
+        _ => format!(
+            "the device refused code {code} of the {} task",
+            kind::name(refused),
+        ),
     }
 }

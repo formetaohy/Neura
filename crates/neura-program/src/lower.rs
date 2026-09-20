@@ -1,9 +1,6 @@
 use crate::graph::{TaskInfo, ValueInfo};
 use crate::shape::Shape;
-use neura_abi::{
-    KIND_MATMUL, KIND_SOFTMAX, KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, MatmulTile,
-    NO_VALUE, Profile, StepRecord,
-};
+use neura_abi::{MatmulTile, NO_VALUE, Profile, StepRecord, kind};
 
 const TARGET_TASKS: u32 = 256;
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
@@ -16,7 +13,7 @@ const MATMUL_TILES_FLOOR: u32 = 128;
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
     pub(crate) kind: u32,
-    pub(crate) flags: u32,
+    pub(crate) op: u32,
     pub(crate) geometry: u32,
     pub(crate) first: u32,
     pub(crate) count: u32,
@@ -34,11 +31,11 @@ impl Task {
     fn span(unit: &TaskInfo, first: u32, count: u32, work: u64) -> Self {
         Self {
             kind: unit.kind,
-            flags: unit.flags,
+            op: unit.op,
             geometry: 0,
             first,
             count,
-            slot: 0,
+            slot: unit.slot,
             out: unit.out,
             inputs: unit.inputs,
             param: unit.param,
@@ -91,7 +88,7 @@ impl Plan {
 
 fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     match unit.kind {
-        KIND_MATMUL => {
+        kind::MATMUL => {
             let out = plan.shape(unit.out);
             let geometry = matmul_geometry(profile, out.rows(), out.columns());
             let tile = profile.ladder()[geometry as usize];
@@ -102,9 +99,9 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                 plan.tasks.push(task);
             }
         }
-        KIND_SOFTMAX | KIND_SOFTMAX_GRAD => {
+        kind::SOFTMAX | kind::SOFTMAX_GRAD | kind::LOG_SOFTMAX | kind::LOG_SOFTMAX_GRAD => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows())) {
+            for (first, count) in spans(out.rows(), rows_per_task(out.rows())) {
                 plan.tasks.push(Task::span(
                     unit,
                     first,
@@ -113,8 +110,8 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                 ));
             }
         }
-        KIND_SUM_CHUNK => reduce(plan, unit),
-        KIND_SUM_TO => {
+        kind::SUM_CHUNK => reduce(plan, unit),
+        kind::SUM_TO => {
             let out = plan.shape(unit.out);
             let source = plan.shape(unit.inputs[0]);
             let replicas = (0..4)
@@ -187,7 +184,7 @@ fn reduction_elements(elements: u32) -> u32 {
         .clamp(REDUCTION_FLOOR, REDUCTION_CEILING)
 }
 
-fn softmax_rows_per_task(rows: u32) -> u32 {
+fn rows_per_task(rows: u32) -> u32 {
     rows.div_ceil(TARGET_TASKS).clamp(1, SOFTMAX_ROW_CEILING)
 }
 

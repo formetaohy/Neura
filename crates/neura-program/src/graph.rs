@@ -1,11 +1,9 @@
 use crate::encode::Encoding;
 use crate::init::Init;
 use crate::shape::Shape;
-use neura_abi::{
-    BINARY_ADD, BINARY_MUL, KIND_BINARY, KIND_BROADCAST, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
-    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, NO_VALUE, Profile,
-    StepRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
-};
+use neura_abi::kind;
+use neura_abi::op;
+use neura_abi::{NO_VALUE, Profile, StepRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -38,9 +36,10 @@ pub(crate) enum Residency {
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct TaskInfo {
     pub(crate) kind: u32,
-    pub(crate) flags: u32,
+    pub(crate) op: u32,
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
+    pub(crate) slot: u32,
     pub(crate) param: f32,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
@@ -48,12 +47,13 @@ pub(crate) struct TaskInfo {
 }
 
 impl TaskInfo {
-    fn op(kind: u32, flags: u32, out: u32, inputs: [u32; 3]) -> Self {
+    fn of(kind: u32, op: u32, out: u32, inputs: [u32; 3]) -> Self {
         Self {
             kind,
-            flags,
+            op,
             out,
             inputs,
+            slot: 0,
             param: 0.0,
             in_place: false,
             chain: Vec::new(),
@@ -149,7 +149,7 @@ impl Graph {
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value {
         let out = self.fresh(shape, Residency::Derived, false);
-        let mut task = TaskInfo::op(KIND_FILL, 0, out.id(), [NO_VALUE; 3]);
+        let mut task = TaskInfo::of(kind::FILL, op::NONE, out.id(), [NO_VALUE; 3]);
         task.param = value;
         self.push(task);
         out
@@ -180,9 +180,9 @@ impl Graph {
             Residency::Derived,
             self.tracked(&[left, right]),
         );
-        self.push(TaskInfo::op(
-            KIND_MATMUL,
-            0,
+        self.push(TaskInfo::of(
+            kind::MATMUL,
+            op::NONE,
             out.id(),
             [left.id(), right.id(), NO_VALUE],
         ));
@@ -190,40 +190,71 @@ impl Graph {
     }
 
     pub fn add(&self, left: Value, right: Value) -> Value {
-        self.elementwise(BINARY_ADD, left, right)
+        self.elementwise(op::ADD, left, right)
     }
 
     pub fn mul(&self, left: Value, right: Value) -> Value {
-        self.elementwise(BINARY_MUL, left, right)
+        self.elementwise(op::MUL, left, right)
+    }
+
+    pub fn sub(&self, left: Value, right: Value) -> Value {
+        self.elementwise(op::SUB, left, right)
+    }
+
+    pub fn div(&self, left: Value, right: Value) -> Value {
+        self.elementwise(op::DIV, left, right)
+    }
+
+    pub fn max(&self, left: Value, right: Value) -> Value {
+        self.elementwise(op::MAXIMUM, left, right)
+    }
+
+    pub fn min(&self, left: Value, right: Value) -> Value {
+        self.elementwise(op::MINIMUM, left, right)
     }
 
     pub fn relu(&self, value: Value) -> Value {
-        self.unary(UNARY_RELU, value)
+        self.unary(op::RELU, value)
     }
 
     pub fn sqrt(&self, value: Value) -> Value {
-        self.unary(UNARY_SQRT, value)
+        self.unary(op::SQRT, value)
     }
 
     pub fn recip(&self, value: Value) -> Value {
-        self.unary(UNARY_RECIP, value)
+        self.unary(op::RECIP, value)
+    }
+
+    pub fn exp(&self, value: Value) -> Value {
+        self.unary(op::EXP, value)
+    }
+
+    pub fn log(&self, value: Value) -> Value {
+        self.unary(op::LOG, value)
+    }
+
+    pub fn tanh(&self, value: Value) -> Value {
+        self.unary(op::TANH, value)
+    }
+
+    pub fn sigmoid(&self, value: Value) -> Value {
+        self.unary(op::SIGMOID, value)
+    }
+
+    pub fn neg(&self, value: Value) -> Value {
+        self.unary(op::NEG, value)
+    }
+
+    pub fn abs(&self, value: Value) -> Value {
+        self.unary(op::ABS, value)
     }
 
     pub fn softmax(&self, value: Value) -> Value {
-        assert!(
-            self.contiguous(value),
-            "a softmax folds a row of a tensor stored row by row, and value {} is a view",
-            value.id(),
-        );
-        let shape = self.shape(value);
-        let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
-        self.push(TaskInfo::op(
-            KIND_SOFTMAX,
-            0,
-            out.id(),
-            [value.id(), NO_VALUE, NO_VALUE],
-        ));
-        out
+        self.rows(kind::SOFTMAX, value)
+    }
+
+    pub fn log_softmax(&self, value: Value) -> Value {
+        self.rows(kind::LOG_SOFTMAX, value)
     }
 
     pub fn sum(&self, value: Value) -> Value {
@@ -233,9 +264,9 @@ impl Graph {
             value.id(),
         );
         let out = self.fresh(Shape::scalar(), Residency::Derived, self.tracked(&[value]));
-        self.push(TaskInfo::op(
-            KIND_SUM_CHUNK,
-            0,
+        self.push(TaskInfo::of(
+            kind::SUM_CHUNK,
+            op::NONE,
             out.id(),
             [value.id(), NO_VALUE, NO_VALUE],
         ));
@@ -258,11 +289,11 @@ impl Graph {
     }
 
     pub fn add_into(&self, target: Value, addend: Value) {
-        self.update_in_place(BINARY_ADD, target, addend);
+        self.update_in_place(op::ADD, target, addend);
     }
 
     pub fn mul_into(&self, target: Value, factor: Value) {
-        self.update_in_place(BINARY_MUL, target, factor);
+        self.update_in_place(op::MUL, target, factor);
     }
 
     pub fn shape(&self, value: Value) -> Shape {
@@ -331,7 +362,7 @@ impl Graph {
 
     fn backward_task(&self, task: &TaskInfo, gradient: Value, grads: &mut [Option<u32>]) {
         match task.kind {
-            KIND_MATMUL => {
+            kind::MATMUL => {
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
                 if self.tracked(&[left]) {
                     let transposed = self.transpose(right);
@@ -344,85 +375,129 @@ impl Graph {
                     self.accumulate(grads, right, contribution);
                 }
             }
-            KIND_BINARY => {
-                let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
-                match task.flags {
-                    BINARY_ADD => {
-                        for operand in [left, right] {
-                            if self.tracked(&[operand]) {
-                                let contribution = self.reduce_to(gradient, operand);
-                                self.accumulate(grads, operand, contribution);
-                            }
-                        }
+            kind::BINARY | kind::UNARY => {
+                let definition = op::of(task.op);
+                for slot in 0..definition.family.operands() {
+                    let operand = self.value_of(task.inputs[slot as usize]);
+                    if !self.tracked(&[operand]) {
+                        continue;
                     }
-                    BINARY_MUL => {
-                        for (operand, other) in [(left, right), (right, left)] {
-                            if self.tracked(&[operand]) {
-                                let product = self.mul(gradient, other);
-                                let contribution = self.reduce_to(product, operand);
-                                self.accumulate(grads, operand, contribution);
-                            }
-                        }
-                    }
-                    other => panic!("binary code {other} has no gradient rule"),
+                    let partial = self.partial(definition, task, slot, gradient);
+                    let contribution = self.reduce_to(partial, operand);
+                    self.accumulate(grads, operand, contribution);
                 }
             }
-            KIND_UNARY => {
+            kind::SOFTMAX => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    let out = self.fresh(self.shape(source), Residency::Derived, true);
-                    self.push(TaskInfo::op(
-                        KIND_UNARY_GRAD,
-                        task.flags,
-                        out.id(),
-                        [task.out, gradient.id(), NO_VALUE],
-                    ));
-                    self.accumulate(grads, source, out);
+                    self.row_gradient(kind::SOFTMAX_GRAD, task, source, gradient, grads);
                 }
             }
-            KIND_SOFTMAX => {
+            kind::LOG_SOFTMAX => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    let out = self.fresh(self.shape(source), Residency::Derived, true);
-                    self.push(TaskInfo::op(
-                        KIND_SOFTMAX_GRAD,
-                        0,
-                        out.id(),
-                        [task.out, gradient.id(), NO_VALUE],
-                    ));
-                    self.accumulate(grads, source, out);
+                    self.row_gradient(kind::LOG_SOFTMAX_GRAD, task, source, gradient, grads);
                 }
             }
-            KIND_SUM_CHUNK => {
+            kind::SUM_CHUNK => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
                     let out = self.broadcast(gradient, self.shape(source));
                     self.accumulate(grads, source, out);
                 }
             }
-            KIND_FILL | KIND_BROADCAST | KIND_SUM_TO | KIND_UNARY_GRAD | KIND_SOFTMAX_GRAD => {}
-            other => panic!("kind {other} has no gradient rule"),
+            kind::FILL
+            | kind::BROADCAST
+            | kind::SUM_TO
+            | kind::PARTIAL
+            | kind::SOFTMAX_GRAD
+            | kind::LOG_SOFTMAX_GRAD => {}
+            other => panic!("the {} task has no gradient rule", kind::name(other)),
         }
     }
 
-    fn elementwise(&self, flags: u32, left: Value, right: Value) -> Value {
+    fn partial(&self, definition: &op::Op, task: &TaskInfo, slot: u32, gradient: Value) -> Value {
+        let op::Partial::Formula { roles, .. } = definition.partial(slot) else {
+            return gradient;
+        };
+        let left = if roles.contains(&op::Role::Result) {
+            task.out
+        } else if roles.contains(&op::Role::Operand) {
+            task.inputs[slot as usize]
+        } else {
+            NO_VALUE
+        };
+        let right = if roles.contains(&op::Role::Other) {
+            task.inputs[slot as usize ^ 1]
+        } else {
+            NO_VALUE
+        };
+        let out = self.fresh(self.shape(gradient), Residency::Derived, false);
+        let mut partial = TaskInfo::of(
+            kind::PARTIAL,
+            task.op,
+            out.id(),
+            [left, right, gradient.id()],
+        );
+        partial.slot = slot;
+        self.push(partial);
+        out
+    }
+
+    fn row_gradient(
+        &self,
+        kind: u32,
+        task: &TaskInfo,
+        source: Value,
+        gradient: Value,
+        grads: &mut [Option<u32>],
+    ) {
+        let out = self.fresh(self.shape(source), Residency::Derived, true);
+        self.push(TaskInfo::of(
+            kind,
+            op::NONE,
+            out.id(),
+            [task.out, gradient.id(), NO_VALUE],
+        ));
+        self.accumulate(grads, source, out);
+    }
+
+    fn rows(&self, kind: u32, value: Value) -> Value {
+        assert!(
+            self.contiguous(value),
+            "a {} folds a row of a tensor stored row by row, and value {} is a view",
+            kind::name(kind),
+            value.id(),
+        );
+        let shape = self.shape(value);
+        let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
+        self.push(TaskInfo::of(
+            kind,
+            op::NONE,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE],
+        ));
+        out
+    }
+
+    fn elementwise(&self, op: u32, left: Value, right: Value) -> Value {
         let shape = self.shape(left).combined(self.shape(right));
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[left, right]));
-        self.push(TaskInfo::op(
-            KIND_BINARY,
-            flags,
+        self.push(TaskInfo::of(
+            op::kind(op),
+            op,
             out.id(),
             [left.id(), right.id(), NO_VALUE],
         ));
         out
     }
 
-    fn unary(&self, flags: u32, value: Value) -> Value {
+    fn unary(&self, op: u32, value: Value) -> Value {
         let shape = self.shape(value);
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
-        self.push(TaskInfo::op(
-            KIND_UNARY,
-            flags,
+        self.push(TaskInfo::of(
+            op::kind(op),
+            op,
             out.id(),
             [value.id(), NO_VALUE, NO_VALUE],
         ));
@@ -434,7 +509,7 @@ impl Graph {
         self.state.borrow_mut().values[storage as usize].retained = true;
     }
 
-    fn update_in_place(&self, flags: u32, target: Value, operand: Value) {
+    fn update_in_place(&self, op: u32, target: Value, operand: Value) {
         {
             let state = self.state.borrow();
             let info = &state.values[target.id() as usize];
@@ -457,9 +532,9 @@ impl Graph {
             self.shape(target).elements(),
             self.shape(operand).elements(),
         );
-        let mut task = TaskInfo::op(
-            KIND_BINARY,
-            flags,
+        let mut task = TaskInfo::of(
+            op::kind(op),
+            op,
             target.id(),
             [target.id(), operand.id(), NO_VALUE],
         );
@@ -482,9 +557,9 @@ impl Graph {
             shape.elements(),
         );
         let out = self.fresh(shape, Residency::Derived, false);
-        self.push(TaskInfo::op(
-            KIND_SUM_TO,
-            0,
+        self.push(TaskInfo::of(
+            kind::SUM_TO,
+            op::NONE,
             out.id(),
             [gradient.id(), NO_VALUE, NO_VALUE],
         ));
@@ -500,9 +575,9 @@ impl Graph {
             self.shape(source).elements(),
         );
         let out = self.fresh(shape, Residency::Derived, false);
-        self.push(TaskInfo::op(
-            KIND_BROADCAST,
-            0,
+        self.push(TaskInfo::of(
+            kind::BROADCAST,
+            op::NONE,
             out.id(),
             [source.id(), NO_VALUE, NO_VALUE],
         ));

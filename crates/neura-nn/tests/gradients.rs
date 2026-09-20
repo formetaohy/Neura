@@ -1,4 +1,4 @@
-use neura_nn::{Linear, mse_loss};
+use neura_nn::{Linear, cross_entropy, mse_loss};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Runtime, RuntimeRequest};
 
@@ -259,4 +259,51 @@ fn one_step_of_adam_moves_a_weight_against_its_gradient() {
         after < before,
         "two hundred steps of adam moved the loss from {before} to {after}",
     );
+}
+
+#[test]
+fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
+    let runtime = open();
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(4, 3), Init::Zero);
+    let targets = graph.input(Shape::matrix(4, 3));
+    let loss = cross_entropy(&graph, logits, targets);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(logits));
+    let program = runtime.compile(&graph);
+    let logits_data = vec![
+        0.5, -1.0, 0.25, //
+        -0.75, 1.5, 0.1, //
+        2.0, -0.5, -1.25, //
+        0.0, 0.0, 0.0,
+    ];
+    let targets_data = vec![
+        1.0, 0.0, 0.0, //
+        0.0, 1.0, 0.0, //
+        0.0, 0.0, 1.0, //
+        1.0, 0.0, 0.0,
+    ];
+    runtime.write(&program, logits, &logits_data);
+    runtime.write(&program, targets, &targets_data);
+    runtime.run(&program);
+    let mut expected = Vec::new();
+    for row in 0..4 {
+        let known = &logits_data[row * 3..row * 3 + 3];
+        let largest = known.iter().copied().fold(f32::MIN, f32::max);
+        let total = known
+            .iter()
+            .map(|value| (value - largest).exp())
+            .sum::<f32>();
+        for column in 0..3 {
+            let probability = (known[column] - largest).exp() / total;
+            expected.push((probability - targets_data[row * 3 + column]) / 4.0);
+        }
+    }
+    let analytic = runtime.read(&program, gradients.of(logits));
+    for (element, (actual, wanted)) in analytic.iter().zip(&expected).enumerate() {
+        assert!(
+            (actual - wanted).abs() < 1e-5,
+            "logit {element} moved by {actual} where its probability less its target says {wanted}",
+        );
+    }
 }

@@ -2,10 +2,13 @@ use neura_abi::{PROFILES, WIDE};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Runtime, RuntimeRequest};
 
+#[path = "support/references.rs"]
+mod references;
 #[path = "support/mod.rs"]
 mod support;
 
-use support::{assert_close, matmul_reference, open, random, softmax_reference};
+use references::{log_softmax_reference, matmul_reference, random, softmax_reference};
+use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
@@ -601,4 +604,80 @@ fn tuning_measures_every_profile_the_device_offers() {
     runtime.write(&program, right, &right_data);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &expected, 1e-4);
+}
+
+#[test]
+fn an_operand_folded_into_a_subtraction_keeps_its_side() {
+    let graph = Graph::new();
+    let left = graph.input(Shape::vector(4));
+    let right = graph.input(Shape::vector(4));
+    let bias = graph.input(Shape::vector(4));
+    let difference = graph.sub(bias, graph.mul(left, right));
+    let quotient = graph.div(bias, graph.mul(left, right));
+    graph.retain(difference);
+    graph.retain(quotient);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    assert_eq!(
+        program.task_count(),
+        2,
+        "each product rides the operand it was folded into",
+    );
+    runtime.write(&program, left, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.write(&program, right, &[0.5, 0.25, -1.0, 2.0]);
+    runtime.write(&program, bias, &[10.0, 20.0, 30.0, 40.0]);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, difference),
+        &[9.5, 19.5, 33.0, 32.0],
+        1e-6,
+    );
+    assert_close(
+        &runtime.read(&program, quotient),
+        &[20.0, 40.0, -10.0, 5.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_log_softmax_row_holds_its_log_probabilities() {
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
+    let log_probabilities = graph.log_softmax(logits);
+    let runtime = open();
+    let program = runtime.compile(&graph);
+    let logits_values = random(54, 3);
+    runtime.write(&program, logits, &logits_values);
+    runtime.run(&program);
+    let out = runtime.read(&program, log_probabilities);
+    assert_close(&out, &log_softmax_reference(&logits_values, 9), 1e-5);
+    for row in out.chunks(9) {
+        assert!(
+            (row.iter().map(|value| value.exp()).sum::<f32>() - 1.0).abs() < 1e-5,
+            "a log probability row exponentiates to one",
+        );
+    }
+}
+
+#[test]
+fn a_log_softmax_rides_the_shape_of_its_rows() {
+    let runtime = open();
+    let mut widths = Vec::new();
+    for columns in [4u32, 64] {
+        let graph = Graph::new();
+        let logits = graph.parameter(Shape::matrix(3, columns), Init::Zero);
+        let out = graph.log_softmax(logits);
+        let program = runtime.compile(&graph);
+        let data = random(3 * columns, columns);
+        runtime.write(&program, logits, &data);
+        runtime.run(&program);
+        assert_close(
+            &runtime.read(&program, out),
+            &log_softmax_reference(&data, columns),
+            1e-5,
+        );
+        widths.push(runtime.read(&program, out).len());
+        assert_eq!(runtime.declared_kernels(), 1);
+    }
+    assert_eq!(widths, vec![12, 192]);
 }

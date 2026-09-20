@@ -1,7 +1,5 @@
-use neura_abi::{
-    KIND_BINARY, KIND_BROADCAST, KIND_MATMUL, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY,
-    KIND_UNARY_GRAD, NARROW, PROFILES, Profile, StepRecord, TaskRecord, WIDE,
-};
+use neura_abi::op;
+use neura_abi::{NARROW, PROFILES, Profile, StepRecord, TaskRecord, WIDE, kind};
 use neura_program::{Encoding, Graph, Init, Shape};
 use std::mem::size_of;
 
@@ -96,14 +94,16 @@ fn a_dense_layer_fuses_its_epilogue_into_the_product() {
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
     assert_eq!(encoding.wave_count(), 1);
-    assert_eq!(kinds(&encoding), vec![KIND_MATMUL]);
+    assert_eq!(kinds(&encoding), vec![kind::MATMUL]);
     let tape = tape(&encoding);
     assert_eq!(
         tape[0].steps, 2,
         "the bias and the rectifier ride the product"
     );
     let steps = steps(&encoding);
+    assert_eq!(steps[tape[0].chain as usize].op, op::ADD);
     assert_eq!(steps[tape[0].chain as usize].operand, bias.id());
+    assert_eq!(steps[tape[0].chain as usize + 1].op, op::RELU);
     assert_eq!(steps[tape[0].chain as usize + 1].operand, u32::MAX);
     assert_eq!(tape[0].out, activated.id());
 }
@@ -115,7 +115,7 @@ fn a_value_two_tasks_read_stays_on_the_tape() {
     let squared = graph.mul(data, data);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
-    assert_eq!(kinds(&encoding), vec![KIND_BINARY]);
+    assert_eq!(kinds(&encoding), vec![kind::BINARY]);
     assert_eq!(readers(&encoding, data.id()), vec![0]);
     assert_eq!(tape(&encoding)[0].out, squared.id());
 }
@@ -131,7 +131,7 @@ fn a_retained_value_is_never_folded_away() {
     let encoding = encoding(&graph);
     let reader = writers(&encoding, activated.id());
     assert_eq!(reader.len(), 1, "the rectifier keeps a task of its own");
-    assert_eq!(kinds(&encoding)[reader[0]], KIND_UNARY);
+    assert_eq!(kinds(&encoding)[reader[0]], kind::UNARY);
     assert!(
         readers(&encoding, doubled.id()).contains(&reader[0]),
         "the rectifier reads the value the graph retains",
@@ -321,22 +321,25 @@ fn a_backward_pass_reaches_every_parameter() {
 
     let kinds = kinds(&encoding(&graph));
     assert!(
-        kinds.contains(&KIND_MATMUL),
+        kinds.contains(&kind::MATMUL),
         "the weight gradient is a matmul"
     );
     assert!(
-        kinds.contains(&KIND_UNARY_GRAD),
+        kinds.contains(&kind::PARTIAL),
         "the rectifier contributes a mask"
     );
     assert!(
-        kinds.contains(&KIND_SUM_CHUNK),
+        kinds.contains(&kind::SUM_CHUNK),
         "the loss reduces through partial sums"
     );
     assert!(
-        kinds.contains(&KIND_BROADCAST),
+        kinds.contains(&kind::BROADCAST),
         "the loss gradient spreads the scalar over the tensor"
     );
-    assert_eq!(kinds.iter().filter(|kind| **kind == KIND_SUM_TO).count(), 1);
+    assert_eq!(
+        kinds.iter().filter(|kind| **kind == kind::SUM_TO).count(),
+        1
+    );
 }
 
 #[test]
@@ -347,7 +350,7 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
     let encoding = encoding(&graph);
     let reductions = kinds(&encoding)
         .iter()
-        .filter(|kind| **kind == KIND_SUM_CHUNK)
+        .filter(|kind| **kind == kind::SUM_CHUNK)
         .count();
     assert_eq!(
         reductions, 257,
@@ -555,5 +558,115 @@ fn every_tensor_a_plan_names_lies_inside_its_arena() {
                 "a tensor lies off the block grid"
             );
         }
+    }
+}
+
+#[test]
+fn a_folded_operand_remembers_which_side_of_its_consumer_it_took() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::vector(4), Init::Zero);
+    let right = graph.parameter(Shape::vector(4), Init::Zero);
+    let bias = graph.input(Shape::vector(4));
+    let difference = graph.sub(bias, graph.mul(left, right));
+    let quotient = graph.div(graph.mul(right, left), bias);
+    graph.retain(difference);
+    graph.retain(quotient);
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 2);
+    let tape = tape(&encoding);
+    let steps = steps(&encoding);
+    assert_eq!(tape[0].op, op::MUL);
+    let folded_into_a_subtraction = steps[tape[0].chain as usize];
+    assert_eq!(folded_into_a_subtraction.op, op::SUB);
+    assert_eq!(folded_into_a_subtraction.operand, bias.id());
+    assert_eq!(
+        folded_into_a_subtraction.swapped, 1,
+        "a product folded into a subtraction is its subtrahend",
+    );
+    assert_eq!(tape[1].op, op::MUL);
+    let folded_into_a_quotient = steps[tape[1].chain as usize];
+    assert_eq!(folded_into_a_quotient.op, op::DIV);
+    assert_eq!(folded_into_a_quotient.operand, bias.id());
+    assert_eq!(
+        folded_into_a_quotient.swapped, 0,
+        "a product folded into a quotient is its dividend",
+    );
+}
+
+#[test]
+fn a_partial_reads_back_the_result_its_formula_names() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let scale = graph.parameter(Shape::vector(4), Init::Zero);
+    let activated = graph.tanh(weight);
+    let scaled = graph.mul(activated, scale);
+    let loss = graph.sum(scaled);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let tangent = tape
+        .iter()
+        .find(|task| task.op == op::TANH)
+        .expect("the tangent keeps a task of its own while the product differentiates it");
+    assert_eq!(tangent.out, activated.id());
+    let partial = tape
+        .iter()
+        .find(|task| task.op == op::TANH && task.kind == kind::PARTIAL)
+        .expect("the tangent leaves a partial behind");
+    assert_eq!(
+        partial.a,
+        activated.id(),
+        "a tangent partial reads the value its own op produced, not the operand it was handed",
+    );
+    assert_eq!(partial.b, neura_abi::NO_VALUE);
+    assert_eq!(partial.slot, 0);
+    assert_eq!(partial.c, gradients.of(activated).id());
+    assert_eq!(partial.out, gradients.of(weight).id());
+}
+
+#[test]
+fn a_partial_reads_back_the_operands_its_formula_names() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let other = graph.parameter(Shape::vector(4), Init::Zero);
+    let magnitude = graph.abs(weight);
+    let scaled = graph.mul(magnitude, other);
+    let loss = graph.sum(scaled);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    graph.retain(gradients.of(other));
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let absolute = tape
+        .iter()
+        .find(|task| task.op == op::ABS && task.kind == kind::PARTIAL)
+        .expect("a magnitude sign reaches the operand it was taken from");
+    assert_eq!(
+        absolute.a,
+        weight.id(),
+        "a magnitude partial has to read the operand it differentiates",
+    );
+    assert_eq!(absolute.b, neura_abi::NO_VALUE);
+    let products = tape
+        .iter()
+        .filter(|task| task.op == op::MUL && task.kind == kind::PARTIAL)
+        .collect::<Vec<_>>();
+    assert_eq!(products.len(), 2, "each tracked factor carries a partial");
+    for (slot, partial) in products.iter().enumerate() {
+        assert_eq!(
+            partial.a,
+            neura_abi::NO_VALUE,
+            "a product descends through the factor it did not differentiate",
+        );
+        assert_eq!(
+            partial.b,
+            if slot == 0 {
+                other.id()
+            } else {
+                magnitude.id()
+            },
+        );
+        assert_eq!(partial.slot, slot as u32);
     }
 }
