@@ -1,9 +1,14 @@
 use neura_abi::{
     BINARY_ADD, BINARY_MUL, BoundsRecord, CHAIN_ADD, CHAIN_COUNT, CHAIN_MUL, CHAIN_RELU,
-    CHAIN_SQRT, KIND_COUNT, KIND_MATMUL, KIND_SOFTMAX, KIND_UNARY, StepRecord, TaskRecord,
-    UNARY_RECIP, UNARY_RELU, UNARY_SQRT, ValueRecord,
+    CHAIN_SQRT, KIND_COUNT, KIND_MATMUL, KIND_SOFTMAX, KIND_UNARY, MEDIUM, MatmulTile, NARROW,
+    SCHEDULES, Schedule, StepRecord, TaskRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT, ValueRecord,
+    WIDE, WORD_BYTES,
 };
 use std::mem::{align_of, offset_of, size_of};
+
+fn refuses(action: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+    std::panic::catch_unwind(action).is_err()
+}
 
 #[test]
 fn records_follow_the_shader_layout() {
@@ -31,13 +36,13 @@ fn records_follow_the_shader_layout() {
 
 #[test]
 fn every_task_kind_is_named() {
-    assert_eq!(KIND_COUNT, 11);
+    assert_eq!(KIND_COUNT, 10);
     for kind in 0..KIND_COUNT {
         assert!(!neura_abi::kind_name(kind).is_empty());
     }
     assert_eq!(neura_abi::kind_name(KIND_MATMUL), "matmul");
     assert_eq!(neura_abi::kind_name(KIND_SOFTMAX), "softmax");
-    assert_eq!(neura_abi::kind_name(neura_abi::KIND_EXPAND), "expand");
+    assert_eq!(neura_abi::kind_name(neura_abi::KIND_SUM_TO), "sum_to");
 }
 
 #[test]
@@ -121,4 +126,90 @@ fn a_step_declares_what_the_device_applies() {
         CHAIN_RELU
     );
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 9);
+}
+
+#[test]
+fn a_schedule_carries_the_geometry_it_declares() {
+    for schedule in SCHEDULES {
+        let declarations = schedule.declarations();
+        for (name, value) in [
+            ("WORKGROUP_SIZE", schedule.workgroup()),
+            ("MATMUL_ROW_TILE", schedule.matmul().rows()),
+            ("MATMUL_COL_TILE", schedule.matmul().columns()),
+            ("MATMUL_DEPTH_TILE", schedule.matmul().depth()),
+            ("MATMUL_THREAD_ROWS", schedule.matmul().thread_rows()),
+            ("MATMUL_THREAD_COLUMNS", schedule.matmul().thread_columns()),
+            ("MATMUL_REGISTER_ROWS", schedule.matmul().register_rows()),
+            (
+                "MATMUL_REGISTER_COLUMNS",
+                schedule.matmul().register_columns(),
+            ),
+        ] {
+            assert!(
+                declarations.contains(&format!("const {name}: u32 = {value}u;")),
+                "{name} of {schedule:?} is declared as {declarations}",
+            );
+        }
+        assert_eq!(schedule.workgroup(), schedule.matmul().threads());
+        assert_eq!(
+            schedule.matmul().registers() * schedule.workgroup(),
+            schedule.matmul().rows() * schedule.matmul().columns(),
+        );
+    }
+}
+
+#[test]
+fn a_schedule_refuses_a_geometry_its_workgroup_cannot_carry() {
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 16, 16, 8, 0), 1024, 4096, 8);
+    }));
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 16, 16, 5, 8), 1024, 4096, 8);
+    }));
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 24, 16, 8, 16), 1024, 4096, 8);
+    }));
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 16, 16, 8, 8), 32, 4096, 8);
+    }));
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 16, 16, 8, 8), 1024, 32, 8);
+    }));
+    assert!(refuses(|| {
+        let _ = Schedule::new(MatmulTile::new(16, 16, 16, 8, 8), 1024, 4096, 0);
+    }));
+}
+
+#[test]
+fn a_schedule_stages_its_tiles_and_its_reduction_pool() {
+    for schedule in SCHEDULES {
+        let tile = schedule.matmul();
+        assert_eq!(
+            tile.shared_bytes(),
+            u64::from(tile.rows() * tile.depth() + tile.depth() * tile.columns()) * 2 * WORD_BYTES,
+        );
+        assert_eq!(
+            schedule.shared_bytes(),
+            tile.shared_bytes() + u64::from(schedule.workgroup()) * WORD_BYTES,
+        );
+        assert!(schedule.fits(u32::MAX, schedule.shared_bytes()));
+        assert!(!schedule.fits(schedule.workgroup() - 1, schedule.shared_bytes()));
+        assert!(!schedule.fits(u32::MAX, schedule.shared_bytes() - 1));
+    }
+    assert!(
+        NARROW.shared_bytes() < MEDIUM.shared_bytes(),
+        "a wider tile stages more",
+    );
+    assert!(
+        MEDIUM.shared_bytes() < WIDE.shared_bytes(),
+        "a wider tile stages more",
+    );
+    assert!(
+        WIDE.shared_bytes() > 16 * 1024,
+        "the widest schedule must ask the device for more than the baseline pool",
+    );
+    assert!(
+        MEDIUM.shared_bytes() <= 16 * 1024,
+        "the middle schedule must run on the baseline pool",
+    );
 }

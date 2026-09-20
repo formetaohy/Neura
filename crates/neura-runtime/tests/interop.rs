@@ -153,19 +153,14 @@ fn a_game_pipeline_draws_a_tensor_straight_out_of_the_arena() {
             depth_or_array_layers: 1,
         },
     );
-    let index = queue.submit([encoder.finish()]);
+    let _index = queue.submit([encoder.finish()]);
     let (sender, completion) = std::sync::mpsc::channel();
     staging
         .slice(..)
         .map_async(wgpu::MapMode::Read, move |result| {
             let _ = sender.send(result);
         });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(index),
-            timeout: Some(std::time::Duration::from_secs(30)),
-        })
-        .expect("the render submission finished");
+    runtime.context().drain();
     completion
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the readback callback fired")

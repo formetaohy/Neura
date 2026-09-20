@@ -1,6 +1,6 @@
 mod reflection;
 
-use neura_abi::{CURSOR_WAVE_BASE, TAPE_WGSL, WORKGROUP_SIZE};
+use neura_abi::{CURSOR_WAVE_BASE, Schedule, TAPE_WGSL};
 use neura_gpu::{BindingKind, BindingSpec, ComputeProgram};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -63,16 +63,18 @@ pub const BINDINGS: &[KernelBinding] = &[
 ];
 
 pub struct Megakernel {
+    schedule: Schedule,
     source: Arc<str>,
     bindings: Vec<ShaderBinding>,
 }
 
 impl Megakernel {
-    pub fn assemble() -> Self {
+    pub fn assemble(schedule: Schedule) -> Self {
         let mut source = String::from(TAPE_WGSL);
         source.push('\n');
-        for fragment in neura_kernels::FRAGMENTS {
-            source.push_str(fragment);
+        source.push_str(&schedule.declarations());
+        for fragment in neura_kernels::fragments(schedule) {
+            source.push_str(&fragment);
             source.push('\n');
         }
         source.push_str(&neura_kernels::reductions());
@@ -82,7 +84,15 @@ impl Megakernel {
         let source = Arc::<str>::from(source);
         let bindings = reflect(&source);
         assert_declared(&bindings);
-        Self { source, bindings }
+        Self {
+            schedule,
+            source,
+            bindings,
+        }
+    }
+
+    pub fn schedule(&self) -> Schedule {
+        self.schedule
     }
 
     pub fn source(&self) -> &str {
@@ -94,7 +104,7 @@ impl Megakernel {
     }
 
     pub fn workgroup_size(&self) -> u32 {
-        WORKGROUP_SIZE
+        self.schedule.workgroup()
     }
 
     pub fn program(&self) -> ComputeProgram {
@@ -106,7 +116,18 @@ impl Megakernel {
                 dynamic_offset: binding.dynamic_offset,
             })
             .collect::<Vec<_>>();
-        ComputeProgram::new("neura megakernel", self.source.clone(), ENTRY, &specs)
+        let matmul = self.schedule.matmul();
+        ComputeProgram::new(
+            &format!(
+                "neura megakernel {}x{}x{}",
+                matmul.rows(),
+                matmul.columns(),
+                matmul.depth(),
+            ),
+            self.source.clone(),
+            ENTRY,
+            &specs,
+        )
     }
 }
 

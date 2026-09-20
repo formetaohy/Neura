@@ -14,5 +14,5 @@ pub use wgpu;
 pub use wgpu::{
     Adapter, AdapterInfo, Backend, Backends, BindGroup, BindGroupEntry, Buffer, BufferAddress,
     BufferUsages, ComputePassDescriptor, Device, DeviceLostReason, DeviceType, Features, Limits,
-    PollType, PowerPreference, Queue, ShaderStages, TextureFormat,
+    PowerPreference, Queue, ShaderStages, TextureFormat,
 };

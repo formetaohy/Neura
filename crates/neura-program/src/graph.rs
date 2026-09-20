@@ -2,18 +2,12 @@ use crate::encode::Encoding;
 use crate::init::Init;
 use crate::shape::Shape;
 use neura_abi::{
-    BINARY_ADD, BINARY_MUL, KIND_BINARY, KIND_BROADCAST, KIND_EXPAND, KIND_FILL, KIND_MATMUL,
-    KIND_SOFTMAX, KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD,
-    MATMUL_COL_TILE, MATMUL_DEPTH_TILE, MATMUL_ROW_TILE, NO_VALUE, StepRecord, UNARY_RECIP,
-    UNARY_RELU, UNARY_SQRT,
+    BINARY_ADD, BINARY_MUL, KIND_BINARY, KIND_BROADCAST, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
+    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, NO_VALUE,
+    Schedule, StepRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
-
-pub const ELEMENT_TILE: u32 = 1024;
-pub const REDUCE_TILE: u32 = 4096;
-pub const MATMUL_TILES_PER_TASK: u32 = 8;
-pub const ROWS_PER_TASK: u32 = 8;
 
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
@@ -45,54 +39,30 @@ pub(crate) enum Residency {
 pub(crate) struct TaskInfo {
     pub(crate) kind: u32,
     pub(crate) flags: u32,
-    pub(crate) first: u32,
-    pub(crate) count: u32,
-    pub(crate) slot: u32,
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
     pub(crate) param: f32,
-    pub(crate) work: u64,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) time: u32,
 }
 
 impl TaskInfo {
-    fn tiled(
-        kind: u32,
-        flags: u32,
-        span: (u32, u32),
-        out: u32,
-        inputs: [u32; 3],
-        param: f32,
-        work: u64,
-    ) -> Self {
-        let (first, count) = span;
+    fn op(kind: u32, flags: u32, out: u32, inputs: [u32; 3]) -> Self {
         Self {
             kind,
             flags,
-            first,
-            count,
-            slot: 0,
             out,
             inputs,
-            param,
-            work,
+            param: 0.0,
             in_place: false,
             chain: Vec::new(),
             time: 0,
         }
     }
-
-    pub(crate) fn reads(&self) -> impl Iterator<Item = u32> + '_ {
-        self.inputs
-            .iter()
-            .copied()
-            .chain(self.chain.iter().map(|step| step.operand))
-            .filter(|value| *value != NO_VALUE)
-    }
 }
 
+#[derive(Clone)]
 pub(crate) struct ValueInfo {
     pub(crate) shape: Shape,
     pub(crate) strides: [u32; 4],
@@ -101,8 +71,22 @@ pub(crate) struct ValueInfo {
     pub(crate) requires_grad: bool,
     pub(crate) retained: bool,
     pub(crate) written_in_place: bool,
-    pub(crate) partials_of: Option<(Value, u32)>,
     pub(crate) initial: Option<Vec<f32>>,
+}
+
+impl ValueInfo {
+    pub(crate) fn derived(shape: Shape, id: u32) -> Self {
+        Self {
+            shape,
+            strides: shape.strides(),
+            storage: id,
+            residency: Residency::Derived,
+            requires_grad: false,
+            retained: false,
+            written_in_place: false,
+            initial: None,
+        }
+    }
 }
 
 pub(crate) struct GraphState {
@@ -165,17 +149,9 @@ impl Graph {
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value {
         let out = self.fresh(shape, Residency::Derived, false);
-        for (first, count) in spans(shape.elements(), ELEMENT_TILE) {
-            self.push(TaskInfo::tiled(
-                KIND_FILL,
-                0,
-                (first, count),
-                out.id(),
-                [NO_VALUE; 3],
-                value,
-                u64::from(count),
-            ));
-        }
+        let mut task = TaskInfo::op(KIND_FILL, 0, out.id(), [NO_VALUE; 3]);
+        task.param = value;
+        self.push(task);
         out
     }
 
@@ -204,19 +180,12 @@ impl Graph {
             Residency::Derived,
             self.tracked(&[left, right]),
         );
-        let tiles = rows.div_ceil(MATMUL_ROW_TILE) * columns.div_ceil(MATMUL_COL_TILE);
-        for (first, count) in spans(tiles, MATMUL_TILES_PER_TASK) {
-            let work = u64::from(count * MATMUL_ROW_TILE * MATMUL_COL_TILE * MATMUL_DEPTH_TILE);
-            self.push(TaskInfo::tiled(
-                KIND_MATMUL,
-                0,
-                (first, count),
-                out.id(),
-                [left.id(), right.id(), NO_VALUE],
-                0.0,
-                work,
-            ));
-        }
+        self.push(TaskInfo::op(
+            KIND_MATMUL,
+            0,
+            out.id(),
+            [left.id(), right.id(), NO_VALUE],
+        ));
         out
     }
 
@@ -248,17 +217,12 @@ impl Graph {
         );
         let shape = self.shape(value);
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
-        for (first, count) in spans(shape.rows(), ROWS_PER_TASK) {
-            self.push(TaskInfo::tiled(
-                KIND_SOFTMAX,
-                0,
-                (first, count),
-                out.id(),
-                [value.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count * shape.columns()),
-            ));
-        }
+        self.push(TaskInfo::op(
+            KIND_SOFTMAX,
+            0,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE],
+        ));
         out
     }
 
@@ -268,44 +232,13 @@ impl Graph {
             "a sum walks its operand element by element, and value {} is a view",
             value.id(),
         );
-        let elements = self.shape(value).elements();
-        let chunks = elements.div_ceil(REDUCE_TILE);
-        assert!(
-            chunks <= REDUCE_TILE,
-            "a sum over {elements} elements leaves {chunks} partial sums, more than the {REDUCE_TILE} one more level folds",
-        );
-        let partials = self.fresh(Shape::vector(chunks), Residency::Derived, false);
-        self.state.borrow_mut().values[partials.id() as usize].partials_of =
-            Some((value, REDUCE_TILE));
-        let mut tasks = Vec::new();
-        for (slot, (first, count)) in spans(elements, REDUCE_TILE).enumerate() {
-            let mut task = TaskInfo::tiled(
-                KIND_SUM_CHUNK,
-                0,
-                (first, count),
-                partials.id(),
-                [value.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count),
-            );
-            task.slot = slot as u32;
-            tasks.push(task);
-        }
         let out = self.fresh(Shape::scalar(), Residency::Derived, self.tracked(&[value]));
-        for (first, count) in spans(chunks, REDUCE_TILE) {
-            tasks.push(TaskInfo::tiled(
-                KIND_SUM_CHUNK,
-                0,
-                (first, count),
-                out.id(),
-                [partials.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count),
-            ));
-        }
-        for task in tasks {
-            self.push(task);
-        }
+        self.push(TaskInfo::op(
+            KIND_SUM_CHUNK,
+            0,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE],
+        ));
         out
     }
 
@@ -344,9 +277,9 @@ impl Graph {
         self.state.borrow().tasks.len()
     }
 
-    pub fn encode(&self, alignment: u64) -> Encoding {
+    pub fn encode(&self, alignment: u64, schedule: Schedule) -> Encoding {
         let state = self.state.borrow();
-        Encoding::plan(&state, alignment)
+        Encoding::plan(&state, schedule, alignment)
     }
 
     pub fn backward(&self, loss: Value) -> Gradients {
@@ -377,15 +310,10 @@ impl Graph {
             state.tasks.len()
         };
         let mut grads: Vec<Option<u32>> = vec![None; self.value_count()];
-        let mut walked: Vec<bool> = vec![false; self.value_count()];
         let seed = self.fill(self.shape(loss), 1.0);
         grads[loss.id() as usize] = Some(seed.id());
         for index in (0..forward).rev() {
             let task = self.task(index);
-            if task.in_place || walked[task.out as usize] {
-                continue;
-            }
-            walked[task.out as usize] = true;
             let Some(gradient) = grads[task.out as usize] else {
                 continue;
             };
@@ -442,70 +370,37 @@ impl Graph {
             KIND_UNARY => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    let out = self.fresh(
-                        self.shape(source),
-                        Residency::Derived,
-                        self.tracked(&[source]),
-                    );
-                    for (first, count) in spans(out.shape().elements(), ELEMENT_TILE) {
-                        self.push(TaskInfo::tiled(
-                            KIND_UNARY_GRAD,
-                            task.flags,
-                            (first, count),
-                            out.id(),
-                            [task.out, gradient.id(), NO_VALUE],
-                            0.0,
-                            u64::from(count),
-                        ));
-                    }
+                    let out = self.fresh(self.shape(source), Residency::Derived, true);
+                    self.push(TaskInfo::op(
+                        KIND_UNARY_GRAD,
+                        task.flags,
+                        out.id(),
+                        [task.out, gradient.id(), NO_VALUE],
+                    ));
                     self.accumulate(grads, source, out);
                 }
             }
             KIND_SOFTMAX => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    let shape = self.shape(source);
-                    let out = self.fresh(shape, Residency::Derived, true);
-                    for (first, count) in spans(shape.rows(), ROWS_PER_TASK) {
-                        self.push(TaskInfo::tiled(
-                            KIND_SOFTMAX_GRAD,
-                            0,
-                            (first, count),
-                            out.id(),
-                            [task.out, gradient.id(), NO_VALUE],
-                            0.0,
-                            u64::from(count * shape.columns()),
-                        ));
-                    }
+                    let out = self.fresh(self.shape(source), Residency::Derived, true);
+                    self.push(TaskInfo::op(
+                        KIND_SOFTMAX_GRAD,
+                        0,
+                        out.id(),
+                        [task.out, gradient.id(), NO_VALUE],
+                    ));
                     self.accumulate(grads, source, out);
                 }
             }
             KIND_SUM_CHUNK => {
                 let source = self.value_of(task.inputs[0]);
-                let partials_of = self.state.borrow().values[source.id() as usize].partials_of;
-                let Some((summed, chunk)) = partials_of else {
-                    return;
-                };
-                if !self.tracked(&[summed]) {
-                    return;
+                if self.tracked(&[source]) {
+                    let out = self.broadcast(gradient, self.shape(source));
+                    self.accumulate(grads, source, out);
                 }
-                let chunk_grads = self.broadcast(gradient, self.shape(source), 0);
-                let out = self.fresh(self.shape(summed), Residency::Derived, true);
-                for (first, count) in spans(out.shape().elements(), ELEMENT_TILE) {
-                    self.push(TaskInfo::tiled(
-                        KIND_EXPAND,
-                        chunk,
-                        (first, count),
-                        out.id(),
-                        [chunk_grads.id(), NO_VALUE, NO_VALUE],
-                        0.0,
-                        u64::from(count),
-                    ));
-                }
-                self.accumulate(grads, summed, out);
             }
-            KIND_FILL | KIND_BROADCAST | KIND_EXPAND | KIND_SUM_TO | KIND_UNARY_GRAD
-            | KIND_SOFTMAX_GRAD => {}
+            KIND_FILL | KIND_BROADCAST | KIND_SUM_TO | KIND_UNARY_GRAD | KIND_SOFTMAX_GRAD => {}
             other => panic!("kind {other} has no gradient rule"),
         }
     }
@@ -513,34 +408,24 @@ impl Graph {
     fn elementwise(&self, flags: u32, left: Value, right: Value) -> Value {
         let shape = self.shape(left).combined(self.shape(right));
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[left, right]));
-        for (first, count) in spans(shape.elements(), ELEMENT_TILE) {
-            self.push(TaskInfo::tiled(
-                KIND_BINARY,
-                flags,
-                (first, count),
-                out.id(),
-                [left.id(), right.id(), NO_VALUE],
-                0.0,
-                u64::from(count),
-            ));
-        }
+        self.push(TaskInfo::op(
+            KIND_BINARY,
+            flags,
+            out.id(),
+            [left.id(), right.id(), NO_VALUE],
+        ));
         out
     }
 
     fn unary(&self, flags: u32, value: Value) -> Value {
         let shape = self.shape(value);
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
-        for (first, count) in spans(shape.elements(), ELEMENT_TILE) {
-            self.push(TaskInfo::tiled(
-                KIND_UNARY,
-                flags,
-                (first, count),
-                out.id(),
-                [value.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count),
-            ));
-        }
+        self.push(TaskInfo::op(
+            KIND_UNARY,
+            flags,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE],
+        ));
         out
     }
 
@@ -572,19 +457,14 @@ impl Graph {
             self.shape(target).elements(),
             self.shape(operand).elements(),
         );
-        for (first, count) in spans(self.shape(target).elements(), ELEMENT_TILE) {
-            let mut task = TaskInfo::tiled(
-                KIND_BINARY,
-                flags,
-                (first, count),
-                target.id(),
-                [target.id(), operand.id(), NO_VALUE],
-                0.0,
-                u64::from(count),
-            );
-            task.in_place = true;
-            self.push(task);
-        }
+        let mut task = TaskInfo::op(
+            KIND_BINARY,
+            flags,
+            target.id(),
+            [target.id(), operand.id(), NO_VALUE],
+        );
+        task.in_place = true;
+        self.push(task);
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
@@ -601,37 +481,31 @@ impl Graph {
             self.shape(gradient).elements(),
             shape.elements(),
         );
-        let replicas = replicas(&shape, self.shape(gradient));
         let out = self.fresh(shape, Residency::Derived, false);
-        for (first, count) in spans(shape.elements(), ELEMENT_TILE) {
-            self.push(TaskInfo::tiled(
-                KIND_SUM_TO,
-                0,
-                (first, count),
-                out.id(),
-                [gradient.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count) * replicas,
-            ));
-        }
+        self.push(TaskInfo::op(
+            KIND_SUM_TO,
+            0,
+            out.id(),
+            [gradient.id(), NO_VALUE, NO_VALUE],
+        ));
         out
     }
 
-    fn broadcast(&self, source: Value, shape: Shape, slot: u32) -> Value {
+    fn broadcast(&self, source: Value, shape: Shape) -> Value {
+        assert!(
+            self.shape(source).is_scalar(),
+            "a broadcast hands every element of {:?} one scalar, and value {} holds {} elements",
+            shape,
+            source.id(),
+            self.shape(source).elements(),
+        );
         let out = self.fresh(shape, Residency::Derived, false);
-        for (first, count) in spans(shape.elements(), ELEMENT_TILE) {
-            let mut task = TaskInfo::tiled(
-                KIND_BROADCAST,
-                0,
-                (first, count),
-                out.id(),
-                [source.id(), NO_VALUE, NO_VALUE],
-                0.0,
-                u64::from(count),
-            );
-            task.slot = slot;
-            self.push(task);
-        }
+        self.push(TaskInfo::op(
+            KIND_BROADCAST,
+            0,
+            out.id(),
+            [source.id(), NO_VALUE, NO_VALUE],
+        ));
         out
     }
 
@@ -680,7 +554,6 @@ impl Graph {
             requires_grad: residency == Residency::Parameter,
             retained: false,
             written_in_place: false,
-            partials_of: None,
             initial,
         });
         Value { id, shape }
@@ -697,7 +570,6 @@ impl Graph {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
-            partials_of: None,
             initial: None,
         });
         Value { id, shape }
@@ -714,7 +586,6 @@ impl Graph {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
-            partials_of: None,
             initial: None,
         });
         Value { id, shape }
@@ -723,25 +594,4 @@ impl Graph {
     fn push(&self, task: TaskInfo) {
         self.state.borrow_mut().tasks.push(task);
     }
-}
-
-fn spans(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
-    let mut first = 0;
-    std::iter::from_fn(move || {
-        if first >= units {
-            return None;
-        }
-        let count = per_task.min(units - first);
-        let span = (first, count);
-        first += count;
-        Some(span)
-    })
-}
-
-fn replicas(target: &Shape, source: Shape) -> u64 {
-    let target = target.dims();
-    let source = source.dims();
-    (0..4)
-        .map(|axis| u64::from(source[axis]) / u64::from(target[axis]))
-        .product()
 }

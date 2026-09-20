@@ -9,16 +9,6 @@ struct Use {
     slot: u32,
 }
 
-struct Group {
-    consumers: Vec<usize>,
-    step: StepRecord,
-    chain: Vec<StepRecord>,
-    out: u32,
-    in_place: bool,
-    work: u64,
-    time: u32,
-}
-
 pub(crate) fn fuse(state: &GraphState) -> Vec<TaskInfo> {
     let mut tasks = state
         .tasks
@@ -26,163 +16,142 @@ pub(crate) fn fuse(state: &GraphState) -> Vec<TaskInfo> {
         .cloned()
         .map(Some)
         .collect::<Vec<Option<TaskInfo>>>();
-    let mut producers = vec![Vec::new(); state.values.len()];
+    let mut writers = vec![None; state.values.len()];
     let mut reads = vec![Vec::new(); state.values.len()];
-    for (time, task) in tasks.iter_mut().enumerate() {
+    for (index, task) in tasks.iter_mut().enumerate() {
         let task = task
             .as_mut()
             .expect("a task survives until the pass reaches the value it writes");
-        task.time = time as u32;
-        producers[task.out as usize].push(time);
+        task.time = index as u32;
+        writers[task.out as usize] = Some(index);
         for (slot, value) in task.inputs.iter().enumerate() {
             if *value != NO_VALUE {
                 reads[*value as usize].push(Use {
-                    task: time,
+                    task: index,
                     slot: slot as u32,
                 });
             }
         }
     }
     for value in 0..state.values.len() {
-        absorb(state, &mut tasks, &mut producers, &mut reads, value as u32);
+        absorb(state, &mut tasks, &mut writers, &mut reads, value as u32);
     }
-    order_by_time(tasks.into_iter().flatten().collect())
-}
-
-fn order_by_time(mut tasks: Vec<TaskInfo>) -> Vec<TaskInfo> {
-    tasks.sort_by_key(|task| task.time);
-    tasks
+    let mut fused = tasks.into_iter().flatten().collect::<Vec<TaskInfo>>();
+    fused.sort_by_key(|task| task.time);
+    fused
 }
 
 fn absorb(
     state: &GraphState,
     tasks: &mut [Option<TaskInfo>],
-    producers: &mut [Vec<usize>],
+    writers: &mut [Option<usize>],
     reads: &mut [Vec<Use>],
     value: u32,
 ) {
-    if producers[value as usize].is_empty() || pinned(state, value) {
+    if pinned(state, value) {
         return;
     }
-    if producers[value as usize]
-        .iter()
-        .any(|producer| !chainable(live(tasks, *producer).kind))
-    {
-        return;
-    }
-    let Some(group) = group_of(state, tasks, reads, value) else {
+    let Some(producer_index) = writers[value as usize] else {
         return;
     };
-    let fused = producers[value as usize].clone();
-    for producer in &fused {
-        let task = tasks[*producer]
+    let uses = &reads[value as usize];
+    if uses.len() != 1 || uses[0].slot == CHAIN_SLOT || uses[0].slot > 1 {
+        return;
+    }
+    let consumer_index = uses[0].task;
+    let (head, step) = {
+        let producer = tasks[producer_index]
+            .as_ref()
+            .expect("a producer survives the pass that absorbs its value");
+        let consumer = tasks[consumer_index]
+            .as_ref()
+            .expect("a consumer is live while it is absorbed");
+        if producer.kind == KIND_SUM_CHUNK
+            || producer.in_place
+            || !absorbable(consumer.kind)
+            || state.values[consumer.out as usize].shape != state.values[value as usize].shape
+            || consumer
+                .inputs
+                .iter()
+                .filter(|input| **input == value)
+                .count()
+                != 1
+        {
+            return;
+        }
+        let Some(step) = consumer_step(consumer, value) else {
+            return;
+        };
+        (consumer.clone(), step)
+    };
+    {
+        let producer = tasks[producer_index]
             .as_mut()
             .expect("a producer survives the pass that absorbs its value");
-        task.time = group.time;
-        task.out = group.out;
-        task.in_place = group.in_place;
-        task.work += group.work;
-        task.chain.push(group.step);
-        task.chain.extend(group.chain.iter().copied());
-        for step in std::iter::once(&group.step).chain(group.chain.iter()) {
+        producer.time = head.time;
+        producer.out = head.out;
+        producer.in_place = head.in_place;
+        producer.chain.push(step);
+        producer.chain.extend(head.chain.iter().copied());
+    }
+    {
+        let producer = tasks[producer_index]
+            .as_ref()
+            .expect("a producer survives the pass that absorbs its value");
+        for step in &producer.chain {
             if step.operand != NO_VALUE {
                 reads[step.operand as usize].push(Use {
-                    task: *producer,
+                    task: producer_index,
                     slot: CHAIN_SLOT,
                 });
             }
         }
     }
-    for consumer in &group.consumers {
-        let task = tasks[*consumer]
-            .take()
-            .expect("a consumer is live while it is absorbed");
-        for value in task.inputs {
-            if value != NO_VALUE {
-                drop_use(reads, value, *consumer);
-            }
-        }
-        for step in &task.chain {
-            if step.operand != NO_VALUE {
-                drop_use(reads, step.operand, *consumer);
-            }
+    let consumer = tasks[consumer_index]
+        .take()
+        .expect("a consumer is live while it is absorbed");
+    for operand in consumer.inputs {
+        if operand != NO_VALUE {
+            drop_use(reads, operand, consumer_index);
         }
     }
-    producers[group.out as usize].retain(|index| !group.consumers.contains(index));
-    producers[group.out as usize].extend(fused);
-    producers[value as usize].clear();
+    for step in &consumer.chain {
+        if step.operand != NO_VALUE {
+            drop_use(reads, step.operand, consumer_index);
+        }
+    }
     reads[value as usize].clear();
+    writers[value as usize] = None;
+    writers[head.out as usize] = Some(producer_index);
 }
 
-fn group_of(
-    state: &GraphState,
-    tasks: &[Option<TaskInfo>],
-    reads: &[Vec<Use>],
-    value: u32,
-) -> Option<Group> {
-    let uses = &reads[value as usize];
-    if uses.is_empty() || uses.iter().any(|use_| use_.slot == CHAIN_SLOT) {
-        return None;
-    }
-    let head = tasks[uses[0].task].as_ref()?;
-    if !absorbable(head.kind)
-        || state.values[head.out as usize].shape != state.values[value as usize].shape
-    {
-        return None;
-    }
-    let operand = match head.kind {
-        KIND_UNARY => NO_VALUE,
+fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
+    match consumer.kind {
+        KIND_UNARY => Some(StepRecord {
+            op: chain_op(consumer.kind, consumer.flags),
+            operand: NO_VALUE,
+        }),
         KIND_BINARY => {
-            let operand = *head.inputs.get((uses[0].slot ^ 1) as usize)?;
-            if uses[0].slot > 1 || operand == NO_VALUE {
+            let slot = consumer
+                .inputs
+                .iter()
+                .position(|input| *input == value)
+                .expect("an absorbed value is one of the consumer's operands");
+            let operand = consumer.inputs[slot ^ 1];
+            if operand == NO_VALUE {
                 return None;
             }
-            operand
+            Some(StepRecord {
+                op: chain_op(consumer.kind, consumer.flags),
+                operand,
+            })
         }
-        _ => return None,
-    };
-    for use_ in uses {
-        let task = tasks[use_.task].as_ref()?;
-        if use_.slot != uses[0].slot
-            || task.kind != head.kind
-            || task.flags != head.flags
-            || task.out != head.out
-            || task.in_place != head.in_place
-            || task.chain != head.chain
-            || task.inputs.iter().filter(|input| **input == value).count() != 1
-        {
-            return None;
-        }
-        if head.kind == KIND_BINARY && *task.inputs.get((use_.slot ^ 1) as usize)? != operand {
-            return None;
-        }
+        _ => None,
     }
-    Some(Group {
-        consumers: uses.iter().map(|use_| use_.task).collect(),
-        step: StepRecord {
-            op: chain_op(head.kind, head.flags),
-            operand,
-        },
-        chain: head.chain.clone(),
-        out: head.out,
-        in_place: head.in_place,
-        work: head.work,
-        time: head.time,
-    })
-}
-
-fn live(tasks: &[Option<TaskInfo>], index: usize) -> &TaskInfo {
-    tasks[index]
-        .as_ref()
-        .expect("a task that writes a taped value is still on the tape")
 }
 
 fn absorbable(kind: u32) -> bool {
     matches!(kind, KIND_BINARY | KIND_UNARY)
-}
-
-fn chainable(kind: u32) -> bool {
-    kind != KIND_SUM_CHUNK
 }
 
 fn pinned(state: &GraphState, value: u32) -> bool {

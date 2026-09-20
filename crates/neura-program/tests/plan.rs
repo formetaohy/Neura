@@ -1,6 +1,6 @@
 use neura_abi::{
-    KIND_BINARY, KIND_EXPAND, KIND_MATMUL, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY,
-    KIND_UNARY_GRAD, StepRecord, TaskRecord,
+    KIND_BINARY, KIND_BROADCAST, KIND_MATMUL, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY,
+    KIND_UNARY_GRAD, MatmulTile, NARROW, SCHEDULES, Schedule, StepRecord, TaskRecord, WIDE,
 };
 use neura_program::{Encoding, Graph, Init, Shape};
 use std::mem::size_of;
@@ -8,7 +8,11 @@ use std::mem::size_of;
 const ALIGNMENT: u64 = 256;
 
 fn encoding(graph: &Graph) -> Encoding {
-    graph.encode(ALIGNMENT)
+    encoding_with(graph, NARROW)
+}
+
+fn encoding_with(graph: &Graph, schedule: Schedule) -> Encoding {
+    graph.encode(ALIGNMENT, schedule)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -74,6 +78,7 @@ fn a_chain_of_rectifiers_fuses_into_one_task() {
     for _ in 0..4 {
         value = graph.relu(value);
     }
+    assert_eq!(graph.task_count(), 4);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
     assert_eq!(encoding.wave_count(), 1);
@@ -212,20 +217,67 @@ fn elementwise_operands_must_meet() {
 }
 
 #[test]
-fn a_matmul_tiles_its_output() {
+fn a_schedule_decides_how_a_matmul_is_tiled() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(64, 32), Init::Zero);
     let right = graph.parameter(Shape::matrix(32, 48), Init::Zero);
     let out = graph.matmul(left, right);
     assert_eq!(out.shape(), Shape::matrix(64, 48));
-    let encoding = encoding(&graph);
-    let tiles: u32 = 4 * 3;
-    assert_eq!(
-        encoding.task_count(),
-        tiles.div_ceil(neura_program::MATMUL_TILES_PER_TASK),
+    for schedule in SCHEDULES {
+        let encoding = encoding_with(&graph, *schedule);
+        let tile = schedule.matmul();
+        let tiles = out.shape().rows().div_ceil(tile.rows())
+            * out.shape().columns().div_ceil(tile.columns());
+        assert_eq!(
+            encoding.task_count(),
+            tiles,
+            "{schedule:?} tiles a 64x48 product into {tiles} workgroups",
+        );
+        assert!(kinds(&encoding).iter().all(|kind| *kind == KIND_MATMUL));
+        assert_eq!(
+            encoding.work(),
+            u64::from(tiles) * tile.tile_work(),
+            "{schedule:?} accounts the tile work it dispatches",
+        );
+    }
+    assert!(
+        encoding_with(&graph, WIDE).task_count() < encoding_with(&graph, NARROW).task_count(),
+        "a wider tile hands the device fewer, larger tasks",
     );
-    assert_eq!(kinds(&encoding).len(), encoding.task_count() as usize);
-    assert!(kinds(&encoding).iter().all(|kind| *kind == KIND_MATMUL));
+}
+
+#[test]
+fn a_schedule_decides_how_many_elements_one_task_carries() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(65536));
+    graph.relu(data);
+    for schedule in SCHEDULES {
+        let encoding = encoding_with(&graph, *schedule);
+        assert_eq!(
+            encoding.task_count(),
+            65536u32.div_ceil(schedule.elements_per_task()),
+            "{schedule:?} hands one workgroup {} elements",
+            schedule.elements_per_task(),
+        );
+    }
+}
+
+#[test]
+fn every_schedule_plans_the_same_values() {
+    for schedule in SCHEDULES {
+        let graph = Graph::new();
+        let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
+        let bias = graph.parameter(Shape::vector(8), Init::Zero);
+        let data = graph.input(Shape::matrix(2, 4));
+        let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
+        let encoding = encoding_with(&graph, *schedule);
+        assert_eq!(
+            encoding.value_count() as usize,
+            graph.value_count(),
+            "{schedule:?} publishes values a graph without a reduction holds",
+        );
+        assert_eq!(encoding.span(out).bytes, 16 * 4);
+    }
 }
 
 #[test]
@@ -256,10 +308,38 @@ fn a_backward_pass_reaches_every_parameter() {
         "the loss reduces through partial sums"
     );
     assert!(
-        kinds.contains(&KIND_EXPAND),
-        "the loss gradient spreads over the tensor"
+        kinds.contains(&KIND_BROADCAST),
+        "the loss gradient spreads the scalar over the tensor"
     );
     assert_eq!(kinds.iter().filter(|kind| **kind == KIND_SUM_TO).count(), 1);
+}
+
+#[test]
+fn a_reduction_folds_through_as_many_levels_as_it_takes() {
+    let schedule = Schedule::new(MatmulTile::new(16, 16, 16, 8, 8), 1024, 64, 8);
+    let graph = Graph::new();
+    let wide = graph.parameter(Shape::vector(64 * 64 + 1), Init::Zero);
+    let loss = graph.sum(wide);
+    let encoding = encoding_with(&graph, schedule);
+    let reductions = kinds(&encoding)
+        .iter()
+        .filter(|kind| **kind == KIND_SUM_CHUNK)
+        .count();
+    assert_eq!(
+        reductions,
+        65 + 2 + 1,
+        "a sum folds one chunk of 64 elements at a time until one scalar stands",
+    );
+    assert_eq!(
+        encoding.wave_count(),
+        3,
+        "every level of the fold is a wave"
+    );
+    assert_eq!(loss.shape(), Shape::scalar());
+    assert!(
+        encoding.value_count() as usize > graph.value_count(),
+        "a folded reduction publishes its partial sums",
+    );
 }
 
 #[test]
@@ -399,7 +479,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     let out = graph.softmax(graph.matmul(input, weight));
     graph.backward(graph.sum(out));
     let encoding = encoding(&graph);
-    assert_eq!(encoding.value_count() as usize, graph.value_count());
+    assert!(encoding.value_count() as usize >= graph.value_count());
     assert!(encoding.arena_bytes() > 0);
     assert!(encoding.work() > 0);
     let seed = encoding
@@ -408,21 +488,6 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
         .find(|(offset, _)| *offset == encoding.span(weight).offset)
         .expect("the weight carries its initial samples");
     assert_eq!(seed.1.len(), 16);
-}
-
-#[test]
-fn a_sum_wider_than_two_levels_is_refused() {
-    let graph = Graph::new();
-    let wide = graph.parameter(
-        Shape::vector(neura_program::REDUCE_TILE * neura_program::REDUCE_TILE + 1),
-        Init::Zero,
-    );
-    assert!(
-        refuses(|| {
-            let _ = graph.sum(wide);
-        }),
-        "a sum whose partial sums need a third level was accepted",
-    );
 }
 
 #[test]
@@ -439,31 +504,33 @@ fn a_non_scalar_loss_is_refused() {
 
 #[test]
 fn every_tensor_a_plan_names_lies_inside_its_arena() {
-    let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
-    let data = graph.input(Shape::matrix(2, 8));
-    let out = graph.softmax(graph.add(
-        graph.matmul(data, weight),
-        graph.fill(Shape::vector(4), 1.0),
-    ));
-    graph.retain(out);
-    let grads = graph.backward(graph.sum(out));
-    graph.retain(grads.of(weight));
-    let encoding = encoding(&graph);
-    for value in [weight, data, out, grads.of(weight)] {
-        let span = encoding.span(value);
-        assert!(
-            span.offset + span.bytes <= encoding.arena_bytes(),
-            "tensor {} of {} bytes at {} leaves the {} byte arena",
-            value.id(),
-            span.bytes,
-            span.offset,
-            encoding.arena_bytes(),
-        );
-        assert_eq!(
-            span.offset % ALIGNMENT,
-            0,
-            "a tensor lies off the block grid"
-        );
+    for schedule in SCHEDULES {
+        let graph = Graph::new();
+        let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
+        let data = graph.input(Shape::matrix(2, 8));
+        let out = graph.softmax(graph.add(
+            graph.matmul(data, weight),
+            graph.fill(Shape::vector(4), 1.0),
+        ));
+        graph.retain(out);
+        let grads = graph.backward(graph.sum(out));
+        graph.retain(grads.of(weight));
+        let encoding = encoding_with(&graph, *schedule);
+        for value in [weight, data, out, grads.of(weight)] {
+            let span = encoding.span(value);
+            assert!(
+                span.offset + span.bytes <= encoding.arena_bytes(),
+                "tensor {} of {} bytes at {} leaves the {} byte arena",
+                value.id(),
+                span.bytes,
+                span.offset,
+                encoding.arena_bytes(),
+            );
+            assert_eq!(
+                span.offset % ALIGNMENT,
+                0,
+                "a tensor lies off the block grid"
+            );
+        }
     }
 }

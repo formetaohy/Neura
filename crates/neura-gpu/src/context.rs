@@ -234,11 +234,14 @@ impl GpuContext {
         }
     }
 
-    pub fn poll(&self) {
+    pub fn drain(&self) {
         self.assert_alive();
         self.device
-            .poll(wgpu::PollType::Poll)
-            .expect("polling the gpu device failed");
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(crate::readback::READBACK_TIMEOUT),
+            })
+            .unwrap_or_else(|error| panic!("waiting for the gpu device failed: {error}"));
         self.assert_alive();
     }
 

@@ -1,6 +1,9 @@
-use neura::wgpu::PollType;
-use neura::{Graph, Init, Mlp, Program, Runtime, RuntimeRequest, Shape, mse_loss};
+use neura::{Adam, Graph, Init, Mlp, Program, Runtime, RuntimeRequest, Schedule, Shape, mse_loss};
 use std::time::Instant;
+
+const PRODUCT_ROWS: u32 = 1024;
+const PRODUCT_DEPTH: u32 = 1024;
+const PRODUCT_COLUMNS: u32 = 1024;
 
 struct Timing {
     submit: f64,
@@ -9,6 +12,7 @@ struct Timing {
 
 struct Measured {
     label: String,
+    schedule: Schedule,
     tasks: u32,
     waves: u32,
     work: u64,
@@ -37,14 +41,18 @@ fn time(runtime: &Runtime, program: &Program, rounds: u32) -> Timing {
 }
 
 fn drain(runtime: &Runtime) {
-    runtime
-        .context()
-        .device()
-        .poll(PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(30)),
-        })
-        .expect("the device finished the work it was handed");
+    runtime.context().drain();
+}
+
+fn schedule_name(schedule: Schedule) -> String {
+    let matmul = schedule.matmul();
+    format!(
+        "{}x{}x{}/{}",
+        matmul.rows(),
+        matmul.columns(),
+        matmul.depth(),
+        schedule.workgroup(),
+    )
 }
 
 fn wide(runtime: &Runtime, elements: u32) -> Measured {
@@ -56,6 +64,7 @@ fn wide(runtime: &Runtime, elements: u32) -> Measured {
     runtime.run(&program);
     Measured {
         label: format!("one rectifier over {elements} elements"),
+        schedule: program.schedule(),
         tasks: program.task_count(),
         waves: program.wave_count(),
         work: program.work(),
@@ -77,7 +86,10 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     let outputs = *widths.last().expect("a width");
     let targets = graph.input(Shape::matrix(samples, outputs));
     let loss = mse_loss(&graph, model.forward(&graph, observations), targets);
-    graph.backward(loss);
+    let gradients = graph.backward(loss);
+    let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
+    optimizer.track_all(&graph, &model.parameters());
+    optimizer.step(&graph, &gradients);
     let program = runtime.compile(&graph);
     runtime.write(
         &program,
@@ -88,11 +100,34 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     runtime.run(&program);
     Measured {
         label: format!("a step of {} layers at batch {samples}", widths.len() - 1),
+        schedule: program.schedule(),
         tasks: program.task_count(),
         waves: program.wave_count(),
         work: program.work(),
         timing: time(runtime, &program, 64),
     }
+}
+
+fn product(runtime: &Runtime, schedule: Schedule) -> (Measured, f64) {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
+    let right = graph.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
+    graph.retain(graph.matmul(left, right));
+    let program = runtime.compile_with(&graph, schedule);
+    runtime.run(&program);
+    let timing = time(runtime, &program, 16);
+    let flops =
+        2.0 * f64::from(PRODUCT_ROWS) * f64::from(PRODUCT_DEPTH) * f64::from(PRODUCT_COLUMNS);
+    let step = timing.step;
+    let measured = Measured {
+        label: format!("a {PRODUCT_ROWS}x{PRODUCT_DEPTH}x{PRODUCT_COLUMNS} product"),
+        schedule: program.schedule(),
+        tasks: program.task_count(),
+        waves: program.wave_count(),
+        work: program.work(),
+        timing,
+    };
+    (measured, flops / (step * 1e-6) / 1e12)
 }
 
 fn main() {
@@ -112,13 +147,21 @@ fn main() {
         step(&runtime, &deep, 64),
     ];
     println!(
-        "{:<40} {:>7} {:>7} {:>11} {:>10} {:>9} {:>13}",
-        "graph", "tasks", "waves", "work", "submit us", "step us", "per dispatch us",
+        "{:<40} {:>12} {:>7} {:>7} {:>11} {:>10} {:>9} {:>13}",
+        "graph",
+        "matmul/threads",
+        "tasks",
+        "waves",
+        "work",
+        "submit us",
+        "step us",
+        "per dispatch us",
     );
     for entry in &measured {
         println!(
-            "{:<40} {:>7} {:>7} {:>11} {:>10.1} {:>9.1} {:>13.2}",
+            "{:<40} {:>12} {:>7} {:>7} {:>11} {:>10.1} {:>9.1} {:>13.2}",
             entry.label,
+            schedule_name(entry.schedule),
             entry.tasks,
             entry.waves,
             entry.work,
@@ -127,6 +170,31 @@ fn main() {
             entry.timing.step / f64::from(entry.waves.max(1)),
         );
     }
+    println!();
+    println!(
+        "{:<40} {:>12} {:>9} {:>9} {:>13}",
+        "schedule search", "matmul/threads", "tasks", "step us", "GFLOP/s",
+    );
+    for schedule in runtime.schedules() {
+        let (entry, tflops) = product(&runtime, schedule);
+        println!(
+            "{:<40} {:>12} {:>9} {:>9.1} {:>13.1}",
+            entry.label,
+            schedule_name(entry.schedule),
+            entry.tasks,
+            entry.timing.step,
+            tflops,
+        );
+    }
+    let search = Graph::new();
+    let left = search.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
+    let right = search.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
+    search.retain(search.matmul(left, right));
+    let tuned = runtime.tune(&search);
+    println!(
+        "the device measured every schedule it offers and kept {}",
+        schedule_name(tuned.schedule()),
+    );
     println!(
         "{} device programs served every shape above",
         runtime.declared_kernels(),

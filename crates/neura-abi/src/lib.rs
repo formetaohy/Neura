@@ -4,11 +4,13 @@ mod constants {
 mod records {
     include!(concat!(env!("OUT_DIR"), "/records.rs"));
 }
+mod schedule;
 
 pub const TAPE_WGSL: &str = include_str!("../abi/program.wgsl");
 
 pub use constants::*;
 pub use records::{BoundsRecord, StepRecord, TaskRecord, ValueRecord};
+pub use schedule::{MEDIUM, MatmulTile, NARROW, SCHEDULES, Schedule, WIDE};
 
 pub const WORD_BYTES: u64 = 4;
 pub const BOUNDS_BYTES: u64 = BOUNDS_WORDS as u64 * WORD_BYTES;
@@ -33,7 +35,6 @@ pub fn kind_name(kind: u32) -> &'static str {
         KIND_FILL => "fill",
         KIND_BROADCAST => "broadcast",
         KIND_SUM_CHUNK => "sum_chunk",
-        KIND_EXPAND => "expand",
         KIND_SUM_TO => "sum_to",
         KIND_SOFTMAX => "softmax",
         KIND_SOFTMAX_GRAD => "softmax_grad",
@@ -43,8 +44,9 @@ pub fn kind_name(kind: u32) -> &'static str {
 
 pub fn pointwise(kind: u32) -> bool {
     match kind {
-        KIND_BINARY | KIND_UNARY | KIND_UNARY_GRAD | KIND_FILL | KIND_BROADCAST | KIND_EXPAND
-        | KIND_SUM_TO => true,
+        KIND_BINARY | KIND_UNARY | KIND_UNARY_GRAD | KIND_FILL | KIND_BROADCAST | KIND_SUM_TO => {
+            true
+        }
         KIND_MATMUL | KIND_SUM_CHUNK | KIND_SOFTMAX | KIND_SOFTMAX_GRAD => false,
         other => panic!("kind {other} is not a declared task kind"),
     }

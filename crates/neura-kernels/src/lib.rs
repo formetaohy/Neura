@@ -1,17 +1,15 @@
+mod matmul;
+
 use neura_abi::{
-    KIND_BINARY, KIND_BROADCAST, KIND_COUNT, KIND_EXPAND, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
-    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, MATMUL_COL_TILE,
-    MATMUL_DEPTH_TILE, MATMUL_ROW_TILE, WORKGROUP_SIZE,
+    KIND_BINARY, KIND_BROADCAST, KIND_COUNT, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
+    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, Schedule,
 };
 
 pub const INDEX: &str = include_str!("../shaders/index.wgsl");
 pub const CHAIN: &str = include_str!("../shaders/chain.wgsl");
-pub const MATMUL: &str = include_str!("../shaders/matmul.wgsl");
 pub const ELEMENTWISE: &str = include_str!("../shaders/elementwise.wgsl");
 pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
-
-pub const FRAGMENTS: &[&str] = &[INDEX, CHAIN, MATMUL, ELEMENTWISE, REDUCE, SOFTMAX];
 
 pub const CHAIN_OPS: &[&str] = &[
     "CHAIN_ADD",
@@ -28,36 +26,24 @@ pub struct Kernel {
 }
 
 struct Reduction {
-    scratch: &'static str,
     function: &'static str,
     combine: &'static str,
 }
 
 const REDUCTIONS: &[Reduction] = &[
     Reduction {
-        scratch: "reduce_scan",
         function: "reduce_chunk_sum",
         combine: "{left} + {right}",
     },
     Reduction {
-        scratch: "softmax_scan",
         function: "softmax_row_sum",
         combine: "{left} + {right}",
     },
     Reduction {
-        scratch: "softmax_scan",
         function: "softmax_row_max",
         combine: "max({left}, {right})",
     },
 ];
-
-const _: () = {
-    assert!(WORKGROUP_SIZE.is_power_of_two());
-    assert!(MATMUL_ROW_TILE.is_multiple_of(2) && MATMUL_COL_TILE.is_multiple_of(2));
-    assert!(MATMUL_ROW_TILE * MATMUL_COL_TILE / 4 == WORKGROUP_SIZE);
-    assert!((MATMUL_ROW_TILE * MATMUL_DEPTH_TILE).is_multiple_of(WORKGROUP_SIZE));
-    assert!((MATMUL_DEPTH_TILE * MATMUL_COL_TILE).is_multiple_of(WORKGROUP_SIZE));
-};
 
 pub const KERNELS: &[Kernel] = &[
     Kernel {
@@ -96,11 +82,6 @@ pub const KERNELS: &[Kernel] = &[
         body: "run_sum_chunk",
     },
     Kernel {
-        kind: KIND_EXPAND,
-        constant: "KIND_EXPAND",
-        body: "run_expand",
-    },
-    Kernel {
         kind: KIND_SUM_TO,
         constant: "KIND_SUM_TO",
         body: "run_sum_to",
@@ -117,6 +98,17 @@ pub const KERNELS: &[Kernel] = &[
     },
 ];
 
+pub fn fragments(schedule: Schedule) -> Vec<String> {
+    vec![
+        INDEX.to_owned(),
+        CHAIN.to_owned(),
+        matmul::body(schedule.matmul()),
+        ELEMENTWISE.to_owned(),
+        REDUCE.to_owned(),
+        SOFTMAX.to_owned(),
+    ]
+}
+
 pub fn kernel(kind: u32) -> &'static Kernel {
     KERNELS
         .iter()
@@ -129,42 +121,36 @@ pub fn kind_count() -> u32 {
 }
 
 pub fn reductions() -> String {
-    let mut source = String::new();
-    let mut declared = Vec::new();
-    for reduction in REDUCTIONS {
-        if !declared.contains(&reduction.scratch) {
-            source.push_str(&format!(
-                "var<workgroup> {}: array<f32, WORKGROUP_SIZE>;
+    let mut source = String::from(
+        "var<workgroup> reduction_scratch: array<f32, WORKGROUP_SIZE>;
+
 ",
-                reduction.scratch,
-            ));
-            declared.push(reduction.scratch);
-        }
+    );
+    for reduction in REDUCTIONS {
         let combine = reduction
             .combine
-            .replace("{left}", &format!("{}[lid]", reduction.scratch))
-            .replace("{right}", &format!("{}[lid + stride]", reduction.scratch));
+            .replace("{left}", "reduction_scratch[lid]")
+            .replace("{right}", "reduction_scratch[lid + stride]");
         source.push_str(&format!(
             "
 fn {function}(lid: u32, start: f32) -> f32 {{
-    {scratch}[lid] = start;
+    reduction_scratch[lid] = start;
     workgroupBarrier();
     var stride = WORKGROUP_SIZE / 2u;
     loop {{
         if (stride == 0u) {{ break; }}
         if (lid < stride) {{
-            {scratch}[lid] = {combine};
+            reduction_scratch[lid] = {combine};
         }}
         workgroupBarrier();
         stride = stride / 2u;
     }}
-    let total = {scratch}[0];
+    let total = reduction_scratch[0];
     workgroupBarrier();
     return total;
 }}
 ",
             function = reduction.function,
-            scratch = reduction.scratch,
             combine = combine,
         ));
     }

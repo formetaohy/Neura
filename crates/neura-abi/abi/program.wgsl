@@ -1,8 +1,4 @@
-const WORKGROUP_SIZE: u32 = 64u;
 const MAX_RANK: u32 = 4u;
-const MATMUL_ROW_TILE: u32 = 16u;
-const MATMUL_COL_TILE: u32 = 16u;
-const MATMUL_DEPTH_TILE: u32 = 16u;
 const MAX_WAVES: u32 = 4096u;
 const CURSOR_WORDS: u32 = 4097u;
 const BOUNDS_WORDS: u32 = 3u;
@@ -21,11 +17,10 @@ const KIND_UNARY_GRAD: u32 = 3u;
 const KIND_FILL: u32 = 4u;
 const KIND_BROADCAST: u32 = 5u;
 const KIND_SUM_CHUNK: u32 = 6u;
-const KIND_EXPAND: u32 = 7u;
-const KIND_SUM_TO: u32 = 8u;
-const KIND_SOFTMAX: u32 = 9u;
-const KIND_SOFTMAX_GRAD: u32 = 10u;
-const KIND_COUNT: u32 = 11u;
+const KIND_SUM_TO: u32 = 7u;
+const KIND_SOFTMAX: u32 = 8u;
+const KIND_SOFTMAX_GRAD: u32 = 9u;
+const KIND_COUNT: u32 = 10u;
 
 const BINARY_ADD: u32 = 0u;
 const BINARY_MUL: u32 = 1u;

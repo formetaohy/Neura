@@ -1,18 +1,17 @@
 use crate::program::Program;
 use neura_abi::{
-    BoundsRecord, CURSOR_BYTES, CURSOR_REFUSED, KIND_COUNT, REFUSED_CHAIN, StepRecord, WORD_BYTES,
-    slot_offset,
+    CURSOR_REFUSED, KIND_COUNT, REFUSED_CHAIN, SCHEDULES, Schedule, WORD_BYTES, slot_offset,
 };
 use neura_gpu::{
-    BindGroupEntry, BufferUsages, ComputePassDescriptor, GpuBuffer, GpuContext, GpuRequest,
-    GpuUnavailable, PipelineHandle, Readback, Submission, wgpu,
+    ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
 };
 use neura_program::{Graph, Value};
-use neura_shader::{ARENA, BOUNDS, CURSOR, Megakernel, STEPS, TASKS, VALUES};
-use std::mem::size_of;
+use std::time::Instant;
 
 pub const WORKGROUP_BUDGET: u32 = 1024;
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
+const TUNE_WARMUP: u32 = 2;
+const TUNE_ROUNDS: u32 = 8;
 
 pub struct RuntimeRequest {
     pub gpu: GpuRequest,
@@ -30,7 +29,6 @@ impl Default for RuntimeRequest {
 
 pub struct Runtime {
     context: GpuContext,
-    kernel: PipelineHandle,
     readback: Readback,
     alignment: u64,
 }
@@ -49,123 +47,88 @@ impl Runtime {
     }
 
     fn of_context(context: GpuContext, readback_bytes: u64) -> Self {
-        let kernel = context.declare(Megakernel::assemble().program());
         Self {
             alignment: context.binding_alignment(),
             readback: Readback::new(context.device(), readback_bytes),
             context,
-            kernel,
         }
     }
 
+    pub fn schedules(&self) -> Vec<Schedule> {
+        let (threads, shared_bytes) = self.workgroup_budget();
+        SCHEDULES
+            .iter()
+            .copied()
+            .filter(|schedule| schedule.fits(threads, shared_bytes))
+            .collect()
+    }
+
+    fn workgroup_budget(&self) -> (u32, u64) {
+        let limits = self.context.limits();
+        (
+            limits
+                .max_compute_invocations_per_workgroup
+                .min(limits.max_compute_workgroup_size_x),
+            u64::from(limits.max_compute_workgroup_storage_size),
+        )
+    }
+
+    pub fn default_schedule(&self) -> Schedule {
+        self.schedules()
+            .into_iter()
+            .next_back()
+            .expect("the device offers no workgroup the framework can schedule")
+    }
+
     pub fn compile(&self, graph: &Graph) -> Program {
+        self.compile_with(graph, self.default_schedule())
+    }
+
+    pub fn compile_with(&self, graph: &Graph, schedule: Schedule) -> Program {
+        let (threads, shared_bytes) = self.workgroup_budget();
+        assert!(
+            schedule.fits(threads, shared_bytes),
+            "{schedule:?} asks the device for {} threads and {} workgroup bytes, while it offers {threads} and {shared_bytes}",
+            schedule.workgroup(),
+            schedule.shared_bytes(),
+        );
         self.context.assert_alive();
-        let encoding = graph.encode(self.alignment);
+        let encoding = graph.encode(self.alignment, schedule);
         assert!(
             encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
         );
-        let arena_bytes = encoding.arena_bytes();
-        let limits = self.context.limits();
-        assert!(
-            arena_bytes <= limits.max_storage_buffer_binding_size,
-            "a tape of {} tasks lays out {arena_bytes} bytes of arena, and the device binds at most {} bytes of storage",
-            encoding.task_count(),
-            limits.max_storage_buffer_binding_size,
-        );
-        assert!(
-            arena_bytes <= limits.max_buffer_size,
-            "a tape of {} tasks lays out {arena_bytes} bytes of arena, and the device holds buffers of at most {} bytes",
-            encoding.task_count(),
-            limits.max_buffer_size,
-        );
-        let device = self.context.device();
-        let arena = GpuBuffer::new(
-            device,
-            "neura arena",
-            arena_bytes,
-            BufferUsages::STORAGE
-                | BufferUsages::COPY_SRC
-                | BufferUsages::COPY_DST
-                | BufferUsages::VERTEX
-                | BufferUsages::INDIRECT,
-        );
-        let tape = GpuBuffer::new(
-            device,
-            "neura tape",
-            encoding.tasks().len() as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let values = GpuBuffer::new(
-            device,
-            "neura values",
-            encoding.values().len() as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let bounds = GpuBuffer::new(
-            device,
-            "neura bounds",
-            encoding.bounds().len() as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let cursor = GpuBuffer::new(
-            device,
-            "neura cursor",
-            CURSOR_BYTES,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        );
-        let steps = GpuBuffer::new(
-            device,
-            "neura steps",
-            (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64),
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
-        );
-        let queue = self.context.queue();
-        tape.write(queue, encoding.tasks());
-        values.write(queue, encoding.values());
-        bounds.write(queue, encoding.bounds());
-        if !encoding.steps().is_empty() {
-            steps.write(queue, encoding.steps());
+        Program::build(&self.context, encoding)
+    }
+
+    pub fn tune(&self, graph: &Graph) -> Program {
+        let mut measured = self
+            .schedules()
+            .into_iter()
+            .map(|schedule| (schedule, self.measure(&self.compile_with(graph, schedule))));
+        let (mut fastest, mut seconds) = measured
+            .next()
+            .expect("the device offers no workgroup the framework can schedule");
+        for (schedule, elapsed) in measured {
+            if elapsed < seconds {
+                fastest = schedule;
+                seconds = elapsed;
+            }
         }
-        for (offset, data) in encoding.initial() {
-            arena.write_at(queue, *offset, bytemuck::cast_slice(data));
+        self.compile_with(graph, fastest)
+    }
+
+    fn measure(&self, program: &Program) -> f64 {
+        for _ in 0..TUNE_WARMUP {
+            self.run(program);
         }
-        let group = self.kernel.bind_group(&[
-            BindGroupEntry {
-                binding: TASKS,
-                resource: tape.resource(0, tape.size()),
-            },
-            BindGroupEntry {
-                binding: VALUES,
-                resource: values.resource(0, values.size()),
-            },
-            BindGroupEntry {
-                binding: ARENA,
-                resource: arena.resource(0, arena.size()),
-            },
-            BindGroupEntry {
-                binding: CURSOR,
-                resource: cursor.resource(0, cursor.size()),
-            },
-            BindGroupEntry {
-                binding: BOUNDS,
-                resource: bounds.resource(0, size_of::<BoundsRecord>() as u64),
-            },
-            BindGroupEntry {
-                binding: STEPS,
-                resource: steps.resource(0, steps.size()),
-            },
-        ]);
-        Program {
-            encoding,
-            arena,
-            tape,
-            values,
-            bounds,
-            steps,
-            cursor,
-            group,
+        self.context.drain();
+        let started = Instant::now();
+        for _ in 0..TUNE_ROUNDS {
+            self.run(program);
         }
+        self.context.drain();
+        started.elapsed().as_secs_f64() / f64::from(TUNE_ROUNDS)
     }
 
     pub fn run(&self, program: &Program) {
@@ -177,7 +140,7 @@ impl Runtime {
             label: Some("neura tape"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(self.kernel.pipeline());
+        pass.set_pipeline(program.kernel.pipeline());
         let waves = program.encoding.waves();
         let mut first = 0;
         for (index, end) in waves.iter().enumerate() {

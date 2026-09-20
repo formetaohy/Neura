@@ -1,10 +1,15 @@
+use neura_abi::{SCHEDULES, WIDE};
 use neura_program::{Graph, Init, Shape, Value};
-use neura_runtime::Runtime;
+use neura_runtime::{Runtime, RuntimeRequest};
 
 #[path = "support/mod.rs"]
 mod support;
 
 use support::{assert_close, matmul_reference, open, random, softmax_reference};
+
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
 
 #[test]
 fn independent_tasks_collapse_into_one_wave() {
@@ -13,7 +18,12 @@ fn independent_tasks_collapse_into_one_wave() {
     let activated = graph.relu(wide);
     let runtime = open();
     let program = runtime.compile(&graph);
-    assert_eq!(program.task_count(), 64);
+    assert_eq!(
+        program.task_count(),
+        65_536 / program.schedule().elements_per_task(),
+        "one workgroup carries {} elements",
+        program.schedule().elements_per_task(),
+    );
     assert_eq!(program.wave_count(), 1);
     runtime.run(&program);
     let out = runtime.read(&program, activated);
@@ -456,4 +466,104 @@ fn a_fresh_program_holds_zeros_until_the_host_writes() {
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &[2.0, 4.0, 6.0, 8.0], 1e-6);
+}
+
+#[test]
+fn every_schedule_the_device_offers_runs_the_same_matmul() {
+    let runtime = open();
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(37, 19), Init::Zero);
+    let right = graph.parameter(Shape::matrix(19, 43), Init::Zero);
+    let out = graph.matmul(left, right);
+    let transposed = graph.matmul(graph.transpose(right), graph.transpose(left));
+    let left_data = random(37 * 19, 11);
+    let right_data = random(19 * 43, 29);
+    let expected = matmul_reference(&left_data, &right_data, 37, 19, 43);
+    let mut transposed_right = vec![0.0f32; 19 * 43];
+    for row in 0..19usize {
+        for column in 0..43usize {
+            transposed_right[column * 19 + row] = right_data[row * 43 + column];
+        }
+    }
+    let mut transposed_left = vec![0.0f32; 37 * 19];
+    for row in 0..37usize {
+        for column in 0..19usize {
+            transposed_left[column * 37 + row] = left_data[row * 19 + column];
+        }
+    }
+    let expected_transposed = matmul_reference(&transposed_right, &transposed_left, 43, 19, 37);
+    for schedule in runtime.schedules() {
+        let program = runtime.compile_with(&graph, schedule);
+        assert_eq!(program.schedule(), schedule);
+        runtime.write(&program, left, &left_data);
+        runtime.write(&program, right, &right_data);
+        runtime.run(&program);
+        assert_close(&runtime.read(&program, out), &expected, 1e-4);
+        assert_close(
+            &runtime.read(&program, transposed),
+            &expected_transposed,
+            1e-4,
+        );
+    }
+}
+
+#[test]
+fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_schedule() {
+    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+        gpu: neura_gpu::GpuRequest::default().minimum_limits(),
+        readback_bytes: 1 << 16,
+    }))
+    .expect("a device with the baseline pool");
+    let schedules = runtime.schedules();
+    assert!(!schedules.is_empty(), "the baseline pool fits no schedule");
+    assert!(
+        schedules
+            .iter()
+            .all(|schedule| schedule.shared_bytes() <= 16 * 1024),
+        "a schedule asks for more than the baseline pool",
+    );
+    assert!(
+        schedules.len() < SCHEDULES.len(),
+        "the baseline pool must drop a schedule the wide pool keeps",
+    );
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
+    let data = graph.input(Shape::matrix(8, 4));
+    let out = graph.matmul(data, weight);
+    let program = runtime.compile(&graph);
+    assert_eq!(program.schedule(), *schedules.last().expect("a schedule"));
+    assert!(
+        refuses(|| {
+            let _ = runtime.compile_with(&graph, WIDE);
+        }),
+        "a schedule the device cannot hold was compiled",
+    );
+    runtime.run(&program);
+    assert_eq!(runtime.read(&program, out).len(), 32);
+}
+
+#[test]
+fn tuning_measures_every_schedule_the_device_offers() {
+    let runtime = open();
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero);
+    let right = graph.parameter(Shape::matrix(32, 64), Init::Zero);
+    let out = graph.matmul(left, right);
+    let left_data = random(64 * 32, 3);
+    let right_data = random(32 * 64, 7);
+    let expected = matmul_reference(&left_data, &right_data, 64, 32, 64);
+    let program = runtime.tune(&graph);
+    assert!(
+        runtime.schedules().contains(&program.schedule()),
+        "a tuned program carries a schedule the device offers",
+    );
+    assert_eq!(
+        runtime.declared_kernels(),
+        runtime.schedules().len(),
+        "tuning declares one device program per schedule it measures",
+    );
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &expected, 1e-4);
 }
