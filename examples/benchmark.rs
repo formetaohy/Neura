@@ -1,9 +1,10 @@
+use neura::wgpu::PollType;
 use neura::{Graph, Init, Mlp, Program, Runtime, RuntimeRequest, Shape, mse_loss};
 use std::time::Instant;
 
 struct Timing {
-    host: f64,
-    waited: f64,
+    submit: f64,
+    step: f64,
 }
 
 struct Measured {
@@ -18,18 +19,32 @@ fn time(runtime: &Runtime, program: &Program, rounds: u32) -> Timing {
     for _ in 0..8 {
         runtime.run(program);
     }
+    let mut submit = 0.0;
+    for _ in 0..rounds {
+        drain(runtime);
+        let started = Instant::now();
+        runtime.run(program);
+        submit += started.elapsed().as_secs_f64() * 1e6;
+    }
+    let submit = submit / f64::from(rounds);
     let started = Instant::now();
     for _ in 0..rounds {
         runtime.run(program);
+        drain(runtime);
     }
-    let host = started.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
-    let started = Instant::now();
-    for _ in 0..rounds {
-        runtime.run(program);
-        runtime.context().poll();
-    }
-    let waited = started.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
-    Timing { host, waited }
+    let step = started.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
+    Timing { submit, step }
+}
+
+fn drain(runtime: &Runtime) {
+    runtime
+        .context()
+        .device()
+        .poll(PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
+        })
+        .expect("the device finished the work it was handed");
 }
 
 fn wide(runtime: &Runtime, elements: u32) -> Measured {
@@ -100,19 +115,19 @@ fn main() {
         step(&runtime, &deep, 64),
     ];
     println!(
-        "{:<40} {:>7} {:>7} {:>11} {:>9} {:>9} {:>10}",
-        "graph", "tasks", "waves", "work", "host us", "waited us", "per wave us",
+        "{:<40} {:>7} {:>7} {:>11} {:>10} {:>9} {:>13}",
+        "graph", "tasks", "waves", "work", "submit us", "step us", "per dispatch us",
     );
     for entry in &measured {
         println!(
-            "{:<40} {:>7} {:>7} {:>11} {:>9.1} {:>9.1} {:>10.3}",
+            "{:<40} {:>7} {:>7} {:>11} {:>10.1} {:>9.1} {:>13.2}",
             entry.label,
             entry.tasks,
             entry.waves,
             entry.work,
-            entry.timing.host,
-            entry.timing.waited,
-            entry.timing.host / f64::from(entry.waves.max(1)),
+            entry.timing.submit,
+            entry.timing.step,
+            entry.timing.step / f64::from(entry.waves.max(1)),
         );
     }
     println!(
