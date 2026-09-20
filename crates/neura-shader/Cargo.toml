@@ -9,9 +9,6 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[dev-dependencies]
-neura-kernels = { workspace = true }
-
 [dependencies]
 naga = { workspace = true }
 neura-abi = { workspace = true }

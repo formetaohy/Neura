@@ -9,9 +9,9 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+neura-program = { workspace = true }
+
 [dev-dependencies]
 neura-runtime = { workspace = true }
 pollster = { workspace = true }
-
-[dependencies]
-neura-program = { workspace = true }

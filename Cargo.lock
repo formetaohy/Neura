@@ -328,7 +328,6 @@ dependencies = [
 name = "neura"
 version = "0.1.0"
 dependencies = [
- "neura-abi",
  "neura-gpu",
  "neura-nn",
  "neura-program",
@@ -373,7 +372,6 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "neura-abi",
- "neura-nn",
 ]
 
 [[package]]
@@ -383,7 +381,6 @@ dependencies = [
  "bytemuck",
  "neura-abi",
  "neura-gpu",
- "neura-nn",
  "neura-program",
  "neura-shader",
  "pollster",

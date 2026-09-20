@@ -45,14 +45,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-neura-abi = { workspace = true }
 neura-program = { workspace = true }
 neura-runtime = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }
-
-[dev-dependencies]
-pollster = { workspace = true }
 
 [[example]]
 name = "train"
@@ -64,3 +60,6 @@ path = "examples/benchmark.rs"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+pollster = { workspace = true }
