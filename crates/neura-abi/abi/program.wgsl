@@ -45,6 +45,7 @@ struct Value {
 struct Task {
     kind: u32,
     flags: u32,
+    geometry: u32,
     first: u32,
     count: u32,
     slot: u32,

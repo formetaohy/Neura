@@ -1,4 +1,4 @@
-use neura_abi::{SCHEDULES, WIDE};
+use neura_abi::{PROFILES, WIDE};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Runtime, RuntimeRequest};
 
@@ -20,9 +20,8 @@ fn independent_tasks_collapse_into_one_wave() {
     let program = runtime.compile(&graph);
     assert_eq!(
         program.task_count(),
-        65_536 / program.schedule().elements_per_task(),
-        "one workgroup carries {} elements",
-        program.schedule().elements_per_task(),
+        32,
+        "a rectifier this wide is handed to the device in bounded chunks",
     );
     assert_eq!(program.wave_count(), 1);
     runtime.run(&program);
@@ -469,7 +468,7 @@ fn a_fresh_program_holds_zeros_until_the_host_writes() {
 }
 
 #[test]
-fn every_schedule_the_device_offers_runs_the_same_matmul() {
+fn every_profile_the_device_offers_runs_the_same_matmul() {
     let runtime = open();
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(37, 19), Init::Zero);
@@ -492,9 +491,9 @@ fn every_schedule_the_device_offers_runs_the_same_matmul() {
         }
     }
     let expected_transposed = matmul_reference(&transposed_right, &transposed_left, 43, 19, 37);
-    for schedule in runtime.schedules() {
-        let program = runtime.compile_with(&graph, schedule);
-        assert_eq!(program.schedule(), schedule);
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, profile);
+        assert_eq!(program.profile(), profile);
         runtime.write(&program, left, &left_data);
         runtime.write(&program, right, &right_data);
         runtime.run(&program);
@@ -508,42 +507,78 @@ fn every_schedule_the_device_offers_runs_the_same_matmul() {
 }
 
 #[test]
-fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_schedule() {
+fn every_tile_of_a_profile_runs_its_own_matmul() {
+    let runtime = open();
+    let ladder = runtime.default_profile().ladder();
+    for index in 0..ladder.len() {
+        let tile = ladder[index];
+        let profile = neura_abi::Profile::of(&ladder[index..index + 1]);
+        let graph = Graph::new();
+        let left = graph.parameter(Shape::matrix(tile.rows(), tile.depth()), Init::Zero);
+        let right = graph.parameter(Shape::matrix(tile.depth(), tile.columns()), Init::Zero);
+        let out = graph.matmul(left, right);
+        let program = runtime.compile_with(&graph, profile);
+        assert_eq!(program.tiles(), &[tile]);
+        assert_eq!(
+            program.matmul_geometries(),
+            vec![(tile, 1)],
+            "a product of {}x{} is not tiled by its own geometry",
+            tile.rows(),
+            tile.columns(),
+        );
+        let left_data = random(tile.rows() * tile.depth(), 5);
+        let right_data = random(tile.depth() * tile.columns(), 9);
+        let expected = matmul_reference(
+            &left_data,
+            &right_data,
+            tile.rows(),
+            tile.depth(),
+            tile.columns(),
+        );
+        runtime.write(&program, left, &left_data);
+        runtime.write(&program, right, &right_data);
+        runtime.run(&program);
+        assert_close(&runtime.read(&program, out), &expected, 1e-4);
+    }
+}
+
+#[test]
+fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest::default().minimum_limits(),
         readback_bytes: 1 << 16,
     }))
     .expect("a device with the baseline pool");
-    let schedules = runtime.schedules();
-    assert!(!schedules.is_empty(), "the baseline pool fits no schedule");
+    let profiles = runtime.profiles();
+    assert!(!profiles.is_empty(), "the baseline pool fits no profile");
     assert!(
-        schedules
+        profiles
             .iter()
-            .all(|schedule| schedule.shared_bytes() <= 16 * 1024),
-        "a schedule asks for more than the baseline pool",
+            .all(|profile| profile.shared_bytes() <= 16 * 1024),
+        "a profile asks for more than the baseline pool",
     );
     assert!(
-        schedules.len() < SCHEDULES.len(),
-        "the baseline pool must drop a schedule the wide pool keeps",
+        profiles.len() < PROFILES.len(),
+        "the baseline pool must drop a profile the wide pool keeps",
     );
     let graph = Graph::new();
     let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
     let data = graph.input(Shape::matrix(8, 4));
     let out = graph.matmul(data, weight);
     let program = runtime.compile(&graph);
-    assert_eq!(program.schedule(), *schedules.last().expect("a schedule"));
+    assert_eq!(program.profile(), *profiles.last().expect("a profile"));
     assert!(
         refuses(|| {
             let _ = runtime.compile_with(&graph, WIDE);
         }),
-        "a schedule the device cannot hold was compiled",
+        "a profile the device cannot hold was compiled",
     );
     runtime.run(&program);
     assert_eq!(runtime.read(&program, out).len(), 32);
 }
 
 #[test]
-fn tuning_measures_every_schedule_the_device_offers() {
+fn tuning_measures_every_profile_the_device_offers() {
     let runtime = open();
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(64, 32), Init::Zero);
@@ -554,13 +589,13 @@ fn tuning_measures_every_schedule_the_device_offers() {
     let expected = matmul_reference(&left_data, &right_data, 64, 32, 64);
     let program = runtime.tune(&graph);
     assert!(
-        runtime.schedules().contains(&program.schedule()),
-        "a tuned program carries a schedule the device offers",
+        runtime.profiles().contains(&program.profile()),
+        "a tuned program carries a profile the device offers",
     );
     assert_eq!(
         runtime.declared_kernels(),
-        runtime.schedules().len(),
-        "tuning declares one device program per schedule it measures",
+        runtime.profiles().len(),
+        "tuning declares one device program per profile it measures",
     );
     runtime.write(&program, left, &left_data);
     runtime.write(&program, right, &right_data);

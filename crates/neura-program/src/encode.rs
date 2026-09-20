@@ -3,7 +3,8 @@ use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::lower;
 use crate::lower::Task;
 use neura_abi::{
-    BoundsRecord, KIND_SUM_CHUNK, Schedule, StepRecord, TaskRecord, ValueRecord, WORD_BYTES,
+    BoundsRecord, KIND_MATMUL, KIND_SUM_CHUNK, MatmulTile, Profile, StepRecord, TaskRecord,
+    ValueRecord, WORD_BYTES,
 };
 use std::cmp::Reverse;
 use std::mem::size_of;
@@ -81,7 +82,7 @@ struct Live {
 }
 
 pub struct Encoding {
-    schedule: Schedule,
+    profile: Profile,
     tasks: Vec<u8>,
     values: Vec<u8>,
     bounds: Vec<u8>,
@@ -89,18 +90,20 @@ pub struct Encoding {
     waves: Vec<u32>,
     spans: Vec<Option<Span>>,
     readable: Vec<bool>,
+    tiles: Vec<MatmulTile>,
+    geometries: Vec<u32>,
     initial: Vec<(u64, Vec<f32>)>,
     arena_bytes: u64,
     work: u64,
 }
 
 impl Encoding {
-    pub(crate) fn plan(state: &GraphState, schedule: Schedule, alignment: u64) -> Self {
+    pub(crate) fn plan(state: &GraphState, profile: Profile, alignment: u64) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(&state.values, &fuse::fuse(state), schedule);
+        let plan = lower::lower(&state.values, &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
         let depths = wave_depths(values, tasks);
@@ -130,11 +133,24 @@ impl Encoding {
             records.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
+        let used = used_tiles(profile, tasks, &order);
         let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
+        let mut geometries = vec![0u32; used.len()];
         let mut work = 0;
         for index in &order {
             let task = &tasks[*index];
+            let geometry = match task.kind {
+                KIND_MATMUL => {
+                    let geometry = used
+                        .iter()
+                        .position(|tile| *tile == profile.ladder()[task.geometry as usize])
+                        .expect("every tile a tape names is carried by its program");
+                    geometries[geometry] += 1;
+                    geometry as u32
+                }
+                _ => 0,
+            };
             assert!(
                 task.kind != KIND_SUM_CHUNK || task.chain.is_empty(),
                 "a reduction task writes one slot per task and carries no chain",
@@ -142,6 +158,7 @@ impl Encoding {
             let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
             record.kind = task.kind;
             record.flags = task.flags;
+            record.geometry = geometry;
             record.first = task.first;
             record.count = task.count;
             record.slot = task.slot;
@@ -204,7 +221,7 @@ impl Encoding {
         }
 
         Self {
-            schedule,
+            profile,
             tasks: tape,
             values: records,
             bounds,
@@ -212,14 +229,28 @@ impl Encoding {
             waves,
             spans,
             readable,
+            tiles: used,
+            geometries,
             initial,
             arena_bytes,
             work,
         }
     }
 
-    pub fn schedule(&self) -> Schedule {
-        self.schedule
+    pub fn profile(&self) -> Profile {
+        self.profile
+    }
+
+    pub fn tiles(&self) -> &[MatmulTile] {
+        &self.tiles
+    }
+
+    pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
+        self.tiles
+            .iter()
+            .copied()
+            .zip(self.geometries.iter().copied())
+            .collect()
     }
 
     pub fn tasks(&self) -> &[u8] {
@@ -289,6 +320,20 @@ impl Encoding {
     pub fn work(&self) -> u64 {
         self.work
     }
+}
+
+fn used_tiles(profile: Profile, tasks: &[Task], order: &[usize]) -> Vec<MatmulTile> {
+    profile
+        .ladder()
+        .iter()
+        .filter(|tile| {
+            order.iter().any(|index| {
+                let task = &tasks[*index];
+                task.kind == KIND_MATMUL && profile.ladder()[task.geometry as usize] == **tile
+            })
+        })
+        .copied()
+        .collect()
 }
 
 fn wave_depths(values: &[ValueInfo], tasks: &[Task]) -> Vec<u32> {

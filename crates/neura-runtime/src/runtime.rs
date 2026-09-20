@@ -1,6 +1,6 @@
 use crate::program::Program;
 use neura_abi::{
-    CURSOR_REFUSED, KIND_COUNT, REFUSED_CHAIN, SCHEDULES, Schedule, WORD_BYTES, slot_offset,
+    CURSOR_REFUSED, KIND_COUNT, PROFILES, Profile, REFUSED_CHAIN, WORD_BYTES, slot_offset,
 };
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
@@ -54,12 +54,12 @@ impl Runtime {
         }
     }
 
-    pub fn schedules(&self) -> Vec<Schedule> {
+    pub fn profiles(&self) -> Vec<Profile> {
         let (threads, shared_bytes) = self.workgroup_budget();
-        SCHEDULES
+        PROFILES
             .iter()
             .copied()
-            .filter(|schedule| schedule.fits(threads, shared_bytes))
+            .filter(|profile| profile.fits(threads, shared_bytes))
             .collect()
     }
 
@@ -73,27 +73,27 @@ impl Runtime {
         )
     }
 
-    pub fn default_schedule(&self) -> Schedule {
-        self.schedules()
+    pub fn default_profile(&self) -> Profile {
+        self.profiles()
             .into_iter()
             .next_back()
             .expect("the device offers no workgroup the framework can schedule")
     }
 
     pub fn compile(&self, graph: &Graph) -> Program {
-        self.compile_with(graph, self.default_schedule())
+        self.compile_with(graph, self.default_profile())
     }
 
-    pub fn compile_with(&self, graph: &Graph, schedule: Schedule) -> Program {
+    pub fn compile_with(&self, graph: &Graph, profile: Profile) -> Program {
         let (threads, shared_bytes) = self.workgroup_budget();
         assert!(
-            schedule.fits(threads, shared_bytes),
-            "{schedule:?} asks the device for {} threads and {} workgroup bytes, while it offers {threads} and {shared_bytes}",
-            schedule.workgroup(),
-            schedule.shared_bytes(),
+            profile.fits(threads, shared_bytes),
+            "{profile:?} asks the device for {} threads and {} workgroup bytes, while it offers {threads} and {shared_bytes}",
+            profile.workgroup(),
+            profile.shared_bytes(),
         );
         self.context.assert_alive();
-        let encoding = graph.encode(self.alignment, schedule);
+        let encoding = graph.encode(self.alignment, profile);
         assert!(
             encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
@@ -103,15 +103,15 @@ impl Runtime {
 
     pub fn tune(&self, graph: &Graph) -> Program {
         let mut measured = self
-            .schedules()
+            .profiles()
             .into_iter()
-            .map(|schedule| (schedule, self.measure(&self.compile_with(graph, schedule))));
+            .map(|profile| (profile, self.measure(&self.compile_with(graph, profile))));
         let (mut fastest, mut seconds) = measured
             .next()
             .expect("the device offers no workgroup the framework can schedule");
-        for (schedule, elapsed) in measured {
+        for (profile, elapsed) in measured {
             if elapsed < seconds {
-                fastest = schedule;
+                fastest = profile;
                 seconds = elapsed;
             }
         }

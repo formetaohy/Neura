@@ -4,13 +4,13 @@ mod constants {
 mod records {
     include!(concat!(env!("OUT_DIR"), "/records.rs"));
 }
-mod schedule;
+mod profile;
 
 pub const TAPE_WGSL: &str = include_str!("../abi/program.wgsl");
 
 pub use constants::*;
+pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
 pub use records::{BoundsRecord, StepRecord, TaskRecord, ValueRecord};
-pub use schedule::{MEDIUM, MatmulTile, NARROW, SCHEDULES, Schedule, WIDE};
 
 pub const WORD_BYTES: u64 = 4;
 pub const BOUNDS_BYTES: u64 = BOUNDS_WORDS as u64 * WORD_BYTES;

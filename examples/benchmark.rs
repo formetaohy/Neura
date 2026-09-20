@@ -1,4 +1,6 @@
-use neura::{Adam, Graph, Init, Mlp, Program, Runtime, RuntimeRequest, Schedule, Shape, mse_loss};
+use neura::{
+    Adam, Graph, Init, MatmulTile, Mlp, Profile, Program, Runtime, RuntimeRequest, Shape, mse_loss,
+};
 use std::time::Instant;
 
 const PRODUCT_ROWS: u32 = 1024;
@@ -12,7 +14,8 @@ struct Timing {
 
 struct Measured {
     label: String,
-    schedule: Schedule,
+    profile: Profile,
+    tiles: Vec<(MatmulTile, u32)>,
     tasks: u32,
     waves: u32,
     work: u64,
@@ -44,15 +47,34 @@ fn drain(runtime: &Runtime) {
     runtime.context().drain();
 }
 
-fn schedule_name(schedule: Schedule) -> String {
-    let matmul = schedule.matmul();
+fn tile_name(tile: MatmulTile) -> String {
     format!(
         "{}x{}x{}/{}",
-        matmul.rows(),
-        matmul.columns(),
-        matmul.depth(),
-        schedule.workgroup(),
+        tile.rows(),
+        tile.columns(),
+        tile.depth(),
+        tile.threads(),
     )
+}
+
+fn tile_list(tiles: &[(MatmulTile, u32)]) -> String {
+    tiles
+        .iter()
+        .map(|(tile, count)| format!("{}x{}", tile_name(*tile), count))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn measured(label: String, program: &Program, timing: Timing) -> Measured {
+    Measured {
+        label,
+        profile: program.profile(),
+        tiles: program.matmul_geometries(),
+        tasks: program.task_count(),
+        waves: program.wave_count(),
+        work: program.work(),
+        timing,
+    }
 }
 
 fn wide(runtime: &Runtime, elements: u32) -> Measured {
@@ -62,14 +84,12 @@ fn wide(runtime: &Runtime, elements: u32) -> Measured {
     let program = runtime.compile(&graph);
     runtime.write(&program, data, &vec![0.5; elements as usize]);
     runtime.run(&program);
-    Measured {
-        label: format!("one rectifier over {elements} elements"),
-        schedule: program.schedule(),
-        tasks: program.task_count(),
-        waves: program.wave_count(),
-        work: program.work(),
-        timing: time(runtime, &program, 64),
-    }
+    let timing = time(runtime, &program, 64);
+    measured(
+        format!("one rectifier over {elements} elements"),
+        &program,
+        timing,
+    )
 }
 
 fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
@@ -98,36 +118,34 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     );
     runtime.write(&program, targets, &vec![0.5; (samples * outputs) as usize]);
     runtime.run(&program);
-    Measured {
-        label: format!("a step of {} layers at batch {samples}", widths.len() - 1),
-        schedule: program.schedule(),
-        tasks: program.task_count(),
-        waves: program.wave_count(),
-        work: program.work(),
-        timing: time(runtime, &program, 64),
-    }
+    let timing = time(runtime, &program, 64);
+    measured(
+        format!("a step of {} layers at batch {samples}", widths.len() - 1),
+        &program,
+        timing,
+    )
 }
 
-fn product(runtime: &Runtime, schedule: Schedule) -> (Measured, f64) {
+fn products(runtime: &Runtime, shapes: &[(u32, u32, u32)]) -> Measured {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
-    let right = graph.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
-    graph.retain(graph.matmul(left, right));
-    let program = runtime.compile_with(&graph, schedule);
+    for (rows, depth, columns) in shapes {
+        let left = graph.parameter(Shape::matrix(*rows, *depth), Init::Zero);
+        let right = graph.parameter(Shape::matrix(*depth, *columns), Init::Zero);
+        graph.retain(graph.matmul(left, right));
+    }
+    let program = runtime.compile(&graph);
     runtime.run(&program);
     let timing = time(runtime, &program, 16);
-    let flops =
-        2.0 * f64::from(PRODUCT_ROWS) * f64::from(PRODUCT_DEPTH) * f64::from(PRODUCT_COLUMNS);
-    let step = timing.step;
-    let measured = Measured {
-        label: format!("a {PRODUCT_ROWS}x{PRODUCT_DEPTH}x{PRODUCT_COLUMNS} product"),
-        schedule: program.schedule(),
-        tasks: program.task_count(),
-        waves: program.wave_count(),
-        work: program.work(),
-        timing,
-    };
-    (measured, flops / (step * 1e-6) / 1e12)
+    let label = shapes
+        .iter()
+        .map(|(rows, depth, columns)| format!("{rows}x{depth}x{columns}"))
+        .collect::<Vec<_>>()
+        .join(" + ");
+    measured(format!("products {label}"), &program, timing)
+}
+
+fn profile_name(profile: Profile) -> String {
+    format!("{} threads", profile.workgroup())
 }
 
 fn main() {
@@ -145,11 +163,13 @@ fn main() {
         step(&runtime, &narrow, 8),
         step(&runtime, &narrow, 4096),
         step(&runtime, &deep, 64),
+        products(&runtime, &[(96, 256, 96), (1024, 1024, 1024)]),
     ];
     println!(
-        "{:<40} {:>12} {:>7} {:>7} {:>11} {:>10} {:>9} {:>13}",
+        "{:<40} {:>10} {:>22} {:>7} {:>7} {:>11} {:>10} {:>9} {:>13}",
         "graph",
-        "matmul/threads",
+        "workgroup",
+        "matmul tiles",
         "tasks",
         "waves",
         "work",
@@ -159,9 +179,10 @@ fn main() {
     );
     for entry in &measured {
         println!(
-            "{:<40} {:>12} {:>7} {:>7} {:>11} {:>10.1} {:>9.1} {:>13.2}",
+            "{:<40} {:>10} {:>22} {:>7} {:>7} {:>11} {:>10.1} {:>9.1} {:>13.2}",
             entry.label,
-            schedule_name(entry.schedule),
+            profile_name(entry.profile),
+            tile_list(&entry.tiles),
             entry.tasks,
             entry.waves,
             entry.work,
@@ -172,18 +193,26 @@ fn main() {
     }
     println!();
     println!(
-        "{:<40} {:>12} {:>9} {:>9} {:>13}",
-        "schedule search", "matmul/threads", "tasks", "step us", "GFLOP/s",
+        "{:<40} {:>10} {:>22} {:>9} {:>13}",
+        "profile search", "workgroup", "matmul tiles", "step us", "TFLOP/s",
     );
-    for schedule in runtime.schedules() {
-        let (entry, tflops) = product(&runtime, schedule);
+    for profile in runtime.profiles() {
+        let graph = Graph::new();
+        let left = graph.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
+        let right = graph.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
+        graph.retain(graph.matmul(left, right));
+        let program = runtime.compile_with(&graph, profile);
+        runtime.run(&program);
+        let timing = time(&runtime, &program, 16);
+        let flops =
+            2.0 * f64::from(PRODUCT_ROWS) * f64::from(PRODUCT_DEPTH) * f64::from(PRODUCT_COLUMNS);
         println!(
-            "{:<40} {:>12} {:>9} {:>9.1} {:>13.1}",
-            entry.label,
-            schedule_name(entry.schedule),
-            entry.tasks,
-            entry.timing.step,
-            tflops,
+            "{:<40} {:>10} {:>22} {:>9.1} {:>13.1}",
+            format!("a {PRODUCT_ROWS}x{PRODUCT_DEPTH}x{PRODUCT_COLUMNS} product"),
+            profile_name(profile),
+            tile_list(&program.matmul_geometries()),
+            timing.step,
+            flops / (timing.step * 1e-6) / 1e12,
         );
     }
     let search = Graph::new();
@@ -192,8 +221,8 @@ fn main() {
     search.retain(search.matmul(left, right));
     let tuned = runtime.tune(&search);
     println!(
-        "the device measured every schedule it offers and kept {}",
-        schedule_name(tuned.schedule()),
+        "the device measured every profile it offers and kept {}",
+        profile_name(tuned.profile()),
     );
     println!(
         "{} device programs served every shape above",

@@ -1,6 +1,6 @@
 use neura_abi::{
     KIND_BINARY, KIND_BROADCAST, KIND_MATMUL, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY,
-    KIND_UNARY_GRAD, MatmulTile, NARROW, SCHEDULES, Schedule, StepRecord, TaskRecord, WIDE,
+    KIND_UNARY_GRAD, NARROW, PROFILES, Profile, StepRecord, TaskRecord, WIDE,
 };
 use neura_program::{Encoding, Graph, Init, Shape};
 use std::mem::size_of;
@@ -11,8 +11,8 @@ fn encoding(graph: &Graph) -> Encoding {
     encoding_with(graph, NARROW)
 }
 
-fn encoding_with(graph: &Graph, schedule: Schedule) -> Encoding {
-    graph.encode(ALIGNMENT, schedule)
+fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
+    graph.encode(ALIGNMENT, profile)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -217,29 +217,55 @@ fn elementwise_operands_must_meet() {
 }
 
 #[test]
-fn a_schedule_decides_how_a_matmul_is_tiled() {
+fn a_matmul_takes_the_widest_tile_that_still_fills_the_device() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero);
-    let right = graph.parameter(Shape::matrix(32, 48), Init::Zero);
-    let out = graph.matmul(left, right);
-    assert_eq!(out.shape(), Shape::matrix(64, 48));
-    for schedule in SCHEDULES {
-        let encoding = encoding_with(&graph, *schedule);
-        let tile = schedule.matmul();
-        let tiles = out.shape().rows().div_ceil(tile.rows())
-            * out.shape().columns().div_ceil(tile.columns());
-        assert_eq!(
-            encoding.task_count(),
-            tiles,
-            "{schedule:?} tiles a 64x48 product into {tiles} workgroups",
-        );
-        assert!(kinds(&encoding).iter().all(|kind| *kind == KIND_MATMUL));
-        assert_eq!(
-            encoding.work(),
-            u64::from(tiles) * tile.tile_work(),
-            "{schedule:?} accounts the tile work it dispatches",
-        );
-    }
+    let left = graph.parameter(Shape::matrix(1024, 16), Init::Zero);
+    let right = graph.parameter(Shape::matrix(16, 1024), Init::Zero);
+    let blocked = graph.parameter(Shape::matrix(16, 48), Init::Zero);
+    let balanced = graph.matmul(left, right);
+    let ragged = graph.matmul(left, blocked);
+    graph.retain(balanced);
+    graph.retain(ragged);
+    let encoding = encoding_with(&graph, WIDE);
+    let ladder = encoding.profile().ladder();
+    let tiles = encoding.tiles();
+    let tasks = tape(&encoding);
+    let balanced_task = *tasks
+        .iter()
+        .find(|task| task.out == balanced.id())
+        .expect("the 1024x1024 product holds a task");
+    assert_eq!(
+        tiles[balanced_task.geometry as usize], ladder[2],
+        "a 1024x1024 product is tiled as widely as its profile divides it",
+    );
+    let ragged_task = *tasks
+        .iter()
+        .find(|task| task.out == ragged.id())
+        .expect("the 1024x48 product holds a task");
+    assert_eq!(
+        tiles[ragged_task.geometry as usize], ladder[0],
+        "a product no wide tile divides takes the narrowest tile of its profile",
+    );
+    assert_eq!(
+        tiles,
+        &[ladder[0], ladder[2]],
+        "a device program carries only the tiles its tape names",
+    );
+    assert_eq!(
+        encoding.matmul_geometries(),
+        vec![(ladder[0], 192), (ladder[2], 256)],
+        "a tape reports the geometry of every task it hands the device",
+    );
+    assert_eq!(
+        encoding.work(),
+        256 * ladder[2].tile_work() + 192 * ladder[0].tile_work(),
+        "a plan accounts the tile work it dispatches",
+    );
+    assert_ne!(
+        encoding_with(&graph, NARROW).tiles(),
+        encoding_with(&graph, WIDE).tiles(),
+        "a profile decides which tiles a product is tiled with",
+    );
     assert!(
         encoding_with(&graph, WIDE).task_count() < encoding_with(&graph, NARROW).task_count(),
         "a wider tile hands the device fewer, larger tasks",
@@ -247,34 +273,33 @@ fn a_schedule_decides_how_a_matmul_is_tiled() {
 }
 
 #[test]
-fn a_schedule_decides_how_many_elements_one_task_carries() {
-    let graph = Graph::new();
-    let data = graph.input(Shape::vector(65536));
-    graph.relu(data);
-    for schedule in SCHEDULES {
-        let encoding = encoding_with(&graph, *schedule);
+fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
+    for (elements, tasks) in [(32u32, 1u32), (4096, 2), (65536, 32), (1 << 20, 256)] {
+        let graph = Graph::new();
+        let data = graph.input(Shape::vector(elements));
+        graph.relu(data);
+        let encoding = encoding(&graph);
         assert_eq!(
             encoding.task_count(),
-            65536u32.div_ceil(schedule.elements_per_task()),
-            "{schedule:?} hands one workgroup {} elements",
-            schedule.elements_per_task(),
+            tasks,
+            "a rectifier over {elements} elements hands the device {tasks} tasks",
         );
     }
 }
 
 #[test]
-fn every_schedule_plans_the_same_values() {
-    for schedule in SCHEDULES {
+fn every_profile_plans_the_same_values() {
+    for profile in PROFILES {
         let graph = Graph::new();
         let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
         let bias = graph.parameter(Shape::vector(8), Init::Zero);
         let data = graph.input(Shape::matrix(2, 4));
         let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
-        let encoding = encoding_with(&graph, *schedule);
+        let encoding = encoding_with(&graph, *profile);
         assert_eq!(
             encoding.value_count() as usize,
             graph.value_count(),
-            "{schedule:?} publishes values a graph without a reduction holds",
+            "{profile:?} publishes values a graph without a reduction holds",
         );
         assert_eq!(encoding.span(out).bytes, 16 * 4);
     }
@@ -316,23 +341,21 @@ fn a_backward_pass_reaches_every_parameter() {
 
 #[test]
 fn a_reduction_folds_through_as_many_levels_as_it_takes() {
-    let schedule = Schedule::new(MatmulTile::new(16, 16, 16, 8, 8), 1024, 64, 8);
     let graph = Graph::new();
-    let wide = graph.parameter(Shape::vector(64 * 64 + 1), Init::Zero);
+    let wide = graph.parameter(Shape::vector(1 << 21), Init::Zero);
     let loss = graph.sum(wide);
-    let encoding = encoding_with(&graph, schedule);
+    let encoding = encoding(&graph);
     let reductions = kinds(&encoding)
         .iter()
         .filter(|kind| **kind == KIND_SUM_CHUNK)
         .count();
     assert_eq!(
-        reductions,
-        65 + 2 + 1,
-        "a sum folds one chunk of 64 elements at a time until one scalar stands",
+        reductions, 257,
+        "a sum folds a chunk of 8192 elements at a time until one scalar stands",
     );
     assert_eq!(
         encoding.wave_count(),
-        3,
+        2,
         "every level of the fold is a wave"
     );
     assert_eq!(loss.shape(), Shape::scalar());
@@ -504,7 +527,7 @@ fn a_non_scalar_loss_is_refused() {
 
 #[test]
 fn every_tensor_a_plan_names_lies_inside_its_arena() {
-    for schedule in SCHEDULES {
+    for profile in PROFILES {
         let graph = Graph::new();
         let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
         let data = graph.input(Shape::matrix(2, 8));
@@ -515,7 +538,7 @@ fn every_tensor_a_plan_names_lies_inside_its_arena() {
         graph.retain(out);
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
-        let encoding = encoding_with(&graph, *schedule);
+        let encoding = encoding_with(&graph, *profile);
         for value in [weight, data, out, grads.of(weight)] {
             let span = encoding.span(value);
             assert!(

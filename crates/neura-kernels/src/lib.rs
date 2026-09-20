@@ -1,8 +1,8 @@
 mod matmul;
 
 use neura_abi::{
-    KIND_BINARY, KIND_BROADCAST, KIND_COUNT, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
-    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, Schedule,
+    Geometry, KIND_BINARY, KIND_BROADCAST, KIND_COUNT, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
+    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD,
 };
 
 pub const INDEX: &str = include_str!("../shaders/index.wgsl");
@@ -98,11 +98,11 @@ pub const KERNELS: &[Kernel] = &[
     },
 ];
 
-pub fn fragments(schedule: Schedule) -> Vec<String> {
+pub fn fragments(geometry: Geometry) -> Vec<String> {
     vec![
         INDEX.to_owned(),
         CHAIN.to_owned(),
-        matmul::body(schedule.matmul()),
+        matmul::family(geometry),
         ELEMENTWISE.to_owned(),
         REDUCE.to_owned(),
         SOFTMAX.to_owned(),

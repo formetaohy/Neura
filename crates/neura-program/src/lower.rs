@@ -1,14 +1,23 @@
 use crate::graph::{TaskInfo, ValueInfo};
 use crate::shape::Shape;
 use neura_abi::{
-    KIND_MATMUL, KIND_SOFTMAX, KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, NO_VALUE, Schedule,
-    StepRecord,
+    KIND_MATMUL, KIND_SOFTMAX, KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, MatmulTile,
+    NO_VALUE, Profile, StepRecord,
 };
+
+const TARGET_TASKS: u32 = 256;
+const TASK_ELEMENTS_FLOOR: u32 = 2048;
+const TASK_ELEMENTS_CEILING: u32 = 65536;
+const REDUCTION_FLOOR: u32 = 8192;
+const REDUCTION_CEILING: u32 = 65536;
+const SOFTMAX_ROW_CEILING: u32 = 8;
+const MATMUL_TILES_FLOOR: u32 = 128;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
     pub(crate) kind: u32,
     pub(crate) flags: u32,
+    pub(crate) geometry: u32,
     pub(crate) first: u32,
     pub(crate) count: u32,
     pub(crate) slot: u32,
@@ -26,6 +35,7 @@ impl Task {
         Self {
             kind: unit.kind,
             flags: unit.flags,
+            geometry: 0,
             first,
             count,
             slot: 0,
@@ -53,13 +63,13 @@ pub(crate) struct Plan {
     pub(crate) tasks: Vec<Task>,
 }
 
-pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], schedule: Schedule) -> Plan {
+pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
     };
     for unit in units {
-        schedule_unit(&mut plan, unit, schedule);
+        schedule_unit(&mut plan, unit, profile);
     }
     for (time, task) in plan.tasks.iter_mut().enumerate() {
         task.time = time as u32;
@@ -79,20 +89,22 @@ impl Plan {
     }
 }
 
-fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, schedule: Schedule) {
+fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     match unit.kind {
         KIND_MATMUL => {
             let out = plan.shape(unit.out);
-            let tile = schedule.matmul();
+            let geometry = matmul_geometry(profile, out.rows(), out.columns());
+            let tile = profile.ladder()[geometry as usize];
             let column_blocks = out.columns().div_ceil(tile.columns());
             for tile_index in 0..out.rows().div_ceil(tile.rows()) * column_blocks {
-                plan.tasks
-                    .push(Task::span(unit, tile_index, 1, tile.tile_work()));
+                let mut task = Task::span(unit, tile_index, 1, tile.tile_work());
+                task.geometry = geometry;
+                plan.tasks.push(task);
             }
         }
         KIND_SOFTMAX | KIND_SOFTMAX_GRAD => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.rows(), schedule.rows_per_task()) {
+            for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows())) {
                 plan.tasks.push(Task::span(
                     unit,
                     first,
@@ -101,21 +113,21 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, schedule: Schedule) {
                 ));
             }
         }
-        KIND_SUM_CHUNK => reduce(plan, unit, schedule),
+        KIND_SUM_CHUNK => reduce(plan, unit),
         KIND_SUM_TO => {
             let out = plan.shape(unit.out);
             let source = plan.shape(unit.inputs[0]);
             let replicas = (0..4)
                 .map(|axis| u64::from(source.dims()[axis]) / u64::from(out.dims()[axis]))
                 .product::<u64>();
-            for (first, count) in spans(out.elements(), schedule.elements_per_task()) {
+            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count) * replicas));
             }
         }
         _ => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.elements(), schedule.elements_per_task()) {
+            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count)));
             }
@@ -123,20 +135,36 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, schedule: Schedule) {
     }
 }
 
-fn reduce(plan: &mut Plan, unit: &TaskInfo, schedule: Schedule) {
+fn matmul_geometry(profile: Profile, rows: u32, columns: u32) -> u32 {
+    profile
+        .ladder()
+        .iter()
+        .rposition(|tile| {
+            rows.is_multiple_of(tile.rows())
+                && columns.is_multiple_of(tile.columns())
+                && matmul_tiles(tile, rows, columns) >= MATMUL_TILES_FLOOR
+        })
+        .unwrap_or(0) as u32
+}
+
+fn matmul_tiles(tile: &MatmulTile, rows: u32, columns: u32) -> u32 {
+    rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns())
+}
+
+fn reduce(plan: &mut Plan, unit: &TaskInfo) {
     let mut source = unit.inputs[0];
     loop {
         let elements = plan.shape(source).elements();
-        if elements <= schedule.elements_per_reduction() {
+        let per_reduction = reduction_elements(elements);
+        if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
             task.inputs = [source, NO_VALUE, NO_VALUE];
             plan.tasks.push(task);
             return;
         }
-        let chunks = elements.div_ceil(schedule.elements_per_reduction());
+        let chunks = elements.div_ceil(per_reduction);
         let partials = plan.publish(Shape::vector(chunks));
-        for (slot, (first, count)) in spans(elements, schedule.elements_per_reduction()).enumerate()
-        {
+        for (slot, (first, count)) in spans(elements, per_reduction).enumerate() {
             let mut task = Task::span(unit, first, count, u64::from(count));
             task.inputs = [source, NO_VALUE, NO_VALUE];
             task.slot = slot as u32;
@@ -145,6 +173,22 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, schedule: Schedule) {
         }
         source = partials;
     }
+}
+
+fn task_elements(elements: u32) -> u32 {
+    (elements / TARGET_TASKS)
+        .next_power_of_two()
+        .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
+}
+
+fn reduction_elements(elements: u32) -> u32 {
+    (elements / TARGET_TASKS)
+        .next_power_of_two()
+        .clamp(REDUCTION_FLOOR, REDUCTION_CEILING)
+}
+
+fn softmax_rows_per_task(rows: u32) -> u32 {
+    rows.div_ceil(TARGET_TASKS).clamp(1, SOFTMAX_ROW_CEILING)
 }
 
 fn spans(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {

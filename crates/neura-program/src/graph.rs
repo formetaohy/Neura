@@ -3,8 +3,8 @@ use crate::init::Init;
 use crate::shape::Shape;
 use neura_abi::{
     BINARY_ADD, BINARY_MUL, KIND_BINARY, KIND_BROADCAST, KIND_FILL, KIND_MATMUL, KIND_SOFTMAX,
-    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, NO_VALUE,
-    Schedule, StepRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
+    KIND_SOFTMAX_GRAD, KIND_SUM_CHUNK, KIND_SUM_TO, KIND_UNARY, KIND_UNARY_GRAD, NO_VALUE, Profile,
+    StepRecord, UNARY_RECIP, UNARY_RELU, UNARY_SQRT,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -277,9 +277,9 @@ impl Graph {
         self.state.borrow().tasks.len()
     }
 
-    pub fn encode(&self, alignment: u64, schedule: Schedule) -> Encoding {
+    pub fn encode(&self, alignment: u64, profile: Profile) -> Encoding {
         let state = self.state.borrow();
-        Encoding::plan(&state, schedule, alignment)
+        Encoding::plan(&state, profile, alignment)
     }
 
     pub fn backward(&self, loss: Value) -> Gradients {

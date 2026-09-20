@@ -1,4 +1,6 @@
-use neura_abi::{BoundsRecord, CURSOR_BYTES, StepRecord, WORD_BYTES};
+use neura_abi::{
+    BoundsRecord, CURSOR_BYTES, Geometry, MatmulTile, Profile, StepRecord, WORD_BYTES,
+};
 use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, PipelineHandle};
 use neura_program::{Encoding, Value};
 use neura_shader::{ARENA, BOUNDS, CURSOR, Megakernel, STEPS, TASKS, VALUES};
@@ -18,7 +20,7 @@ pub struct Program {
 
 impl Program {
     pub(crate) fn build(context: &GpuContext, encoding: Encoding) -> Self {
-        let schedule = encoding.schedule();
+        let profile = encoding.profile();
         let limits = context.limits();
         let arena_bytes = encoding.arena_bytes();
         assert!(
@@ -84,7 +86,8 @@ impl Program {
         for (offset, data) in encoding.initial() {
             arena.write_at(queue, *offset, bytemuck::cast_slice(data));
         }
-        let kernel = context.declare(Megakernel::assemble(schedule).program());
+        let geometry = Geometry::of(profile, encoding.tiles());
+        let kernel = context.declare(Megakernel::assemble(geometry).program());
         let group = kernel.bind_group(&[
             BindGroupEntry {
                 binding: TASKS,
@@ -141,8 +144,16 @@ impl Program {
             + self.cursor.size()
     }
 
-    pub fn schedule(&self) -> neura_abi::Schedule {
-        self.encoding.schedule()
+    pub fn profile(&self) -> Profile {
+        self.encoding.profile()
+    }
+
+    pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
+        self.encoding.matmul_geometries()
+    }
+
+    pub fn tiles(&self) -> &[MatmulTile] {
+        self.encoding.tiles()
     }
 
     pub fn task_count(&self) -> u32 {
