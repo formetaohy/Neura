@@ -3,11 +3,11 @@ use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
+use crate::schedule;
 use neura_abi::{
-    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, StepRecord, Store, TaskRecord,
-    ValueRecord, WORD_BYTES,
+    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, SegmentRecord, StepRecord,
+    Store, TaskRecord, ValueRecord, WORD_BYTES,
 };
-use std::cmp::Reverse;
 use std::mem::size_of;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -104,7 +104,8 @@ pub struct Encoding {
     values: Vec<u8>,
     bounds: Vec<u8>,
     steps: Vec<u8>,
-    waves: Vec<u32>,
+    segments: Vec<SegmentRecord>,
+    waves: Vec<BoundsRecord>,
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     geometries: Vec<u32>,
@@ -130,20 +131,19 @@ impl Encoding {
         let values = &plan.values;
         let tasks = &plan.tasks;
         let layout = Layout::of(values, precision, alignment);
-        let depths = wave_depths(values, tasks);
-        let mut order = (0..tasks.len()).collect::<Vec<_>>();
-        order.sort_by_key(|index| (depths[*index], Reverse(tasks[*index].work)));
-
-        let waves = wave_ends(&depths, &order);
+        assert_writers_precede_readers(values, tasks);
+        let schedule = schedule::Schedule::of(values, tasks);
+        let order = schedule.order();
+        let ends = schedule.ends();
         assert!(
-            waves.len() as u32 <= neura_abi::MAX_WAVES,
+            ends.len() as u32 <= neura_abi::MAX_WAVES,
             "a tape of {} waves outruns the {} cursor slots one dispatch hands the device",
-            waves.len(),
+            ends.len(),
             neura_abi::MAX_WAVES,
         );
-        let live = storage_liveness(values, tasks, &order);
+        let live = storage_liveness(values, tasks, order);
         let reserved = layout.tensors().bytes();
-        let (offsets, tensor_bytes) = allocate(values, &live, &waves, alignment, reserved);
+        let (offsets, tensor_bytes) = allocate(values, &live, ends, alignment, reserved);
         let arena_bytes = tensor_bytes - reserved;
         assert!(
             tensor_bytes.is_multiple_of(WORD_BYTES),
@@ -168,8 +168,8 @@ impl Encoding {
         let mut updates_weights = false;
         let mut geometries = vec![0u32; profile.tiles().len()];
         let mut work = 0;
-        for index in &order {
-            let task = &tasks[*index];
+        for index in order {
+            let task = &tasks[*index as usize];
             let geometry = match task.kind {
                 Kind::Matmul => {
                     assert!(
@@ -238,21 +238,17 @@ impl Encoding {
         }
 
         let mut bounds = Vec::new();
-        let mut first = 0;
-        for (wave, end) in waves.iter().enumerate() {
-            let mut record: BoundsRecord = bytemuck::Zeroable::zeroed();
-            record.first_task = first;
-            record.task_count = end - first;
-            record.wave = wave as u32;
-            bounds.extend_from_slice(bytemuck::bytes_of(&record));
+        let mut segments = Vec::new();
+        for record in schedule.bounds() {
+            bounds.extend_from_slice(bytemuck::bytes_of(record));
             bounds.resize(bounds.len().next_multiple_of(alignment as usize), 0);
-            first = *end;
         }
+        segments.extend_from_slice(schedule.segments());
 
         let mut readable = vec![false; values.len()];
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
-        for index in &order {
-            let task = &tasks[*index];
+        for index in order {
+            let task = &tasks[*index as usize];
             let storage = values[task.out as usize].storage as usize;
             if !arena_resident(values, storage) {
                 continue;
@@ -289,7 +285,8 @@ impl Encoding {
             values: records,
             bounds,
             steps,
-            waves,
+            segments,
+            waves: schedule.bounds().to_vec(),
             spans,
             readable,
             geometries,
@@ -334,7 +331,11 @@ impl Encoding {
         &self.steps
     }
 
-    pub fn waves(&self) -> &[u32] {
+    pub fn segments(&self) -> &[SegmentRecord] {
+        &self.segments
+    }
+
+    pub fn waves(&self) -> &[BoundsRecord] {
         &self.waves
     }
 
@@ -413,34 +414,6 @@ impl Encoding {
     }
 }
 
-fn wave_depths(values: &[ValueInfo], tasks: &[Task]) -> Vec<u32> {
-    assert_writers_precede_readers(values, tasks);
-    let mut available = vec![0u32; values.len()];
-    let mut deepest_read = vec![0u32; values.len()];
-    let mut depths = vec![0u32; tasks.len()];
-    for (index, task) in tasks.iter().enumerate() {
-        let reads = task.reads().collect::<Vec<_>>();
-        let mut depth = reads
-            .iter()
-            .map(|value| available[values[*value as usize].storage as usize])
-            .max()
-            .unwrap_or(0);
-        if task.in_place {
-            depth = depth.max(deepest_read[values[task.out as usize].storage as usize] + 1);
-        }
-        depths[index] = depth;
-        for value in reads {
-            if task.in_place && value == task.out {
-                continue;
-            }
-            let storage = values[value as usize].storage as usize;
-            deepest_read[storage] = deepest_read[storage].max(depth);
-        }
-        available[values[task.out as usize].storage as usize] = depth + 1;
-    }
-    depths
-}
-
 fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
     let mut last_writer = vec![None::<usize>; values.len()];
     for (position, task) in tasks.iter().enumerate() {
@@ -452,7 +425,7 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
             }
             match last_writer[storage] {
                 Some(writer) => assert!(
-                    tasks[writer].time < task.time,
+                    writer < position,
                     "task {position} reads a tensor that its own tape only writes later",
                 ),
                 None => assert!(
@@ -465,24 +438,11 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
     }
 }
 
-fn wave_ends(depths: &[u32], order: &[usize]) -> Vec<u32> {
-    let mut ends = Vec::new();
-    let mut cursor = 0usize;
-    while cursor < order.len() {
-        let depth = depths[order[cursor]];
-        while cursor < order.len() && depths[order[cursor]] == depth {
-            cursor += 1;
-        }
-        ends.push(cursor as u32);
-    }
-    ends
-}
-
-fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[usize]) -> Vec<Option<Live>> {
+fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<Option<Live>> {
     let mut live = vec![None::<Live>; values.len()];
     let mut readers = Vec::new();
     for (position, index) in order.iter().enumerate() {
-        let task = &tasks[*index];
+        let task = &tasks[*index as usize];
         let aliases = reads_every_element_in_place(values, task);
         touch(values, &mut live, task.out, position, false, None);
         readers.clear();

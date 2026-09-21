@@ -2,7 +2,7 @@ use neura_abi::Kind;
 use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
     BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, PlacementRecord, Profile,
-    StepRecord, Store, TaskRecord, ValueRecord, WIDE, WORD_BYTES, Window,
+    SegmentRecord, StepRecord, Store, TaskRecord, ValueRecord, WIDE, WORD_BYTES, Window,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -35,9 +35,12 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(StepRecord, operand), 4);
     assert_eq!(offset_of!(StepRecord, swapped), 8);
     assert_eq!(size_of::<BoundsRecord>(), 12);
-    assert_eq!(offset_of!(BoundsRecord, first_task), 0);
-    assert_eq!(offset_of!(BoundsRecord, task_count), 4);
+    assert_eq!(offset_of!(BoundsRecord, first_segment), 0);
+    assert_eq!(offset_of!(BoundsRecord, segment_count), 4);
     assert_eq!(offset_of!(BoundsRecord, wave), 8);
+    assert_eq!(size_of::<SegmentRecord>(), 8);
+    assert_eq!(offset_of!(SegmentRecord, first), 0);
+    assert_eq!(offset_of!(SegmentRecord, count), 4);
     assert_eq!(align_of::<ValueRecord>(), 4);
     assert_eq!(align_of::<TaskRecord>(), 4);
     assert_eq!(align_of::<StepRecord>(), 4);

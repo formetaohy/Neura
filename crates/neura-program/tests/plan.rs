@@ -38,12 +38,37 @@ fn kinds(encoding: &Encoding) -> Vec<Kind> {
         .collect()
 }
 
-fn wave_of(encoding: &Encoding, task: usize) -> u32 {
+fn segment_of(encoding: &Encoding, task: usize) -> usize {
     encoding
-        .waves()
-        .iter()
-        .position(|end| task < *end as usize)
-        .expect("every task belongs to a wave") as u32
+        .segments()
+        .partition_point(|segment| segment.first as usize <= task)
+        - 1
+}
+
+fn follows(encoding: &Encoding, before: usize, after: usize) -> bool {
+    let segment = segment_of(encoding, before);
+    let wave_before = wave_of(encoding, before);
+    let wave_after = wave_of(encoding, after);
+    wave_before < wave_after
+        || (segment == segment_of(encoding, after)
+            && before as u32 - encoding.segments()[segment].first
+                < after as u32 - encoding.segments()[segment].first)
+}
+
+fn wave_of(encoding: &Encoding, task: usize) -> u32 {
+    let mut at = 0usize;
+    for (wave, bounds) in encoding.waves().iter().enumerate() {
+        let count = encoding.segments()
+            [bounds.first_segment as usize..(bounds.first_segment + bounds.segment_count) as usize]
+            .iter()
+            .map(|segment| segment.count as usize)
+            .sum::<usize>();
+        if task < at + count {
+            return wave as u32;
+        }
+        at += count;
+    }
+    panic!("every task belongs to a wave")
 }
 
 fn writers(encoding: &Encoding, value: u32) -> Vec<usize> {
@@ -195,7 +220,8 @@ fn independent_tasks_share_a_wave() {
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 3);
     assert_eq!(encoding.wave_count(), 2);
-    assert_eq!(encoding.waves(), &[2, 3]);
+    assert_eq!(encoding.waves()[0].segment_count, 2);
+    assert_eq!(encoding.waves()[1].segment_count, 1);
     assert_eq!(out.shape(), Shape::vector(64));
 }
 
@@ -524,13 +550,13 @@ fn a_parameter_updated_in_place_feeds_the_tasks_that_follow() {
     assert!(
         update
             .iter()
-            .all(|task| wave_of(&encoding, *task) < wave_of(&encoding, reader[0])),
+            .all(|task| follows(&encoding, *task, reader[0])),
         "a reader observes the update it follows",
     );
 }
 
 #[test]
-fn an_update_in_place_never_shares_a_wave_with_its_readers() {
+fn an_update_in_place_follows_every_reader_of_the_value_it_replaces() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::vector(8), Init::Zero);
     let input = graph.input(Shape::vector(8));
@@ -543,14 +569,14 @@ fn an_update_in_place_never_shares_a_wave_with_its_readers() {
     let encoding = encoding(&graph);
     let update = writers(&encoding, weight.id());
     assert_eq!(update.len(), 1, "the update writes the parameter once");
-    let before = wave_of(&encoding, writers(&encoding, read.id())[0]);
-    let after = wave_of(&encoding, writers(&encoding, read_back.id())[0]);
+    let before = writers(&encoding, read.id())[0];
+    let after = writers(&encoding, read_back.id())[0];
     assert!(
-        before < wave_of(&encoding, update[0]),
+        follows(&encoding, before, update[0]),
         "an update in place follows every reader of the value it replaces",
     );
     assert!(
-        after > wave_of(&encoding, update[0]),
+        follows(&encoding, update[0], after),
         "a reader that follows the update observes it",
     );
 }
@@ -815,5 +841,66 @@ fn a_partial_reads_back_the_operands_its_formula_names() {
             },
         );
         assert_eq!(partial.slot, slot as u32);
+    }
+}
+
+#[test]
+fn a_write_takes_its_turn_after_every_write_it_follows() {
+    let graph = Graph::new();
+    let state = graph.resident(Shape::vector(4));
+    let deep = {
+        let mut value = graph.relu(graph.input(Shape::vector(4)));
+        for _ in 0..5 {
+            value = graph.relu(value);
+        }
+        value
+    };
+    let shallow = graph.fill(Shape::vector(4), 7.0);
+    graph.add_into(state, deep);
+    graph.copy_into(state, shallow);
+    let out = graph.relu(state);
+    graph.retain(state);
+    graph.retain(out);
+    let encoding = encoding(&graph);
+    let updates = writers(&encoding, state.id());
+    assert_eq!(updates.len(), 2, "two tasks update the resident tensor");
+    let reader = writers(&encoding, out.id())[0];
+    assert!(
+        follows(&encoding, updates[0], updates[1]),
+        "the copy reaches the tensor the sum already updated",
+    );
+    assert!(
+        updates
+            .iter()
+            .all(|update| follows(&encoding, *update, reader)),
+        "the reader reaches the tensor after every update to it",
+    );
+}
+
+#[test]
+fn a_chain_of_single_task_waves_rides_one_segment() {
+    let graph = Graph::new();
+    let mut value = graph.input(Shape::vector(64));
+    for _ in 1..8 {
+        value = graph.relu(graph.mul(value, value));
+    }
+    let out = graph.relu(value);
+    graph.retain(out);
+    let encoding = encoding(&graph);
+    assert_eq!(encoding.task_count(), 7);
+    assert_eq!(
+        encoding.wave_count(),
+        1,
+        "a chain of single task waves leaves one dispatch",
+    );
+    assert_eq!(
+        encoding.waves()[0].segment_count,
+        1,
+        "one workgroup carries the whole chain",
+    );
+    assert_eq!(encoding.segments().len(), 1);
+    for task in 0..encoding.task_count() as usize {
+        assert_eq!(segment_of(&encoding, task), 0);
+        assert_eq!(wave_of(&encoding, task), 0);
     }
 }

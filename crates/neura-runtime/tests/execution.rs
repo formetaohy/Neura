@@ -506,6 +506,55 @@ fn an_update_in_place_replays_on_every_run() {
 }
 
 #[test]
+fn a_write_lands_after_every_write_it_follows() {
+    let graph = Graph::new();
+    let state = graph.resident(Shape::vector(4));
+    let data = graph.input(Shape::vector(4));
+    let mut deep = graph.relu(data);
+    for _ in 0..5 {
+        deep = graph.relu(deep);
+    }
+    let shallow = graph.fill(Shape::vector(4), 7.0);
+    graph.add_into(state, deep);
+    graph.copy_into(state, shallow);
+    let out = graph.relu(state);
+    graph.retain(state);
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, &[1.0; 4]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[7.0; 4], 1e-6);
+    assert_close(&runtime.read(&program, state), &[7.0; 4], 1e-6);
+}
+
+#[test]
+fn a_chain_of_updates_rides_one_dispatch() {
+    let graph = Graph::new();
+    let source = graph.input(Shape::vector(2048));
+    let mut value = source;
+    let half = graph.fill(Shape::vector(2048), 0.5);
+    for _ in 1..16 {
+        value = graph.mul(value, half);
+    }
+    let out = graph.relu(value);
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    assert_eq!(
+        program.wave_count(),
+        1,
+        "a chain of dependent work is dispatched once",
+    );
+    runtime.write(&program, source, &vec![0.5; 2048]);
+    runtime.run(&program);
+    let expected = 0.5f32.powi(16);
+    assert_close(&runtime.read(&program, out), &[expected; 2048], 1e-6);
+}
+
+#[test]
 fn a_tape_runs_a_whole_training_step_in_one_submission() {
     let graph = Graph::new();
     let weight = graph.parameter(

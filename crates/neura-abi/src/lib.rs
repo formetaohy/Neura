@@ -20,7 +20,9 @@ pub use kind::Kind;
 pub use placement::Placement;
 pub use precision::Precision;
 pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
-pub use records::{BoundsRecord, PlacementRecord, StepRecord, TaskRecord, ValueRecord};
+pub use records::{
+    BoundsRecord, PlacementRecord, SegmentRecord, StepRecord, TaskRecord, ValueRecord,
+};
 pub use store::Store;
 pub use window::Window;
 

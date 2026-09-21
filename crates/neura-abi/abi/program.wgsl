@@ -43,9 +43,14 @@ struct Step {
 }
 
 struct Bounds {
-    first_task: u32,
-    task_count: u32,
+    first_segment: u32,
+    segment_count: u32,
     wave: u32,
+}
+
+struct Segment {
+    first: u32,
+    count: u32,
 }
 
 struct Placement {
@@ -60,3 +65,4 @@ struct Placement {
 @group(0) @binding(4) var<storage, read> bounds: Bounds;
 @group(0) @binding(5) var<storage, read> steps: array<Step>;
 @group(0) @binding(6) var<storage, read> placement: Placement;
+@group(0) @binding(7) var<storage, read> segments: array<Segment>;

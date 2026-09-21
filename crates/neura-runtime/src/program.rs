@@ -7,8 +7,8 @@ use neura_gpu::{
     BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, PipelineHandle, Submission,
 };
 use neura_program::{Encoding, Region, Span, Value};
-use neura_shader::{BOUNDS, CURSOR, HEAP, Megakernel, PLACEMENT, STEPS, TASKS, VALUES};
-use std::mem::size_of;
+use neura_shader::{BOUNDS, CURSOR, HEAP, Megakernel, PLACEMENT, SEGMENTS, STEPS, TASKS, VALUES};
+use std::mem::{size_of, size_of_val};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -67,6 +67,7 @@ pub struct Program {
     pub(crate) values: GpuBuffer,
     pub(crate) bounds: GpuBuffer,
     pub(crate) steps: GpuBuffer,
+    pub(crate) segments: GpuBuffer,
     placement: GpuBuffer,
 }
 
@@ -127,6 +128,12 @@ impl Program {
             (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
+        let segments = GpuBuffer::new(
+            device,
+            "neura segments",
+            size_of_val(encoding.segments()) as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
         let placement_bytes = GpuBuffer::new(
             device,
             "neura placement",
@@ -158,6 +165,7 @@ impl Program {
         if !encoding.steps().is_empty() {
             steps.write(queue, encoding.steps());
         }
+        segments.write(queue, bytemuck::cast_slice(encoding.segments()));
         let geometry = Geometry::of(encoding.profile());
         let kernel = context.declare(Megakernel::assemble(geometry, weights.precision()).program());
         let group = kernel.bind_group(&[
@@ -189,6 +197,10 @@ impl Program {
                 binding: PLACEMENT,
                 resource: placement_bytes.resource(0, placement_bytes.size()),
             },
+            BindGroupEntry {
+                binding: SEGMENTS,
+                resource: segments.resource(0, segments.size()),
+            },
         ]);
         Self {
             encoding,
@@ -199,6 +211,7 @@ impl Program {
             values,
             bounds,
             steps,
+            segments,
             cursor,
             group,
             placement: placement_bytes,
@@ -247,6 +260,7 @@ impl Program {
             + self.values.size()
             + self.bounds.size()
             + self.steps.size()
+            + self.segments.size()
             + self.cursor.size()
             + self.placement.size()
     }

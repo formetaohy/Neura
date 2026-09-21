@@ -4,6 +4,7 @@ mod graph;
 mod init;
 mod layout;
 mod lower;
+mod schedule;
 mod shape;
 
 pub use encode::{Encoding, Span};

@@ -29,7 +29,6 @@ pub(crate) struct Task {
     pub(crate) work: u64,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
-    pub(crate) time: u32,
 }
 
 impl Task {
@@ -49,7 +48,6 @@ impl Task {
             work,
             in_place: unit.in_place,
             chain: unit.chain.clone(),
-            time: 0,
         }
     }
 
@@ -74,9 +72,6 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
     };
     for unit in units {
         schedule_unit(&mut plan, unit, profile);
-    }
-    for (time, task) in plan.tasks.iter_mut().enumerate() {
-        task.time = time as u32;
     }
     plan
 }

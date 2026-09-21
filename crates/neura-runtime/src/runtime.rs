@@ -216,12 +216,9 @@ impl Runtime {
             timestamp_writes: None,
         });
         pass.set_pipeline(program.kernel.pipeline());
-        let waves = program.encoding.waves();
-        let mut first = 0;
-        for (index, end) in waves.iter().enumerate() {
+        for (index, wave) in program.encoding.waves().iter().enumerate() {
             pass.set_bind_group(0, &program.group, &[(index as u64 * self.alignment) as u32]);
-            pass.dispatch_workgroups((end - first).min(WORKGROUP_BUDGET), 1, 1);
-            first = *end;
+            pass.dispatch_workgroups(wave.segment_count.min(WORKGROUP_BUDGET), 1, 1);
         }
         drop(pass);
         submission.submit(self.context.queue());

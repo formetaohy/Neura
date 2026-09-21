@@ -339,8 +339,14 @@ fn every_kernel_body_carries_its_chain() {
 fn the_devices_bound_every_tensor_the_tape_names() {
     let kernel = assemble(PROFILES[0]);
     assert!(kernel.source().contains("atomicAdd(&cursor["));
-    assert!(kernel.source().contains("bounds.task_count"));
-    assert!(kernel.source().contains("bounds.first_task"));
+    assert!(kernel.source().contains("bounds.segment_count"));
+    assert!(kernel.source().contains("bounds.first_segment"));
+    assert!(
+        kernel
+            .source()
+            .contains("segments[bounds.first_segment + claimed_segment]")
+    );
+    assert!(kernel.source().contains("storageBarrier()"));
 }
 
 fn workgroup_bytes(source: &str) -> u64 {

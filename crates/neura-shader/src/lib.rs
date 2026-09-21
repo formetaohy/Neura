@@ -18,6 +18,7 @@ pub const CURSOR: u32 = 3;
 pub const BOUNDS: u32 = 4;
 pub const STEPS: u32 = 5;
 pub const PLACEMENT: u32 = 6;
+pub const SEGMENTS: u32 = 7;
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -68,6 +69,12 @@ pub const BINDINGS: &[KernelBinding] = &[
         kind: BindingKind::ReadOnlyStorage,
         dynamic_offset: false,
         name: "placement",
+    },
+    KernelBinding {
+        binding: SEGMENTS,
+        kind: BindingKind::ReadOnlyStorage,
+        dynamic_offset: false,
+        name: "segments",
     },
 ];
 
@@ -160,20 +167,23 @@ fn dispatch() -> String {
 fn task_loop() -> String {
     format!(
         "
-var<workgroup> claimed_task: u32;
+var<workgroup> claimed_segment: u32;
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn {ENTRY}(@builtin(local_invocation_index) lid: u32) {{
     loop {{
         if (lid == 0u) {{
-            claimed_task = atomicAdd(&cursor[{CURSOR_WAVE_BASE} + bounds.wave], 1u);
+            claimed_segment = atomicAdd(&cursor[{CURSOR_WAVE_BASE} + bounds.wave], 1u);
         }}
         workgroupBarrier();
-        if (claimed_task >= bounds.task_count) {{
+        if (claimed_segment >= bounds.segment_count) {{
             break;
         }}
-        run_task(bounds.first_task + claimed_task, lid);
-        workgroupBarrier();
+        let segment = segments[bounds.first_segment + claimed_segment];
+        for (var index = segment.first; index < segment.first + segment.count; index = index + 1u) {{
+            run_task(index, lid);
+            storageBarrier();
+        }}
     }}
 }}
 "
