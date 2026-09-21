@@ -38,7 +38,8 @@ pub fn fragment() -> String {
     let output = values[task.out];
     let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        let g = fetch(gradient.base, value_offset(index, dims, gradient.strides));
+        let at = coordinates(index, dims);
+        let g = fetch(gradient.base, read_address(at, gradient.strides));
         var result = 0.0;
         switch (task.op * 2u + task.slot) {
 ",
@@ -60,7 +61,7 @@ pub fn fragment() -> String {
     source.push_str(
         "            default: { refuse(task.kind, task.op * 2u + task.slot); }
         }
-        publish(output.base, index, chained(task, index, result));
+        publish(output.base, index, chained(task, at, result));
     }
 }
 ",
@@ -77,7 +78,7 @@ fn roles(partial: Partial) -> String {
         };
         write!(
             source,
-            "let {} = fetch({record}.base, value_offset(index, dims, {record}.strides)); ",
+            "let {} = fetch({record}.base, read_address(at, {record}.strides)); ",
             role.name(),
         )
         .unwrap();

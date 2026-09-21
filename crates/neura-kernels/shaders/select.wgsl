@@ -14,7 +14,7 @@ fn run_one_hot(task: Task, lid: u32) {
         let row = index / classes;
         let column = index % classes;
         let chosen = whole_index(fetch(indices.base, row), classes, OneHot);
-        publish(output.base, index, chained(task, index, select(0.0, 1.0, column == chosen)));
+        publish(output.base, index, chained(task, coordinates(index, output.dims), select(0.0, 1.0, column == chosen)));
     }
 }
 
@@ -28,6 +28,6 @@ fn run_gather(task: Task, lid: u32) {
         let row = index / width;
         let column = index % width;
         let chosen = whole_index(fetch(indices.base, row), rows, Gather);
-        publish(output.base, index, chained(task, index, fetch(table.base, chosen * width + column)));
+        publish(output.base, index, chained(task, coordinates(index, output.dims), fetch(table.base, chosen * width + column)));
     }
 }

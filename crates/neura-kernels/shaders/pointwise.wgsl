@@ -1,25 +1,16 @@
-fn value_offset(flat: u32, dims: vec4<u32>, strides: vec4<u32>) -> u32 {
-    let w = flat % dims.w;
-    let z = (flat / dims.w) % dims.z;
-    let y = (flat / (dims.w * dims.z)) % dims.y;
-    let x = flat / (dims.w * dims.z * dims.y);
-    return x * strides.x + y * strides.y + z * strides.z + w * strides.w;
-}
-
-fn chain_operand(step: Step, index: u32, dims: vec4<u32>) -> f32 {
+fn chain_operand(step: Step, at: vec4<u32>) -> f32 {
     if (step.operand == NO_VALUE) {
         return 0.0;
     }
     let source = values[step.operand];
-    return fetch(source.base, value_offset(index, dims, source.strides));
+    return fetch(source.base, read_address(at, source.strides));
 }
 
-fn chained(task: Task, index: u32, carried: f32) -> f32 {
+fn chained(task: Task, at: vec4<u32>, carried: f32) -> f32 {
     var result = carried;
-    let dims = values[task.out].dims;
     for (var step = 0u; step < task.steps; step = step + 1u) {
         let record = steps[task.chain + step];
-        let operand = chain_operand(record, index, dims);
+        let operand = chain_operand(record, at);
         let swapped = record.swapped == 1u;
         result = op_apply(
             task.kind,
@@ -35,34 +26,40 @@ fn run_binary(task: Task, lid: u32) {
     let left = values[task.a];
     let right = values[task.b];
     let output = values[task.out];
+    let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        let a = fetch(left.base, value_offset(index, output.dims, left.strides));
-        let b = fetch(right.base, value_offset(index, output.dims, right.strides));
-        publish(output.base, index, chained(task, index, op_apply(task.kind, task.op, a, b)));
+        let at = coordinates(index, dims);
+        let a = fetch(left.base, read_address(at, left.strides));
+        let b = fetch(right.base, read_address(at, right.strides));
+        publish(output.base, index, chained(task, at, op_apply(task.kind, task.op, a, b)));
     }
 }
 
 fn run_unary(task: Task, lid: u32) {
     let source = values[task.a];
     let output = values[task.out];
+    let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        let a = fetch(source.base, value_offset(index, output.dims, source.strides));
-        publish(output.base, index, chained(task, index, op_apply(task.kind, task.op, a, 0.0)));
+        let at = coordinates(index, dims);
+        let a = fetch(source.base, read_address(at, source.strides));
+        publish(output.base, index, chained(task, at, op_apply(task.kind, task.op, a, 0.0)));
     }
 }
 
 fn run_fill(task: Task, lid: u32) {
     let output = values[task.out];
+    let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        publish(output.base, index, chained(task, index, task.param));
+        publish(output.base, index, chained(task, coordinates(index, dims), task.param));
     }
 }
 
 fn run_broadcast(task: Task, lid: u32) {
     let output = values[task.out];
     let source = values[task.a];
+    let dims = output.dims;
     let scalar = fetch(source.base, task.slot);
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        publish(output.base, index, chained(task, index, scalar));
+        publish(output.base, index, chained(task, coordinates(index, dims), scalar));
     }
 }

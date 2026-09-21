@@ -37,6 +37,6 @@ fn run_sum_to(task: Task, lid: u32) {
                 }
             }
         }
-        publish(output.base, index, chained(task, index, total));
+        publish(output.base, index, chained(task, coordinates(index, output.dims), total));
     }
 }

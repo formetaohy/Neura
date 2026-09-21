@@ -4,6 +4,7 @@ mod ops;
 use neura_abi::{Geometry, Kind, Placement, Precision};
 
 pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
+pub const READ: &str = include_str!("../shaders/read.wgsl");
 pub const POINTWISE: &str = include_str!("../shaders/pointwise.wgsl");
 pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
@@ -34,6 +35,7 @@ pub fn body(kind: Kind) -> &'static str {
 pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -> Vec<String> {
     vec![
         REFUSE.to_owned(),
+        READ.to_owned(),
         ops::fragment(),
         storage(weights, placement),
         POINTWISE.to_owned(),

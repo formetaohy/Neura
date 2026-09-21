@@ -75,7 +75,7 @@ fn fold_rows_by_workgroup(task: Task, lid: u32, source: Value, seed: u32, noised
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
         let chosen = fold_row_by_workgroup(lid, source, row, columns, seed, noised);
         if (lid == 0u) {
-            publish(output.base, row, chained(task, row, f32(chosen)));
+            publish(output.base, row, chained(task, coordinates(row, output.dims), f32(chosen)));
         }
         workgroupBarrier();
     }
@@ -85,7 +85,7 @@ fn fold_rows_by_thread(task: Task, lid: u32, source: Value, seed: u32, noised: b
     let output = values[task.out];
     let columns = source.dims.w;
     for (var row = task.first + lid; row < task.first + task.count; row = row + WORKGROUP_SIZE) {
-        publish(output.base, row, chained(task, row, f32(fold_row_by_thread(source, row, columns, seed, noised))));
+        publish(output.base, row, chained(task, coordinates(row, output.dims), f32(fold_row_by_thread(source, row, columns, seed, noised))));
     }
 }
 

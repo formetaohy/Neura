@@ -120,7 +120,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
             let register = row * tile.register_columns() + column;
             writeln!(
                 source,
-                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output.base, index{register}, chained(task, index{register}, acc{register}));\n        }}",
+                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output.base, index{register}, chained(task, vec4<u32>(0u, 0u, row{register}, column{register}), acc{register}));\n        }}",
             )
             .unwrap();
         }

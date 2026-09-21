@@ -729,3 +729,56 @@ fn a_log_softmax_rides_the_shape_of_its_rows() {
     }
     assert_eq!(widths, vec![12, 192]);
 }
+
+#[test]
+fn a_view_reads_back_through_the_strides_it_was_transposed_to() {
+    let runtime = open();
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(3, 5));
+    let table = graph.parameter(Shape::matrix(5, 3), Init::Zero);
+    let shifted = graph.add(data, graph.transpose(table));
+    graph.retain(shifted);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let data_values = random(15, 5);
+    let table_values = random(15, 11);
+    runtime.write(&program, data, &data_values);
+    runtime.write(&program, table, &table_values);
+    runtime.run(&program);
+    let expected = (0..15)
+        .map(|index| {
+            let row = index / 5;
+            let column = index % 5;
+            data_values[index] + table_values[column * 3 + row]
+        })
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, shifted), &expected, 1e-6);
+}
+
+#[test]
+fn a_tensor_of_every_rank_reads_the_row_it_broadcasts() {
+    let runtime = open();
+    let graph = Graph::new();
+    for dims in [vec![2u32, 3, 4], vec![2, 3, 4, 5]] {
+        let shape = Shape::of(&dims);
+        let elements = dims.iter().product::<u32>();
+        let columns = *dims.last().expect("a last axis");
+        let data = graph.input(shape);
+        let bias = graph.parameter(Shape::vector(columns), Init::Zero);
+        let shifted = graph.add(data, bias);
+        graph.retain(shifted);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile(&graph, &weights);
+        let data_values = random(elements, elements);
+        let bias_values = random(columns, columns + 7);
+        runtime.write(&program, data, &data_values);
+        runtime.write(&program, bias, &bias_values);
+        runtime.run(&program);
+        let expected = data_values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| value + bias_values[index % columns as usize])
+            .collect::<Vec<_>>();
+        assert_close(&runtime.read(&program, shifted), &expected, 1e-6);
+    }
+}
