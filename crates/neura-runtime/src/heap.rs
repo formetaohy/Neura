@@ -1,22 +1,18 @@
 use neura_abi::WORD_BYTES;
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Block {
-    pub(crate) words: u64,
-    pub(crate) word: u64,
+#[derive(Clone, Copy)]
+struct Block {
+    word: u64,
+    words: u64,
 }
 
-struct Free {
-    blocks: Vec<Block>,
-}
-
-pub struct Heap {
+pub(crate) struct Heap {
     buffer: GpuBuffer,
     words: u64,
     stride: u64,
-    free: Mutex<Free>,
+    free: Mutex<Vec<Block>>,
 }
 
 impl Heap {
@@ -41,75 +37,69 @@ impl Heap {
             buffer,
             words,
             stride,
-            free: Mutex::new(Free {
-                blocks: vec![Block { word: 0, words }],
+            free: Mutex::new(vec![Block { word: 0, words }]),
+        }
+    }
+
+    pub(crate) fn buffer(&self) -> &GpuBuffer {
+        &self.buffer
+    }
+
+    pub(crate) fn words(&self) -> u64 {
+        self.words
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.words * WORD_BYTES
+    }
+
+    pub(crate) fn allocate(self: &Arc<Self>, words: u64) -> Allocation {
+        let wanted = words.max(1).next_multiple_of(self.stride);
+        let claimed = {
+            let mut free = self.free.lock().expect("a device heap is never poisoned");
+            free.iter()
+                .position(|block| block.words >= wanted)
+                .map(|index| {
+                    let block = free[index];
+                    if block.words == wanted {
+                        free.remove(index);
+                    } else {
+                        free[index] = Block {
+                            word: block.word + wanted,
+                            words: block.words - wanted,
+                        };
+                    }
+                    Block {
+                        word: block.word,
+                        words: wanted,
+                    }
+                })
+                .ok_or_else(|| free.iter().map(|block| block.words).sum::<u64>())
+        };
+        let block = claimed.unwrap_or_else(|free| {
+            panic!(
+                "the device heap of {} bytes holds no room for {wanted} words beside the {} it has already handed out",
+                self.bytes(),
+                self.words - free,
+            )
+        });
+        Allocation {
+            lease: Arc::new(Lease {
+                heap: self.clone(),
+                block,
             }),
         }
     }
 
-    pub fn buffer(&self) -> &GpuBuffer {
-        &self.buffer
-    }
-
-    pub fn words(&self) -> u64 {
-        self.words
-    }
-
-    pub fn bytes(&self) -> u64 {
-        self.words * WORD_BYTES
-    }
-
-    pub(crate) fn reserve(&self, words: u64) -> Block {
-        let wanted = words.max(1).next_multiple_of(self.stride);
-        let mut free = self.free.lock().expect("a device heap is never poisoned");
-        let index = free
-            .blocks
-            .iter()
-            .position(|block| block.words >= wanted)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the device heap of {} bytes holds no room for {wanted} more words",
-                    self.bytes(),
-                )
-            });
-        let block = free.blocks[index];
-        if block.words == wanted {
-            free.blocks.remove(index);
-        } else {
-            free.blocks[index] = Block {
-                word: block.word + wanted,
-                words: block.words - wanted,
-            };
-        }
-        Block {
-            word: block.word,
-            words: wanted,
-        }
-    }
-
-    pub(crate) fn shrink(&self, block: Block, words: u64) -> Block {
-        let kept = words.max(1).next_multiple_of(self.stride).min(block.words);
-        if kept < block.words {
-            self.release(Block {
-                word: block.word + kept,
-                words: block.words - kept,
-            });
-        }
-        Block {
-            word: block.word,
-            words: kept,
-        }
-    }
-
-    pub(crate) fn release(&self, block: Block) {
+    fn release(&self, block: Block) {
         if block.words == 0 {
             return;
         }
         let mut free = self.free.lock().expect("a device heap is never poisoned");
-        free.blocks.push(block);
-        free.blocks.sort_by_key(|block| block.word);
-        let mut merged: Vec<Block> = Vec::with_capacity(free.blocks.len());
-        for block in free.blocks.drain(..) {
+        free.push(block);
+        free.sort_by_key(|block| block.word);
+        let mut merged: Vec<Block> = Vec::with_capacity(free.len());
+        for block in free.drain(..) {
             match merged.last_mut() {
                 Some(last) if last.word + last.words >= block.word => {
                     last.words = last.words.max(block.word + block.words - last.word);
@@ -117,6 +107,59 @@ impl Heap {
                 _ => merged.push(block),
             }
         }
-        free.blocks = merged;
+        *free = merged;
+    }
+}
+
+pub(crate) struct Allocation {
+    lease: Arc<Lease>,
+}
+
+struct Lease {
+    heap: Arc<Heap>,
+    block: Block,
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.heap.release(self.block);
+    }
+}
+
+impl Clone for Allocation {
+    fn clone(&self) -> Self {
+        Self {
+            lease: self.lease.clone(),
+        }
+    }
+}
+
+impl Allocation {
+    pub(crate) fn word(&self) -> u64 {
+        self.lease.block.word
+    }
+
+    pub(crate) fn words(&self) -> u64 {
+        self.lease.block.words
+    }
+
+    pub(crate) fn offset(&self) -> u64 {
+        self.word() * WORD_BYTES
+    }
+
+    pub(crate) fn bytes(&self) -> u64 {
+        self.words() * WORD_BYTES
+    }
+
+    pub(crate) fn heap(&self) -> &Heap {
+        &self.lease.heap
+    }
+
+    pub(crate) fn buffer(&self) -> &GpuBuffer {
+        self.lease.heap.buffer()
+    }
+
+    pub(crate) fn lives_on(&self, heap: &Arc<Heap>) -> bool {
+        Arc::ptr_eq(&self.lease.heap, heap)
     }
 }

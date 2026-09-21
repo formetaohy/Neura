@@ -305,6 +305,82 @@ fn a_dropped_program_returns_its_tensors_to_the_heap() {
 }
 
 #[test]
+fn a_dropped_store_returns_its_words_to_the_heap() {
+    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+        readback_bytes: 1 << 12,
+        heap_bytes: 64 << 10,
+        ..Default::default()
+    }))
+    .expect("device");
+    let graph = Graph::new();
+    let (weight, _) = linear(&graph, 96, 96);
+    assert_eq!(weight.shape(), Shape::matrix(96, 96));
+    for _ in 0..8 {
+        let weights = runtime.weights(&graph, Precision::Single);
+        assert_eq!(weights.tensors(), 2);
+        assert!(
+            weights.bytes() < runtime.heap_bytes(),
+            "a store of {} bytes does not fit beside itself in the {} byte heap",
+            weights.bytes(),
+            runtime.heap_bytes(),
+        );
+    }
+    let weights = runtime.weights(&graph, Precision::Single);
+    assert_eq!(weights.tensors(), 2);
+}
+
+#[test]
+fn a_program_keeps_the_store_it_was_built_with() {
+    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+        readback_bytes: 1 << 12,
+        heap_bytes: 40 << 10,
+        ..Default::default()
+    }))
+    .expect("device");
+    let graph = Graph::new();
+    let (weight, _) = linear(&graph, 64, 64);
+    let data = graph.input(Shape::matrix(2, 64));
+    let out = graph.matmul(data, weight);
+    graph.retain(out);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    drop(weights);
+    runtime.write(&program, data, &random(128, 5));
+    runtime.run(&program);
+    assert_eq!(runtime.read(&program, out).len(), 128);
+    drop(program);
+    let rebuilt = runtime.weights(&graph, Precision::Single);
+    assert_eq!(rebuilt.tensors(), 2);
+}
+
+#[test]
+fn two_stores_of_one_model_hold_their_own_words() {
+    let runtime = open();
+    let graph = Graph::new();
+    let (weight, _) = linear(&graph, 32, 32);
+    let data = graph.input(Shape::matrix(2, 32));
+    let out = graph.matmul(data, weight);
+    graph.retain(out);
+    let first = runtime.weights(&graph, Precision::Single);
+    let second = runtime.weights(&graph, Precision::Single);
+    assert_ne!(
+        first.offset(),
+        second.offset(),
+        "two stores of one model were laid over each other",
+    );
+    let narrow = runtime.compile(&graph, &first);
+    let wide = runtime.compile(&graph, &second);
+    runtime.write(&narrow, weight, &[1.0; 32 * 32]);
+    runtime.write(&wide, weight, &[2.0; 32 * 32]);
+    runtime.write(&narrow, data, &[1.0; 64]);
+    runtime.write(&wide, data, &[1.0; 64]);
+    runtime.run(&narrow);
+    runtime.run(&wide);
+    assert_close(&runtime.read(&narrow, out), &[32.0; 64], 1e-4);
+    assert_close(&runtime.read(&wide, out), &[64.0; 64], 1e-4);
+}
+
+#[test]
 fn a_half_store_keeps_an_odd_tensor() {
     let runtime = open();
     let graph = Graph::new();
@@ -323,7 +399,9 @@ fn a_half_store_keeps_an_odd_tensor() {
 #[test]
 fn a_store_of_another_runtime_is_refused() {
     let graph = Graph::new();
-    let (_, _) = linear(&graph, 4, 4);
+    let (weight, _) = linear(&graph, 4, 4);
+    let data = graph.input(Shape::matrix(2, 4));
+    graph.retain(graph.matmul(data, weight));
     let first = open();
     let second = open();
     let weights = first.weights(&graph, Precision::Single);
@@ -332,5 +410,20 @@ fn a_store_of_another_runtime_is_refused() {
             let _ = second.compile(&graph, &weights);
         }),
         "a weight store of another runtime's heap was compiled into a tape",
+    );
+    let program = first.compile(&graph, &weights);
+    assert!(
+        refuses(|| second.run(&program)),
+        "a program of another runtime's heap was run",
+    );
+    assert!(
+        refuses(|| {
+            let _ = second.read(&program, weight);
+        }),
+        "a program of another runtime's heap was read",
+    );
+    assert!(
+        refuses(|| second.write(&program, weight, &[1.0; 16])),
+        "a program of another runtime's heap was written",
     );
 }

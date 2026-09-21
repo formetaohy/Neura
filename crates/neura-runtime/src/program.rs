@@ -1,7 +1,6 @@
-use crate::heap::{Block, Heap};
+use crate::heap::{Allocation, Heap};
 use neura_abi::{
     BoundsRecord, CURSOR_BYTES, Geometry, MatmulTile, Placement, Precision, Profile, StepRecord,
-    WORD_BYTES,
 };
 use neura_gpu::{
     BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, PipelineHandle, Submission,
@@ -13,36 +12,30 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Weights {
-    heap: Arc<Heap>,
-    block: Block,
+    store: Allocation,
     region: Region,
     precision: Precision,
 }
 
 impl Weights {
-    pub(crate) fn new(heap: Arc<Heap>, block: Block, region: Region, precision: Precision) -> Self {
+    pub(crate) fn new(store: Allocation, region: Region, precision: Precision) -> Self {
         Self {
-            heap,
-            block,
+            store,
             region,
             precision,
         }
     }
 
     pub fn buffer(&self) -> &GpuBuffer {
-        self.heap.buffer()
+        self.store.buffer()
     }
 
     pub fn offset(&self) -> u64 {
-        self.block.word * WORD_BYTES
-    }
-
-    pub fn words(&self) -> u64 {
-        self.block.words
+        self.store.offset()
     }
 
     pub fn bytes(&self) -> u64 {
-        self.block.words * WORD_BYTES
+        self.store.bytes()
     }
 
     pub fn tensors(&self) -> usize {
@@ -58,7 +51,7 @@ impl Weights {
     }
 
     pub(crate) fn lives_on(&self, heap: &Arc<Heap>) -> bool {
-        Arc::ptr_eq(&self.heap, heap)
+        self.store.lives_on(heap)
     }
 }
 
@@ -67,8 +60,7 @@ pub struct Program {
     pub(crate) kernel: PipelineHandle,
     pub(crate) group: BindGroup,
     pub(crate) cursor: GpuBuffer,
-    pub(crate) heap: Arc<Heap>,
-    pub(crate) tensors: Block,
+    pub(crate) tensors: Allocation,
     pub(crate) weights: Weights,
     pub(crate) tape: GpuBuffer,
     pub(crate) values: GpuBuffer,
@@ -80,13 +72,13 @@ impl Program {
     pub(crate) fn build(
         context: &GpuContext,
         encoding: Encoding,
-        heap: Arc<Heap>,
-        tensors: Block,
+        placement: Placement,
+        tensors: Allocation,
         weights: Weights,
     ) -> Self {
         let limits = context.limits();
         for (name, bytes) in [
-            ("device heap", heap.bytes()),
+            ("device heap", tensors.heap().bytes()),
             ("tape", encoding.tasks().len() as u64),
             ("values", encoding.values().len() as u64),
         ] {
@@ -137,9 +129,9 @@ impl Program {
         let queue = context.queue();
         let mut clearing = Submission::new(device, "neura tensors");
         clearing.clear_buffer(
-            heap.buffer().buffer(),
-            tensors.word * WORD_BYTES,
-            Some(tensors.words * WORD_BYTES),
+            tensors.buffer().buffer(),
+            tensors.offset(),
+            Some(tensors.bytes()),
         );
         clearing.submit(queue);
         tape.write(queue, encoding.tasks());
@@ -149,7 +141,6 @@ impl Program {
             steps.write(queue, encoding.steps());
         }
         let geometry = Geometry::of(encoding.profile(), encoding.tiles());
-        let placement = Placement::new(heap.words(), weights.offset() / WORD_BYTES, tensors.word);
         let kernel = context
             .declare(Megakernel::assemble(geometry, weights.precision(), placement).program());
         let group = kernel.bind_group(&[
@@ -163,7 +154,7 @@ impl Program {
             },
             BindGroupEntry {
                 binding: HEAP,
-                resource: heap.buffer().resource(0, heap.buffer().size()),
+                resource: tensors.buffer().resource(0, tensors.buffer().size()),
             },
             BindGroupEntry {
                 binding: CURSOR,
@@ -181,7 +172,6 @@ impl Program {
         Self {
             encoding,
             kernel,
-            heap,
             tensors,
             weights,
             tape,
@@ -193,16 +183,20 @@ impl Program {
         }
     }
 
+    pub(crate) fn lives_on(&self, heap: &Arc<Heap>) -> bool {
+        self.tensors.lives_on(heap)
+    }
+
     pub fn heap(&self) -> &GpuBuffer {
-        self.heap.buffer()
+        self.tensors.buffer()
     }
 
     pub fn heap_bytes(&self) -> u64 {
-        self.heap.bytes()
+        self.tensors.heap().bytes()
     }
 
     pub fn tensors(&self) -> &GpuBuffer {
-        self.heap.buffer()
+        self.tensors.buffer()
     }
 
     pub fn tensor_bytes(&self) -> u64 {
@@ -222,7 +216,7 @@ impl Program {
     }
 
     pub fn device_bytes(&self) -> u64 {
-        self.heap.bytes()
+        self.tensors.heap().bytes()
             + self.tape.size()
             + self.values.size()
             + self.bounds.size()
@@ -277,12 +271,6 @@ impl Program {
             offset: span.offset,
             elements: span.elements,
         }
-    }
-}
-
-impl Drop for Program {
-    fn drop(&mut self) {
-        self.heap.release(self.tensors);
     }
 }
 

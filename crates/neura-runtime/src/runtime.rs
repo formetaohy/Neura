@@ -109,8 +109,8 @@ impl Runtime {
     pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights {
         self.context.assert_alive();
         let layout = graph.layout(self.alignment, precision);
-        let block = self.heap.reserve(layout.weights().words());
-        let placement = Placement::new(self.heap.words(), block.word, 0);
+        let store = self.heap.allocate(layout.weights().words());
+        let placement = Placement::new(self.heap.words(), store.word(), 0);
         let queue = self.context.queue();
         for (address, data) in layout.uploads() {
             self.heap.buffer().write_at(
@@ -119,12 +119,7 @@ impl Runtime {
                 &precision.pack(data),
             );
         }
-        Weights::new(
-            self.heap.clone(),
-            block,
-            layout.weights().clone(),
-            precision,
-        )
+        Weights::new(store, layout.weights().clone(), precision)
     }
 
     pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
@@ -167,25 +162,16 @@ impl Runtime {
             weights.precision(),
             Precision::Single,
         );
-        let tensors = self.heap.reserve(sized.tensor_bytes() / WORD_BYTES);
-        let placement = Placement::new(self.heap.words(), weights_at, tensors.word);
+        let tensors = self.heap.allocate(sized.tensor_bytes() / WORD_BYTES);
+        let placement = Placement::new(self.heap.words(), weights_at, tensors.word());
         let encoding = graph.encode(self.alignment, profile, weights.precision(), placement);
         assert!(
-            encoding.tensor_bytes() <= tensors.words * WORD_BYTES,
+            encoding.tensor_bytes() <= tensors.bytes(),
             "a second plan of {} tensor bytes outruns the {} bytes the first one asked for",
             encoding.tensor_bytes(),
-            tensors.words * WORD_BYTES,
+            tensors.bytes(),
         );
-        let tensors = self
-            .heap
-            .shrink(tensors, encoding.tensor_bytes() / WORD_BYTES);
-        Program::build(
-            &self.context,
-            encoding,
-            self.heap.clone(),
-            tensors,
-            weights.clone(),
-        )
+        Program::build(&self.context, encoding, placement, tensors, weights.clone())
     }
 
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
@@ -221,6 +207,7 @@ impl Runtime {
     }
 
     pub fn run(&self, program: &Program) {
+        self.assert_owns(program);
         self.context.assert_alive();
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
@@ -242,6 +229,7 @@ impl Runtime {
     }
 
     pub fn write(&self, program: &Program, value: Value, data: &[f32]) {
+        self.assert_owns(program);
         assert!(
             program.readable(value),
             "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to write it",
@@ -260,8 +248,7 @@ impl Runtime {
             Store::Tensors => bytemuck::cast_slice(data).to_vec(),
         };
         program
-            .heap
-            .buffer()
+            .heap()
             .write_at(self.context.queue(), span.offset, &bytes);
     }
 
@@ -271,6 +258,7 @@ impl Runtime {
     }
 
     pub fn read_many(&self, program: &Program, values: &[Value]) -> Vec<Vec<f32>> {
+        self.assert_owns(program);
         self.context.assert_alive();
         assert!(!values.is_empty(), "a read names at least one tensor");
         for value in values {
@@ -302,7 +290,7 @@ impl Runtime {
         for span in &spans {
             let bytes = span_bytes(*span, precision);
             submission.copy_buffer_to_buffer(
-                program.heap.buffer().buffer(),
+                program.heap().buffer(),
                 span.offset,
                 self.readback.staging().buffer(),
                 at,
@@ -334,6 +322,13 @@ impl Runtime {
                 decode(*span, precision, &bytes[start..start + *length as usize])
             })
             .collect()
+    }
+
+    fn assert_owns(&self, program: &Program) {
+        assert!(
+            program.lives_on(&self.heap),
+            "this program runs on the device heap of another runtime",
+        );
     }
 
     pub fn context(&self) -> &GpuContext {
