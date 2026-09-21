@@ -20,7 +20,7 @@ pub fn body(kind: Kind) -> &'static str {
         Kind::Fill => "run_fill",
         Kind::Broadcast => "run_broadcast",
         Kind::SumChunk => "run_sum_chunk",
-        Kind::SumTo => "run_sum_to",
+        Kind::SumAxis => "run_sum_axis",
         Kind::Softmax => "run_softmax",
         Kind::SoftmaxGrad => "run_softmax_grad",
         Kind::LogSoftmax => "run_log_softmax",

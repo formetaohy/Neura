@@ -57,7 +57,7 @@ kinds! {
     Fill = "fill" pointwise true chainable false;
     Broadcast = "broadcast" pointwise true chainable false;
     SumChunk = "sum_chunk" pointwise false chainable false;
-    SumTo = "sum_to" pointwise true chainable false;
+    SumAxis = "sum_axis" pointwise false chainable false;
     Softmax = "softmax" pointwise false chainable false;
     SoftmaxGrad = "softmax_grad" pointwise false chainable false;
     LogSoftmax = "log_softmax" pointwise false chainable false;

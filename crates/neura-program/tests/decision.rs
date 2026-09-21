@@ -71,6 +71,112 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
 }
 
 #[test]
+fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
+    let graph = Graph::new();
+    let short = graph.sum_rows(graph.input(Shape::matrix(64, 8)));
+    let long = graph.sum_rows(graph.input(Shape::matrix(2, 200)));
+    let view = graph.sum_rows(graph.transpose(graph.input(Shape::matrix(200, 2))));
+    graph.retain(short);
+    graph.retain(long);
+    graph.retain(view);
+    for (profile, long_geometry) in [
+        (NARROW, strategy::WORKGROUP_ROW),
+        (WIDE, strategy::THREAD_ROW),
+    ] {
+        let encoding = encoding_with(&graph, profile);
+        let short = tasks_of(&encoding, short);
+        assert_eq!(short.len(), 64);
+        for (index, task) in short.into_iter().enumerate() {
+            assert_eq!(Kind::of(task.kind), Kind::SumAxis);
+            assert_eq!(task.slot, 3);
+            assert_eq!(
+                task.geometry,
+                strategy::THREAD_ROW,
+                "a row of eight elements folds through one thread",
+            );
+            assert_eq!(task.first, index as u32);
+            assert_eq!(task.count, 1);
+        }
+        let long = tasks_of(&encoding, long);
+        assert_eq!(long.len(), 2);
+        for (index, task) in long.into_iter().enumerate() {
+            assert_eq!(
+                task.geometry, long_geometry,
+                "a row of 200 elements folds through {long_geometry} on {profile:?}",
+            );
+            assert_eq!(task.slot, 3);
+            assert_eq!(task.first, index as u32);
+            assert_eq!(task.count, 1);
+        }
+        let view = tasks_of(&encoding, view);
+        assert_eq!(view.len(), 1);
+        assert_eq!(
+            view[0].geometry,
+            strategy::THREAD_ELEMENT,
+            "a row a view holds apart folds element by element",
+        );
+        assert_eq!(view[0].slot, 3);
+        assert_eq!(view[0].count, 2);
+    }
+}
+
+#[test]
+fn a_product_hands_the_device_a_tile_for_every_plane() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([2, 3, 64, 16]), Init::Zero);
+    let right = graph.parameter(Shape::of([2, 3, 16, 32]), Init::Zero);
+    let batched = graph.matmul(left, right);
+    let shared = graph.matmul(left, graph.parameter(Shape::matrix(16, 32), Init::Zero));
+    let spread = graph.matmul(
+        graph.parameter(Shape::of([2, 1, 64, 16]), Init::Zero),
+        right,
+    );
+    graph.retain(batched);
+    graph.retain(shared);
+    graph.retain(spread);
+    assert_eq!(batched.shape(), Shape::of([2, 3, 64, 32]));
+    assert_eq!(shared.shape(), Shape::of([2, 3, 64, 32]));
+    assert_eq!(spread.shape(), Shape::of([2, 3, 64, 32]));
+    let encoding = encoding_with(&graph, WIDE);
+    let tile = encoding.profile().ladder()[0];
+    let per_plane = 64u32.div_ceil(tile.rows()) * 32u32.div_ceil(tile.columns());
+    assert_eq!(
+        encoding.matmul_geometries(),
+        vec![(tile, 3 * 6 * per_plane)],
+        "every plane of every product carries its own tiles",
+    );
+    for product in [batched, shared, spread] {
+        let tasks = tasks_of(&encoding, product);
+        assert_eq!(tasks.len() as u32, 6 * per_plane);
+        for (tile_index, task) in tasks.into_iter().enumerate() {
+            assert_eq!(Kind::of(task.kind), Kind::Matmul);
+            assert_eq!(task.first, tile_index as u32);
+            assert_eq!(task.count, 1);
+        }
+    }
+    assert_eq!(
+        encoding.work(),
+        u64::from(3 * 6 * per_plane) * tile.tile_work(),
+        "a plan accounts the tiles of every plane",
+    );
+}
+
+#[test]
+fn a_product_refuses_batches_that_do_not_meet() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([2, 1, 4, 3]), Init::Zero);
+    assert!(refuses(|| {
+        let _ = graph.matmul(left, graph.parameter(Shape::of([3, 1, 3, 5]), Init::Zero));
+    }));
+    assert!(refuses(|| {
+        let _ = graph.matmul(left, graph.parameter(Shape::of([2, 1, 4, 5]), Init::Zero));
+    }));
+    assert!(refuses(|| {
+        let _ = graph.sum_rows(graph.parameter(Shape::matrix(4, 1), Init::Zero));
+    }));
+}
+
+#[test]
 fn a_choice_covers_every_row_once() {
     let rows = 1000u32;
     let graph = Graph::new();

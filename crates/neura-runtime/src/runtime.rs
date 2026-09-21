@@ -385,14 +385,13 @@ fn refusal_message(word: u32) -> String {
             "the device refused an index outside the rows of the {} task",
             kind.name(),
         ),
-        Kind::Matmul | Kind::Argmax | Kind::Categorical => format!(
+        Kind::Matmul | Kind::Argmax | Kind::Categorical | Kind::SumAxis => format!(
             "the device refused geometry {code} of the {} task",
             kind.name(),
         ),
         Kind::Fill
         | Kind::Broadcast
         | Kind::SumChunk
-        | Kind::SumTo
         | Kind::Softmax
         | Kind::SoftmaxGrad
         | Kind::LogSoftmax

@@ -44,12 +44,22 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
     source.push_str("    let left = values[task.a];\n    let right = values[task.b];\n    let output = values[task.out];\n    let rows = left.dims.z;\n    let depth = left.dims.w;\n    let columns = right.dims.w;\n");
     writeln!(
         source,
+        "    let row_blocks = (rows + MATMUL_ROWS_{geometry} - 1u) / MATMUL_ROWS_{geometry};",
+    )
+    .unwrap();
+    writeln!(
+        source,
         "    let column_blocks = (columns + MATMUL_COLUMNS_{geometry} - 1u) / MATMUL_COLUMNS_{geometry};",
     )
     .unwrap();
     writeln!(
         source,
         "    let depth_blocks = (depth + MATMUL_DEPTH_{geometry} - 1u) / MATMUL_DEPTH_{geometry};",
+    )
+    .unwrap();
+    writeln!(
+        source,
+        "    let tiles_per_plane = row_blocks * column_blocks;",
     )
     .unwrap();
     writeln!(
@@ -65,14 +75,33 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
     source.push_str(
         "    for (var tile = task.first; tile < task.first + task.count; tile = tile + 1u) {\n",
     );
+    writeln!(source, "        let plane = tile / tiles_per_plane;").unwrap();
+    writeln!(source, "        let plane_row = plane / output.dims.y;").unwrap();
+    writeln!(source, "        let plane_column = plane % output.dims.y;").unwrap();
+    writeln!(source, "        let within = tile % tiles_per_plane;").unwrap();
     writeln!(
         source,
-        "        let base_row = (tile / column_blocks) * MATMUL_ROWS_{geometry};",
+        "        let base_row = (within / column_blocks) * MATMUL_ROWS_{geometry};",
     )
     .unwrap();
     writeln!(
         source,
-        "        let base_column = (tile % column_blocks) * MATMUL_COLUMNS_{geometry};",
+        "        let base_column = (within % column_blocks) * MATMUL_COLUMNS_{geometry};",
+    )
+    .unwrap();
+    writeln!(
+        source,
+        "        let batch_left = Value(left.base + plane_row * left.strides.x + plane_column * left.strides.y, left.dims, left.strides);",
+    )
+    .unwrap();
+    writeln!(
+        source,
+        "        let batch_right = Value(right.base + plane_row * right.strides.x + plane_column * right.strides.y, right.dims, right.strides);",
+    )
+    .unwrap();
+    writeln!(
+        source,
+        "        let batch_out = output.base + plane * rows * columns;",
     )
     .unwrap();
     for register in 0..tile.registers() {
@@ -80,7 +109,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
     }
     writeln!(
         source,
-        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, 0u, 0u, left, right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = 0u; block < depth_blocks; block = block + 1u) {{\n            if (block + 1u < depth_blocks) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, left, right, rows, depth, columns);\n            }}",
+        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, 0u, 0u, batch_left, batch_right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = 0u; block < depth_blocks; block = block + 1u) {{\n            if (block + 1u < depth_blocks) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, batch_left, batch_right, rows, depth, columns);\n            }}",
     )
     .unwrap();
     writeln!(
@@ -120,7 +149,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
             let register = row * tile.register_columns() + column;
             writeln!(
                 source,
-                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output.base, index{register}, chained(task, vec4<u32>(0u, 0u, row{register}, column{register}), acc{register}));\n        }}",
+                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(batch_out, index{register}, chained(task, vec4<u32>(plane_row, plane_column, row{register}, column{register}), acc{register}));\n        }}",
             )
             .unwrap();
         }

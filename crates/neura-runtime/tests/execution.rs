@@ -60,6 +60,178 @@ fn a_matmul_matches_a_cpu_reference() {
 }
 
 #[test]
+fn a_product_pairs_the_batch_its_operands_share() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([2, 1, 3, 4]), Init::Zero);
+    let right = graph.parameter(Shape::of([1, 3, 4, 2]), Init::Zero);
+    let out = graph.matmul(left, right);
+    assert_eq!(out.shape(), Shape::of([2, 3, 3, 2]));
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let left_data = random(24, 11);
+    let right_data = random(24, 29);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 36];
+    for row in 0..2usize {
+        for column in 0..3usize {
+            let plane = row * 3 + column;
+            let product = matmul_reference(
+                &left_data[row * 12..row * 12 + 12],
+                &right_data[column * 8..column * 8 + 8],
+                3,
+                4,
+                2,
+            );
+            expected[plane * 6..plane * 6 + 6].copy_from_slice(&product);
+        }
+    }
+    assert_close(&runtime.read(&program, out), &expected, 1e-5);
+}
+
+#[test]
+fn a_product_spreads_one_operand_over_every_plane() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([2, 3, 7, 5]), Init::Zero);
+    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero);
+    let out = graph.matmul(left, right);
+    assert_eq!(out.shape(), Shape::of([2, 3, 7, 9]));
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let left_data = random(2 * 3 * 7 * 5, 31);
+    let right_data = random(45, 37);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    let mut expected = Vec::new();
+    for plane in 0..6usize {
+        expected.extend(matmul_reference(
+            &left_data[plane * 35..plane * 35 + 35],
+            &right_data,
+            7,
+            5,
+            9,
+        ));
+    }
+    assert_close(&runtime.read(&program, out), &expected, 1e-5);
+}
+
+#[test]
+fn a_row_fold_sums_every_row_of_every_plane() {
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::of([2, 3, 5, 7]), Init::Zero);
+    let sums = graph.sum_rows(data);
+    assert_eq!(sums.shape(), Shape::of([2, 3, 5, 1]));
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(2 * 3 * 5 * 7, 17);
+    runtime.write(&program, data, &values);
+    runtime.run(&program);
+    let expected = values
+        .chunks(7)
+        .map(|row| row.iter().sum::<f32>())
+        .collect::<Vec<_>>();
+    assert_eq!(expected.len(), 30);
+    assert_close(&runtime.read(&program, sums), &expected, 1e-4);
+}
+
+#[test]
+fn a_row_fold_walks_a_view_through_its_strides() {
+    let graph = Graph::new();
+    let matrix = graph.parameter(Shape::matrix(7, 3), Init::Zero);
+    let sums = graph.sum_rows(graph.transpose(matrix));
+    assert_eq!(sums.shape(), Shape::matrix(3, 1));
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(21, 23);
+    runtime.write(&program, matrix, &values);
+    runtime.run(&program);
+    let expected = (0..3)
+        .map(|column| (0..7).map(|row| values[row * 3 + column]).sum::<f32>())
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, sums), &expected, 1e-4);
+}
+
+#[test]
+fn a_masked_attention_block_rides_one_tape() {
+    let heads = 2usize;
+    let tokens = 3u32;
+    let width = 2u32;
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
+    let keys = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
+    let values = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
+    let mask = graph.parameter(Shape::matrix(tokens, tokens), Init::Zero);
+    let scores = graph.mul(
+        graph.matmul(queries, graph.transpose(keys)),
+        graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
+    );
+    let weighted = graph.softmax(graph.add(scores, mask));
+    let out = graph.matmul(weighted, values);
+    assert_eq!(out.shape(), Shape::of([heads as u32, 1, tokens, width]));
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let elements = heads * tokens as usize * width as usize;
+    let data = random(elements as u32 * 3, 41);
+    let mask_values = (0..tokens * tokens)
+        .map(|index| {
+            if index % tokens <= index / tokens {
+                0.0
+            } else {
+                -1.0e9
+            }
+        })
+        .collect::<Vec<_>>();
+    let (values_data, rest) = data.split_at(elements);
+    let (keys_data, queries_data) = rest.split_at(elements);
+    runtime.write(&program, queries, queries_data);
+    runtime.write(&program, keys, keys_data);
+    runtime.write(&program, values, values_data);
+    runtime.write(&program, mask, &mask_values);
+    runtime.run(&program);
+    let scale = 1.0 / (width as f32).sqrt();
+    let mut expected = Vec::new();
+    for head in 0..heads {
+        for row in 0..tokens as usize {
+            let mut logits = Vec::new();
+            for column in 0..tokens as usize {
+                let at = (head * tokens as usize + row) * width as usize;
+                let other = (head * tokens as usize + column) * width as usize;
+                let dot = (0..width as usize)
+                    .map(|step| queries_data[at + step] * keys_data[other + step])
+                    .sum::<f32>();
+                logits.push(dot * scale + mask_values[row * tokens as usize + column]);
+            }
+            let largest = logits.iter().copied().fold(f32::MIN, f32::max);
+            let total = logits
+                .iter()
+                .map(|value| (value - largest).exp())
+                .sum::<f32>();
+            let probabilities = logits
+                .iter()
+                .map(|value| (value - largest).exp() / total)
+                .collect::<Vec<_>>();
+            for step in 0..width as usize {
+                let mut sum = 0.0;
+                for (column, probability) in probabilities.iter().enumerate() {
+                    let at = (head * tokens as usize + column) * width as usize;
+                    sum += probability * values_data[at + step];
+                }
+                expected.push(sum);
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, out), &expected, 1e-5);
+}
+
+#[test]
 fn a_bias_broadcasts_over_every_row() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(4, 8));

@@ -58,8 +58,8 @@ fn run_broadcast(task: Task, lid: u32) {
     let output = values[task.out];
     let source = values[task.a];
     let dims = output.dims;
-    let scalar = fetch(source.base, task.slot);
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        publish(output.base, index, chained(task, coordinates(index, dims), scalar));
+        let at = coordinates(index, dims);
+        publish(output.base, index, chained(task, at, fetch(source.base, read_address(at, source.strides))));
     }
 }

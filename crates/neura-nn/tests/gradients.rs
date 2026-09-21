@@ -1,4 +1,4 @@
-use neura_nn::{Linear, cross_entropy, mse_loss, policy_loss};
+use neura_nn::{LayerNorm, Linear, cross_entropy, mse_loss, policy_loss};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
@@ -13,6 +13,133 @@ fn open() -> Runtime {
 fn sampled(elements: usize) -> impl Iterator<Item = usize> {
     let stride = (elements / 4).max(1);
     (0..elements).step_by(stride).take(4)
+}
+
+#[test]
+fn a_batched_product_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let left = graph.parameter(
+        Shape::of([2, 1, 3, 4]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let right = graph.parameter(
+        Shape::of([2, 3, 4, 2]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let product = graph.matmul(left, right);
+    assert_eq!(product.shape(), Shape::of([2, 3, 3, 2]));
+    let targets = graph.input(Shape::of([2, 3, 3, 2]));
+    let loss = mse_loss(&graph, product, targets);
+    let gradients = graph.backward(loss);
+    let parameters = [left, right];
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        targets,
+        &(0..36)
+            .map(|index| (index as f32 * 0.031).cos() * 0.5)
+            .collect::<Vec<_>>(),
+    );
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 1e-2,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+
+#[test]
+fn a_normalized_row_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.parameter(
+        Shape::of([2, 3, 5]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let layer = LayerNorm::new(
+        &graph,
+        5,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        1e-5,
+    );
+    let targets = graph.input(Shape::of([2, 3, 5]));
+    let loss = mse_loss(&graph, layer.forward(&graph, input), targets);
+    let gradients = graph.backward(loss);
+    let mut parameters = vec![input];
+    parameters.extend(layer.parameters());
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        targets,
+        &(0..30)
+            .map(|index| (index as f32 * 0.043).sin() * 0.5)
+            .collect::<Vec<_>>(),
+    );
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 2e-3,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
+    }
 }
 
 #[test]

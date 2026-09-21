@@ -1,6 +1,6 @@
 use crate::graph::{TaskInfo, ValueInfo};
 use crate::shape::Shape;
-use neura_abi::{Kind, MatmulTile, NO_VALUE, Profile, StepRecord, strategy};
+use neura_abi::{Kind, MAX_RANK, MatmulTile, NO_VALUE, Profile, StepRecord, strategy};
 
 const TARGET_TASKS: u32 = 256;
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
@@ -8,6 +8,7 @@ const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
+const FOLD_ROW_CEILING: u32 = 8;
 const MATMUL_TILES_FLOOR: u32 = 128;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -89,11 +90,13 @@ impl Plan {
 fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     match unit.kind {
         Kind::Matmul => {
-            let out = plan.shape(unit.out);
-            let geometry = matmul_geometry(profile, out.rows(), out.columns());
+            let dims = plan.shape(unit.out).dims();
+            let geometry = matmul_geometry(profile, dims[2], dims[3]);
             let tile = profile.ladder()[geometry as usize];
-            let column_blocks = out.columns().div_ceil(tile.columns());
-            for tile_index in 0..out.rows().div_ceil(tile.rows()) * column_blocks {
+            let planes = dims[0] * dims[1];
+            let row_blocks = dims[2].div_ceil(tile.rows());
+            let column_blocks = dims[3].div_ceil(tile.columns());
+            for tile_index in 0..planes * row_blocks * column_blocks {
                 let mut task = Task::span(unit, tile_index, 1, tile.tile_work());
                 task.geometry = geometry;
                 plan.tasks.push(task);
@@ -112,17 +115,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile),
         Kind::SumChunk => reduce(plan, unit),
-        Kind::SumTo => {
-            let out = plan.shape(unit.out);
-            let source = plan.shape(unit.inputs[0]);
-            let replicas = (0..4)
-                .map(|axis| u64::from(source.dims()[axis]) / u64::from(out.dims()[axis]))
-                .product::<u64>();
-            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * replicas));
-            }
-        }
+        Kind::SumAxis => fold(plan, unit, profile),
         Kind::Binary
         | Kind::Unary
         | Kind::Partial
@@ -201,6 +194,35 @@ fn task_elements(elements: u32) -> u32 {
         .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
 }
 
+fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let (shape, strides) = {
+        let source = &plan.values[unit.inputs[0] as usize];
+        (source.shape, source.strides)
+    };
+    let axis = unit.slot;
+    let folds = shape.dims()[axis as usize];
+    let out = plan.shape(unit.out);
+    if axis == MAX_RANK - 1 && strides == shape.strides() {
+        let columns = shape.columns();
+        let geometry = if columns <= profile.workgroup() {
+            strategy::THREAD_ROW
+        } else {
+            strategy::WORKGROUP_ROW
+        };
+        for (first, count) in spans(out.elements(), fold_rows_per_task(out.elements())) {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
+            task.geometry = geometry;
+            plan.tasks.push(task);
+        }
+        return;
+    }
+    for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(folds));
+        task.geometry = strategy::THREAD_ELEMENT;
+        plan.tasks.push(task);
+    }
+}
+
 fn reduction_elements(elements: u32) -> u32 {
     (elements / TARGET_TASKS)
         .next_power_of_two()
@@ -209,6 +231,10 @@ fn reduction_elements(elements: u32) -> u32 {
 
 fn softmax_rows_per_task(rows: u32) -> u32 {
     rows.div_ceil(TARGET_TASKS).clamp(1, SOFTMAX_ROW_CEILING)
+}
+
+fn fold_rows_per_task(rows: u32) -> u32 {
+    rows.div_ceil(TARGET_TASKS).clamp(1, FOLD_ROW_CEILING)
 }
 
 fn choice_rows_per_task(rows: u32) -> u32 {

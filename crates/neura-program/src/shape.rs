@@ -82,12 +82,14 @@ impl Shape {
         (0..4).all(|axis| self.dims[axis] == other.dims[axis] || self.dims[axis] == 1)
     }
 
-    pub fn as_matrix(self) -> Option<(u32, u32)> {
-        if self.dims[0] == 1 && self.dims[1] == 1 {
-            Some((self.dims[2], self.dims[3]))
-        } else {
-            None
-        }
+    pub fn batch(self) -> [u32; 2] {
+        [self.dims[0], self.dims[1]]
+    }
+
+    pub fn reduced(self, axis: u32) -> Self {
+        let mut dims = self.dims;
+        dims[axis as usize] = 1;
+        Self { dims }
     }
 
     pub fn rows(self) -> u32 {

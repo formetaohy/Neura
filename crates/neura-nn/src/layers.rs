@@ -34,6 +34,59 @@ impl Linear {
     }
 }
 
+pub struct LayerNorm {
+    columns: u32,
+    scale: Value,
+    shift: Value,
+    share: Value,
+    floor: Value,
+}
+
+impl LayerNorm {
+    pub fn new(graph: &Graph, columns: u32, init: Init, floor: f32) -> Self {
+        assert!(
+            columns > 0,
+            "a layer of {columns} columns normalizes nothing"
+        );
+        assert!(floor > 0.0, "a floor of {floor} divides by zero");
+        Self {
+            columns,
+            scale: graph.parameter(Shape::vector(columns), init),
+            shift: graph.parameter(Shape::vector(columns), Init::Zero),
+            share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
+            floor: graph.fill(Shape::scalar(), floor),
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+        assert_eq!(
+            graph.shape(input).columns(),
+            self.columns,
+            "a layer of {} columns normalizes {:?}",
+            self.columns,
+            graph.shape(input).dims(),
+        );
+        let mean = graph.mul(graph.sum_rows(input), self.share);
+        let centered = graph.sub(input, mean);
+        let spread = graph.mul(graph.sum_rows(graph.mul(centered, centered)), self.share);
+        let deviation = graph.sqrt(graph.add(spread, self.floor));
+        let sharpened = graph.mul(centered, graph.recip(deviation));
+        graph.add(graph.mul(sharpened, self.scale), self.shift)
+    }
+
+    pub fn scale(&self) -> Value {
+        self.scale
+    }
+
+    pub fn shift(&self) -> Value {
+        self.shift
+    }
+
+    pub fn parameters(&self) -> [Value; 2] {
+        [self.scale, self.shift]
+    }
+}
+
 pub struct Mlp {
     layers: Vec<Linear>,
 }

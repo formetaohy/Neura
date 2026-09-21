@@ -127,6 +127,43 @@ fn a_value_two_tasks_read_stays_on_the_tape() {
 }
 
 #[test]
+fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::vector(64), Init::Zero);
+    let right = graph.parameter(Shape::vector(64), Init::Zero);
+    let product = graph.mul(left, right);
+    let negated = graph.neg(product);
+    let squared = graph.mul(product, product);
+    let encoding = encoding(&graph);
+    let reader = writers(&encoding, negated.id())[0];
+    let taker = writers(&encoding, squared.id())[0];
+    assert_eq!(
+        wave_of(&encoding, reader),
+        wave_of(&encoding, taker),
+        "both readers of a value share a wave",
+    );
+    assert_ne!(
+        encoding.span(product).offset,
+        encoding.span(squared).offset,
+        "the storage of a value a second task reads in the same wave was handed to its reader",
+    );
+}
+
+#[test]
+fn a_value_one_task_reads_hands_its_storage_to_that_task() {
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::vector(64), Init::Zero);
+    let scaled = graph.mul(data, graph.fill(Shape::vector(64), 2.0));
+    let squared = graph.mul(scaled, scaled);
+    let encoding = encoding(&graph);
+    assert_eq!(
+        encoding.span(scaled).offset,
+        encoding.span(squared).offset,
+        "the only reader of a value takes the storage it consumed",
+    );
+}
+
+#[test]
 fn a_retained_value_is_never_folded_away() {
     let graph = Graph::new();
     let data = graph.parameter(Shape::vector(8), Init::Zero);
@@ -347,7 +384,11 @@ fn a_backward_pass_reaches_every_parameter() {
         kinds.contains(&Kind::Broadcast),
         "the loss gradient spreads the scalar over the tensor"
     );
-    assert_eq!(kinds.iter().filter(|kind| **kind == Kind::SumTo).count(), 1);
+    assert_eq!(
+        kinds.iter().filter(|kind| **kind == Kind::SumAxis).count(),
+        1,
+        "the bias gradient folds the rows it was spread over",
+    );
 }
 
 #[test]

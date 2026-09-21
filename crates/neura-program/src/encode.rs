@@ -80,7 +80,15 @@ impl Blocks {
 struct Live {
     first: usize,
     last: usize,
+    reads: u32,
     aliased_at: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct Active {
+    live: Live,
+    offset: u64,
+    bytes: u64,
 }
 
 pub struct Encoding {
@@ -166,14 +174,13 @@ impl Encoding {
                     geometries[geometry] += 1;
                     geometry as u32
                 }
-                Kind::Argmax | Kind::Categorical => task.geometry,
+                Kind::Argmax | Kind::Categorical | Kind::SumAxis => task.geometry,
                 Kind::Binary
                 | Kind::Unary
                 | Kind::Partial
                 | Kind::Fill
                 | Kind::Broadcast
                 | Kind::SumChunk
-                | Kind::SumTo
                 | Kind::Softmax
                 | Kind::SoftmaxGrad
                 | Kind::LogSoftmax
@@ -457,23 +464,26 @@ fn wave_ends(depths: &[u32], order: &[usize]) -> Vec<u32> {
 
 fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[usize]) -> Vec<Option<Live>> {
     let mut live = vec![None::<Live>; values.len()];
+    let mut readers = Vec::new();
     for (position, index) in order.iter().enumerate() {
         let task = &tasks[*index];
         let aliases = reads_every_element_in_place(values, task);
-        touch(values, &mut live, task.out, position, position, None);
+        touch(values, &mut live, task.out, position, false, None);
+        readers.clear();
         for input in task.reads() {
-            if aliases && input != task.out {
-                touch(
-                    values,
-                    &mut live,
-                    input,
-                    position,
-                    position.saturating_sub(1),
-                    Some(position),
-                );
-            } else {
-                touch(values, &mut live, input, position, position, None);
+            if readers.contains(&input) {
+                continue;
             }
+            readers.push(input);
+            let in_place = aliases && input != task.out;
+            touch(
+                values,
+                &mut live,
+                input,
+                position,
+                true,
+                in_place.then_some(position),
+            );
         }
     }
     live
@@ -494,23 +504,23 @@ fn touch(
     values: &[ValueInfo],
     live: &mut [Option<Live>],
     value: u32,
-    first: usize,
-    last: usize,
+    position: usize,
+    read: bool,
     aliased_at: Option<usize>,
 ) {
     let storage = values[value as usize].storage as usize;
     match &mut live[storage] {
         Some(entry) => {
-            entry.first = entry.first.min(first);
-            entry.last = entry.last.max(last);
-            if aliased_at.is_some() || last >= entry.last {
-                entry.aliased_at = aliased_at;
-            }
+            entry.first = entry.first.min(position);
+            entry.last = entry.last.max(position);
+            entry.reads += u32::from(read);
+            entry.aliased_at = entry.aliased_at.max(aliased_at);
         }
         slot @ None => {
             *slot = Some(Live {
-                first,
-                last,
+                first: position,
+                last: position,
+                reads: u32::from(read),
                 aliased_at,
             });
         }
@@ -565,11 +575,30 @@ fn allocate(
         .filter_map(|(id, live)| live.map(|live| (id, live)))
         .collect::<Vec<_>>();
     pending.sort_by_key(|(_, live)| (live.first, live.last));
-    let mut active = Vec::<(u32, Option<usize>, Block)>::new();
+    let mut active = Vec::<Active>::new();
     for (storage, live) in pending {
-        active.retain(|(last_wave, aliased_at, block)| {
-            if *last_wave < wave_of(live.first) || *aliased_at == Some(live.first) {
-                arena.release(block.offset, block.bytes);
+        let wave = wave_of(live.first);
+        let taken = active
+            .iter()
+            .position(|held| held.live.reads == 1 && held.live.aliased_at == Some(live.first));
+        if let Some(position) = taken {
+            let held = active.swap_remove(position);
+            let bytes = storage_bytes(values, storage);
+            assert_eq!(
+                held.bytes, bytes,
+                "a value read in place by one task hands that task a storage of another size",
+            );
+            offsets[storage] = held.offset;
+            active.push(Active {
+                live,
+                offset: held.offset,
+                bytes,
+            });
+            continue;
+        }
+        active.retain(|held| {
+            if wave_of(held.live.last) < wave {
+                arena.release(held.offset, held.bytes);
                 false
             } else {
                 true
@@ -578,7 +607,11 @@ fn allocate(
         let bytes = storage_bytes(values, storage);
         let offset = arena.reserve(bytes, alignment);
         offsets[storage] = offset;
-        active.push((wave_of(live.last), live.aliased_at, Block { offset, bytes }));
+        active.push(Active {
+            live,
+            offset,
+            bytes,
+        });
     }
     (offsets, arena.bytes())
 }

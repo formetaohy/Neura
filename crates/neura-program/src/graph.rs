@@ -4,8 +4,8 @@ use crate::layout::Layout;
 use crate::shape::Shape;
 use neura_abi::Kind;
 use neura_abi::op;
+use neura_abi::{MAX_RANK, Placement, Precision};
 use neura_abi::{NO_VALUE, Profile, StepRecord};
-use neura_abi::{Placement, Precision};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -163,27 +163,30 @@ impl Graph {
     }
 
     pub fn matmul(&self, left: Value, right: Value) -> Value {
-        let (rows, depth) = left.shape().as_matrix().unwrap_or_else(|| {
-            panic!(
-                "a matmul left operand must be a matrix, not {:?}",
-                left.shape()
-            )
-        });
-        let (right_rows, columns) = right.shape().as_matrix().unwrap_or_else(|| {
-            panic!(
-                "a matmul right operand must be a matrix, not {:?}",
-                right.shape()
-            )
-        });
+        let left_dims = left.shape().dims();
+        let right_dims = right.shape().dims();
         assert_eq!(
-            depth,
-            right_rows,
+            left_dims[3], right_dims[2],
             "a matmul of {:?} by {:?} has no shared depth",
-            left.shape(),
-            right.shape(),
+            left_dims, right_dims,
+        );
+        let (left_batch, right_batch) = (left.shape().batch(), right.shape().batch());
+        assert!(
+            left_batch
+                .iter()
+                .zip(right_batch)
+                .all(|(left, right)| left == &right || *left == 1 || right == 1),
+            "a matmul of {:?} by {:?} carries batches that do not meet",
+            left_dims,
+            right_dims,
         );
         let out = self.fresh(
-            Shape::matrix(rows, columns),
+            Shape::of([
+                left_batch[0].max(right_batch[0]),
+                left_batch[1].max(right_batch[1]),
+                left_dims[2],
+                right_dims[3],
+            ]),
             Residency::Derived,
             self.tracked(&[left, right]),
         );
@@ -375,10 +378,6 @@ impl Graph {
     }
 
     pub fn transpose(&self, value: Value) -> Value {
-        let (rows, columns) = value
-            .shape()
-            .as_matrix()
-            .unwrap_or_else(|| panic!("only a matrix transposes, not {:?}", value.shape()));
         let (strides, storage, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
@@ -386,7 +385,9 @@ impl Graph {
         };
         let mut strides = strides;
         strides.swap(2, 3);
-        self.alias(Shape::matrix(columns, rows), strides, storage, tracked)
+        let mut dims = value.shape().dims();
+        dims.swap(2, 3);
+        self.alias(Shape::of(dims), strides, storage, tracked)
     }
 
     pub fn add_into(&self, target: Value, addend: Value) {
@@ -523,7 +524,7 @@ impl Graph {
                     self.row_gradient(Kind::LogSoftmaxGrad, task, source, gradient, grads);
                 }
             }
-            Kind::SumChunk => {
+            Kind::SumChunk | Kind::SumAxis => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
                     let out = self.broadcast(gradient, self.shape(source));
@@ -532,7 +533,6 @@ impl Graph {
             }
             Kind::Fill
             | Kind::Broadcast
-            | Kind::SumTo
             | Kind::Partial
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad => {}
@@ -686,33 +686,63 @@ impl Graph {
     }
 
     fn reduce_to(&self, gradient: Value, target: Value) -> Value {
-        if self.shape(gradient) == self.shape(target) {
+        let shape = self.shape(target);
+        if self.shape(gradient) == shape {
             return gradient;
         }
-        let shape = self.shape(target);
         assert!(
             shape.fits_within(self.shape(gradient)),
             "a gradient of {} elements cannot fold back into {} elements",
             self.shape(gradient).elements(),
             shape.elements(),
         );
-        let out = self.fresh(shape, Residency::Derived, false);
-        self.push(TaskInfo::of(
-            Kind::SumTo,
+        let mut folded = gradient;
+        for axis in (0..MAX_RANK).rev() {
+            if self.shape(folded).dims()[axis as usize] != shape.dims()[axis as usize] {
+                folded = self.fold(folded, axis);
+            }
+        }
+        folded
+    }
+
+    pub fn sum_rows(&self, value: Value) -> Value {
+        self.fold(value, MAX_RANK - 1)
+    }
+
+    fn fold(&self, value: Value, axis: u32) -> Value {
+        let shape = self.shape(value);
+        assert!(
+            axis < MAX_RANK,
+            "a fold names one of the {MAX_RANK} axes of {:?}",
+            shape.dims(),
+        );
+        assert!(
+            shape.dims()[axis as usize] > 1,
+            "folding axis {axis} of {:?} reduces a single element",
+            shape.dims(),
+        );
+        let out = self.fresh(
+            shape.reduced(axis),
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::SumAxis,
             op::NONE,
             out.id(),
-            [gradient.id(), NO_VALUE, NO_VALUE],
-        ));
+            [value.id(), NO_VALUE, NO_VALUE],
+        );
+        task.slot = axis;
+        self.push(task);
         out
     }
 
     fn broadcast(&self, source: Value, shape: Shape) -> Value {
         assert!(
-            self.shape(source).is_scalar(),
-            "a broadcast hands every element of {:?} one scalar, and value {} holds {} elements",
-            shape,
-            source.id(),
-            self.shape(source).elements(),
+            self.shape(source).fits_within(shape),
+            "a broadcast spreads {:?} over {:?}",
+            self.shape(source).dims(),
+            shape.dims(),
         );
         let out = self.fresh(shape, Residency::Derived, false);
         self.push(TaskInfo::of(
