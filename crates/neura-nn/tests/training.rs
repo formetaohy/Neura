@@ -1,4 +1,4 @@
-use neura_nn::{Adam, Linear, Mlp, Sgd, cross_entropy, mse_loss};
+use neura_nn::{Adam, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
 use neura_program::{Graph, Init, Shape};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
@@ -215,4 +215,68 @@ fn a_network_learns_the_action_it_was_shown() {
             sample % 3,
         );
     }
+}
+
+#[test]
+fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
+    let runtime = open();
+    let graph = Graph::new();
+    let layer = Linear::new(
+        &graph,
+        3,
+        4,
+        Init::Uniform {
+            low: -0.3,
+            high: 0.3,
+        },
+    );
+    let samples = 5;
+    let classes = 4;
+    let observations = graph.input(Shape::matrix(samples, 3));
+    let advantage = graph.input(Shape::matrix(samples, 1));
+    let logits = layer.forward(&graph, observations);
+    let action = graph.argmax(logits);
+    let loss = policy_loss(&graph, logits, action, advantage);
+    graph.retain(logits);
+    graph.retain(action);
+    let gradients = graph.backward(loss);
+    let optimizer = Sgd::new(&graph, 0.05);
+    optimizer.step(&graph, &gradients, &layer.parameters());
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        observations,
+        &(0..15)
+            .map(|index| index as f32 * 0.13 - 0.9)
+            .collect::<Vec<_>>(),
+    );
+    runtime.write(&program, advantage, &vec![1.0; samples as usize]);
+    runtime.run(&program);
+    let scored = runtime.read(&program, logits);
+    let taken = runtime.read(&program, action);
+    let expected = (0..samples)
+        .map(|row| {
+            let mut best = f32::MIN;
+            let mut index = 0.0f32;
+            for column in 0..classes {
+                let value = scored[(row * classes + column) as usize];
+                if value > best {
+                    best = value;
+                    index = column as f32;
+                }
+            }
+            index
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(taken, expected, "the device picks the class it scores");
+    let before = runtime.read(&program, loss)[0];
+    for _ in 0..8 {
+        runtime.run(&program);
+    }
+    let after = runtime.read(&program, loss)[0];
+    assert!(
+        after < before,
+        "eight policy steps moved the loss from {before} to {after}",
+    );
 }

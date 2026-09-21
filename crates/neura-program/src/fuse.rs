@@ -1,5 +1,5 @@
 use crate::graph::{GraphState, Residency, TaskInfo};
-use neura_abi::{NO_VALUE, StepRecord, kind};
+use neura_abi::{Kind, NO_VALUE, StepRecord};
 
 const CHAIN_SLOT: u32 = u32::MAX;
 
@@ -66,9 +66,9 @@ fn absorb(
         let consumer = tasks[consumer_index]
             .as_ref()
             .expect("a consumer is live while it is absorbed");
-        if producer.kind == kind::SUM_CHUNK
+        if producer.kind == Kind::SumChunk
             || producer.in_place
-            || !kind::of(consumer.kind).chainable
+            || !consumer.kind.chainable()
             || state.values[consumer.out as usize].shape != state.values[value as usize].shape
             || consumer
                 .inputs
@@ -127,12 +127,12 @@ fn absorb(
 
 fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
     match consumer.kind {
-        kind::UNARY => Some(StepRecord {
+        Kind::Unary => Some(StepRecord {
             op: consumer.op,
             operand: NO_VALUE,
             swapped: 0,
         }),
-        kind::BINARY => {
+        Kind::Binary => {
             let slot = consumer
                 .inputs
                 .iter()
@@ -148,7 +148,20 @@ fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
                 swapped: u32::from(slot == 1),
             })
         }
-        _ => None,
+        Kind::Matmul
+        | Kind::Partial
+        | Kind::Fill
+        | Kind::Broadcast
+        | Kind::SumChunk
+        | Kind::SumTo
+        | Kind::Softmax
+        | Kind::SoftmaxGrad
+        | Kind::LogSoftmax
+        | Kind::LogSoftmaxGrad
+        | Kind::Argmax
+        | Kind::Categorical
+        | Kind::OneHot
+        | Kind::Gather => None,
     }
 }
 

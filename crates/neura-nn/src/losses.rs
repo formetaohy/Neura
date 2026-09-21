@@ -34,3 +34,32 @@ pub fn cross_entropy(graph: &Graph, logits: Value, target: Value) -> Value {
         graph.fill(Shape::scalar(), -1.0 / rows as f32),
     )
 }
+
+pub fn policy_loss(graph: &Graph, logits: Value, action: Value, advantage: Value) -> Value {
+    let shape = graph.shape(logits);
+    let classes = shape.dims()[3];
+    let rows = shape.rows();
+    assert_eq!(
+        graph.shape(action).elements(),
+        rows,
+        "a policy weighs one taken action per row it scores",
+    );
+    assert_eq!(
+        graph.shape(action).dims()[3],
+        1,
+        "a taken action is the class its row chose, and {:?} holds a row of them",
+        graph.shape(action).dims(),
+    );
+    let weights = graph.shape(advantage);
+    assert!(
+        weights.is_scalar() || (weights.dims()[3] == 1 && weights.elements() == rows),
+        "an advantage weighs one action per row, and {:?} holds {} weights for {rows} rows",
+        weights.dims(),
+        weights.elements(),
+    );
+    let taken = graph.mul(graph.one_hot(action, classes), graph.log_softmax(logits));
+    graph.mul(
+        graph.sum(graph.mul(advantage, taken)),
+        graph.fill(Shape::scalar(), -1.0 / rows as f32),
+    )
+}

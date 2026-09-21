@@ -2,7 +2,7 @@ use crate::encode::Encoding;
 use crate::init::Init;
 use crate::layout::Layout;
 use crate::shape::Shape;
-use neura_abi::kind;
+use neura_abi::Kind;
 use neura_abi::op;
 use neura_abi::{NO_VALUE, Profile, StepRecord};
 use neura_abi::{Placement, Precision};
@@ -38,7 +38,7 @@ pub(crate) enum Residency {
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct TaskInfo {
-    pub(crate) kind: u32,
+    pub(crate) kind: Kind,
     pub(crate) op: u32,
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
@@ -50,7 +50,7 @@ pub(crate) struct TaskInfo {
 }
 
 impl TaskInfo {
-    fn of(kind: u32, op: u32, out: u32, inputs: [u32; 3]) -> Self {
+    fn of(kind: Kind, op: u32, out: u32, inputs: [u32; 3]) -> Self {
         Self {
             kind,
             op,
@@ -156,7 +156,7 @@ impl Graph {
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value {
         let out = self.fresh(shape, Residency::Derived, false);
-        let mut task = TaskInfo::of(kind::FILL, op::NONE, out.id(), [NO_VALUE; 3]);
+        let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 3]);
         task.param = value;
         self.push(task);
         out
@@ -188,7 +188,7 @@ impl Graph {
             self.tracked(&[left, right]),
         );
         self.push(TaskInfo::of(
-            kind::MATMUL,
+            Kind::Matmul,
             op::NONE,
             out.id(),
             [left.id(), right.id(), NO_VALUE],
@@ -261,11 +261,101 @@ impl Graph {
     }
 
     pub fn softmax(&self, value: Value) -> Value {
-        self.rows(kind::SOFTMAX, value)
+        self.rows(Kind::Softmax, value)
     }
 
     pub fn log_softmax(&self, value: Value) -> Value {
-        self.rows(kind::LOG_SOFTMAX, value)
+        self.rows(Kind::LogSoftmax, value)
+    }
+
+    pub fn argmax(&self, value: Value) -> Value {
+        self.choice(Kind::Argmax, value, NO_VALUE)
+    }
+
+    pub fn categorical(&self, logits: Value, seed: Value) -> Value {
+        assert!(
+            self.shape(seed).is_scalar(),
+            "a categorical draw takes one seed, and value {} holds {} elements",
+            seed.id(),
+            self.shape(seed).elements(),
+        );
+        self.choice(Kind::Categorical, logits, seed.id())
+    }
+
+    fn choice(&self, kind: Kind, source: Value, seed: u32) -> Value {
+        assert!(
+            self.contiguous(source),
+            "a {} folds a row of a tensor stored row by row, and value {} is a view",
+            kind.name(),
+            source.id(),
+        );
+        let mut dims = self.shape(source).dims();
+        dims[3] = 1;
+        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        self.push(TaskInfo::of(
+            kind,
+            op::NONE,
+            out.id(),
+            [source.id(), seed, NO_VALUE],
+        ));
+        out
+    }
+
+    fn index_list(&self, indices: Value) {
+        let shape = self.shape(indices);
+        assert_eq!(
+            shape.dims()[3],
+            1,
+            "an index list holds one index per row, and {:?} holds {} of them",
+            shape.dims(),
+            shape.dims()[3],
+        );
+        assert!(
+            self.contiguous(indices),
+            "an index list is walked row by row, and value {} is a view",
+            indices.id(),
+        );
+    }
+
+    pub fn one_hot(&self, indices: Value, classes: u32) -> Value {
+        self.index_list(indices);
+        assert!(
+            classes > 0,
+            "a one hot tensor of {classes} classes holds none"
+        );
+        let mut dims = self.shape(indices).dims();
+        dims[3] = classes;
+        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        self.push(TaskInfo::of(
+            Kind::OneHot,
+            op::NONE,
+            out.id(),
+            [indices.id(), NO_VALUE, NO_VALUE],
+        ));
+        out
+    }
+
+    pub fn gather(&self, table: Value, indices: Value) -> Value {
+        assert!(
+            !self.tracked(&[table]),
+            "a gather moves whole rows of a table, and a table that learns is trained through the one hot product of its rows",
+        );
+        self.index_list(indices);
+        assert!(
+            self.contiguous(table),
+            "a gather walks a table row by row, and value {} is a view",
+            table.id(),
+        );
+        let mut dims = self.shape(indices).dims();
+        dims[3] = self.shape(table).dims()[3];
+        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        self.push(TaskInfo::of(
+            Kind::Gather,
+            op::NONE,
+            out.id(),
+            [table.id(), indices.id(), NO_VALUE],
+        ));
+        out
     }
 
     pub fn sum(&self, value: Value) -> Value {
@@ -276,7 +366,7 @@ impl Graph {
         );
         let out = self.fresh(Shape::scalar(), Residency::Derived, self.tracked(&[value]));
         self.push(TaskInfo::of(
-            kind::SUM_CHUNK,
+            Kind::SumChunk,
             op::NONE,
             out.id(),
             [value.id(), NO_VALUE, NO_VALUE],
@@ -310,7 +400,7 @@ impl Graph {
     pub fn copy_into(&self, target: Value, source: Value) {
         self.assert_in_place(target, source);
         let mut task = TaskInfo::of(
-            kind::UNARY,
+            Kind::Unary,
             op::IDENTITY,
             target.id(),
             [source.id(), NO_VALUE, NO_VALUE],
@@ -396,7 +486,7 @@ impl Graph {
 
     fn backward_task(&self, task: &TaskInfo, gradient: Value, grads: &mut [Option<u32>]) {
         match task.kind {
-            kind::MATMUL => {
+            Kind::Matmul => {
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
                 if self.tracked(&[left]) {
                     let transposed = self.transpose(right);
@@ -409,7 +499,7 @@ impl Graph {
                     self.accumulate(grads, right, contribution);
                 }
             }
-            kind::BINARY | kind::UNARY => {
+            Kind::Binary | Kind::Unary => {
                 let definition = op::of(task.op);
                 for slot in 0..definition.family.operands() {
                     let operand = self.value_of(task.inputs[slot as usize]);
@@ -421,32 +511,37 @@ impl Graph {
                     self.accumulate(grads, operand, contribution);
                 }
             }
-            kind::SOFTMAX => {
+            Kind::Softmax => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    self.row_gradient(kind::SOFTMAX_GRAD, task, source, gradient, grads);
+                    self.row_gradient(Kind::SoftmaxGrad, task, source, gradient, grads);
                 }
             }
-            kind::LOG_SOFTMAX => {
+            Kind::LogSoftmax => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
-                    self.row_gradient(kind::LOG_SOFTMAX_GRAD, task, source, gradient, grads);
+                    self.row_gradient(Kind::LogSoftmaxGrad, task, source, gradient, grads);
                 }
             }
-            kind::SUM_CHUNK => {
+            Kind::SumChunk => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
                     let out = self.broadcast(gradient, self.shape(source));
                     self.accumulate(grads, source, out);
                 }
             }
-            kind::FILL
-            | kind::BROADCAST
-            | kind::SUM_TO
-            | kind::PARTIAL
-            | kind::SOFTMAX_GRAD
-            | kind::LOG_SOFTMAX_GRAD => {}
-            other => panic!("the {} task has no gradient rule", kind::name(other)),
+            Kind::Fill
+            | Kind::Broadcast
+            | Kind::SumTo
+            | Kind::Partial
+            | Kind::SoftmaxGrad
+            | Kind::LogSoftmaxGrad => {}
+            Kind::Argmax | Kind::Categorical | Kind::OneHot | Kind::Gather => {
+                panic!(
+                    "the {} task yields the index of a row, and an index carries no gradient",
+                    task.kind.name(),
+                )
+            }
         }
     }
 
@@ -468,7 +563,7 @@ impl Graph {
         };
         let out = self.fresh(self.shape(gradient), Residency::Derived, false);
         let mut partial = TaskInfo::of(
-            kind::PARTIAL,
+            Kind::Partial,
             task.op,
             out.id(),
             [left, right, gradient.id()],
@@ -480,7 +575,7 @@ impl Graph {
 
     fn row_gradient(
         &self,
-        kind: u32,
+        kind: Kind,
         task: &TaskInfo,
         source: Value,
         gradient: Value,
@@ -496,11 +591,11 @@ impl Graph {
         self.accumulate(grads, source, out);
     }
 
-    fn rows(&self, kind: u32, value: Value) -> Value {
+    fn rows(&self, kind: Kind, value: Value) -> Value {
         assert!(
             self.contiguous(value),
             "a {} folds a row of a tensor stored row by row, and value {} is a view",
-            kind::name(kind),
+            kind.name(),
             value.id(),
         );
         let shape = self.shape(value);
@@ -603,7 +698,7 @@ impl Graph {
         );
         let out = self.fresh(shape, Residency::Derived, false);
         self.push(TaskInfo::of(
-            kind::SUM_TO,
+            Kind::SumTo,
             op::NONE,
             out.id(),
             [gradient.id(), NO_VALUE, NO_VALUE],
@@ -621,7 +716,7 @@ impl Graph {
         );
         let out = self.fresh(shape, Residency::Derived, false);
         self.push(TaskInfo::of(
-            kind::BROADCAST,
+            Kind::Broadcast,
             op::NONE,
             out.id(),
             [source.id(), NO_VALUE, NO_VALUE],

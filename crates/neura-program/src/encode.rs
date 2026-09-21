@@ -4,8 +4,8 @@ use crate::layout::{Layout, Region, Store, store_of};
 use crate::lower;
 use crate::lower::Task;
 use neura_abi::{
-    BoundsRecord, MatmulTile, Placement, Precision, Profile, StepRecord, TaskRecord, ValueRecord,
-    WORD_BYTES, kind,
+    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, StepRecord, TaskRecord,
+    ValueRecord, WORD_BYTES,
 };
 use std::cmp::Reverse;
 use std::mem::size_of;
@@ -158,7 +158,7 @@ impl Encoding {
         for index in &order {
             let task = &tasks[*index];
             let geometry = match task.kind {
-                kind::MATMUL => {
+                Kind::Matmul => {
                     let geometry = used
                         .iter()
                         .position(|tile| *tile == profile.ladder()[task.geometry as usize])
@@ -166,14 +166,27 @@ impl Encoding {
                     geometries[geometry] += 1;
                     geometry as u32
                 }
-                _ => 0,
+                Kind::Argmax | Kind::Categorical => task.geometry,
+                Kind::Binary
+                | Kind::Unary
+                | Kind::Partial
+                | Kind::Fill
+                | Kind::Broadcast
+                | Kind::SumChunk
+                | Kind::SumTo
+                | Kind::Softmax
+                | Kind::SoftmaxGrad
+                | Kind::LogSoftmax
+                | Kind::LogSoftmaxGrad
+                | Kind::OneHot
+                | Kind::Gather => 0,
             };
             assert!(
-                task.kind != kind::SUM_CHUNK || task.chain.is_empty(),
+                task.kind != Kind::SumChunk || task.chain.is_empty(),
                 "a reduction task writes one slot per task and carries no chain",
             );
             let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
-            record.kind = task.kind;
+            record.kind = task.kind.code();
             record.op = task.op;
             record.geometry = geometry;
             record.first = task.first;
@@ -370,7 +383,7 @@ fn used_tiles(profile: Profile, tasks: &[Task], order: &[usize]) -> Vec<MatmulTi
         .filter(|tile| {
             order.iter().any(|index| {
                 let task = &tasks[*index];
-                task.kind == kind::MATMUL && profile.ladder()[task.geometry as usize] == **tile
+                task.kind == Kind::Matmul && profile.ladder()[task.geometry as usize] == **tile
             })
         })
         .copied()
@@ -467,7 +480,7 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[usize]) -> Ve
 }
 
 fn reads_every_element_in_place(values: &[ValueInfo], task: &Task) -> bool {
-    if !kind::pointwise(task.kind) {
+    if !task.kind.pointwise() {
         return false;
     }
     let out = &values[task.out as usize];

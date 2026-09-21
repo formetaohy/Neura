@@ -1,5 +1,6 @@
+use naga::AddressSpace;
 use neura_abi::op::OPS;
-use neura_abi::{Geometry, PROFILES, Placement, Precision, Profile, kind};
+use neura_abi::{Geometry, Kind, PROFILES, Placement, Precision, Profile};
 use neura_shader::{BINDINGS, Megakernel, reflect};
 use std::collections::BTreeSet;
 
@@ -57,13 +58,15 @@ fn every_profile_declares_its_own_device_constants() {
 #[test]
 fn the_program_declares_the_taxonomy_it_dispatches() {
     let kernel = assemble(PROFILES[0]);
-    for kind in kind::KINDS {
+    for kind in Kind::ALL {
         assert!(
-            kernel
-                .source()
-                .contains(&format!("const {}: u32 = {}u;", kind.constant, kind.code)),
+            kernel.source().contains(&format!(
+                "const {}: u32 = {}u;",
+                kind.constant(),
+                kind.code()
+            )),
             "a device program never declares the {} task",
-            kind.name,
+            kind.name(),
         );
     }
     for op in OPS {
@@ -79,17 +82,14 @@ fn the_program_declares_the_taxonomy_it_dispatches() {
 
 #[test]
 fn every_declared_kind_has_a_body() {
-    let covered = neura_kernels::BODIES
+    let covered = Kind::ALL
         .iter()
-        .map(|body| body.kind)
-        .collect::<BTreeSet<_>>();
-    let declared = kind::KINDS
-        .iter()
-        .map(|kind| kind.code)
+        .map(|kind| neura_kernels::body(*kind))
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        covered, declared,
-        "every kind the tape can name needs a body the megakernel can run",
+        covered.len(),
+        Kind::ALL.len(),
+        "every kind the tape can name needs a body of its own the megakernel can run",
     );
 }
 
@@ -97,22 +97,22 @@ fn every_declared_kind_has_a_body() {
 fn the_megakernel_dispatches_every_kind_by_its_declared_constant() {
     for profile in PROFILES {
         let kernel = assemble(*profile);
-        for kind in kind::KINDS {
+        for kind in Kind::ALL {
             assert!(
                 kernel
                     .source()
-                    .contains(&format!("case {}:", kind.constant)),
+                    .contains(&format!("case {}:", kind.constant())),
                 "the megakernel never dispatches the {} task",
-                kind.name,
+                kind.name(),
             );
             assert!(
                 kernel.source().contains(&format!(
                     "case {}: {{ {}(task, lid); }}",
-                    kind.constant,
-                    neura_kernels::body(kind.code),
+                    kind.constant(),
+                    neura_kernels::body(*kind),
                 )),
                 "the megakernel never runs the {} body",
-                kind.name,
+                kind.name(),
             );
         }
     }
@@ -224,11 +224,10 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
                 );
             }
         }
-        assert!(
-            kernel
-                .source()
-                .contains("default: { refuse(MATMUL, task.geometry); }")
-        );
+        assert!(kernel.source().contains(&format!(
+            "default: {{ refuse({}, task.geometry); }}",
+            Kind::Matmul.constant(),
+        )));
         assert!(
             kernel.source().matches("workgroupBarrier()").count() >= profile.ladder().len() * 2,
             "a profile of {profile:?} stages its tiles without a barrier",
@@ -337,7 +336,7 @@ fn every_kernel_body_carries_its_chain() {
     let kernel = assemble(PROFILES[0]);
     let chained = kernel.source().matches("chained(task,").count();
     assert!(
-        chained >= neura_kernels::BODIES.len() - 3,
+        chained >= Kind::ALL.len() - 3,
         "every elementwise body ends in its chain, and a reduction does not",
     );
 }
@@ -348,4 +347,58 @@ fn the_devices_bound_every_tensor_the_tape_names() {
     assert!(kernel.source().contains("atomicAdd(&cursor["));
     assert!(kernel.source().contains("bounds.task_count"));
     assert!(kernel.source().contains("bounds.first_task"));
+}
+
+fn workgroup_bytes(source: &str) -> u64 {
+    let module = naga::front::wgsl::parse_str(source).expect("the assembled program parses");
+    module
+        .global_variables
+        .iter()
+        .filter(|(_, variable)| variable.space == AddressSpace::WorkGroup)
+        .map(|(_, variable)| type_bytes(&module, variable.ty))
+        .sum()
+}
+
+fn type_bytes(module: &naga::Module, ty: naga::Handle<naga::Type>) -> u64 {
+    match &module.types[ty].inner {
+        naga::TypeInner::Scalar(scalar) => u64::from(scalar.width),
+        naga::TypeInner::Vector { size, scalar } => {
+            let lanes = match size {
+                naga::VectorSize::Bi => 2u64,
+                naga::VectorSize::Tri => 3,
+                naga::VectorSize::Quad => 4,
+            };
+            lanes * u64::from(scalar.width)
+        }
+        naga::TypeInner::Array { base, size, .. } => match size {
+            naga::ArraySize::Constant(count) => u64::from(count.get()) * type_bytes(module, *base),
+            other => panic!("a workgroup array of a {other:?} size holds no bytes to promise"),
+        },
+        naga::TypeInner::Struct { span, .. } => u64::from(*span),
+        other => panic!("a workgroup binding of {other:?} holds no bytes to promise"),
+    }
+}
+
+#[test]
+fn the_profile_carries_the_workgroup_memory_its_program_declares() {
+    for profile in PROFILES {
+        let geometry = Geometry::of(*profile, profile.ladder());
+        let kernel = Megakernel::assemble(geometry, Precision::Single, PLACEMENT);
+        let declared = workgroup_bytes(kernel.source());
+        assert!(
+            declared > 0,
+            "{profile:?} declares no workgroup memory at all",
+        );
+        assert!(
+            profile.shared_bytes() >= declared,
+            "{profile:?} promises {} workgroup bytes where its program declares {declared}",
+            profile.shared_bytes(),
+        );
+    }
+}
+
+#[test]
+fn the_reductions_and_choices_keep_a_scratch_of_their_own() {
+    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0], &[]), Precision::Single, PLACEMENT);
+    assert!(workgroup_bytes(kernel.source()) >= 2 * u64::from(PROFILES[0].workgroup()) * 4);
 }

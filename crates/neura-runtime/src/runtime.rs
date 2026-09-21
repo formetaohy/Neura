@@ -1,7 +1,7 @@
 use crate::heap::Heap;
 use crate::program::{Program, Span, Weights};
 use neura_abi::{
-    CURSOR_REFUSED, PROFILES, Placement, Precision, Profile, WORD_BYTES, kind, op, slot_offset,
+    CURSOR_REFUSED, Kind, PROFILES, Placement, Precision, Profile, WORD_BYTES, op, slot_offset,
 };
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
@@ -365,24 +365,39 @@ fn decode(span: Span, precision: Precision, bytes: &[u8]) -> Vec<f32> {
 fn refusal_message(word: u32) -> String {
     let refused = word >> 16;
     let code = (word & 0xffff) - 1;
-    if refused >= kind::COUNT {
+    if refused >= Kind::COUNT {
         return format!("the device refused kind {refused} with code {code}");
     }
-    match refused {
-        kind::BINARY | kind::UNARY => format!(
+    let kind = Kind::of(refused);
+    match kind {
+        Kind::Binary | Kind::Unary => format!(
             "the device refused the {} op of the {} task",
             op::name(code),
-            kind::name(refused),
+            kind.name(),
         ),
-        kind::PARTIAL => format!(
+        Kind::Partial => format!(
             "the device refused the partial of the {} op over operand {} of the {} task",
             op::name(code / 2),
             code % 2,
-            kind::name(refused),
+            kind.name(),
         ),
-        _ => format!(
-            "the device refused code {code} of the {} task",
-            kind::name(refused),
+        Kind::OneHot | Kind::Gather => format!(
+            "the device refused an index outside the rows of the {} task",
+            kind.name(),
         ),
+        Kind::Matmul | Kind::Argmax | Kind::Categorical => format!(
+            "the device refused geometry {code} of the {} task",
+            kind.name(),
+        ),
+        Kind::Fill
+        | Kind::Broadcast
+        | Kind::SumChunk
+        | Kind::SumTo
+        | Kind::Softmax
+        | Kind::SoftmaxGrad
+        | Kind::LogSoftmax
+        | Kind::LogSoftmaxGrad => {
+            format!("the device refused code {code} of the {} task", kind.name())
+        }
     }
 }

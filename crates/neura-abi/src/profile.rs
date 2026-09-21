@@ -97,6 +97,9 @@ pub struct Profile {
     shared_bytes: u64,
 }
 
+const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
+const CLAIMED_TASK: u64 = WORD_BYTES;
+
 impl Profile {
     pub const fn of(ladder: &'static [MatmulTile]) -> Self {
         let count = ladder.len();
@@ -121,7 +124,7 @@ impl Profile {
         Self {
             workgroup,
             ladder,
-            shared_bytes: staging + workgroup as u64 * WORD_BYTES,
+            shared_bytes: staging + REDUCTION_SCRATCH * workgroup as u64 + CLAIMED_TASK,
         }
     }
 

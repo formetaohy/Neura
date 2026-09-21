@@ -129,6 +129,35 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     )
 }
 
+fn act(runtime: &Runtime, widths: &[u32], agents: u32) -> Measured {
+    let graph = Graph::new();
+    let model = Mlp::new(
+        &graph,
+        widths,
+        Init::Uniform {
+            low: -0.2,
+            high: 0.2,
+        },
+    );
+    let observations = graph.input(Shape::matrix(agents, widths[0]));
+    let actions = graph.argmax(model.forward(&graph, observations));
+    graph.retain(actions);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        observations,
+        &vec![0.25; (agents * widths[0]) as usize],
+    );
+    runtime.run(&program);
+    let timing = time(runtime, &program, 64);
+    measured(
+        format!("{agents} agents acting through {} layers", widths.len() - 1),
+        &program,
+        timing,
+    )
+}
+
 fn products(runtime: &Runtime, shapes: &[(u32, u32, u32)]) -> Measured {
     let graph = Graph::new();
     for (rows, depth, columns) in shapes {
@@ -166,6 +195,7 @@ fn main() {
         wide(&runtime, 262_144),
         step(&runtime, &narrow, 8),
         step(&runtime, &narrow, 4096),
+        act(&runtime, &narrow, 4096),
         step(&runtime, &deep, 64),
         products(&runtime, &[(96, 256, 96), (1024, 1024, 1024)]),
     ];

@@ -1,75 +1,34 @@
 mod matmul;
 mod ops;
 
-use neura_abi::{Geometry, Placement, Precision, kind};
+use neura_abi::{Geometry, Kind, Placement, Precision};
 
 pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
 pub const POINTWISE: &str = include_str!("../shaders/pointwise.wgsl");
 pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
+pub const CHOICE: &str = include_str!("../shaders/choice.wgsl");
+pub const SELECT: &str = include_str!("../shaders/select.wgsl");
 
-pub struct Body {
-    pub kind: u32,
-    pub function: &'static str,
-}
-
-pub const BODIES: &[Body] = &[
-    Body {
-        kind: kind::MATMUL,
-        function: "run_matmul",
-    },
-    Body {
-        kind: kind::BINARY,
-        function: "run_binary",
-    },
-    Body {
-        kind: kind::UNARY,
-        function: "run_unary",
-    },
-    Body {
-        kind: kind::PARTIAL,
-        function: "run_partial",
-    },
-    Body {
-        kind: kind::FILL,
-        function: "run_fill",
-    },
-    Body {
-        kind: kind::BROADCAST,
-        function: "run_broadcast",
-    },
-    Body {
-        kind: kind::SUM_CHUNK,
-        function: "run_sum_chunk",
-    },
-    Body {
-        kind: kind::SUM_TO,
-        function: "run_sum_to",
-    },
-    Body {
-        kind: kind::SOFTMAX,
-        function: "run_softmax",
-    },
-    Body {
-        kind: kind::SOFTMAX_GRAD,
-        function: "run_softmax_grad",
-    },
-    Body {
-        kind: kind::LOG_SOFTMAX,
-        function: "run_log_softmax",
-    },
-    Body {
-        kind: kind::LOG_SOFTMAX_GRAD,
-        function: "run_log_softmax_grad",
-    },
-];
-
-pub fn body(code: u32) -> &'static str {
-    BODIES
-        .iter()
-        .find(|body| body.kind == code)
-        .unwrap_or_else(|| panic!("no device body runs the {} task", kind::name(code)))
-        .function
+pub fn body(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Matmul => "run_matmul",
+        Kind::Binary => "run_binary",
+        Kind::Unary => "run_unary",
+        Kind::Partial => "run_partial",
+        Kind::Fill => "run_fill",
+        Kind::Broadcast => "run_broadcast",
+        Kind::SumChunk => "run_sum_chunk",
+        Kind::SumTo => "run_sum_to",
+        Kind::Softmax => "run_softmax",
+        Kind::SoftmaxGrad => "run_softmax_grad",
+        Kind::LogSoftmax => "run_log_softmax",
+        Kind::LogSoftmaxGrad => "run_log_softmax_grad",
+        Kind::Argmax => "run_argmax",
+        Kind::Categorical => "run_categorical",
+        Kind::OneHot => "run_one_hot",
+        Kind::Gather => "run_gather",
+    }
 }
 
 pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -> Vec<String> {
@@ -80,8 +39,10 @@ pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -
         POINTWISE.to_owned(),
         matmul::family(geometry),
         REDUCE.to_owned(),
-        SOFTMAX.to_owned(),
         reductions(),
+        SOFTMAX.to_owned(),
+        CHOICE.to_owned(),
+        SELECT.to_owned(),
     ]
 }
 

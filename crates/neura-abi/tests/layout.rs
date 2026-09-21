@@ -1,4 +1,4 @@
-use neura_abi::kind::{self, KINDS};
+use neura_abi::Kind;
 use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
     BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, StepRecord, TaskRecord,
@@ -39,29 +39,41 @@ fn records_follow_the_shader_layout() {
 
 #[test]
 fn every_task_kind_is_declared_once() {
-    assert_eq!(kind::COUNT as usize, KINDS.len());
-    for (code, entry) in KINDS.iter().enumerate() {
+    assert_eq!(Kind::COUNT as usize, Kind::ALL.len());
+    for (code, kind) in Kind::ALL.iter().enumerate() {
         assert_eq!(
-            entry.code, code as u32,
+            kind.code(),
+            code as u32,
             "the {} kind leaves a hole",
-            entry.name
+            kind.name()
         );
-        assert_eq!(kind::of(entry.code), entry);
-        assert_eq!(kind::constant(entry.code), entry.constant);
-        assert!(!entry.name.is_empty());
+        assert_eq!(Kind::of(kind.code()), *kind);
+        assert!(!kind.name().is_empty());
+        assert!(!kind.constant().is_empty());
     }
-    let mut names = KINDS.iter().map(|entry| entry.name).collect::<Vec<_>>();
+    let mut names = Kind::ALL.iter().map(|kind| kind.name()).collect::<Vec<_>>();
+    let mut constants = Kind::ALL
+        .iter()
+        .map(|kind| kind.constant())
+        .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), KINDS.len(), "two kinds share a name");
-    assert_eq!(kind::name(kind::MATMUL), "matmul");
-    assert_eq!(kind::name(kind::LOG_SOFTMAX), "log_softmax");
-    assert!(kind::pointwise(kind::PARTIAL));
-    assert!(!kind::pointwise(kind::MATMUL));
-    assert!(kind::of(kind::BINARY).chainable);
-    assert!(!kind::of(kind::PARTIAL).chainable);
+    constants.sort_unstable();
+    constants.dedup();
+    assert_eq!(names.len(), Kind::ALL.len(), "two kinds share a name");
+    assert_eq!(
+        constants.len(),
+        Kind::ALL.len(),
+        "two kinds share a device constant"
+    );
+    assert_eq!(Kind::Matmul.name(), "matmul");
+    assert_eq!(Kind::LogSoftmax.name(), "log_softmax");
+    assert!(Kind::Partial.pointwise());
+    assert!(!Kind::Matmul.pointwise());
+    assert!(Kind::Binary.chainable());
+    assert!(!Kind::Partial.chainable());
     assert!(refuses(|| {
-        let _ = kind::of(kind::COUNT);
+        let _ = Kind::of(Kind::COUNT);
     }));
 }
 
@@ -163,7 +175,7 @@ fn mentions(formula: &str, name: &str) -> bool {
 #[test]
 fn a_record_declares_what_the_device_reads() {
     let mut task: TaskRecord = bytemuck::Zeroable::zeroed();
-    task.kind = kind::MATMUL;
+    task.kind = Kind::Matmul.code();
     task.op = op::MUL;
     task.geometry = 2;
     task.first = 3;
@@ -179,7 +191,7 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(bytes.len(), 52);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
-        kind::MATMUL
+        Kind::Matmul.code()
     );
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), op::MUL);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
@@ -223,15 +235,15 @@ fn a_profile_offers_the_tiles_one_workgroup_carries() {
                 .all(|pair| pair[0].tile_work() < pair[1].tile_work()),
             "a profile offers its tiles from the smallest to the widest",
         );
-        assert_eq!(
-            profile.shared_bytes(),
-            profile
-                .ladder()
-                .iter()
-                .map(|tile| tile.shared_bytes())
-                .max()
-                .unwrap()
-                + u64::from(profile.workgroup()) * WORD_BYTES,
+        let staged = profile
+            .ladder()
+            .iter()
+            .map(|tile| tile.shared_bytes())
+            .max()
+            .unwrap();
+        assert!(
+            profile.shared_bytes() >= staged + u64::from(profile.workgroup()) * WORD_BYTES,
+            "a profile carries the widest tile it stages beside the scratch its reductions declare",
         );
         assert!(profile.fits(u32::MAX, profile.shared_bytes()));
         assert!(!profile.fits(profile.workgroup() - 1, profile.shared_bytes()));

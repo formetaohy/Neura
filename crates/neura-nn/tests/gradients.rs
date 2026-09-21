@@ -1,4 +1,4 @@
-use neura_nn::{Linear, cross_entropy, mse_loss};
+use neura_nn::{Linear, cross_entropy, mse_loss, policy_loss};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
@@ -310,5 +310,66 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
             (actual - wanted).abs() < 1e-5,
             "logit {element} moved by {actual} where its probability less its target says {wanted}",
         );
+    }
+}
+
+#[test]
+fn a_policy_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let layer = Linear::new(
+        &graph,
+        3,
+        4,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let observations = graph.input(Shape::matrix(5, 3));
+    let action = graph.input(Shape::matrix(5, 1));
+    let advantage = graph.input(Shape::matrix(5, 1));
+    let logits = layer.forward(&graph, observations);
+    let loss = policy_loss(&graph, logits, action, advantage);
+    let gradients = graph.backward(loss);
+    let parameters = layer.parameters();
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        observations,
+        &(0..15)
+            .map(|index| index as f32 * 0.1 - 0.7)
+            .collect::<Vec<_>>(),
+    );
+    runtime.write(&program, action, &[0.0, 2.0, 1.0, 3.0, 0.0]);
+    runtime.write(&program, advantage, &[1.0, -0.5, 0.25, -0.75, 2.0]);
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert!(
+                (numeric - analytic[element]).abs() < 1e-2,
+                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
+                values.len(),
+                analytic[element],
+            );
+        }
+        runtime.write(&program, *parameter, &values);
     }
 }

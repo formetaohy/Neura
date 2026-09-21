@@ -1,4 +1,4 @@
-use neura_abi::{Geometry, MatmulTile, kind};
+use neura_abi::{Geometry, Kind, MatmulTile};
 use std::fmt::Write as _;
 
 pub fn family(geometry: Geometry) -> String {
@@ -140,7 +140,7 @@ fn dispatch(source: &mut String, tiles: usize) {
     writeln!(
         source,
         "        default: {{ refuse({}, task.geometry); }}\n    }}\n}}\n",
-        kind::constant(kind::MATMUL),
+        Kind::Matmul.constant(),
     )
     .unwrap();
 }

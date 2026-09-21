@@ -1,73 +1,77 @@
 use std::fmt::Write as _;
 
 macro_rules! kinds {
-    (@declare $code:expr;) => {};
-    (@declare $code:expr; $name:ident = $label:literal pointwise $pointwise:literal chainable $chainable:literal; $($rest:tt)*) => {
-        pub const $name: u32 = $code;
-        kinds!(@declare $code + 1u32; $($rest)*);
-    };
-    ($($name:ident = $label:literal pointwise $pointwise:literal chainable $chainable:literal;)+) => {
-        kinds!(@declare 0u32; $($name = $label pointwise $pointwise chainable $chainable;)+);
-
-        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        pub struct Kind {
-            pub code: u32,
-            pub constant: &'static str,
-            pub name: &'static str,
-            pub pointwise: bool,
-            pub chainable: bool,
+    ($($variant:ident = $label:literal pointwise $pointwise:literal chainable $chainable:literal;)+) => {
+        #[repr(u32)]
+        #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+        pub enum Kind {
+            $($variant),+
         }
 
-        pub const KINDS: &[Kind] = &[$(Kind {
-            code: $name,
-            constant: stringify!($name),
-            name: $label,
-            pointwise: $pointwise,
-            chainable: $chainable,
-        }),+];
+        impl Kind {
+            pub const ALL: &'static [Kind] = &[$(Kind::$variant),+];
+            pub const COUNT: u32 = Self::ALL.len() as u32;
 
-        pub const COUNT: u32 = KINDS.len() as u32;
+            pub const fn code(self) -> u32 {
+                self as u32
+            }
+
+            pub fn of(code: u32) -> Self {
+                *Self::ALL.get(code as usize).unwrap_or_else(|| {
+                    panic!("kind {code} is not a declared task kind")
+                })
+            }
+
+            pub const fn constant(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant)),+
+                }
+            }
+
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label),+
+                }
+            }
+
+            pub const fn pointwise(self) -> bool {
+                match self {
+                    $(Self::$variant => $pointwise),+
+                }
+            }
+
+            pub const fn chainable(self) -> bool {
+                match self {
+                    $(Self::$variant => $chainable),+
+                }
+            }
+        }
     };
 }
 
 kinds! {
-    MATMUL = "matmul" pointwise false chainable false;
-    BINARY = "binary" pointwise true chainable true;
-    UNARY = "unary" pointwise true chainable true;
-    PARTIAL = "partial" pointwise true chainable false;
-    FILL = "fill" pointwise true chainable false;
-    BROADCAST = "broadcast" pointwise true chainable false;
-    SUM_CHUNK = "sum_chunk" pointwise false chainable false;
-    SUM_TO = "sum_to" pointwise true chainable false;
-    SOFTMAX = "softmax" pointwise false chainable false;
-    SOFTMAX_GRAD = "softmax_grad" pointwise false chainable false;
-    LOG_SOFTMAX = "log_softmax" pointwise false chainable false;
-    LOG_SOFTMAX_GRAD = "log_softmax_grad" pointwise false chainable false;
-}
-
-pub fn of(code: u32) -> &'static Kind {
-    KINDS
-        .get(code as usize)
-        .filter(|kind| kind.code == code)
-        .unwrap_or_else(|| panic!("kind {code} is not a declared task kind"))
-}
-
-pub fn constant(code: u32) -> &'static str {
-    of(code).constant
-}
-
-pub fn name(code: u32) -> &'static str {
-    of(code).name
-}
-
-pub fn pointwise(code: u32) -> bool {
-    of(code).pointwise
+    Matmul = "matmul" pointwise false chainable false;
+    Binary = "binary" pointwise true chainable true;
+    Unary = "unary" pointwise true chainable true;
+    Partial = "partial" pointwise true chainable false;
+    Fill = "fill" pointwise true chainable false;
+    Broadcast = "broadcast" pointwise true chainable false;
+    SumChunk = "sum_chunk" pointwise false chainable false;
+    SumTo = "sum_to" pointwise true chainable false;
+    Softmax = "softmax" pointwise false chainable false;
+    SoftmaxGrad = "softmax_grad" pointwise false chainable false;
+    LogSoftmax = "log_softmax" pointwise false chainable false;
+    LogSoftmaxGrad = "log_softmax_grad" pointwise false chainable false;
+    Argmax = "argmax" pointwise false chainable false;
+    Categorical = "categorical" pointwise false chainable false;
+    OneHot = "one_hot" pointwise false chainable false;
+    Gather = "gather" pointwise false chainable false;
 }
 
 pub fn declarations() -> String {
     let mut out = String::new();
-    for kind in KINDS {
-        writeln!(out, "const {}: u32 = {}u;", kind.constant, kind.code).unwrap();
+    for kind in Kind::ALL {
+        writeln!(out, "const {}: u32 = {}u;", kind.constant(), kind.code()).unwrap();
     }
     out
 }

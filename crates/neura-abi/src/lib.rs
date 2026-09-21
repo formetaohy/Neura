@@ -9,10 +9,12 @@ pub mod op;
 mod placement;
 mod precision;
 mod profile;
+pub mod strategy;
 
 pub const TAPE_WGSL: &str = include_str!("../abi/program.wgsl");
 
 pub use constants::*;
+pub use kind::Kind;
 pub use placement::Placement;
 pub use precision::Precision;
 pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};

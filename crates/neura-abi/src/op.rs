@@ -1,4 +1,4 @@
-use crate::kind;
+use crate::Kind;
 use std::fmt::Write as _;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -15,10 +15,10 @@ impl Family {
         }
     }
 
-    pub const fn kind(self) -> u32 {
+    pub const fn kind(self) -> Kind {
         match self {
-            Self::Binary => kind::BINARY,
-            Self::Unary => kind::UNARY,
+            Self::Binary => Kind::Binary,
+            Self::Unary => Kind::Unary,
         }
     }
 }
@@ -156,7 +156,7 @@ pub fn of(code: u32) -> &'static Op {
         .unwrap_or_else(|| panic!("op {code} is not a declared pointwise op"))
 }
 
-pub fn kind(code: u32) -> u32 {
+pub fn kind(code: u32) -> Kind {
     of(code).family.kind()
 }
 

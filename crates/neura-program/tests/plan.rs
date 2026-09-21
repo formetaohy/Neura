@@ -1,6 +1,6 @@
 use neura_abi::op;
 use neura_abi::{
-    NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES, kind,
+    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES,
 };
 use neura_program::{Encoding, Graph, Init, Shape, Store};
 use std::mem::size_of;
@@ -31,8 +31,11 @@ fn steps(encoding: &Encoding) -> Vec<StepRecord> {
     records(encoding.steps(), size_of::<StepRecord>())
 }
 
-fn kinds(encoding: &Encoding) -> Vec<u32> {
-    tape(encoding).iter().map(|task| task.kind).collect()
+fn kinds(encoding: &Encoding) -> Vec<Kind> {
+    tape(encoding)
+        .iter()
+        .map(|task| Kind::of(task.kind))
+        .collect()
 }
 
 fn wave_of(encoding: &Encoding, task: usize) -> u32 {
@@ -97,7 +100,7 @@ fn a_dense_layer_fuses_its_epilogue_into_the_product() {
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
     assert_eq!(encoding.wave_count(), 1);
-    assert_eq!(kinds(&encoding), vec![kind::MATMUL]);
+    assert_eq!(kinds(&encoding), vec![Kind::Matmul]);
     let tape = tape(&encoding);
     assert_eq!(
         tape[0].steps, 2,
@@ -118,7 +121,7 @@ fn a_value_two_tasks_read_stays_on_the_tape() {
     let squared = graph.mul(data, data);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
-    assert_eq!(kinds(&encoding), vec![kind::BINARY]);
+    assert_eq!(kinds(&encoding), vec![Kind::Binary]);
     assert_eq!(readers(&encoding, data.id()), vec![0]);
     assert_eq!(tape(&encoding)[0].out, squared.id());
 }
@@ -134,7 +137,7 @@ fn a_retained_value_is_never_folded_away() {
     let encoding = encoding(&graph);
     let reader = writers(&encoding, activated.id());
     assert_eq!(reader.len(), 1, "the rectifier keeps a task of its own");
-    assert_eq!(kinds(&encoding)[reader[0]], kind::UNARY);
+    assert_eq!(kinds(&encoding)[reader[0]], Kind::Unary);
     assert!(
         readers(&encoding, doubled.id()).contains(&reader[0]),
         "the rectifier reads the value the graph retains",
@@ -329,25 +332,22 @@ fn a_backward_pass_reaches_every_parameter() {
 
     let kinds = kinds(&encoding(&graph));
     assert!(
-        kinds.contains(&kind::MATMUL),
+        kinds.contains(&Kind::Matmul),
         "the weight gradient is a matmul"
     );
     assert!(
-        kinds.contains(&kind::PARTIAL),
+        kinds.contains(&Kind::Partial),
         "the rectifier contributes a mask"
     );
     assert!(
-        kinds.contains(&kind::SUM_CHUNK),
+        kinds.contains(&Kind::SumChunk),
         "the loss reduces through partial sums"
     );
     assert!(
-        kinds.contains(&kind::BROADCAST),
+        kinds.contains(&Kind::Broadcast),
         "the loss gradient spreads the scalar over the tensor"
     );
-    assert_eq!(
-        kinds.iter().filter(|kind| **kind == kind::SUM_TO).count(),
-        1
-    );
+    assert_eq!(kinds.iter().filter(|kind| **kind == Kind::SumTo).count(), 1);
 }
 
 #[test]
@@ -358,7 +358,7 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
     let encoding = encoding(&graph);
     let reductions = kinds(&encoding)
         .iter()
-        .filter(|kind| **kind == kind::SUM_CHUNK)
+        .filter(|kind| **kind == Kind::SumChunk)
         .count();
     assert_eq!(
         reductions, 257,
@@ -630,7 +630,7 @@ fn a_partial_reads_back_the_result_its_formula_names() {
     assert_eq!(tangent.out, activated.id());
     let partial = tape
         .iter()
-        .find(|task| task.op == op::TANH && task.kind == kind::PARTIAL)
+        .find(|task| task.op == op::TANH && Kind::of(task.kind) == Kind::Partial)
         .expect("the tangent leaves a partial behind");
     assert_eq!(
         partial.a,
@@ -658,7 +658,7 @@ fn a_partial_reads_back_the_operands_its_formula_names() {
     let tape = tape(&encoding);
     let absolute = tape
         .iter()
-        .find(|task| task.op == op::ABS && task.kind == kind::PARTIAL)
+        .find(|task| task.op == op::ABS && Kind::of(task.kind) == Kind::Partial)
         .expect("a magnitude sign reaches the operand it was taken from");
     assert_eq!(
         absolute.a,
@@ -668,7 +668,7 @@ fn a_partial_reads_back_the_operands_its_formula_names() {
     assert_eq!(absolute.b, neura_abi::NO_VALUE);
     let products = tape
         .iter()
-        .filter(|task| task.op == op::MUL && task.kind == kind::PARTIAL)
+        .filter(|task| task.op == op::MUL && Kind::of(task.kind) == Kind::Partial)
         .collect::<Vec<_>>();
     assert_eq!(products.len(), 2, "each tracked factor carries a partial");
     for (slot, partial) in products.iter().enumerate() {
