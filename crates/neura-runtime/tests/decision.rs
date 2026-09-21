@@ -8,7 +8,10 @@ mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
-use decision::{argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference};
+use decision::{
+    argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference,
+    scatter_reference,
+};
 use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
@@ -368,6 +371,68 @@ fn a_table_learns_through_the_one_hot_product_of_its_index_list() {
         .flat_map(|count| vec![*count as f32; width as usize])
         .collect::<Vec<_>>();
     assert_close(&runtime.read(&program, table_gradient), &expected, 0.0);
+}
+
+#[test]
+fn a_gather_walks_its_gradient_back_into_the_table_it_reads() {
+    let runtime = open();
+    let classes = 4;
+    let width = 3;
+    let picks = 5;
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::matrix(classes, width), Init::Zero);
+    let indices = graph.input(Shape::matrix(picks, 1));
+    let picked = graph.gather(table, indices);
+    let loss = graph.sum(picked);
+    let gradients = graph.backward(loss);
+    let table_gradient = gradients.of(table);
+    graph.retain(picked);
+    graph.retain(table_gradient);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let table_data = random(classes * width, 17);
+    let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
+    runtime.write(&program, table, &table_data);
+    runtime.write(&program, indices, &index_data);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, picked),
+        &gather_reference(&table_data, &index_data, width),
+        1e-6,
+    );
+    let counted = counts(&index_data, classes);
+    let expected = counted
+        .iter()
+        .flat_map(|count| vec![*count as f32; width as usize])
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, table_gradient), &expected, 0.0);
+}
+
+#[test]
+fn a_scatter_accumulates_updates_into_the_rows_it_names() {
+    let runtime = open();
+    let classes = 4;
+    let width = 3;
+    let picks = 5;
+    let graph = Graph::new();
+    let table = graph.resident(Shape::matrix(classes, width));
+    let indices = graph.input(Shape::matrix(picks, 1));
+    let updates = graph.input(Shape::matrix(picks, width));
+    graph.scatter_into(table, indices, updates);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let table_data = random(classes * width, 19);
+    let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
+    let update_data = random(picks * width, 23);
+    runtime.write(&program, table, &table_data);
+    runtime.write(&program, indices, &index_data);
+    runtime.write(&program, updates, &update_data);
+    runtime.run(&program);
+    let scattered = scatter_reference(&table_data, &index_data, &update_data, width);
+    assert_close(&runtime.read(&program, table), &scattered, 0.0);
+    runtime.run(&program);
+    let doubled = scatter_reference(&scattered, &index_data, &update_data, width);
+    assert_close(&runtime.read(&program, table), &doubled, 0.0);
 }
 
 #[test]

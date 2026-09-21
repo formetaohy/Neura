@@ -439,10 +439,6 @@ impl<'g> Graph<'g> {
     pub fn gather(&self, table: Value<'g>, indices: Value<'g>) -> Value<'g> {
         let table = self.own(table);
         let indices = self.own(indices);
-        assert!(
-            !self.tracked(&[table]),
-            "a gather moves whole rows of a table, and a table that learns is trained through the one hot product of its rows",
-        );
         self.index_list(indices);
         assert!(
             self.contiguous(table),
@@ -451,7 +447,7 @@ impl<'g> Graph<'g> {
         );
         let mut dims = self.shape(indices).dims();
         dims[3] = self.shape(table).dims()[3];
-        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        let out = self.fresh(Shape::of(dims), Residency::Derived, self.tracked(&[table]));
         self.push(TaskInfo::of(
             Kind::Gather,
             op::NONE,
@@ -459,6 +455,26 @@ impl<'g> Graph<'g> {
             [table.id(), indices.id(), NO_VALUE],
         ));
         out
+    }
+
+    pub fn scatter_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+        let target = self.own(target);
+        let indices = self.own(indices);
+        let updates = self.own(updates);
+        {
+            let state = self.state.borrow();
+            let info = &state.values[target.id() as usize];
+            assert!(
+                matches!(
+                    info.residency,
+                    Residency::Input | Residency::Parameter | Residency::Resident
+                ),
+                "only a leaf tensor scatters in place, and value {} is derived from other tasks",
+                target.id(),
+            );
+        }
+        self.scatter(target, indices, updates);
+        self.wrote_in_place(target);
     }
 
     pub fn sum(&self, value: Value<'g>) -> Value<'g> {
@@ -664,6 +680,15 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, filter, out);
                 }
             }
+            Kind::Gather => {
+                let table = self.value_of(task.inputs[0]);
+                let indices = self.value_of(task.inputs[1]);
+                if self.tracked(&[table]) {
+                    let zeros = self.fill(self.shape(table), 0.0);
+                    self.scatter(zeros, indices, gradient);
+                    self.accumulate(grads, table, zeros);
+                }
+            }
             Kind::Fill
             | Kind::Broadcast
             | Kind::Partial
@@ -671,8 +696,9 @@ impl<'g> Graph<'g> {
             | Kind::LogSoftmaxGrad
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
-            | Kind::MatmulFold => {}
-            Kind::Argmax | Kind::Categorical | Kind::OneHot | Kind::Gather => {
+            | Kind::MatmulFold
+            | Kind::Scatter => {}
+            Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",
                     task.kind.name(),
@@ -838,6 +864,38 @@ impl<'g> Graph<'g> {
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
+    }
+
+    fn scatter(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+        self.index_list(indices);
+        assert!(
+            self.contiguous(target),
+            "a scatter walks a table row by row, and value {} is a view",
+            target.id(),
+        );
+        assert!(
+            self.contiguous(updates),
+            "a scatter walks its updates row by row, and value {} is a view",
+            updates.id(),
+        );
+        let expected = self.shape(indices).dims();
+        let actual = self.shape(updates).dims();
+        let width = self.shape(target).dims()[3];
+        assert_eq!(
+            actual,
+            [expected[0], expected[1], expected[2], width],
+            "a scatter of {:?} indices meets updates of {:?} where the table holds {width} numbers per row",
+            expected,
+            actual,
+        );
+        let mut task = TaskInfo::of(
+            Kind::Scatter,
+            op::NONE,
+            target.id(),
+            [target.id(), indices.id(), updates.id()],
+        );
+        task.in_place = true;
+        self.push(task);
     }
 
     fn reduce_to(&self, gradient: Value<'g>, target: Value<'g>) -> Value<'g> {

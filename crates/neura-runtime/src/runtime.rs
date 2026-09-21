@@ -445,7 +445,7 @@ fn refusal_message(word: u32) -> String {
             code % 2,
             kind.name(),
         ),
-        Kind::OneHot | Kind::Gather => format!(
+        Kind::OneHot | Kind::Gather | Kind::Scatter => format!(
             "the device refused an index outside the rows of the {} task",
             kind.name(),
         ),

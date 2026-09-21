@@ -142,6 +142,18 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                     .push(Task::span(unit, first, count, u64::from(count)));
             }
         }
+        Kind::Scatter => {
+            let rows = plan.shape(unit.inputs[1]).elements();
+            let width = plan.shape(unit.out).columns();
+            for (first, count) in spans(rows, scatter_rows_per_task(rows)) {
+                plan.tasks.push(Task::span(
+                    unit,
+                    first,
+                    count,
+                    u64::from(count) * u64::from(width),
+                ));
+            }
+        }
     }
 }
 
@@ -351,6 +363,12 @@ fn fold_rows_per_task(rows: u32) -> u32 {
 
 fn choice_rows_per_task(rows: u32) -> u32 {
     rows.div_ceil(TARGET_TASKS).max(1)
+}
+
+const SCATTER_ROW_CEILING: u32 = 4096;
+
+fn scatter_rows_per_task(rows: u32) -> u32 {
+    rows.min(SCATTER_ROW_CEILING)
 }
 
 fn spans(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {

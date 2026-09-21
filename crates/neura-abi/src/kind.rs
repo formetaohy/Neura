@@ -67,6 +67,7 @@ kinds! {
     Categorical = "categorical" pointwise false chainable false;
     OneHot = "one_hot" pointwise false chainable false;
     Gather = "gather" pointwise false chainable false;
+    Scatter = "scatter" pointwise false chainable false;
     Conv2d = "conv2d" pointwise false chainable false;
     Conv2dInputGrad = "conv2d_input_grad" pointwise false chainable false;
     Conv2dWeightGrad = "conv2d_weight_grad" pointwise false chainable false;

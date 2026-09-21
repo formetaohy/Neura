@@ -196,6 +196,7 @@ impl Encoding {
                 | Kind::LogSoftmaxGrad
                 | Kind::OneHot
                 | Kind::Gather
+                | Kind::Scatter
                 | Kind::Conv2d
                 | Kind::Conv2dInputGrad
                 | Kind::MatmulFold => 0,

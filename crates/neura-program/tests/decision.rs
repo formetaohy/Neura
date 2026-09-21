@@ -365,9 +365,6 @@ fn a_choice_stops_the_graph_it_cannot_fold() {
         let _ = graph.argmax(graph.transpose(table));
     }));
     assert!(refuses(|| {
-        let _ = graph.gather(table, indices);
-    }));
-    assert!(refuses(|| {
         let _ = graph.gather(
             graph.input(Shape::matrix(4, 4)),
             graph.input(Shape::matrix(2, 2)),
@@ -399,4 +396,45 @@ fn an_index_carries_no_gradient_of_its_own() {
     let picked = table_graph.matmul(table_graph.one_hot(indices, 4), table);
     let gradients = table_graph.backward(table_graph.sum(picked));
     assert_eq!(gradients.of(table).shape(), Shape::matrix(4, 3));
+}
+
+#[test]
+fn a_gather_walks_its_gradient_back_into_the_table_it_reads() {
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::matrix(4, 3), Init::Zero);
+    let indices = graph.input(Shape::matrix(2, 1));
+    let picked = graph.gather(table, indices);
+    let gradients = graph.backward(graph.sum(picked));
+    assert_eq!(gradients.of(table).shape(), Shape::matrix(4, 3));
+}
+
+#[test]
+fn a_scatter_adds_updates_into_the_leaf_it_names() {
+    let graph = Graph::new();
+    let table = graph.resident(Shape::matrix(4, 3));
+    let indices = graph.input(Shape::matrix(2, 1));
+    let updates = graph.input(Shape::matrix(2, 3));
+    graph.scatter_into(table, indices, updates);
+    let encoding = encoding_with(&graph, NARROW);
+    assert_eq!(encoding.task_count(), 1);
+    assert!(!encoding.updates_weights());
+}
+
+#[test]
+fn a_scatter_stops_at_every_tensor_it_cannot_update() {
+    let graph = Graph::new();
+    let table = graph.resident(Shape::matrix(4, 3));
+    let derived = graph.mul(table, table);
+    let indices = graph.input(Shape::matrix(2, 1));
+    let updates = graph.input(Shape::matrix(2, 3));
+    let wide = graph.input(Shape::matrix(2, 4));
+    assert!(refuses(|| {
+        graph.scatter_into(derived, indices, updates);
+    }));
+    assert!(refuses(|| {
+        graph.scatter_into(table, indices, wide);
+    }));
+    assert!(refuses(|| {
+        graph.scatter_into(table, graph.transpose(indices), updates);
+    }));
 }

@@ -11,6 +11,7 @@ pub const SOFTMAX: &str = include_str!("../shader/softmax.wgsl");
 pub const CHOICE: &str = include_str!("../shader/choice.wgsl");
 pub const SELECT: &str = include_str!("../shader/select.wgsl");
 pub const CONV: &str = include_str!("../shader/conv.wgsl");
+pub const SCATTER: &str = include_str!("../shader/scatter.wgsl");
 
 pub fn body(kind: Kind) -> &'static str {
     match kind {
@@ -31,6 +32,7 @@ pub fn body(kind: Kind) -> &'static str {
         Kind::Categorical => "run_categorical",
         Kind::OneHot => "run_one_hot",
         Kind::Gather => "run_gather",
+        Kind::Scatter => "run_scatter",
         Kind::Conv2d => "run_conv2d",
         Kind::Conv2dInputGrad => "run_conv2d_input_grad",
         Kind::Conv2dWeightGrad => "run_conv2d_weight_grad",
@@ -51,6 +53,7 @@ pub fn fragments(geometry: Geometry, weights: Precision) -> Vec<String> {
         CHOICE.to_owned(),
         SELECT.to_owned(),
         CONV.to_owned(),
+        SCATTER.to_owned(),
     ]
 }
 

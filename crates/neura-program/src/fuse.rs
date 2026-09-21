@@ -163,6 +163,7 @@ fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
         | Kind::Categorical
         | Kind::OneHot
         | Kind::Gather
+        | Kind::Scatter
         | Kind::Conv2d
         | Kind::Conv2dInputGrad
         | Kind::Conv2dWeightGrad => None,

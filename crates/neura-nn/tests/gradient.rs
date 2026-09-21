@@ -1,4 +1,4 @@
-use neura_nn::{Conv2d, LayerNorm, Linear, cross_entropy, mse_loss, policy_loss};
+use neura_nn::{Conv2d, Embedding, LayerNorm, Linear, cross_entropy, mse_loss, policy_loss};
 use neura_program::{Graph, Init, Shape, Value, Window};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
@@ -438,6 +438,59 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
             "logit {element} moved by {actual} where its probability less its target says {wanted}",
         );
     }
+}
+
+#[test]
+fn an_embedding_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let embedding = Embedding::new(
+        &graph,
+        6,
+        4,
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let indices = graph.input(Shape::matrix(3, 1));
+    let picked = embedding.forward(&graph, indices);
+    let targets = graph.input(Shape::matrix(3, 4));
+    let loss = mse_loss(&graph, picked, targets);
+    let gradients = graph.backward(loss);
+    let table = embedding.table();
+    graph.retain(gradients.of(table));
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let index_data = vec![2.0, 5.0, 2.0];
+    let target_data = (0..12)
+        .map(|index| (index as f32 * 0.077).cos() * 0.25)
+        .collect::<Vec<_>>();
+    runtime.write(&program, indices, &index_data);
+    runtime.write(&program, targets, &target_data);
+    runtime.run(&program);
+    let values = runtime.read(&program, table);
+    let analytic = runtime.read(&program, gradients.of(table));
+    for element in [1, 9, 14, 22] {
+        let step = 0.01 * values[element].abs().max(0.1);
+        let mut probe = values.clone();
+        probe[element] += step;
+        runtime.write(&program, table, &probe);
+        runtime.run(&program);
+        let high = runtime.read(&program, loss)[0];
+        probe[element] -= 2.0 * step;
+        runtime.write(&program, table, &probe);
+        runtime.run(&program);
+        let low = runtime.read(&program, loss)[0];
+        let numeric = (high - low) / (2.0 * step);
+        assert!(
+            (numeric - analytic[element]).abs() < 1e-2,
+            "element {element} of an embedding of {} numbers: the tape gives {} where the slope is {numeric}",
+            values.len(),
+            analytic[element],
+        );
+    }
+    runtime.write(&program, table, &values);
 }
 
 #[test]

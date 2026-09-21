@@ -127,6 +127,34 @@ impl<'g> LayerNorm<'g> {
     }
 }
 
+pub struct Embedding<'g> {
+    table: Value<'g>,
+}
+
+impl<'g> Embedding<'g> {
+    pub fn new(graph: &Graph<'g>, rows: u32, width: u32, init: Init) -> Self {
+        assert!(
+            rows > 0 && width > 0,
+            "an embedding of {rows} rows of {width} numbers holds nothing",
+        );
+        Self {
+            table: graph.parameter(Shape::matrix(rows, width), init),
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, indices: Value<'g>) -> Value<'g> {
+        graph.gather(self.table, indices)
+    }
+
+    pub fn table(&self) -> Value<'g> {
+        self.table
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 1] {
+        [self.table]
+    }
+}
+
 pub struct Mlp<'g> {
     layers: Vec<Linear<'g>>,
 }
