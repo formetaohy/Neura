@@ -1,8 +1,8 @@
 use neura_abi::Kind;
 use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
-    BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, StepRecord, TaskRecord,
-    ValueRecord, WIDE, WORD_BYTES,
+    BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, PlacementRecord, Profile,
+    StepRecord, Store, TaskRecord, ValueRecord, WIDE, WORD_BYTES, Window,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -14,9 +14,10 @@ fn refuses(action: impl FnOnce() + std::panic::UnwindSafe) -> bool {
 fn records_follow_the_shader_layout() {
     assert_eq!(size_of::<ValueRecord>(), 48);
     assert_eq!(offset_of!(ValueRecord, base), 0);
+    assert_eq!(offset_of!(ValueRecord, store), 4);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 52);
+    assert_eq!(size_of::<TaskRecord>(), 68);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -24,6 +25,10 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(TaskRecord, param), 40);
     assert_eq!(offset_of!(TaskRecord, chain), 44);
     assert_eq!(offset_of!(TaskRecord, steps), 48);
+    assert_eq!(offset_of!(TaskRecord, stride_rows), 52);
+    assert_eq!(offset_of!(TaskRecord, stride_columns), 56);
+    assert_eq!(offset_of!(TaskRecord, pad_rows), 60);
+    assert_eq!(offset_of!(TaskRecord, pad_columns), 64);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -35,6 +40,9 @@ fn records_follow_the_shader_layout() {
     assert_eq!(align_of::<ValueRecord>(), 4);
     assert_eq!(align_of::<TaskRecord>(), 4);
     assert_eq!(align_of::<StepRecord>(), 4);
+    assert_eq!(size_of::<PlacementRecord>(), 8);
+    assert_eq!(offset_of!(PlacementRecord, tensors), 0);
+    assert_eq!(offset_of!(PlacementRecord, weights), 4);
 }
 
 #[test]
@@ -68,10 +76,13 @@ fn every_task_kind_is_declared_once() {
     );
     assert_eq!(Kind::Matmul.name(), "matmul");
     assert_eq!(Kind::LogSoftmax.name(), "log_softmax");
+    assert_eq!(Kind::Conv2d.name(), "conv2d");
     assert!(Kind::Partial.pointwise());
     assert!(!Kind::Matmul.pointwise());
+    assert!(!Kind::Conv2d.pointwise());
     assert!(Kind::Binary.chainable());
     assert!(!Kind::Partial.chainable());
+    assert!(!Kind::Conv2d.chainable());
     assert!(refuses(|| {
         let _ = Kind::of(Kind::COUNT);
     }));
@@ -174,6 +185,20 @@ fn mentions(formula: &str, name: &str) -> bool {
 
 #[test]
 fn a_record_declares_what_the_device_reads() {
+    let mut value: ValueRecord = bytemuck::Zeroable::zeroed();
+    value.base = 6;
+    value.store = Store::Weights.code();
+    value.dims = [1, 2, 3, 4];
+    value.strides = [12, 6, 2, 1];
+    let bytes = bytemuck::bytes_of(&value);
+    assert_eq!(bytes.len(), 48);
+    assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 6);
+    assert_eq!(
+        u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
+        Store::Weights.code()
+    );
+    assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);
     let mut task: TaskRecord = bytemuck::Zeroable::zeroed();
     task.kind = Kind::Matmul.code();
     task.op = op::MUL;
@@ -187,8 +212,12 @@ fn a_record_declares_what_the_device_reads() {
     task.param = 0.5;
     task.chain = 7;
     task.steps = 2;
+    task.stride_rows = 1;
+    task.stride_columns = 2;
+    task.pad_rows = 3;
+    task.pad_columns = 4;
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 52);
+    assert_eq!(bytes.len(), 68);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -199,6 +228,10 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(f32::from_ne_bytes(bytes[40..44].try_into().unwrap()), 0.5);
     assert_eq!(u32::from_ne_bytes(bytes[44..48].try_into().unwrap()), 7);
     assert_eq!(u32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[56..60].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 4);
 }
 
 #[test]
@@ -216,6 +249,65 @@ fn a_step_declares_what_the_device_applies() {
     );
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 9);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 1);
+}
+
+#[test]
+fn every_value_lives_in_one_declared_store() {
+    for (code, store) in Store::ALL.iter().enumerate() {
+        assert_eq!(
+            store.code(),
+            code as u32,
+            "the {store:?} store leaves a hole"
+        );
+        assert!(!store.constant().is_empty());
+    }
+    assert_eq!(Store::Tensors.code(), 0);
+    assert_eq!(Store::Weights.code(), 1);
+    let declarations = neura_abi::store::declarations();
+    for store in Store::ALL {
+        assert!(declarations.contains(&format!(
+            "const {}: u32 = {}u;",
+            store.constant(),
+            store.code(),
+        )));
+    }
+    let mut constants = Store::ALL
+        .iter()
+        .map(|store| store.constant())
+        .collect::<Vec<_>>();
+    constants.sort_unstable();
+    constants.dedup();
+    assert_eq!(
+        constants.len(),
+        Store::ALL.len(),
+        "two stores share a device constant",
+    );
+}
+
+#[test]
+fn a_window_declares_how_it_walks_its_input() {
+    let window = Window::new([3, 5], [2, 4], [1, 6]);
+    assert_eq!(window.reach_rows(), 3);
+    assert_eq!(window.reach_columns(), 5);
+    assert_eq!(window.stride_rows(), 2);
+    assert_eq!(window.stride_columns(), 4);
+    assert_eq!(window.pad_rows(), 1);
+    assert_eq!(window.pad_columns(), 6);
+    let sliding = Window::sliding([3, 3]);
+    assert_eq!(sliding.stride_rows(), 1);
+    assert_eq!(sliding.stride_columns(), 1);
+    assert_eq!(sliding.pad_rows(), 0);
+    assert_eq!(sliding.pad_columns(), 0);
+    assert_eq!(sliding.reach_rows(), 3);
+    assert!(refuses(|| {
+        let _ = Window::new([0, 3], [1, 1], [0, 0]);
+    }));
+    assert!(refuses(|| {
+        let _ = Window::new([3, 3], [0, 1], [0, 0]);
+    }));
+    assert!(refuses(|| {
+        let _ = Window::sliding([3, 0]);
+    }));
 }
 
 #[test]

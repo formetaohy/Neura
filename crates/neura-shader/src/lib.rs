@@ -1,7 +1,7 @@
 mod reflection;
 
 use neura_abi::{
-    CURSOR_WAVE_BASE, Geometry, Kind, Placement, Precision, TAPE_WGSL, kind, op, strategy,
+    CURSOR_WAVE_BASE, Geometry, Kind, Precision, TAPE_WGSL, kind, op, store, strategy,
 };
 use neura_gpu::{BindingKind, BindingSpec, ComputeProgram};
 use std::fmt::Write as _;
@@ -17,6 +17,7 @@ pub const HEAP: u32 = 2;
 pub const CURSOR: u32 = 3;
 pub const BOUNDS: u32 = 4;
 pub const STEPS: u32 = 5;
+pub const PLACEMENT: u32 = 6;
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -62,6 +63,12 @@ pub const BINDINGS: &[KernelBinding] = &[
         dynamic_offset: false,
         name: "steps",
     },
+    KernelBinding {
+        binding: PLACEMENT,
+        kind: BindingKind::ReadOnlyStorage,
+        dynamic_offset: false,
+        name: "placement",
+    },
 ];
 
 pub struct Megakernel {
@@ -71,14 +78,15 @@ pub struct Megakernel {
 }
 
 impl Megakernel {
-    pub fn assemble(geometry: Geometry, weights: Precision, placement: Placement) -> Self {
+    pub fn assemble(geometry: Geometry, weights: Precision) -> Self {
         let mut source = String::from(TAPE_WGSL);
         source.push('\n');
         source.push_str(&kind::declarations());
         source.push_str(&op::declarations());
         source.push_str(&strategy::declarations());
+        source.push_str(&store::declarations());
         source.push_str(&geometry.declarations());
-        for fragment in neura_kernels::fragments(geometry.clone(), weights, placement) {
+        for fragment in neura_kernels::fragments(geometry.clone(), weights) {
             source.push_str(&fragment);
             source.push('\n');
         }

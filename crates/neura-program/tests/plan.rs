@@ -6,14 +6,14 @@ use neura_program::{Encoding, Graph, Init, Shape, Store};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
-const PLACEMENT: Placement = Placement::new(1 << 20, 1 << 18, 1 << 16);
+const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding(graph: &Graph) -> Encoding {
     encoding_with(graph, NARROW)
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    graph.encode(ALIGNMENT, profile, Precision::Single, PLACEMENT)
+    graph.encode(ALIGNMENT, profile, Precision::Single)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -143,8 +143,8 @@ fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
         "both readers of a value share a wave",
     );
     assert_ne!(
-        encoding.span(product).offset,
-        encoding.span(squared).offset,
+        encoding.span(product, PLACEMENT).offset,
+        encoding.span(squared, PLACEMENT).offset,
         "the storage of a value a second task reads in the same wave was handed to its reader",
     );
 }
@@ -157,8 +157,8 @@ fn a_value_one_task_reads_hands_its_storage_to_that_task() {
     let squared = graph.mul(scaled, scaled);
     let encoding = encoding(&graph);
     assert_eq!(
-        encoding.span(scaled).offset,
-        encoding.span(squared).offset,
+        encoding.span(scaled, PLACEMENT).offset,
+        encoding.span(squared, PLACEMENT).offset,
         "the only reader of a value takes the storage it consumed",
     );
 }
@@ -349,7 +349,7 @@ fn every_profile_plans_the_same_values() {
             graph.value_count(),
             "{profile:?} publishes values a graph without a reduction holds",
         );
-        assert_eq!(encoding.span(out).elements, 16);
+        assert_eq!(encoding.span(out, PLACEMENT).elements, 16);
     }
 }
 
@@ -488,10 +488,10 @@ fn a_view_shares_the_storage_of_its_source() {
     let transposed = graph.transpose(matrix);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
     let encoding = encoding(&graph);
-    assert_eq!(encoding.span(matrix).elements, 32);
+    assert_eq!(encoding.span(matrix, PLACEMENT).elements, 32);
     assert!(
         refuses(|| {
-            let _ = encoding.span(transposed);
+            let _ = encoding.span(transposed, PLACEMENT);
         }),
         "a transposed view was handed its own storage",
     );
@@ -562,7 +562,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
         .uploads()
         .iter()
         .find(|(address, _)| {
-            layout.weight_bytes(PLACEMENT, *address) == encoding.span(weight).offset
+            layout.weight_bytes(PLACEMENT, *address) == encoding.span(weight, PLACEMENT).offset
         })
         .expect("the weight carries its initial samples");
     assert_eq!(seed.1.len(), 16);
@@ -596,7 +596,7 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
         let encoding = encoding_with(&graph, *profile);
         let layout = graph.layout(ALIGNMENT, Precision::Single);
         for value in [weight, data, out, grads.of(weight)] {
-            let span = encoding.span(value);
+            let span = encoding.span(value, PLACEMENT);
             let bytes = u64::from(span.elements) * WORD_BYTES;
             let (base, limit) = match span.store {
                 Store::Tensors => (PLACEMENT.tensors() * WORD_BYTES, encoding.tensor_bytes()),

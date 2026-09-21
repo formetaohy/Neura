@@ -1,5 +1,5 @@
-use neura_nn::{Adam, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
-use neura_program::{Graph, Init, Shape};
+use neura_nn::{Adam, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
+use neura_program::{Graph, Init, Shape, Window};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
@@ -101,6 +101,45 @@ fn descent_lowers_the_loss_of_a_single_layer() {
         last < first,
         "twenty steps moved the loss from {first} to {last}",
     );
+}
+
+#[test]
+fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
+    let runtime = open();
+    let graph = Graph::new();
+    let conv = Conv2d::new(
+        &graph,
+        [1, 1],
+        Window::sliding([3, 3]),
+        Init::Uniform {
+            low: -0.2,
+            high: 0.2,
+        },
+    );
+    let inputs = graph.input(Shape::of([1, 1, 6, 6]));
+    let targets = graph.input(Shape::of([1, 1, 4, 4]));
+    let loss = mse_loss(&graph, conv.forward(&graph, inputs), targets);
+    let gradients = graph.backward(loss);
+    let optimizer = Sgd::new(&graph, 0.1);
+    optimizer.step(&graph, &gradients, &conv.parameters());
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let pattern = (0..36)
+        .map(|index| (index as f32 * 0.21).sin())
+        .collect::<Vec<_>>();
+    runtime.write(&program, inputs, &pattern);
+    runtime.write(&program, targets, &[1.0; 16]);
+    runtime.run(&program);
+    let first = runtime.read(&program, loss)[0];
+    for _ in 0..40 {
+        runtime.run(&program);
+    }
+    let last = runtime.read(&program, loss)[0];
+    assert!(
+        last < first,
+        "forty steps moved the loss from {first} to {last}",
+    );
+    assert!(last.is_finite() && last >= 0.0, "the loss ended at {last}");
 }
 
 #[test]

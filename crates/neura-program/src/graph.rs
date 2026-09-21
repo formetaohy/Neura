@@ -4,7 +4,7 @@ use crate::layout::Layout;
 use crate::shape::Shape;
 use neura_abi::Kind;
 use neura_abi::op;
-use neura_abi::{MAX_RANK, Placement, Precision};
+use neura_abi::{MAX_RANK, Precision, Window};
 use neura_abi::{NO_VALUE, Profile, StepRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -44,6 +44,7 @@ pub(crate) struct TaskInfo {
     pub(crate) inputs: [u32; 3],
     pub(crate) slot: u32,
     pub(crate) param: f32,
+    pub(crate) window: Window,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) time: u32,
@@ -58,6 +59,7 @@ impl TaskInfo {
             inputs,
             slot: 0,
             param: 0.0,
+            window: Window::sliding([1, 1]),
             in_place: false,
             chain: Vec::new(),
             time: 0,
@@ -196,6 +198,55 @@ impl Graph {
             out.id(),
             [left.id(), right.id(), NO_VALUE],
         ));
+        out
+    }
+
+    pub fn conv2d(&self, input: Value, filter: Value, window: Window) -> Value {
+        let input_dims = self.shape(input).dims();
+        let filter_dims = self.shape(filter).dims();
+        assert_eq!(
+            filter_dims[1], input_dims[1],
+            "a convolution reads {} channels through a filter of {} of them",
+            input_dims[1], filter_dims[1],
+        );
+        assert_eq!(
+            [filter_dims[2], filter_dims[3]],
+            [window.reach_rows(), window.reach_columns()],
+            "a window of {} by {} taps walks a filter of {} by {} taps",
+            window.reach_rows(),
+            window.reach_columns(),
+            filter_dims[2],
+            filter_dims[3],
+        );
+        let padded_rows = input_dims[2] + 2 * window.pad_rows();
+        let padded_columns = input_dims[3] + 2 * window.pad_columns();
+        assert!(
+            padded_rows >= filter_dims[2] && padded_columns >= filter_dims[3],
+            "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
+            filter_dims[2],
+            filter_dims[3],
+            input_dims,
+            window.pad_rows(),
+            window.pad_columns(),
+        );
+        let out = self.fresh(
+            Shape::of([
+                input_dims[0],
+                filter_dims[0],
+                (padded_rows - filter_dims[2]) / window.stride_rows() + 1,
+                (padded_columns - filter_dims[3]) / window.stride_columns() + 1,
+            ]),
+            Residency::Derived,
+            self.tracked(&[input, filter]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Conv2d,
+            op::NONE,
+            out.id(),
+            [input.id(), filter.id(), NO_VALUE],
+        );
+        task.window = window;
+        self.push(task);
         out
     }
 
@@ -427,15 +478,9 @@ impl Graph {
         Layout::of(&self.state.borrow().values, precision, alignment)
     }
 
-    pub fn encode(
-        &self,
-        alignment: u64,
-        profile: Profile,
-        precision: Precision,
-        placement: Placement,
-    ) -> Encoding {
+    pub fn encode(&self, alignment: u64, profile: Profile, precision: Precision) -> Encoding {
         let state = self.state.borrow();
-        Encoding::plan(&state, profile, alignment, precision, placement)
+        Encoding::plan(&state, profile, alignment, precision)
     }
 
     pub fn backward(&self, loss: Value) -> Gradients {
@@ -531,11 +576,41 @@ impl Graph {
                     self.accumulate(grads, source, out);
                 }
             }
+            Kind::Conv2d => {
+                let input = self.value_of(task.inputs[0]);
+                let filter = self.value_of(task.inputs[1]);
+                if self.tracked(&[input]) {
+                    let out = self.fresh(self.shape(input), Residency::Derived, false);
+                    let mut grad = TaskInfo::of(
+                        Kind::Conv2dInputGrad,
+                        op::NONE,
+                        out.id(),
+                        [filter.id(), gradient.id(), NO_VALUE],
+                    );
+                    grad.window = task.window;
+                    self.push(grad);
+                    self.accumulate(grads, input, out);
+                }
+                if self.tracked(&[filter]) {
+                    let out = self.fresh(self.shape(filter), Residency::Derived, false);
+                    let mut grad = TaskInfo::of(
+                        Kind::Conv2dWeightGrad,
+                        op::NONE,
+                        out.id(),
+                        [input.id(), gradient.id(), filter.id()],
+                    );
+                    grad.window = task.window;
+                    self.push(grad);
+                    self.accumulate(grads, filter, out);
+                }
+            }
             Kind::Fill
             | Kind::Broadcast
             | Kind::Partial
             | Kind::SoftmaxGrad
-            | Kind::LogSoftmaxGrad => {}
+            | Kind::LogSoftmaxGrad
+            | Kind::Conv2dInputGrad
+            | Kind::Conv2dWeightGrad => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot | Kind::Gather => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",

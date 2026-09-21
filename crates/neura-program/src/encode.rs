@@ -1,10 +1,10 @@
 use crate::fuse;
 use crate::graph::{GraphState, Residency, ValueInfo};
-use crate::layout::{Layout, Region, Store, store_of};
+use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
 use neura_abi::{
-    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, StepRecord, TaskRecord,
+    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, StepRecord, Store, TaskRecord,
     ValueRecord, WORD_BYTES,
 };
 use std::cmp::Reverse;
@@ -91,6 +91,13 @@ struct Active {
     bytes: u64,
 }
 
+#[derive(Clone, Copy)]
+struct Placed {
+    store: Store,
+    address: u64,
+    elements: u32,
+}
+
 pub struct Encoding {
     profile: Profile,
     tasks: Vec<u8>,
@@ -98,7 +105,7 @@ pub struct Encoding {
     bounds: Vec<u8>,
     steps: Vec<u8>,
     waves: Vec<u32>,
-    spans: Vec<Option<Span>>,
+    spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     tiles: Vec<MatmulTile>,
     geometries: Vec<u32>,
@@ -115,7 +122,6 @@ impl Encoding {
         profile: Profile,
         alignment: u64,
         precision: Precision,
-        placement: Placement,
     ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
@@ -147,11 +153,12 @@ impl Encoding {
 
         let mut records = Vec::new();
         for (id, info) in values.iter().enumerate() {
-            let address = layout.address(values, &offsets, placement, id as u32);
+            let address = layout.address(values, &offsets, id as u32);
             let mut record: ValueRecord = bytemuck::Zeroable::zeroed();
             record.base = u32::try_from(address).unwrap_or_else(|_| {
                 panic!("value {id} lies at {address}, beyond the device address space")
             });
+            record.store = layout.store(values, id as u32).code();
             record.dims = info.shape.dims();
             record.strides = info.strides;
             records.extend_from_slice(bytemuck::bytes_of(&record));
@@ -174,7 +181,9 @@ impl Encoding {
                     geometries[geometry] += 1;
                     geometry as u32
                 }
-                Kind::Argmax | Kind::Categorical | Kind::SumAxis => task.geometry,
+                Kind::Argmax | Kind::Categorical | Kind::SumAxis | Kind::Conv2dWeightGrad => {
+                    task.geometry
+                }
                 Kind::Binary
                 | Kind::Unary
                 | Kind::Partial
@@ -186,7 +195,9 @@ impl Encoding {
                 | Kind::LogSoftmax
                 | Kind::LogSoftmaxGrad
                 | Kind::OneHot
-                | Kind::Gather => 0,
+                | Kind::Gather
+                | Kind::Conv2d
+                | Kind::Conv2dInputGrad => 0,
             };
             assert!(
                 task.kind != Kind::SumChunk || task.chain.is_empty(),
@@ -206,6 +217,10 @@ impl Encoding {
             record.param = task.param;
             record.chain = (steps.len() / size_of::<StepRecord>()) as u32;
             record.steps = task.chain.len() as u32;
+            record.stride_rows = task.window.stride_rows();
+            record.stride_columns = task.window.stride_columns();
+            record.pad_rows = task.window.pad_rows();
+            record.pad_columns = task.window.pad_columns();
             for step in &task.chain {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
             }
@@ -255,10 +270,9 @@ impl Encoding {
             if info.storage as usize != id {
                 continue;
             }
-            let (store, offset) = layout.span(values, &offsets, placement, id as u32);
-            spans[id] = Some(Span {
-                store,
-                offset,
+            spans[id] = Some(Placed {
+                store: layout.store(values, id as u32),
+                address: layout.address(values, &offsets, id as u32),
                 elements: info.shape.elements(),
             });
         }
@@ -318,8 +332,9 @@ impl Encoding {
         &self.waves
     }
 
-    pub fn span(&self, value: crate::graph::Value) -> Span {
-        self.spans
+    pub fn span(&self, value: crate::graph::Value, placement: Placement) -> Span {
+        let placed = self
+            .spans
             .get(value.id() as usize)
             .copied()
             .flatten()
@@ -328,7 +343,16 @@ impl Encoding {
                     "{} elements of a view hold no storage of their own",
                     value.shape().elements(),
                 )
-            })
+            });
+        let offset = match placed.store {
+            Store::Weights => self.layout.weight_bytes(placement, placed.address),
+            Store::Tensors => (placement.tensors() + placed.address) * WORD_BYTES,
+        };
+        Span {
+            store: placed.store,
+            offset,
+            elements: placed.elements,
+        }
     }
 
     pub fn readable(&self, value: crate::graph::Value) -> bool {

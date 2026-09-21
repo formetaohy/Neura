@@ -496,6 +496,60 @@ fn reading_two_tensors_costs_one_submission() {
 }
 
 #[test]
+fn a_readout_holds_the_run_it_was_pulled_from() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let doubled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
+    graph.retain(doubled);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    let first = runtime.pull(&program, &[doubled]);
+    runtime.write(&program, data, &[5.0, 6.0, 7.0, 8.0]);
+    runtime.run(&program);
+    assert_close(
+        &runtime.collect(first).pop().expect("one tensor came back"),
+        &[2.0, 4.0, 6.0, 8.0],
+        1e-6,
+    );
+    assert_close(
+        &runtime.read(&program, doubled),
+        &[10.0, 12.0, 14.0, 16.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_pull_without_a_collect_runs_out_of_readbacks() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4));
+    let out = graph.mul(data, graph.fill(Shape::vector(4), 1.0));
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let mut pulled = Vec::new();
+    for slot in 0..runtime.readback_slots() {
+        runtime.run(&program);
+        pulled.push((slot, runtime.pull(&program, &[out])));
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.pull(&program, &[out])
+    }));
+    assert!(
+        outcome.is_err(),
+        "every readback of the runtime was in flight, and a pull was accepted",
+    );
+    let (slot, readout) = pulled.pop().expect("a readback was pulled");
+    runtime.collect(readout);
+    let next = runtime.pull(&program, &[out]);
+    runtime.collect(next);
+    assert!(slot < runtime.readback_slots());
+}
+
+#[test]
 fn a_graph_without_tasks_is_refused_by_the_runtime() {
     let graph = Graph::new();
     graph.input(Shape::vector(4));

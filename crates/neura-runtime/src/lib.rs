@@ -3,7 +3,9 @@ mod program;
 mod runtime;
 
 pub use neura_abi::{MatmulTile, PROFILES, Placement, Precision, Profile};
-pub use program::{Program, Span, Weights};
+pub use neura_program::Span;
+pub use program::{Program, Weights};
 pub use runtime::{
-    DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, Runtime, RuntimeRequest, WORKGROUP_BUDGET,
+    DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, READBACK_SLOTS, Readout, Runtime, RuntimeRequest,
+    WORKGROUP_BUDGET,
 };

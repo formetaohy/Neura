@@ -1,17 +1,15 @@
 use naga::AddressSpace;
 use neura_abi::op::OPS;
-use neura_abi::{Geometry, Kind, PROFILES, Placement, Precision, Profile};
+use neura_abi::{Geometry, Kind, PROFILES, Precision, Profile};
 use neura_shader::{BINDINGS, Megakernel, reflect};
 use std::collections::BTreeSet;
-
-const PLACEMENT: Placement = Placement::new(1 << 20, 1 << 18, 1 << 16);
 
 fn assemble(profile: Profile) -> Megakernel {
     assemble_with(profile, Precision::Single)
 }
 
 fn assemble_with(profile: Profile, weights: Precision) -> Megakernel {
-    Megakernel::assemble(Geometry::of(profile, profile.ladder()), weights, PLACEMENT)
+    Megakernel::assemble(Geometry::of(profile, profile.ladder()), weights)
 }
 
 #[test]
@@ -239,7 +237,7 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
 fn a_program_carries_only_the_tiles_it_is_given() {
     let profile = PROFILES[PROFILES.len() - 1];
     let geometry = Geometry::of(profile, &profile.ladder()[..1]);
-    let kernel = Megakernel::assemble(geometry.clone(), Precision::Single, PLACEMENT);
+    let kernel = Megakernel::assemble(geometry.clone(), Precision::Single);
     assert!(
         kernel
             .source()
@@ -293,7 +291,7 @@ fn two_profiles_are_two_programs() {
 fn the_program_hands_the_device_one_group_of_six_buffers() {
     let kernel = assemble(PROFILES[0]);
     let program = kernel.program();
-    assert_eq!(program.bindings().len(), 6);
+    assert_eq!(program.bindings().len(), BINDINGS.len());
     assert!(
         program
             .bindings()
@@ -309,24 +307,26 @@ fn half_weights_unpack_where_single_weights_load() {
     let single = assemble_with(PROFILES[0], Precision::Single);
     let half = assemble_with(PROFILES[0], Precision::Half);
     assert!(single.source().contains(
-        "fn fetch(base: u32, offset: u32) -> f32 {
-    return heap[base + offset];"
+        "fn fetch(value: Value, offset: u32) -> f32 {
+    return heap[base_of(value) + value.base + offset];"
     ));
     assert!(!single.source().contains("unpack2x16float"));
     assert!(
         half.source()
-            .contains(&format!("const HEAP_WORDS: u32 = {}u;", PLACEMENT.heap()))
+            .contains("heap[placement.weights + (element >> 1u)]")
     );
-    assert!(half.source().contains(&format!(
-        "const WEIGHT_WORDS: u32 = {}u;",
-        PLACEMENT.weights()
-    )));
     assert!(half.source().contains("unpack2x16float"));
     for kernel in [&single, &half] {
         assert!(
             kernel
                 .source()
-                .contains("fn publish(base: u32, offset: u32, data: f32)")
+                .contains("fn publish(value: Value, offset: u32, data: f32)")
+        );
+        assert!(
+            kernel
+                .source()
+                .contains("fn base_of(value: Value) -> u32 {"),
+            "every device program is handed the stores it addresses instead of carrying them",
         );
     }
 }
@@ -383,7 +383,7 @@ fn type_bytes(module: &naga::Module, ty: naga::Handle<naga::Type>) -> u64 {
 fn the_profile_carries_the_workgroup_memory_its_program_declares() {
     for profile in PROFILES {
         let geometry = Geometry::of(*profile, profile.ladder());
-        let kernel = Megakernel::assemble(geometry, Precision::Single, PLACEMENT);
+        let kernel = Megakernel::assemble(geometry, Precision::Single);
         let declared = workgroup_bytes(kernel.source());
         assert!(
             declared > 0,
@@ -399,6 +399,6 @@ fn the_profile_carries_the_workgroup_memory_its_program_declares() {
 
 #[test]
 fn the_reductions_and_choices_keep_a_scratch_of_their_own() {
-    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0], &[]), Precision::Single, PLACEMENT);
+    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0], &[]), Precision::Single);
     assert!(workgroup_bytes(kernel.source()) >= 2 * u64::from(PROFILES[0].workgroup()) * 4);
 }

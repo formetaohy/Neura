@@ -1,11 +1,12 @@
-use neura_abi::{Kind, NARROW, Precision, Profile, TaskRecord, WIDE, strategy};
-use neura_program::{Encoding, Graph, Init, Placement, Shape, Value};
+use neura_abi::{Kind, NARROW, Precision, Profile, TaskRecord, ValueRecord, WIDE, strategy};
+use neura_program::{Encoding, Graph, Init, Placement, Shape, Value, Window};
+use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
-const PLACEMENT: Placement = Placement::new(1 << 20, 1 << 18, 1 << 16);
+const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    graph.encode(ALIGNMENT, profile, Precision::Single, PLACEMENT)
+    graph.encode(ALIGNMENT, profile, Precision::Single)
 }
 
 fn refuses(action: impl FnOnce()) -> bool {
@@ -26,6 +27,16 @@ fn tasks_of(encoding: &Encoding, value: Value) -> Vec<TaskRecord> {
     tape(encoding)
         .into_iter()
         .filter(|task| task.out == value.id())
+        .collect()
+}
+
+fn values_of(encoding: &Encoding) -> Vec<ValueRecord> {
+    encoding
+        .values()
+        .as_chunks::<{ size_of::<ValueRecord>() }>()
+        .0
+        .iter()
+        .map(|value| bytemuck::pod_read_unaligned(value))
         .collect()
 }
 
@@ -195,7 +206,7 @@ fn a_choice_covers_every_row_once() {
         cursor += task.count;
     }
     assert_eq!(cursor, rows);
-    assert_eq!(encoding.span(action).elements, rows);
+    assert_eq!(encoding.span(action, PLACEMENT).elements, rows);
 }
 
 #[test]
@@ -209,7 +220,7 @@ fn an_index_list_carries_one_index_per_row() {
     assert_eq!(tasks.len(), 1);
     assert_eq!(Kind::of(tasks[0].kind), Kind::OneHot);
     assert_eq!(tasks[0].a, indices.id());
-    assert_eq!(encoding.span(mask).elements, 24);
+    assert_eq!(encoding.span(mask, PLACEMENT).elements, 24);
     assert_eq!(graph.shape(mask), Shape::matrix(6, 4));
 }
 
@@ -226,8 +237,113 @@ fn a_gather_copies_the_rows_of_the_table_it_names() {
     assert_eq!(Kind::of(tasks[0].kind), Kind::Gather);
     assert_eq!(tasks[0].a, table.id());
     assert_eq!(tasks[0].b, indices.id());
-    assert_eq!(encoding.span(picked).elements, 21);
+    assert_eq!(encoding.span(picked, PLACEMENT).elements, 21);
     assert_eq!(graph.shape(picked), Shape::matrix(7, 3));
+}
+
+#[test]
+fn a_convolution_hands_the_device_the_window_it_walks() {
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 64, 64]));
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero);
+    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([2, 4, 32, 32]));
+    graph.retain(convolved);
+    let encoding = encoding_with(&graph, WIDE);
+    let tasks = tasks_of(&encoding, convolved);
+    assert_eq!(tasks.len(), 4);
+    let mut cursor = 0;
+    for task in tasks {
+        assert_eq!(Kind::of(task.kind), Kind::Conv2d);
+        assert_eq!(task.a, input.id());
+        assert_eq!(task.b, filter.id());
+        assert_eq!(task.first, cursor);
+        assert_eq!(task.count, 2048);
+        assert_eq!(task.stride_rows, 2);
+        assert_eq!(task.stride_columns, 2);
+        assert_eq!(task.pad_rows, 1);
+        assert_eq!(task.pad_columns, 1);
+        cursor += task.count;
+    }
+    assert_eq!(cursor, 8192);
+    assert_eq!(encoding.span(convolved, PLACEMENT).elements, 8192);
+    assert_eq!(
+        encoding.work(),
+        8192 * 27,
+        "a convolution accounts every channel of every tap it reads",
+    );
+}
+
+#[test]
+fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
+    let graph = Graph::new();
+    let input = graph.parameter(Shape::of([1, 16, 8, 8]), Init::Zero);
+    let filter = graph.parameter(Shape::of([16, 16, 3, 3]), Init::Zero);
+    let window = Window::new([3, 3], [1, 1], [1, 1]);
+    let convolved = graph.conv2d(input, filter, window);
+    let gradients = graph.backward(graph.sum(convolved));
+    let output_grad = gradients.of(convolved);
+    let weight_grad = gradients.of(filter);
+    graph.retain(weight_grad);
+    let encoding = encoding_with(&graph, WIDE);
+    let gradient_tasks = tape(&encoding)
+        .into_iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Conv2dWeightGrad)
+        .collect::<Vec<_>>();
+    let partials = gradient_tasks
+        .iter()
+        .find(|task| task.out != weight_grad.id())
+        .map(|task| task.out)
+        .expect("a weight gradient splits its positions before it folds them");
+    assert_eq!(
+        values_of(&encoding)[partials as usize].dims,
+        [1, 1, 64, 2304],
+        "the chunks of a weight gradient are summed down one row each",
+    );
+    let mut chunks = 0u32;
+    let mut folded = 0u32;
+    for task in gradient_tasks {
+        if task.out == weight_grad.id() {
+            assert_eq!(task.geometry, strategy::WEIGHT_FOLD);
+            assert_eq!(task.a, partials);
+            folded += task.count;
+        } else {
+            assert_eq!(task.out, partials);
+            assert_eq!(task.geometry, strategy::WEIGHT_CHUNK);
+            assert_eq!(task.a, input.id());
+            assert_eq!(task.b, output_grad.id());
+            assert_eq!(task.c, filter.id());
+            chunks += 1;
+        }
+    }
+    assert_eq!(chunks, 128);
+    assert_eq!(folded, 2304);
+    assert_eq!(encoding.span(weight_grad, PLACEMENT).elements, 2304);
+}
+
+#[test]
+fn a_convolution_stops_the_graph_it_cannot_walk() {
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 6, 6]));
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero);
+    assert!(refuses(|| {
+        let _ = graph.conv2d(input, filter, Window::sliding([5, 5]));
+    }));
+    assert!(refuses(|| {
+        let _ = graph.conv2d(
+            input,
+            graph.parameter(Shape::of([4, 2, 3, 3]), Init::Zero),
+            Window::sliding([3, 3]),
+        );
+    }));
+    assert!(refuses(|| {
+        let _ = graph.conv2d(
+            graph.input(Shape::of([2, 3, 2, 2])),
+            graph.parameter(Shape::of([4, 3, 5, 5]), Init::Zero),
+            Window::new([5, 5], [1, 1], [1, 1]),
+        );
+    }));
 }
 
 #[test]

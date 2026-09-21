@@ -10,6 +10,7 @@ const NO_VALUE: u32 = 0xffffffffu;
 
 struct Value {
     base: u32,
+    store: u32,
     dims: vec4<u32>,
     strides: vec4<u32>,
 }
@@ -28,6 +29,10 @@ struct Task {
     param: f32,
     chain: u32,
     steps: u32,
+    stride_rows: u32,
+    stride_columns: u32,
+    pad_rows: u32,
+    pad_columns: u32,
 }
 
 struct Step {
@@ -42,9 +47,15 @@ struct Bounds {
     wave: u32,
 }
 
+struct Placement {
+    tensors: u32,
+    weights: u32,
+}
+
 @group(0) @binding(0) var<storage, read> tasks: array<Task>;
 @group(0) @binding(1) var<storage, read> values: array<Value>;
 @group(0) @binding(2) var<storage, read_write> heap: array<f32>;
 @group(0) @binding(3) var<storage, read_write> cursor: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> bounds: Bounds;
 @group(0) @binding(5) var<storage, read> steps: array<Step>;
+@group(0) @binding(6) var<storage, read> placement: Placement;

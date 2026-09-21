@@ -1,6 +1,6 @@
 use crate::graph::{TaskInfo, ValueInfo};
 use crate::shape::Shape;
-use neura_abi::{Kind, MAX_RANK, MatmulTile, NO_VALUE, Profile, StepRecord, strategy};
+use neura_abi::{Kind, MAX_RANK, MatmulTile, NO_VALUE, Profile, StepRecord, Window, strategy};
 
 const TARGET_TASKS: u32 = 256;
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
@@ -22,6 +22,7 @@ pub(crate) struct Task {
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
     pub(crate) param: f32,
+    pub(crate) window: Window,
     pub(crate) work: u64,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
@@ -40,6 +41,7 @@ impl Task {
             out: unit.out,
             inputs: unit.inputs,
             param: unit.param,
+            window: unit.window,
             work,
             in_place: unit.in_place,
             chain: unit.chain.clone(),
@@ -116,6 +118,27 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile),
         Kind::SumChunk => reduce(plan, unit),
         Kind::SumAxis => fold(plan, unit, profile),
+        Kind::Conv2d => {
+            let out = plan.shape(unit.out);
+            let filter = plan.shape(unit.inputs[1]);
+            let dims = filter.dims();
+            let taps = u64::from(dims[1] * dims[2] * dims[3]);
+            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count) * taps));
+            }
+        }
+        Kind::Conv2dInputGrad => {
+            let out = plan.shape(unit.out);
+            let filter = plan.shape(unit.inputs[0]);
+            let dims = filter.dims();
+            let taps = u64::from(dims[0] * dims[2] * dims[3]);
+            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count) * taps));
+            }
+        }
+        Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit),
         Kind::Binary
         | Kind::Unary
         | Kind::Partial
@@ -129,6 +152,38 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                     .push(Task::span(unit, first, count, u64::from(count)));
             }
         }
+    }
+}
+
+fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo) {
+    let input = plan.shape(unit.inputs[0]);
+    let gradient = plan.shape(unit.inputs[1]);
+    let filters = plan.shape(unit.inputs[2]).elements();
+    let positions = input.dims()[0] * gradient.dims()[2] * gradient.dims()[3];
+    let per_task = task_elements(filters);
+    let spans_per_chunk = filters.div_ceil(per_task);
+    let chunks = (TARGET_TASKS / spans_per_chunk).clamp(1, positions);
+    let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
+    for chunk in 0..chunks {
+        for (first, count) in spans(filters, per_task) {
+            let mut task = Task::span(
+                unit,
+                first,
+                count,
+                u64::from(count) * u64::from(positions.div_ceil(chunks)),
+            );
+            task.geometry = strategy::WEIGHT_CHUNK;
+            task.slot = chunk;
+            task.inputs = [unit.inputs[0], unit.inputs[1], unit.inputs[2]];
+            task.out = partials;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count) in spans(filters, per_task) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(chunks));
+        task.geometry = strategy::WEIGHT_FOLD;
+        task.inputs = [partials, NO_VALUE, NO_VALUE];
+        plan.tasks.push(task);
     }
 }
 

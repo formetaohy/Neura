@@ -26,15 +26,15 @@ pub fn family(geometry: Geometry) -> String {
 
 fn load(source: &mut String, geometry: usize) {
     let function = format!(
-        "fn matmul_load_{geometry}(lid: u32, base_row: u32, base_column: u32, base_depth: u32, buffer: u32, left: Value, right: Value, rows: u32, depth: u32, columns: u32) {{\n"
+        "fn matmul_load_{geometry}(lid: u32, base_row: u32, base_column: u32, base_depth: u32, buffer: u32, left_plane: u32, right_plane: u32, left: Value, right: Value, rows: u32, depth: u32, columns: u32) {{\n"
     );
     source.push_str(&function);
     let left = format!(
-        "    let left_slot = buffer * MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry};\n    for (var unit = lid; unit < MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_row + unit / MATMUL_DEPTH_{geometry};\n        let column = base_depth + unit % MATMUL_DEPTH_{geometry};\n        let inside = row < rows && column < depth;\n        let address = select(0u, row * left.strides.z + column * left.strides.w, inside);\n        matmul_left[left_slot + unit] = select(0.0, fetch(left.base, address), inside);\n    }}\n",
+        "    let left_slot = buffer * MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry};\n    for (var unit = lid; unit < MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_row + unit / MATMUL_DEPTH_{geometry};\n        let column = base_depth + unit % MATMUL_DEPTH_{geometry};\n        let inside = row < rows && column < depth;\n        let address = select(0u, left_plane + row * left.strides.z + column * left.strides.w, inside);\n        matmul_left[left_slot + unit] = select(0.0, fetch(left, address), inside);\n    }}\n",
     );
     source.push_str(&left);
     let right = format!(
-        "    let right_slot = buffer * MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry};\n    for (var unit = lid; unit < MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_depth + unit / MATMUL_COLUMNS_{geometry};\n        let column = base_column + unit % MATMUL_COLUMNS_{geometry};\n        let inside = row < depth && column < columns;\n        let address = select(0u, row * right.strides.z + column * right.strides.w, inside);\n        matmul_right[right_slot + unit] = select(0.0, fetch(right.base, address), inside);\n    }}\n}}\n\n",
+        "    let right_slot = buffer * MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry};\n    for (var unit = lid; unit < MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_depth + unit / MATMUL_COLUMNS_{geometry};\n        let column = base_column + unit % MATMUL_COLUMNS_{geometry};\n        let inside = row < depth && column < columns;\n        let address = select(0u, right_plane + row * right.strides.z + column * right.strides.w, inside);\n        matmul_right[right_slot + unit] = select(0.0, fetch(right, address), inside);\n    }}\n}}\n\n",
     );
     source.push_str(&right);
 }
@@ -91,25 +91,21 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
     .unwrap();
     writeln!(
         source,
-        "        let batch_left = Value(left.base + plane_row * left.strides.x + plane_column * left.strides.y, left.dims, left.strides);",
+        "        let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;",
     )
     .unwrap();
     writeln!(
         source,
-        "        let batch_right = Value(right.base + plane_row * right.strides.x + plane_column * right.strides.y, right.dims, right.strides);",
+        "        let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;",
     )
     .unwrap();
-    writeln!(
-        source,
-        "        let batch_out = output.base + plane * rows * columns;",
-    )
-    .unwrap();
+    writeln!(source, "        let out_plane = plane * rows * columns;",).unwrap();
     for register in 0..tile.registers() {
         writeln!(source, "        var acc{register} = 0.0;").unwrap();
     }
     writeln!(
         source,
-        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, 0u, 0u, batch_left, batch_right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = 0u; block < depth_blocks; block = block + 1u) {{\n            if (block + 1u < depth_blocks) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, batch_left, batch_right, rows, depth, columns);\n            }}",
+        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, 0u, 0u, left_plane, right_plane, left, right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = 0u; block < depth_blocks; block = block + 1u) {{\n            if (block + 1u < depth_blocks) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, left_plane, right_plane, left, right, rows, depth, columns);\n            }}",
     )
     .unwrap();
     writeln!(
@@ -149,7 +145,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
             let register = row * tile.register_columns() + column;
             writeln!(
                 source,
-                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(batch_out, index{register}, chained(task, vec4<u32>(plane_row, plane_column, row{register}, column{register}), acc{register}));\n        }}",
+                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output, out_plane + index{register}, chained(task, vec4<u32>(plane_row, plane_column, row{register}, column{register}), acc{register}));\n        }}",
             )
             .unwrap();
         }

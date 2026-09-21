@@ -1,12 +1,13 @@
 use crate::heap::{Allocation, Heap};
 use neura_abi::{
-    BoundsRecord, CURSOR_BYTES, Geometry, MatmulTile, Placement, Precision, Profile, StepRecord,
+    BoundsRecord, CURSOR_BYTES, Geometry, MatmulTile, Placement, PlacementRecord, Precision,
+    Profile, StepRecord, WORD_BYTES,
 };
 use neura_gpu::{
     BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, PipelineHandle, Submission,
 };
-use neura_program::{Encoding, Region, Store, Value};
-use neura_shader::{BOUNDS, CURSOR, HEAP, Megakernel, STEPS, TASKS, VALUES};
+use neura_program::{Encoding, Region, Span, Value};
+use neura_shader::{BOUNDS, CURSOR, HEAP, Megakernel, PLACEMENT, STEPS, TASKS, VALUES};
 use std::mem::size_of;
 use std::sync::Arc;
 
@@ -66,13 +67,13 @@ pub struct Program {
     pub(crate) values: GpuBuffer,
     pub(crate) bounds: GpuBuffer,
     pub(crate) steps: GpuBuffer,
+    placement: GpuBuffer,
 }
 
 impl Program {
     pub(crate) fn build(
         context: &GpuContext,
         encoding: Encoding,
-        placement: Placement,
         tensors: Allocation,
         weights: Weights,
     ) -> Self {
@@ -126,6 +127,12 @@ impl Program {
             (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
+        let placement_bytes = GpuBuffer::new(
+            device,
+            "neura placement",
+            size_of::<PlacementRecord>() as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
         let queue = context.queue();
         let mut clearing = Submission::new(device, "neura tensors");
         clearing.clear_buffer(
@@ -137,12 +144,22 @@ impl Program {
         tape.write(queue, encoding.tasks());
         values.write(queue, encoding.values());
         bounds.write(queue, encoding.bounds());
+        placement_bytes.write(
+            queue,
+            bytemuck::bytes_of(&PlacementRecord {
+                tensors: u32::try_from(tensors.word()).unwrap_or_else(|_| {
+                    panic!("the tensors of a program start beyond the device address space")
+                }),
+                weights: u32::try_from(weights.offset() / WORD_BYTES).unwrap_or_else(|_| {
+                    panic!("the weights of a program start beyond the device address space")
+                }),
+            }),
+        );
         if !encoding.steps().is_empty() {
             steps.write(queue, encoding.steps());
         }
         let geometry = Geometry::of(encoding.profile(), encoding.tiles());
-        let kernel = context
-            .declare(Megakernel::assemble(geometry, weights.precision(), placement).program());
+        let kernel = context.declare(Megakernel::assemble(geometry, weights.precision()).program());
         let group = kernel.bind_group(&[
             BindGroupEntry {
                 binding: TASKS,
@@ -168,6 +185,10 @@ impl Program {
                 binding: STEPS,
                 resource: steps.resource(0, steps.size()),
             },
+            BindGroupEntry {
+                binding: PLACEMENT,
+                resource: placement_bytes.resource(0, placement_bytes.size()),
+            },
         ]);
         Self {
             encoding,
@@ -180,7 +201,12 @@ impl Program {
             steps,
             cursor,
             group,
+            placement: placement_bytes,
         }
+    }
+
+    fn at(&self) -> Placement {
+        Placement::new(self.tensors.word(), self.weights.offset() / WORD_BYTES)
     }
 
     pub(crate) fn lives_on(&self, heap: &Arc<Heap>) -> bool {
@@ -222,6 +248,7 @@ impl Program {
             + self.bounds.size()
             + self.steps.size()
             + self.cursor.size()
+            + self.placement.size()
     }
 
     pub fn profile(&self) -> Profile {
@@ -265,18 +292,6 @@ impl Program {
     }
 
     pub fn span(&self, value: Value) -> Span {
-        let span = self.encoding.span(value);
-        Span {
-            store: span.store,
-            offset: span.offset,
-            elements: span.elements,
-        }
+        self.encoding.span(value, self.at())
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Span {
-    pub store: Store,
-    pub offset: u64,
-    pub elements: u32,
 }

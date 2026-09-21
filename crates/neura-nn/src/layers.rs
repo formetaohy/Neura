@@ -1,4 +1,4 @@
-use neura_program::{Graph, Init, Shape, Value};
+use neura_program::{Graph, Init, Shape, Value, Window};
 
 pub struct Linear {
     weight: Value,
@@ -31,6 +31,46 @@ impl Linear {
 
     pub fn parameters(&self) -> [Value; 2] {
         [self.weight, self.bias]
+    }
+}
+
+pub struct Conv2d {
+    filter: Value,
+    bias: Value,
+    window: Window,
+}
+
+impl Conv2d {
+    pub fn new(graph: &Graph, channels: [u32; 2], window: Window, init: Init) -> Self {
+        let [inputs, outputs] = channels;
+        assert!(
+            inputs > 0 && outputs > 0,
+            "a convolution of {inputs} channels into {outputs} carries no filter",
+        );
+        Self {
+            filter: graph.parameter(
+                Shape::of([outputs, inputs, window.reach_rows(), window.reach_columns()]),
+                init,
+            ),
+            bias: graph.parameter(Shape::of([1, outputs, 1, 1]), Init::Zero),
+            window,
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+        graph.add(graph.conv2d(input, self.filter, self.window), self.bias)
+    }
+
+    pub fn filter(&self) -> Value {
+        self.filter
+    }
+
+    pub fn bias(&self) -> Value {
+        self.bias
+    }
+
+    pub fn parameters(&self) -> [Value; 2] {
+        [self.filter, self.bias]
     }
 }
 

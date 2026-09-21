@@ -1,7 +1,7 @@
 mod matmul;
 mod ops;
 
-use neura_abi::{Geometry, Kind, Placement, Precision};
+use neura_abi::{Geometry, Kind, Precision};
 
 pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
 pub const READ: &str = include_str!("../shaders/read.wgsl");
@@ -10,6 +10,7 @@ pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
 pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
 pub const CHOICE: &str = include_str!("../shaders/choice.wgsl");
 pub const SELECT: &str = include_str!("../shaders/select.wgsl");
+pub const CONV: &str = include_str!("../shaders/conv.wgsl");
 
 pub fn body(kind: Kind) -> &'static str {
     match kind {
@@ -29,15 +30,18 @@ pub fn body(kind: Kind) -> &'static str {
         Kind::Categorical => "run_categorical",
         Kind::OneHot => "run_one_hot",
         Kind::Gather => "run_gather",
+        Kind::Conv2d => "run_conv2d",
+        Kind::Conv2dInputGrad => "run_conv2d_input_grad",
+        Kind::Conv2dWeightGrad => "run_conv2d_weight_grad",
     }
 }
 
-pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -> Vec<String> {
+pub fn fragments(geometry: Geometry, weights: Precision) -> Vec<String> {
     vec![
         REFUSE.to_owned(),
         READ.to_owned(),
         ops::fragment(),
-        storage(weights, placement),
+        storage(weights),
         POINTWISE.to_owned(),
         matmul::family(geometry),
         REDUCE.to_owned(),
@@ -45,46 +49,42 @@ pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -
         SOFTMAX.to_owned(),
         CHOICE.to_owned(),
         SELECT.to_owned(),
+        CONV.to_owned(),
     ]
 }
 
-fn storage(weights: Precision, placement: Placement) -> String {
-    let mut source = String::new();
-    source.push_str(
+fn storage(weights: Precision) -> String {
+    let mut source = String::from(
         "
-fn publish(base: u32, offset: u32, data: f32) {
-    heap[base + offset] = data;
+fn base_of(value: Value) -> u32 {
+    return select(placement.weights, placement.tensors, value.store == STORE_TENSORS);
+}
+
+fn publish(value: Value, offset: u32, data: f32) {
+    heap[base_of(value) + value.base + offset] = data;
 }
 ",
     );
     match weights {
         Precision::Single => source.push_str(
             "
-fn fetch(base: u32, offset: u32) -> f32 {
-    return heap[base + offset];
+fn fetch(value: Value, offset: u32) -> f32 {
+    return heap[base_of(value) + value.base + offset];
 }
 ",
         ),
-        Precision::Half => {
-            source.push_str(&format!(
-                "
-const HEAP_WORDS: u32 = {}u;
-const WEIGHT_WORDS: u32 = {}u;
-
-fn fetch(base: u32, offset: u32) -> f32 {{
-    let address = base + offset;
-    if (address < HEAP_WORDS) {{
-        return heap[address];
-    }}
-    let element = address - HEAP_WORDS;
-    let pair = unpack2x16float(bitcast<u32>(heap[WEIGHT_WORDS + (element >> 1u)]));
-    return select(pair.x, pair.y, (element & 1u) == 1u);
-}}
+        Precision::Half => source.push_str(
+            "
+fn fetch(value: Value, offset: u32) -> f32 {
+    if (value.store == STORE_WEIGHTS) {
+        let element = value.base + offset;
+        let pair = unpack2x16float(bitcast<u32>(heap[placement.weights + (element >> 1u)]));
+        return select(pair.x, pair.y, (element & 1u) == 1u);
+    }
+    return heap[placement.tensors + value.base + offset];
+}
 ",
-                placement.heap(),
-                placement.weights(),
-            ));
-        }
+        ),
     }
     source
 }

@@ -1,11 +1,5 @@
 use crate::graph::{Residency, ValueInfo};
-use neura_abi::{Placement, Precision, WORD_BYTES};
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Store {
-    Weights,
-    Tensors,
-}
+use neura_abi::{Placement, Precision, Store, WORD_BYTES};
 
 #[derive(Clone, Debug)]
 pub struct Region {
@@ -141,48 +135,19 @@ impl Layout {
         store_of(values[values[value as usize].storage as usize].residency)
     }
 
-    pub(crate) fn address(
-        &self,
-        values: &[ValueInfo],
-        arena: &[u64],
-        placement: Placement,
-        value: u32,
-    ) -> u64 {
+    pub(crate) fn address(&self, values: &[ValueInfo], arena: &[u64], value: u32) -> u64 {
         let storage = values[value as usize].storage;
         match self.store(values, value) {
-            Store::Weights => match self.weights.precision {
-                Precision::Single => placement.weights() + self.weights.address(storage),
-                Precision::Half => placement.heap() + self.weights.address(storage),
-            },
+            Store::Weights => self.weights.address(storage),
             Store::Tensors => match values[storage as usize].residency {
-                Residency::Resident => placement.tensors() + self.tensors.address(storage),
-                _ => placement.tensors() + arena[storage as usize] / WORD_BYTES,
+                Residency::Resident => self.tensors.address(storage),
+                _ => arena[storage as usize] / WORD_BYTES,
             },
         }
     }
 
     pub fn weight_bytes(&self, placement: Placement, address: u64) -> u64 {
         (placement.weights() + self.weights.word_of(address)) * WORD_BYTES
-    }
-
-    pub(crate) fn span(
-        &self,
-        values: &[ValueInfo],
-        arena: &[u64],
-        placement: Placement,
-        value: u32,
-    ) -> (Store, u64) {
-        let storage = values[value as usize].storage;
-        match self.store(values, value) {
-            Store::Weights => (
-                Store::Weights,
-                self.weight_bytes(placement, self.weights.address(storage)),
-            ),
-            Store::Tensors => (
-                Store::Tensors,
-                self.address(values, arena, placement, value) * WORD_BYTES,
-            ),
-        }
     }
 }
 

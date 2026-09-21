@@ -9,7 +9,9 @@ pub mod op;
 mod placement;
 mod precision;
 mod profile;
+pub mod store;
 pub mod strategy;
+mod window;
 
 pub const TAPE_WGSL: &str = include_str!("../abi/program.wgsl");
 
@@ -18,7 +20,9 @@ pub use kind::Kind;
 pub use placement::Placement;
 pub use precision::Precision;
 pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
-pub use records::{BoundsRecord, StepRecord, TaskRecord, ValueRecord};
+pub use records::{BoundsRecord, PlacementRecord, StepRecord, TaskRecord, ValueRecord};
+pub use store::Store;
+pub use window::Window;
 
 pub const WORD_BYTES: u64 = 4;
 pub const BOUNDS_BYTES: u64 = BOUNDS_WORDS as u64 * WORD_BYTES;

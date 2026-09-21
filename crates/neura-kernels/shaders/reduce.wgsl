@@ -3,18 +3,18 @@ fn run_sum_chunk(task: Task, lid: u32) {
     let output = values[task.out];
     var local = 0.0;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        local = local + fetch(source.base, index);
+        local = local + fetch(source, index);
     }
     let total = workgroup_sum(lid, local);
     if (lid == 0u) {
-        publish(output.base, task.slot, total);
+        publish(output, task.slot, total);
     }
 }
 
 fn sum_row_with_workgroup(lid: u32, source: Value, row: u32, columns: u32) -> f32 {
     var local = 0.0;
     for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-        local = local + fetch(source.base, row * columns + column);
+        local = local + fetch(source, row * columns + column);
     }
     return workgroup_sum(lid, local);
 }
@@ -22,7 +22,7 @@ fn sum_row_with_workgroup(lid: u32, source: Value, row: u32, columns: u32) -> f3
 fn sum_row_with_thread(source: Value, row: u32, columns: u32) -> f32 {
     var local = 0.0;
     for (var column = 0u; column < columns; column = column + 1u) {
-        local = local + fetch(source.base, row * columns + column);
+        local = local + fetch(source, row * columns + column);
     }
     return local;
 }
@@ -32,7 +32,7 @@ fn sum_rows_with_workgroup(task: Task, lid: u32, source: Value, columns: u32) {
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
         let total = sum_row_with_workgroup(lid, source, row, columns);
         if (lid == 0u) {
-            publish(output.base, row, chained(task, coordinates(row, output.dims), total));
+            publish(output, row, chained(task, coordinates(row, output.dims), total));
         }
         workgroupBarrier();
     }
@@ -41,7 +41,7 @@ fn sum_rows_with_workgroup(task: Task, lid: u32, source: Value, columns: u32) {
 fn sum_rows_with_thread(task: Task, lid: u32, source: Value, columns: u32) {
     let output = values[task.out];
     for (var row = task.first + lid; row < task.first + task.count; row = row + WORKGROUP_SIZE) {
-        publish(output.base, row, chained(task, coordinates(row, output.dims), sum_row_with_thread(source, row, columns)));
+        publish(output, row, chained(task, coordinates(row, output.dims), sum_row_with_thread(source, row, columns)));
     }
 }
 
@@ -57,9 +57,9 @@ fn sum_axis_element(task: Task, lid: u32, source: Value, output: Value, axis: u3
         let at = coordinates(index, output.dims);
         var total = 0.0;
         for (var fold = 0u; fold < folds; fold = fold + 1u) {
-            total = total + fetch(source.base, read_address(at + step * fold, source.strides));
+            total = total + fetch(source, read_address(at + step * fold, source.strides));
         }
-        publish(output.base, index, chained(task, at, total));
+        publish(output, index, chained(task, at, total));
     }
 }
 

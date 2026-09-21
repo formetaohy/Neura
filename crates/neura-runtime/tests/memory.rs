@@ -87,12 +87,7 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256));
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = graph.encode(
-        256,
-        neura_abi::NARROW,
-        Precision::Single,
-        neura_runtime::Placement::new(1 << 16, 1 << 12, 1 << 14),
-    );
+    let encoding = graph.encode(256, neura_abi::NARROW, Precision::Single);
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() <= 8 * 1024,
@@ -378,6 +373,25 @@ fn two_stores_of_one_model_hold_their_own_words() {
     runtime.run(&wide);
     assert_close(&runtime.read(&narrow, out), &[32.0; 64], 1e-4);
     assert_close(&runtime.read(&wide, out), &[64.0; 64], 1e-4);
+}
+
+#[test]
+fn one_device_program_serves_every_store_of_its_model() {
+    let runtime = open();
+    let graph = Graph::new();
+    let (weight, _) = linear(&graph, 32, 32);
+    let data = graph.input(Shape::matrix(2, 32));
+    graph.retain(graph.matmul(data, weight));
+    let first = runtime.weights(&graph, Precision::Half);
+    let second = runtime.weights(&graph, Precision::Half);
+    assert_ne!(first.offset(), second.offset());
+    runtime.compile(&graph, &first);
+    runtime.compile(&graph, &second);
+    assert_eq!(
+        runtime.declared_kernels(),
+        1,
+        "a device program that carries the stores it addresses is rebuilt for every store",
+    );
 }
 
 #[test]

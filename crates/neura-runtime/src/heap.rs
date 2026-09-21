@@ -45,10 +45,6 @@ impl Heap {
         &self.buffer
     }
 
-    pub(crate) fn words(&self) -> u64 {
-        self.words
-    }
-
     pub(crate) fn bytes(&self) -> u64 {
         self.words * WORD_BYTES
     }

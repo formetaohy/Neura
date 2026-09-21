@@ -13,8 +13,8 @@ fn run_one_hot(task: Task, lid: u32) {
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let row = index / classes;
         let column = index % classes;
-        let chosen = whole_index(fetch(indices.base, row), classes, OneHot);
-        publish(output.base, index, chained(task, coordinates(index, output.dims), select(0.0, 1.0, column == chosen)));
+        let chosen = whole_index(fetch(indices, row), classes, OneHot);
+        publish(output, index, chained(task, coordinates(index, output.dims), select(0.0, 1.0, column == chosen)));
     }
 }
 
@@ -27,7 +27,7 @@ fn run_gather(task: Task, lid: u32) {
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let row = index / width;
         let column = index % width;
-        let chosen = whole_index(fetch(indices.base, row), rows, Gather);
-        publish(output.base, index, chained(task, coordinates(index, output.dims), fetch(table.base, chosen * width + column)));
+        let chosen = whole_index(fetch(indices, row), rows, Gather);
+        publish(output, index, chained(task, coordinates(index, output.dims), fetch(table, chosen * width + column)));
     }
 }

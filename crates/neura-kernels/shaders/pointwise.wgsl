@@ -3,7 +3,7 @@ fn chain_operand(step: Step, at: vec4<u32>) -> f32 {
         return 0.0;
     }
     let source = values[step.operand];
-    return fetch(source.base, read_address(at, source.strides));
+    return fetch(source, read_address(at, source.strides));
 }
 
 fn chained(task: Task, at: vec4<u32>, carried: f32) -> f32 {
@@ -29,9 +29,9 @@ fn run_binary(task: Task, lid: u32) {
     let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let at = coordinates(index, dims);
-        let a = fetch(left.base, read_address(at, left.strides));
-        let b = fetch(right.base, read_address(at, right.strides));
-        publish(output.base, index, chained(task, at, op_apply(task.kind, task.op, a, b)));
+        let a = fetch(left, read_address(at, left.strides));
+        let b = fetch(right, read_address(at, right.strides));
+        publish(output, index, chained(task, at, op_apply(task.kind, task.op, a, b)));
     }
 }
 
@@ -41,8 +41,8 @@ fn run_unary(task: Task, lid: u32) {
     let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let at = coordinates(index, dims);
-        let a = fetch(source.base, read_address(at, source.strides));
-        publish(output.base, index, chained(task, at, op_apply(task.kind, task.op, a, 0.0)));
+        let a = fetch(source, read_address(at, source.strides));
+        publish(output, index, chained(task, at, op_apply(task.kind, task.op, a, 0.0)));
     }
 }
 
@@ -50,7 +50,7 @@ fn run_fill(task: Task, lid: u32) {
     let output = values[task.out];
     let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        publish(output.base, index, chained(task, coordinates(index, dims), task.param));
+        publish(output, index, chained(task, coordinates(index, dims), task.param));
     }
 }
 
@@ -60,6 +60,6 @@ fn run_broadcast(task: Task, lid: u32) {
     let dims = output.dims;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let at = coordinates(index, dims);
-        publish(output.base, index, chained(task, at, fetch(source.base, read_address(at, source.strides))));
+        publish(output, index, chained(task, at, fetch(source, read_address(at, source.strides))));
     }
 }

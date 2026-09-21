@@ -1,20 +1,33 @@
 use crate::heap::Heap;
-use crate::program::{Program, Span, Weights};
+use crate::program::{Program, Weights};
 use neura_abi::{
     CURSOR_REFUSED, Kind, PROFILES, Placement, Precision, Profile, WORD_BYTES, op, slot_offset,
 };
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
 };
-use neura_program::{Graph, Store, Value};
+use neura_program::{Graph, Span, Store, Value};
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
+use wgpu::{BufferAsyncError, MapMode};
 
 pub const WORKGROUP_BUDGET: u32 = 1024;
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
+pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
+
+pub struct Readout {
+    slot: usize,
+    submission: wgpu::SubmissionIndex,
+    completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
+    precision: Precision,
+    spans: Vec<(Span, u64, u64)>,
+    total: u64,
+    refusal: u64,
+}
 
 pub struct RuntimeRequest {
     pub gpu: GpuRequest,
@@ -74,7 +87,7 @@ impl Runtime {
         );
         Self {
             alignment: context.binding_alignment(),
-            readback: Readback::new(context.device(), readback_bytes),
+            readback: Readback::new(context.device(), readback_bytes, READBACK_SLOTS),
             heap: Arc::new(Heap::new(&context, heap_bytes)),
             context,
         }
@@ -110,7 +123,7 @@ impl Runtime {
         self.context.assert_alive();
         let layout = graph.layout(self.alignment, precision);
         let store = self.heap.allocate(layout.weights().words());
-        let placement = Placement::new(self.heap.words(), store.word(), 0);
+        let placement = Placement::new(0, store.word());
         let queue = self.context.queue();
         for (address, data) in layout.uploads() {
             self.heap.buffer().write_at(
@@ -139,39 +152,25 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let weights_at = weights.offset() / WORD_BYTES;
-        let sized = graph.encode(
-            self.alignment,
-            profile,
-            weights.precision(),
-            Placement::new(self.heap.words(), weights_at, 0),
-        );
+        let encoding = graph.encode(self.alignment, profile, weights.precision());
         assert!(
-            sized.task_count() > 0,
+            encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
         );
         assert!(
-            sized.weights() == weights.region(),
+            encoding.weights() == weights.region(),
             "this graph holds {} parameters where the weight store carries {}; one store serves every program of one model",
-            sized.weights().tensors(),
+            encoding.weights().tensors(),
             weights.tensors(),
         );
         assert!(
-            !(weights.precision().half() && sized.updates_weights()),
+            !(weights.precision().half() && encoding.updates_weights()),
             "a {:?} weight store carries no in-place parameter update; a model that trains holds its weights in {:?}",
             weights.precision(),
             Precision::Single,
         );
-        let tensors = self.heap.allocate(sized.tensor_bytes() / WORD_BYTES);
-        let placement = Placement::new(self.heap.words(), weights_at, tensors.word());
-        let encoding = graph.encode(self.alignment, profile, weights.precision(), placement);
-        assert!(
-            encoding.tensor_bytes() <= tensors.bytes(),
-            "a second plan of {} tensor bytes outruns the {} bytes the first one asked for",
-            encoding.tensor_bytes(),
-            tensors.bytes(),
-        );
-        Program::build(&self.context, encoding, placement, tensors, weights.clone())
+        let tensors = self.heap.allocate(encoding.tensor_bytes() / WORD_BYTES);
+        Program::build(&self.context, encoding, tensors, weights.clone())
     }
 
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
@@ -253,18 +252,22 @@ impl Runtime {
     }
 
     pub fn read(&self, program: &Program, value: Value) -> Vec<f32> {
-        let mut values = self.read_many(program, &[value]);
+        let mut values = self.collect(self.pull(program, &[value]));
         values.pop().expect("one tensor was read")
     }
 
     pub fn read_many(&self, program: &Program, values: &[Value]) -> Vec<Vec<f32>> {
+        self.collect(self.pull(program, values))
+    }
+
+    pub fn pull(&self, program: &Program, values: &[Value]) -> Readout {
         self.assert_owns(program);
         self.context.assert_alive();
-        assert!(!values.is_empty(), "a read names at least one tensor");
+        assert!(!values.is_empty(), "a pull names at least one tensor");
         for value in values {
             assert!(
                 program.readable(*value),
-                "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to read it back",
+                "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to pull it",
                 value.id(),
             );
         }
@@ -280,11 +283,13 @@ impl Runtime {
             + WORD_BYTES;
         assert!(
             total <= self.readback.capacity(),
-            "reading {total} bytes outruns the {} byte staging buffer of this runtime",
+            "pulling {total} bytes outruns the {} byte readback of this runtime",
             self.readback.capacity(),
         );
+        let slot = self.readback.claim();
+        let staging = self.readback.staging(slot);
         let device = self.context.device();
-        let mut submission = Submission::new(device, "neura read");
+        let mut submission = Submission::new(device, "neura pull");
         let mut collected = Vec::with_capacity(spans.len());
         let mut at = 0;
         for span in &spans {
@@ -292,7 +297,7 @@ impl Runtime {
             submission.copy_buffer_to_buffer(
                 program.heap().buffer(),
                 span.offset,
-                self.readback.staging().buffer(),
+                staging.buffer(),
                 at,
                 bytes,
             );
@@ -302,24 +307,52 @@ impl Runtime {
         submission.copy_buffer_to_buffer(
             program.cursor.buffer(),
             slot_offset(CURSOR_REFUSED),
-            self.readback.staging().buffer(),
+            staging.buffer(),
             at,
             WORD_BYTES,
         );
-        let bytes = self
-            .readback
-            .collect(device, self.context.queue(), submission, total);
+        let (sender, completed) = mpsc::channel();
+        submission.map_buffer_on_submit(staging.buffer(), MapMode::Read, ..total, move |result| {
+            let _ = sender.send(result);
+        });
+        let submission = submission.submit(self.context.queue());
+        Readout {
+            slot,
+            submission,
+            completed,
+            precision,
+            spans: collected,
+            total,
+            refusal: at,
+        }
+    }
+
+    pub fn collect(&self, readout: Readout) -> Vec<Vec<f32>> {
+        self.context.assert_alive();
+        let bytes = self.readback.finish(
+            self.context.device(),
+            readout.slot,
+            readout.submission,
+            readout.completed,
+            readout.total,
+        );
+        self.context.assert_alive();
         let refusal = u32::from_ne_bytes(
-            bytes[at as usize..(at + WORD_BYTES) as usize]
+            bytes[readout.refusal as usize..(readout.refusal + WORD_BYTES) as usize]
                 .try_into()
                 .expect("a word was copied back"),
         );
         assert_eq!(refusal, 0, "{}", refusal_message(refusal));
-        collected
+        readout
+            .spans
             .iter()
             .map(|(span, offset, length)| {
                 let start = *offset as usize;
-                decode(*span, precision, &bytes[start..start + *length as usize])
+                decode(
+                    *span,
+                    readout.precision,
+                    &bytes[start..start + *length as usize],
+                )
             })
             .collect()
     }
@@ -341,6 +374,10 @@ impl Runtime {
 
     pub fn readback_capacity(&self) -> u64 {
         self.readback.capacity()
+    }
+
+    pub fn readback_slots(&self) -> usize {
+        self.readback.slots()
     }
 
     pub fn declared_kernels(&self) -> usize {
@@ -385,17 +422,25 @@ fn refusal_message(word: u32) -> String {
             "the device refused an index outside the rows of the {} task",
             kind.name(),
         ),
-        Kind::Matmul | Kind::Argmax | Kind::Categorical | Kind::SumAxis => format!(
-            "the device refused geometry {code} of the {} task",
-            kind.name(),
-        ),
+        Kind::Matmul
+        | Kind::Argmax
+        | Kind::Categorical
+        | Kind::SumAxis
+        | Kind::Conv2dWeightGrad => {
+            format!(
+                "the device refused geometry {code} of the {} task",
+                kind.name(),
+            )
+        }
         Kind::Fill
         | Kind::Broadcast
         | Kind::SumChunk
         | Kind::Softmax
         | Kind::SoftmaxGrad
         | Kind::LogSoftmax
-        | Kind::LogSoftmaxGrad => {
+        | Kind::LogSoftmaxGrad
+        | Kind::Conv2d
+        | Kind::Conv2dInputGrad => {
             format!("the device refused code {code} of the {} task", kind.name())
         }
     }
