@@ -1,6 +1,6 @@
 use neura_program::{Graph, Shape, Value};
 
-pub fn mse_loss(graph: &Graph, prediction: Value, target: Value) -> Value {
+pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>) -> Value<'g> {
     let shape = graph.shape(prediction);
     assert_eq!(
         shape,
@@ -19,7 +19,7 @@ pub fn mse_loss(graph: &Graph, prediction: Value, target: Value) -> Value {
     )
 }
 
-pub fn cross_entropy(graph: &Graph, logits: Value, target: Value) -> Value {
+pub fn cross_entropy<'g>(graph: &Graph<'g>, logits: Value<'g>, target: Value<'g>) -> Value<'g> {
     let shape = graph.shape(logits);
     assert_eq!(
         shape,
@@ -35,7 +35,12 @@ pub fn cross_entropy(graph: &Graph, logits: Value, target: Value) -> Value {
     )
 }
 
-pub fn policy_loss(graph: &Graph, logits: Value, action: Value, advantage: Value) -> Value {
+pub fn policy_loss<'g>(
+    graph: &Graph<'g>,
+    logits: Value<'g>,
+    action: Value<'g>,
+    advantage: Value<'g>,
+) -> Value<'g> {
     let shape = graph.shape(logits);
     let classes = shape.dims()[3];
     let rows = shape.rows();

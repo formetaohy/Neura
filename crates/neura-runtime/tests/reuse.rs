@@ -9,15 +9,14 @@ mod support;
 use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
-struct Sensor {
-    program: neura_runtime::Program,
-    input: Value,
-    out: Value,
-    weight: Value,
+struct Sensor<'g> {
+    program: neura_runtime::Program<'g>,
+    input: Value<'g>,
+    out: Value<'g>,
+    weight: Value<'g>,
 }
 
-fn sensor(runtime: &Runtime, samples: u32) -> Sensor {
-    let graph = Graph::new();
+fn sensor<'g>(runtime: &'g Runtime, graph: &Graph<'g>, samples: u32) -> Sensor<'g> {
     let input = graph.input(Shape::matrix(samples, 4));
     let weight = graph.parameter(
         Shape::matrix(4, 2),
@@ -28,8 +27,8 @@ fn sensor(runtime: &Runtime, samples: u32) -> Sensor {
     );
     let out = graph.matmul(input, weight);
     graph.retain(out);
-    let weights = runtime.weights(&graph, Precision::Single);
-    let program = runtime.compile(&graph, &weights);
+    let weights = runtime.weights(graph, Precision::Single);
+    let program = runtime.compile(graph, &weights);
     Sensor {
         program,
         input,
@@ -42,8 +41,10 @@ fn sensor(runtime: &Runtime, samples: u32) -> Sensor {
 fn a_recompile_of_one_shape_shares_the_device_tape_but_not_the_tensors() {
     let runtime = open();
     let before = runtime.device_tapes();
-    let first = sensor(&runtime, 16);
-    let second = sensor(&runtime, 16);
+    let first_graph = Graph::new();
+    let second_graph = Graph::new();
+    let first = sensor(&runtime, &first_graph, 16);
+    let second = sensor(&runtime, &second_graph, 16);
     assert_eq!(
         runtime.device_tapes(),
         before + 1,
@@ -73,9 +74,10 @@ fn a_recompile_of_one_shape_shares_the_device_tape_but_not_the_tensors() {
 fn a_session_of_varying_batches_keeps_one_tape_per_shape() {
     let runtime = open();
     let before = runtime.device_tapes();
+    let graphs: Vec<Graph> = [8u32, 16, 8, 24, 16].iter().map(|_| Graph::new()).collect();
     let mut programs = Vec::new();
-    for (index, samples) in [8u32, 16, 8, 24, 16].into_iter().enumerate() {
-        let sensor = sensor(&runtime, samples);
+    for (index, (graph, samples)) in graphs.iter().zip([8u32, 16, 8, 24, 16]).enumerate() {
+        let sensor = sensor(&runtime, graph, samples);
         let input = random(samples * 4, 61 + index as u32);
         runtime.write(&sensor.program, sensor.input, &input);
         runtime.run(&sensor.program);
@@ -98,8 +100,9 @@ fn a_session_of_varying_batches_keeps_one_tape_per_shape() {
 fn a_dropped_program_recycles_its_device_tape() {
     let runtime = open();
     let before = runtime.device_tapes();
+    let graph = Graph::new();
     {
-        let sensor = sensor(&runtime, 12);
+        let sensor = sensor(&runtime, &graph, 12);
         let input = random(12 * 4, 9);
         runtime.write(&sensor.program, sensor.input, &input);
         runtime.run(&sensor.program);
@@ -115,7 +118,7 @@ fn a_dropped_program_recycles_its_device_tape() {
         before,
         "a program nobody holds leaves no device tape behind"
     );
-    let again = sensor(&runtime, 12);
+    let again = sensor(&runtime, &graph, 12);
     let input = random(12 * 4, 13);
     runtime.write(&again.program, again.input, &input);
     runtime.run(&again.program);

@@ -1,12 +1,12 @@
 use neura_program::{Graph, Init, Shape, Value, Window};
 
-pub struct Linear {
-    weight: Value,
-    bias: Value,
+pub struct Linear<'g> {
+    weight: Value<'g>,
+    bias: Value<'g>,
 }
 
-impl Linear {
-    pub fn new(graph: &Graph, inputs: u32, outputs: u32, init: Init) -> Self {
+impl<'g> Linear<'g> {
+    pub fn new(graph: &Graph<'g>, inputs: u32, outputs: u32, init: Init) -> Self {
         assert!(
             inputs > 0 && outputs > 0,
             "a dense layer of {inputs} by {outputs} carries no weight",
@@ -17,31 +17,31 @@ impl Linear {
         }
     }
 
-    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
         graph.add(graph.matmul(input, self.weight), self.bias)
     }
 
-    pub fn weight(&self) -> Value {
+    pub fn weight(&self) -> Value<'g> {
         self.weight
     }
 
-    pub fn bias(&self) -> Value {
+    pub fn bias(&self) -> Value<'g> {
         self.bias
     }
 
-    pub fn parameters(&self) -> [Value; 2] {
+    pub fn parameters(&self) -> [Value<'g>; 2] {
         [self.weight, self.bias]
     }
 }
 
-pub struct Conv2d {
-    filter: Value,
-    bias: Value,
+pub struct Conv2d<'g> {
+    filter: Value<'g>,
+    bias: Value<'g>,
     window: Window,
 }
 
-impl Conv2d {
-    pub fn new(graph: &Graph, channels: [u32; 2], window: Window, init: Init) -> Self {
+impl<'g> Conv2d<'g> {
+    pub fn new(graph: &Graph<'g>, channels: [u32; 2], window: Window, init: Init) -> Self {
         let [inputs, outputs] = channels;
         assert!(
             inputs > 0 && outputs > 0,
@@ -57,33 +57,33 @@ impl Conv2d {
         }
     }
 
-    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
         graph.add(graph.conv2d(input, self.filter, self.window), self.bias)
     }
 
-    pub fn filter(&self) -> Value {
+    pub fn filter(&self) -> Value<'g> {
         self.filter
     }
 
-    pub fn bias(&self) -> Value {
+    pub fn bias(&self) -> Value<'g> {
         self.bias
     }
 
-    pub fn parameters(&self) -> [Value; 2] {
+    pub fn parameters(&self) -> [Value<'g>; 2] {
         [self.filter, self.bias]
     }
 }
 
-pub struct LayerNorm {
+pub struct LayerNorm<'g> {
     columns: u32,
-    scale: Value,
-    shift: Value,
-    share: Value,
-    floor: Value,
+    scale: Value<'g>,
+    shift: Value<'g>,
+    share: Value<'g>,
+    floor: Value<'g>,
 }
 
-impl LayerNorm {
-    pub fn new(graph: &Graph, columns: u32, init: Init, floor: f32) -> Self {
+impl<'g> LayerNorm<'g> {
+    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32) -> Self {
         assert!(
             columns > 0,
             "a layer of {columns} columns normalizes nothing"
@@ -98,7 +98,7 @@ impl LayerNorm {
         }
     }
 
-    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
         assert_eq!(
             graph.shape(input).columns(),
             self.columns,
@@ -114,25 +114,25 @@ impl LayerNorm {
         graph.add(graph.mul(sharpened, self.scale), self.shift)
     }
 
-    pub fn scale(&self) -> Value {
+    pub fn scale(&self) -> Value<'g> {
         self.scale
     }
 
-    pub fn shift(&self) -> Value {
+    pub fn shift(&self) -> Value<'g> {
         self.shift
     }
 
-    pub fn parameters(&self) -> [Value; 2] {
+    pub fn parameters(&self) -> [Value<'g>; 2] {
         [self.scale, self.shift]
     }
 }
 
-pub struct Mlp {
-    layers: Vec<Linear>,
+pub struct Mlp<'g> {
+    layers: Vec<Linear<'g>>,
 }
 
-impl Mlp {
-    pub fn new(graph: &Graph, widths: &[u32], init: Init) -> Self {
+impl<'g> Mlp<'g> {
+    pub fn new(graph: &Graph<'g>, widths: &[u32], init: Init) -> Self {
         assert!(
             widths.len() >= 2,
             "a multilayer perceptron spans at least two widths",
@@ -144,7 +144,7 @@ impl Mlp {
         Self { layers }
     }
 
-    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
         let mut value = input;
         for (index, layer) in self.layers.iter().enumerate() {
             let dense = layer.forward(graph, value);
@@ -157,14 +157,14 @@ impl Mlp {
         value
     }
 
-    pub fn parameters(&self) -> Vec<Value> {
+    pub fn parameters(&self) -> Vec<Value<'g>> {
         self.layers
             .iter()
             .flat_map(|layer| layer.parameters())
             .collect()
     }
 
-    pub fn layers(&self) -> &[Linear] {
+    pub fn layers(&self) -> &[Linear<'g>] {
         &self.layers
     }
 }

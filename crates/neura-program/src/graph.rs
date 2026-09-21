@@ -8,22 +8,37 @@ use neura_abi::{MAX_RANK, Precision, Window};
 use neura_abi::{NO_VALUE, Profile, StepRecord};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
+static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Value {
+pub struct Value<'g> {
+    graph: u64,
     id: u32,
     shape: Shape,
+    brand: PhantomData<fn(&'g ()) -> &'g ()>,
 }
 
-impl Value {
+impl<'g> Value<'g> {
     pub const fn id(self) -> u32 {
         self.id
     }
 
     pub const fn shape(self) -> Shape {
         self.shape
+    }
+
+    fn of(graph: u64, id: u32, shape: Shape) -> Self {
+        Self {
+            graph,
+            id,
+            shape,
+            brand: PhantomData,
+        }
     }
 }
 
@@ -103,12 +118,12 @@ pub(crate) struct GraphState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Gradients {
-    values: HashMap<u32, Value>,
+pub struct Gradients<'g> {
+    values: HashMap<u32, Value<'g>>,
 }
 
-impl Gradients {
-    pub fn of(&self, value: Value) -> Value {
+impl<'g> Gradients<'g> {
+    pub fn of(&self, value: Value<'g>) -> Value<'g> {
         *self
             .values
             .get(&value.id())
@@ -116,17 +131,13 @@ impl Gradients {
     }
 }
 
-impl Default for Graph {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-pub struct Graph {
+pub struct Graph<'g> {
+    instance: u64,
     state: RefCell<GraphState>,
+    brand: PhantomData<fn(&'g ()) -> &'g ()>,
 }
 
-impl Graph {
+impl<'g> Graph<'g> {
     pub fn new() -> Self {
         Self {
             state: RefCell::new(GraphState {
@@ -136,18 +147,20 @@ impl Graph {
                 differentiated: false,
                 updated_in_place: false,
             }),
+            instance: NEXT_GRAPH.fetch_add(1, Ordering::Relaxed),
+            brand: PhantomData,
         }
     }
 
-    pub fn input(&self, shape: Shape) -> Value {
+    pub fn input(&self, shape: Shape) -> Value<'g> {
         self.hold(shape, Residency::Input, None)
     }
 
-    pub fn resident(&self, shape: Shape) -> Value {
+    pub fn resident(&self, shape: Shape) -> Value<'g> {
         self.hold(shape, Residency::Resident, None)
     }
 
-    pub fn parameter(&self, shape: Shape, init: Init) -> Value {
+    pub fn parameter(&self, shape: Shape, init: Init) -> Value<'g> {
         let data = {
             let mut state = self.state.borrow_mut();
             let entropy = &mut state.entropy;
@@ -156,7 +169,7 @@ impl Graph {
         self.hold(shape, Residency::Parameter, Some(data))
     }
 
-    pub fn fill(&self, shape: Shape, value: f32) -> Value {
+    pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
         let out = self.fresh(shape, Residency::Derived, false);
         let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 3]);
         task.param = value;
@@ -164,7 +177,9 @@ impl Graph {
         out
     }
 
-    pub fn matmul(&self, left: Value, right: Value) -> Value {
+    pub fn matmul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         let left_dims = left.shape().dims();
         let right_dims = right.shape().dims();
         assert_eq!(
@@ -201,7 +216,9 @@ impl Graph {
         out
     }
 
-    pub fn conv2d(&self, input: Value, filter: Value, window: Window) -> Value {
+    pub fn conv2d(&self, input: Value<'g>, filter: Value<'g>, window: Window) -> Value<'g> {
+        let input = self.own(input);
+        let filter = self.own(filter);
         let input_dims = self.shape(input).dims();
         let filter_dims = self.shape(filter).dims();
         assert_eq!(
@@ -250,83 +267,110 @@ impl Graph {
         out
     }
 
-    pub fn add(&self, left: Value, right: Value) -> Value {
+    pub fn add(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::ADD, left, right)
     }
 
-    pub fn mul(&self, left: Value, right: Value) -> Value {
+    pub fn mul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::MUL, left, right)
     }
 
-    pub fn sub(&self, left: Value, right: Value) -> Value {
+    pub fn sub(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::SUB, left, right)
     }
 
-    pub fn div(&self, left: Value, right: Value) -> Value {
+    pub fn div(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::DIV, left, right)
     }
 
-    pub fn max(&self, left: Value, right: Value) -> Value {
+    pub fn max(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::MAXIMUM, left, right)
     }
 
-    pub fn min(&self, left: Value, right: Value) -> Value {
+    pub fn min(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         self.elementwise(op::MINIMUM, left, right)
     }
 
-    pub fn relu(&self, value: Value) -> Value {
+    pub fn relu(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::RELU, value)
     }
 
-    pub fn sqrt(&self, value: Value) -> Value {
+    pub fn sqrt(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::SQRT, value)
     }
 
-    pub fn recip(&self, value: Value) -> Value {
+    pub fn recip(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::RECIP, value)
     }
 
-    pub fn exp(&self, value: Value) -> Value {
+    pub fn exp(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::EXP, value)
     }
 
-    pub fn log(&self, value: Value) -> Value {
+    pub fn log(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::LOG, value)
     }
 
-    pub fn tanh(&self, value: Value) -> Value {
+    pub fn tanh(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::TANH, value)
     }
 
-    pub fn sigmoid(&self, value: Value) -> Value {
+    pub fn sigmoid(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::SIGMOID, value)
     }
 
-    pub fn neg(&self, value: Value) -> Value {
+    pub fn neg(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::NEG, value)
     }
 
-    pub fn abs(&self, value: Value) -> Value {
+    pub fn abs(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::ABS, value)
     }
 
-    pub fn identity(&self, value: Value) -> Value {
+    pub fn identity(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.unary(op::IDENTITY, value)
     }
 
-    pub fn softmax(&self, value: Value) -> Value {
+    pub fn softmax(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.rows(Kind::Softmax, value)
     }
 
-    pub fn log_softmax(&self, value: Value) -> Value {
+    pub fn log_softmax(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.rows(Kind::LogSoftmax, value)
     }
 
-    pub fn argmax(&self, value: Value) -> Value {
+    pub fn argmax(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.choice(Kind::Argmax, value, NO_VALUE)
     }
 
-    pub fn categorical(&self, logits: Value, seed: Value) -> Value {
+    pub fn categorical(&self, logits: Value<'g>, seed: Value<'g>) -> Value<'g> {
+        let logits = self.own(logits);
+        let seed = self.own(seed);
         assert!(
             self.shape(seed).is_scalar(),
             "a categorical draw takes one seed, and value {} holds {} elements",
@@ -336,7 +380,8 @@ impl Graph {
         self.choice(Kind::Categorical, logits, seed.id())
     }
 
-    fn choice(&self, kind: Kind, source: Value, seed: u32) -> Value {
+    fn choice(&self, kind: Kind, source: Value<'g>, seed: u32) -> Value<'g> {
+        let source = self.own(source);
         assert!(
             self.contiguous(source),
             "a {} folds a row of a tensor stored row by row, and value {} is a view",
@@ -355,7 +400,8 @@ impl Graph {
         out
     }
 
-    fn index_list(&self, indices: Value) {
+    fn index_list(&self, indices: Value<'g>) {
+        let indices = self.own(indices);
         let shape = self.shape(indices);
         assert_eq!(
             shape.dims()[3],
@@ -371,7 +417,8 @@ impl Graph {
         );
     }
 
-    pub fn one_hot(&self, indices: Value, classes: u32) -> Value {
+    pub fn one_hot(&self, indices: Value<'g>, classes: u32) -> Value<'g> {
+        let indices = self.own(indices);
         self.index_list(indices);
         assert!(
             classes > 0,
@@ -389,7 +436,9 @@ impl Graph {
         out
     }
 
-    pub fn gather(&self, table: Value, indices: Value) -> Value {
+    pub fn gather(&self, table: Value<'g>, indices: Value<'g>) -> Value<'g> {
+        let table = self.own(table);
+        let indices = self.own(indices);
         assert!(
             !self.tracked(&[table]),
             "a gather moves whole rows of a table, and a table that learns is trained through the one hot product of its rows",
@@ -412,7 +461,8 @@ impl Graph {
         out
     }
 
-    pub fn sum(&self, value: Value) -> Value {
+    pub fn sum(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         assert!(
             self.contiguous(value),
             "a sum walks its operand element by element, and value {} is a view",
@@ -428,7 +478,8 @@ impl Graph {
         out
     }
 
-    pub fn transpose(&self, value: Value) -> Value {
+    pub fn transpose(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         let (strides, storage, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
@@ -441,15 +492,21 @@ impl Graph {
         self.alias(Shape::of(dims), strides, storage, tracked)
     }
 
-    pub fn add_into(&self, target: Value, addend: Value) {
+    pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
+        let target = self.own(target);
+        let addend = self.own(addend);
         self.update_in_place(op::ADD, target, addend);
     }
 
-    pub fn mul_into(&self, target: Value, factor: Value) {
+    pub fn mul_into(&self, target: Value<'g>, factor: Value<'g>) {
+        let target = self.own(target);
+        let factor = self.own(factor);
         self.update_in_place(op::MUL, target, factor);
     }
 
-    pub fn copy_into(&self, target: Value, source: Value) {
+    pub fn copy_into(&self, target: Value<'g>, source: Value<'g>) {
+        let target = self.own(target);
+        let source = self.own(source);
         self.assert_in_place(target, source);
         let mut task = TaskInfo::of(
             Kind::Unary,
@@ -462,7 +519,8 @@ impl Graph {
         self.wrote_in_place(target);
     }
 
-    pub fn shape(&self, value: Value) -> Shape {
+    pub fn shape(&self, value: Value<'g>) -> Shape {
+        let value = self.own(value);
         self.state.borrow().values[value.id() as usize].shape
     }
 
@@ -483,7 +541,8 @@ impl Graph {
         Encoding::plan(&state, profile, alignment, precision)
     }
 
-    pub fn backward(&self, loss: Value) -> Gradients {
+    pub fn backward(&self, loss: Value<'g>) -> Gradients<'g> {
+        let loss = self.own(loss);
         {
             let state = self.state.borrow();
             assert!(
@@ -530,7 +589,8 @@ impl Graph {
         Gradients { values }
     }
 
-    fn backward_task(&self, task: &TaskInfo, gradient: Value, grads: &mut [Option<u32>]) {
+    fn backward_task(&self, task: &TaskInfo, gradient: Value<'g>, grads: &mut [Option<u32>]) {
+        let gradient = self.own(gradient);
         match task.kind {
             Kind::Matmul => {
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
@@ -621,7 +681,14 @@ impl Graph {
         }
     }
 
-    fn partial(&self, definition: &op::Op, task: &TaskInfo, slot: u32, gradient: Value) -> Value {
+    fn partial(
+        &self,
+        definition: &op::Op,
+        task: &TaskInfo,
+        slot: u32,
+        gradient: Value<'g>,
+    ) -> Value<'g> {
+        let gradient = self.own(gradient);
         let op::Partial::Formula { roles, .. } = definition.partial(slot) else {
             return gradient;
         };
@@ -653,10 +720,12 @@ impl Graph {
         &self,
         kind: Kind,
         task: &TaskInfo,
-        source: Value,
-        gradient: Value,
+        source: Value<'g>,
+        gradient: Value<'g>,
         grads: &mut [Option<u32>],
     ) {
+        let source = self.own(source);
+        let gradient = self.own(gradient);
         let out = self.fresh(self.shape(source), Residency::Derived, true);
         self.push(TaskInfo::of(
             kind,
@@ -667,7 +736,8 @@ impl Graph {
         self.accumulate(grads, source, out);
     }
 
-    fn rows(&self, kind: Kind, value: Value) -> Value {
+    fn rows(&self, kind: Kind, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         assert!(
             self.contiguous(value),
             "a {} folds a row of a tensor stored row by row, and value {} is a view",
@@ -685,7 +755,9 @@ impl Graph {
         out
     }
 
-    fn elementwise(&self, op: u32, left: Value, right: Value) -> Value {
+    fn elementwise(&self, op: u32, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
         let shape = self.shape(left).combined(self.shape(right));
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[left, right]));
         self.push(TaskInfo::of(
@@ -697,7 +769,8 @@ impl Graph {
         out
     }
 
-    fn unary(&self, op: u32, value: Value) -> Value {
+    fn unary(&self, op: u32, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         let shape = self.shape(value);
         let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
         self.push(TaskInfo::of(
@@ -709,12 +782,15 @@ impl Graph {
         out
     }
 
-    pub fn retain(&self, value: Value) {
+    pub fn retain(&self, value: Value<'g>) {
+        let value = self.own(value);
         let storage = self.state.borrow().values[value.id() as usize].storage;
         self.state.borrow_mut().values[storage as usize].retained = true;
     }
 
-    fn update_in_place(&self, op: u32, target: Value, operand: Value) {
+    fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
+        let target = self.own(target);
+        let operand = self.own(operand);
         self.assert_in_place(target, operand);
         let mut task = TaskInfo::of(
             op::kind(op),
@@ -727,7 +803,9 @@ impl Graph {
         self.wrote_in_place(target);
     }
 
-    fn assert_in_place(&self, target: Value, operand: Value) {
+    fn assert_in_place(&self, target: Value<'g>, operand: Value<'g>) {
+        let target = self.own(target);
+        let operand = self.own(operand);
         {
             let state = self.state.borrow();
             let info = &state.values[target.id() as usize];
@@ -755,13 +833,16 @@ impl Graph {
         );
     }
 
-    fn wrote_in_place(&self, target: Value) {
+    fn wrote_in_place(&self, target: Value<'g>) {
+        let target = self.own(target);
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
     }
 
-    fn reduce_to(&self, gradient: Value, target: Value) -> Value {
+    fn reduce_to(&self, gradient: Value<'g>, target: Value<'g>) -> Value<'g> {
+        let gradient = self.own(gradient);
+        let target = self.own(target);
         let shape = self.shape(target);
         if self.shape(gradient) == shape {
             return gradient;
@@ -781,11 +862,13 @@ impl Graph {
         folded
     }
 
-    pub fn sum_rows(&self, value: Value) -> Value {
+    pub fn sum_rows(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
         self.fold(value, MAX_RANK - 1)
     }
 
-    fn fold(&self, value: Value, axis: u32) -> Value {
+    fn fold(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+        let value = self.own(value);
         let shape = self.shape(value);
         assert!(
             axis < MAX_RANK,
@@ -813,7 +896,8 @@ impl Graph {
         out
     }
 
-    fn broadcast(&self, source: Value, shape: Shape) -> Value {
+    fn broadcast(&self, source: Value<'g>, shape: Shape) -> Value<'g> {
+        let source = self.own(source);
         assert!(
             self.shape(source).fits_within(shape),
             "a broadcast spreads {:?} over {:?}",
@@ -830,7 +914,9 @@ impl Graph {
         out
     }
 
-    fn accumulate(&self, grads: &mut [Option<u32>], value: Value, contribution: Value) {
+    fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {
+        let value = self.own(value);
+        let contribution = self.own(contribution);
         grads[value.id() as usize] = Some(match grads[value.id() as usize] {
             None => contribution.id(),
             Some(existing) => {
@@ -840,31 +926,41 @@ impl Graph {
         });
     }
 
-    fn contiguous(&self, value: Value) -> bool {
+    fn contiguous(&self, value: Value<'g>) -> bool {
+        let value = self.own(value);
         let state = self.state.borrow();
         let info = &state.values[value.id() as usize];
         info.strides == info.shape.strides()
     }
 
-    fn tracked(&self, values: &[Value]) -> bool {
+    fn tracked(&self, values: &[Value<'g>]) -> bool {
         let state = self.state.borrow();
         values
             .iter()
             .any(|value| state.values[value.id() as usize].requires_grad)
     }
 
-    pub(crate) fn value_of(&self, id: u32) -> Value {
-        Value {
+    fn own(&self, value: Value<'g>) -> Value<'g> {
+        assert_eq!(
+            value.graph, self.instance,
+            "a tensor of another graph reached this graph",
+        );
+        value
+    }
+
+    pub(crate) fn value_of(&self, id: u32) -> Value<'g> {
+        Value::of(
+            self.instance,
             id,
-            shape: self.state.borrow().values[id as usize].shape,
-        }
+            self.state.borrow().values[id as usize].shape,
+        )
     }
 
     fn task(&self, index: usize) -> TaskInfo {
         self.state.borrow().tasks[index].clone()
     }
 
-    fn hold(&self, shape: Shape, residency: Residency, initial: Option<Vec<f32>>) -> Value {
+    fn hold(&self, shape: Shape, residency: Residency, initial: Option<Vec<f32>>) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
@@ -877,10 +973,10 @@ impl Graph {
             written_in_place: false,
             initial,
         });
-        Value { id, shape }
+        Value::of(self.instance, id, shape)
     }
 
-    fn fresh(&self, shape: Shape, residency: Residency, tracked: bool) -> Value {
+    fn fresh(&self, shape: Shape, residency: Residency, tracked: bool) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
@@ -893,10 +989,10 @@ impl Graph {
             written_in_place: false,
             initial: None,
         });
-        Value { id, shape }
+        Value::of(self.instance, id, shape)
     }
 
-    fn alias(&self, shape: Shape, strides: [u32; 4], storage: u32, tracked: bool) -> Value {
+    fn alias(&self, shape: Shape, strides: [u32; 4], storage: u32, tracked: bool) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
@@ -909,10 +1005,16 @@ impl Graph {
             written_in_place: false,
             initial: None,
         });
-        Value { id, shape }
+        Value::of(self.instance, id, shape)
     }
 
     fn push(&self, task: TaskInfo) {
         self.state.borrow_mut().tasks.push(task);
+    }
+}
+
+impl<'g> Default for Graph<'g> {
+    fn default() -> Self {
+        Self::new()
     }
 }

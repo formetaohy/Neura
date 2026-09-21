@@ -9,6 +9,7 @@ use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
 };
 use neura_program::{Graph, Span, Store, Value};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -21,7 +22,8 @@ pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
 
-pub struct Readout {
+pub struct Readout<'r> {
+    brand: PhantomData<&'r ()>,
     slot: usize,
     submission: wgpu::SubmissionIndex,
     completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
@@ -129,7 +131,7 @@ impl Runtime {
             .expect("the device offers no workgroup the framework can schedule")
     }
 
-    pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights {
+    pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
         self.context.assert_alive();
         let layout = graph.layout(self.alignment, precision);
         let store = self.heap.allocate(layout.weights().words());
@@ -145,11 +147,16 @@ impl Runtime {
         Weights::new(store, layout.weights().clone(), precision)
     }
 
-    pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
+    pub fn compile<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
         self.compile_with(graph, weights, self.default_profile())
     }
 
-    pub fn compile_with(&self, graph: &Graph, weights: &Weights, profile: Profile) -> Program {
+    pub fn compile_with<'r>(
+        &'r self,
+        graph: &Graph,
+        weights: &Weights<'r>,
+        profile: Profile,
+    ) -> Program<'r> {
         let (threads, shared_bytes) = self.workgroup_budget();
         assert!(
             profile.fits(threads, shared_bytes),
@@ -195,7 +202,7 @@ impl Runtime {
         Program::of(&self.context, tape, tensors, weights.clone())
     }
 
-    pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
+    pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
         let mut measured = self.profiles().into_iter().map(|profile| {
             (
                 profile,
@@ -214,7 +221,7 @@ impl Runtime {
         self.compile_with(graph, weights, fastest)
     }
 
-    fn measure(&self, program: &Program) -> f64 {
+    fn measure(&self, program: &Program<'_>) -> f64 {
         for _ in 0..TUNE_WARMUP {
             self.run(program);
         }
@@ -227,7 +234,7 @@ impl Runtime {
         started.elapsed().as_secs_f64() / f64::from(TUNE_ROUNDS)
     }
 
-    pub fn run(&self, program: &Program) {
+    pub fn run(&self, program: &Program<'_>) {
         self.assert_owns(program);
         self.context.assert_alive();
         let device = self.context.device();
@@ -246,7 +253,7 @@ impl Runtime {
         submission.submit(self.context.queue());
     }
 
-    pub fn write(&self, program: &Program, value: Value, data: &[f32]) {
+    pub fn write(&self, program: &Program<'_>, value: Value<'_>, data: &[f32]) {
         self.assert_owns(program);
         assert!(
             program.readable(value),
@@ -270,16 +277,16 @@ impl Runtime {
             .write_at(self.context.queue(), span.offset, &bytes);
     }
 
-    pub fn read(&self, program: &Program, value: Value) -> Vec<f32> {
+    pub fn read(&self, program: &Program<'_>, value: Value<'_>) -> Vec<f32> {
         let mut values = self.collect(self.pull(program, &[value]));
         values.pop().expect("one tensor was read")
     }
 
-    pub fn read_many(&self, program: &Program, values: &[Value]) -> Vec<Vec<f32>> {
+    pub fn read_many(&self, program: &Program<'_>, values: &[Value<'_>]) -> Vec<Vec<f32>> {
         self.collect(self.pull(program, values))
     }
 
-    pub fn pull(&self, program: &Program, values: &[Value]) -> Readout {
+    pub fn pull(&self, program: &Program<'_>, values: &[Value<'_>]) -> Readout<'_> {
         self.assert_owns(program);
         self.context.assert_alive();
         assert!(!values.is_empty(), "a pull names at least one tensor");
@@ -336,6 +343,7 @@ impl Runtime {
         });
         let submission = submission.submit(self.context.queue());
         Readout {
+            brand: PhantomData,
             slot,
             submission,
             completed,
@@ -346,7 +354,7 @@ impl Runtime {
         }
     }
 
-    pub fn collect(&self, readout: Readout) -> Vec<Vec<f32>> {
+    pub fn collect(&self, readout: Readout<'_>) -> Vec<Vec<f32>> {
         self.context.assert_alive();
         let bytes = self.readback.finish(
             self.context.device(),
@@ -376,7 +384,7 @@ impl Runtime {
             .collect()
     }
 
-    fn assert_owns(&self, program: &Program) {
+    fn assert_owns(&self, program: &Program<'_>) {
         assert!(
             program.lives_on(&self.heap),
             "this program runs on the device heap of another runtime",

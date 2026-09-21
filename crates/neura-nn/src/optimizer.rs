@@ -1,18 +1,18 @@
 use neura_program::{Gradients, Graph, Init, Shape, Value};
 
-pub struct Sgd {
-    descent: Value,
+pub struct Sgd<'g> {
+    descent: Value<'g>,
 }
 
-impl Sgd {
-    pub fn new(graph: &Graph, rate: f32) -> Self {
+impl<'g> Sgd<'g> {
+    pub fn new(graph: &Graph<'g>, rate: f32) -> Self {
         assert!(rate > 0.0, "a descent rate of {rate} moves nothing");
         Self {
             descent: graph.fill(Shape::scalar(), -rate),
         }
     }
 
-    pub fn step(&self, graph: &Graph, gradients: &Gradients, parameters: &[Value]) {
+    pub fn step(&self, graph: &Graph<'g>, gradients: &Gradients<'g>, parameters: &[Value<'g>]) {
         assert!(
             !parameters.is_empty(),
             "a step without parameters leaves the model as it was",
@@ -24,25 +24,31 @@ impl Sgd {
     }
 }
 
-pub struct Adam {
-    descent: Value,
-    mean_decay: Value,
-    variance_decay: Value,
-    mean_freshness: Value,
-    variance_freshness: Value,
-    floor: Value,
-    moments: Vec<Moments>,
+pub struct Adam<'g> {
+    descent: Value<'g>,
+    mean_decay: Value<'g>,
+    variance_decay: Value<'g>,
+    mean_freshness: Value<'g>,
+    variance_freshness: Value<'g>,
+    floor: Value<'g>,
+    moments: Vec<Moments<'g>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Moments {
-    pub parameter: Value,
-    pub mean: Value,
-    pub variance: Value,
+pub struct Moments<'g> {
+    pub parameter: Value<'g>,
+    pub mean: Value<'g>,
+    pub variance: Value<'g>,
 }
 
-impl Adam {
-    pub fn new(graph: &Graph, rate: f32, mean_decay: f32, variance_decay: f32, floor: f32) -> Self {
+impl<'g> Adam<'g> {
+    pub fn new(
+        graph: &Graph<'g>,
+        rate: f32,
+        mean_decay: f32,
+        variance_decay: f32,
+        floor: f32,
+    ) -> Self {
         assert!(rate > 0.0, "a descent rate of {rate} moves nothing");
         assert!(
             (0.0..1.0).contains(&mean_decay),
@@ -64,7 +70,7 @@ impl Adam {
         }
     }
 
-    pub fn track(&mut self, graph: &Graph, parameter: Value) -> Moments {
+    pub fn track(&mut self, graph: &Graph<'g>, parameter: Value<'g>) -> Moments<'g> {
         assert!(
             !self
                 .moments
@@ -81,18 +87,18 @@ impl Adam {
         moments
     }
 
-    pub fn track_all(&mut self, graph: &Graph, parameters: &[Value]) -> Vec<Moments> {
+    pub fn track_all(&mut self, graph: &Graph<'g>, parameters: &[Value<'g>]) -> Vec<Moments<'g>> {
         parameters
             .iter()
             .map(|parameter| self.track(graph, *parameter))
             .collect()
     }
 
-    pub fn moments(&self) -> &[Moments] {
+    pub fn moments(&self) -> &[Moments<'g>] {
         &self.moments
     }
 
-    pub fn step(&self, graph: &Graph, gradients: &Gradients) {
+    pub fn step(&self, graph: &Graph<'g>, gradients: &Gradients<'g>) {
         assert!(
             !self.moments.is_empty(),
             "a step without tracked parameters leaves the model as it was",

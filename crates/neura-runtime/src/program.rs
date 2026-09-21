@@ -8,22 +8,25 @@ use neura_abi::{
 use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_program::{Region, Span, Value};
 use neura_shader::{BOUNDS, CURSOR, HEAP, PLACEMENT, SEGMENTS, STEPS, TASKS, VALUES};
+use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct Weights {
+pub struct Weights<'r> {
     store: Allocation,
     region: Region,
     precision: Precision,
+    brand: PhantomData<&'r ()>,
 }
 
-impl Weights {
+impl<'r> Weights<'r> {
     pub(crate) fn new(store: Allocation, region: Region, precision: Precision) -> Self {
         Self {
             store,
             region,
             precision,
+            brand: PhantomData,
         }
     }
 
@@ -56,21 +59,22 @@ impl Weights {
     }
 }
 
-pub struct Program {
+pub struct Program<'r> {
+    brand: PhantomData<&'r ()>,
     pub(crate) tape: Arc<DeviceTape>,
     pub(crate) cursor: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
-    pub(crate) weights: Weights,
+    pub(crate) weights: Weights<'r>,
     placement: Recycled,
 }
 
-impl Program {
+impl<'r> Program<'r> {
     pub(crate) fn of(
         context: &GpuContext,
         tape: Arc<DeviceTape>,
         tensors: Allocation,
-        weights: Weights,
+        weights: Weights<'r>,
     ) -> Self {
         let pool = tape.pool();
         let cursor = Recycled::claim(
@@ -148,6 +152,7 @@ impl Program {
             },
         ]);
         Self {
+            brand: PhantomData,
             tape,
             cursor,
             group,
@@ -185,7 +190,7 @@ impl Program {
         self.tape.encoding.resident_bytes()
     }
 
-    pub fn weights(&self) -> &Weights {
+    pub fn weights(&self) -> &Weights<'r> {
         &self.weights
     }
 

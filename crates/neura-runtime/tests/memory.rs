@@ -14,11 +14,11 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn linear(
-    graph: &Graph,
+fn linear<'g>(
+    graph: &Graph<'g>,
     inputs: u32,
     outputs: u32,
-) -> (neura_program::Value, neura_program::Value) {
+) -> (neura_program::Value<'g>, neura_program::Value<'g>) {
     (
         graph.parameter(
             Shape::matrix(inputs, outputs),

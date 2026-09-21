@@ -9,7 +9,7 @@ use support::{assert_close, open};
 
 struct Probe {
     op: u32,
-    build: fn(&Graph, Value, Value) -> Value,
+    build: for<'g> fn(&'g Graph<'g>, Value<'g>, Value<'g>) -> Value<'g>,
     apply: fn(f32, f32) -> f32,
     partial: fn(f32, f32) -> (f32, f32),
 }
