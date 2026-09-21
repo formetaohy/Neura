@@ -1,7 +1,7 @@
-mod layers;
-mod losses;
-mod optimizers;
+mod layer;
+mod loss;
+mod optimizer;
 
-pub use layers::{Conv2d, LayerNorm, Linear, Mlp};
-pub use losses::{cross_entropy, mse_loss, policy_loss};
-pub use optimizers::{Adam, Moments, Sgd};
+pub use layer::{Conv2d, LayerNorm, Linear, Mlp};
+pub use loss::{cross_entropy, mse_loss, policy_loss};
+pub use optimizer::{Adam, Moments, Sgd};

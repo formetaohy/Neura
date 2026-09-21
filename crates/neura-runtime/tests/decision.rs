@@ -3,13 +3,13 @@ use neura_runtime::{PROFILES, Precision};
 
 #[path = "support/decision.rs"]
 mod decision;
-#[path = "support/references.rs"]
-mod references;
+#[path = "support/reference.rs"]
+mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
 use decision::{argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference};
-use references::{matmul_reference, random};
+use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {

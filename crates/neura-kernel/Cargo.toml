@@ -1,5 +1,5 @@
 [package]
-name = "neura-kernels"
+name = "neura-kernel"
 version.workspace = true
 edition.workspace = true
 description = "Device bodies the megakernel runs for every task kind"

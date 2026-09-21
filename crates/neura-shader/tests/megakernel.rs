@@ -82,7 +82,7 @@ fn the_program_declares_the_taxonomy_it_dispatches() {
 fn every_declared_kind_has_a_body() {
     let covered = Kind::ALL
         .iter()
-        .map(|kind| neura_kernels::body(*kind))
+        .map(|kind| neura_kernel::body(*kind))
         .collect::<BTreeSet<_>>();
     assert_eq!(
         covered.len(),
@@ -107,7 +107,7 @@ fn the_megakernel_dispatches_every_kind_by_its_declared_constant() {
                 kernel.source().contains(&format!(
                     "case {}: {{ {}(task, lid); }}",
                     kind.constant(),
-                    neura_kernels::body(*kind),
+                    neura_kernel::body(*kind),
                 )),
                 "the megakernel never runs the {} body",
                 kind.name(),

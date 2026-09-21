@@ -1,5 +1,7 @@
 use crate::heap::Heap;
+use crate::pool::Pool;
 use crate::program::{Program, Weights};
+use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
     CURSOR_REFUSED, Kind, PROFILES, Placement, Precision, Profile, WORD_BYTES, op, slot_offset,
 };
@@ -49,6 +51,8 @@ pub struct Runtime {
     context: GpuContext,
     readback: Readback,
     heap: Arc<Heap>,
+    pool: Arc<Pool>,
+    tapes: Tapes,
     alignment: u64,
 }
 
@@ -89,8 +93,14 @@ impl Runtime {
             alignment: context.binding_alignment(),
             readback: Readback::new(context.device(), readback_bytes, READBACK_SLOTS),
             heap: Arc::new(Heap::new(&context, heap_bytes)),
+            pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
+            tapes: Tapes::new(),
             context,
         }
+    }
+
+    pub fn device_tapes(&self) -> usize {
+        self.tapes.resident()
     }
 
     pub fn profiles(&self) -> Vec<Profile> {
@@ -169,8 +179,20 @@ impl Runtime {
             weights.precision(),
             Precision::Single,
         );
-        let tensors = self.heap.allocate(encoding.tensor_bytes() / WORD_BYTES);
-        Program::build(&self.context, encoding, tensors, weights.clone())
+        let signature = tape::signature(&encoding, profile, weights.precision(), self.alignment);
+        let tape = self.tapes.of(signature, |signature| {
+            DeviceTape::build(
+                &self.context,
+                &self.pool,
+                encoding,
+                weights.precision(),
+                signature,
+            )
+        });
+        let tensors = self
+            .heap
+            .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
+        Program::of(&self.context, tape, tensors, weights.clone())
     }
 
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
@@ -210,13 +232,13 @@ impl Runtime {
         self.context.assert_alive();
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
-        submission.clear_buffer(program.cursor.buffer(), 0, None);
+        submission.clear_buffer(program.cursor.buffer().buffer(), 0, None);
         let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
             label: Some("neura tape"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(program.kernel.pipeline());
-        for (index, wave) in program.encoding.waves().iter().enumerate() {
+        pass.set_pipeline(program.tape.kernel.pipeline());
+        for (index, wave) in program.tape.encoding.waves().iter().enumerate() {
             pass.set_bind_group(0, &program.group, &[(index as u64 * self.alignment) as u32]);
             pass.dispatch_workgroups(wave.segment_count.min(WORKGROUP_BUDGET), 1, 1);
         }
@@ -302,7 +324,7 @@ impl Runtime {
             at += bytes;
         }
         submission.copy_buffer_to_buffer(
-            program.cursor.buffer(),
+            program.cursor.buffer().buffer(),
             slot_offset(CURSOR_REFUSED),
             staging.buffer(),
             at,

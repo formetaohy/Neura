@@ -23,7 +23,7 @@ wgpu = { version = "30", default-features = false, features = [
     "wgsl",
 ] }
 neura-abi = { version = "0.1.0", path = "crates/neura-abi" }
-neura-kernels = { version = "0.1.0", path = "crates/neura-kernels" }
+neura-kernel = { version = "0.1.0", path = "crates/neura-kernel" }
 neura-shader = { version = "0.1.0", path = "crates/neura-shader" }
 neura-gpu = { version = "0.1.0", path = "crates/neura-gpu" }
 neura-program = { version = "0.1.0", path = "crates/neura-program" }

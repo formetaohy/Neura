@@ -93,7 +93,7 @@ impl Megakernel {
         source.push_str(&strategy::declarations());
         source.push_str(&store::declarations());
         source.push_str(&geometry.declarations());
-        for fragment in neura_kernels::fragments(geometry.clone(), weights) {
+        for fragment in neura_kernel::fragments(geometry.clone(), weights) {
             source.push_str(&fragment);
             source.push('\n');
         }
@@ -156,7 +156,7 @@ fn dispatch() -> String {
             out,
             "        case {}: {{ {}(task, lid); }}",
             kind.constant(),
-            neura_kernels::body(*kind),
+            neura_kernel::body(*kind),
         )
         .unwrap();
     }

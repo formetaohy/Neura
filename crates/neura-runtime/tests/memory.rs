@@ -2,12 +2,12 @@ use neura_gpu::{BufferUsages, GpuBuffer, Submission};
 use neura_program::{Graph, Init, Shape, Store};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
-#[path = "support/references.rs"]
-mod references;
+#[path = "support/reference.rs"]
+mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
-use references::{matmul_reference, random};
+use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {

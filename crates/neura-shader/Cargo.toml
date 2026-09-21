@@ -13,4 +13,4 @@ workspace = true
 naga = { workspace = true }
 neura-abi = { workspace = true }
 neura-gpu = { workspace = true }
-neura-kernels = { workspace = true }
+neura-kernel = { workspace = true }

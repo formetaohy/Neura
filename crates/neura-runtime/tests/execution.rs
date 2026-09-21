@@ -2,14 +2,14 @@ use neura_abi::{PROFILES, WIDE};
 use neura_program::{Graph, Init, Shape, Value};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
-#[path = "support/references.rs"]
-mod references;
+#[path = "support/reference.rs"]
+mod reference;
 #[path = "support/softmax.rs"]
 mod softmax;
 #[path = "support/mod.rs"]
 mod support;
 
-use references::{matmul_reference, random};
+use reference::{matmul_reference, random};
 use softmax::{log_softmax_reference, softmax_reference};
 use support::{assert_close, open};
 

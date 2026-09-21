@@ -352,7 +352,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "neura-kernels"
+name = "neura-kernel"
 version = "0.1.0"
 dependencies = [
  "neura-abi",
@@ -394,7 +394,7 @@ dependencies = [
  "naga",
  "neura-abi",
  "neura-gpu",
- "neura-kernels",
+ "neura-kernel",
 ]
 
 [[package]]

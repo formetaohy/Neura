@@ -1,16 +1,16 @@
 mod matmul;
-mod ops;
+mod op;
 
 use neura_abi::{Geometry, Kind, Precision};
 
-pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
-pub const READ: &str = include_str!("../shaders/read.wgsl");
-pub const POINTWISE: &str = include_str!("../shaders/pointwise.wgsl");
-pub const REDUCE: &str = include_str!("../shaders/reduce.wgsl");
-pub const SOFTMAX: &str = include_str!("../shaders/softmax.wgsl");
-pub const CHOICE: &str = include_str!("../shaders/choice.wgsl");
-pub const SELECT: &str = include_str!("../shaders/select.wgsl");
-pub const CONV: &str = include_str!("../shaders/conv.wgsl");
+pub const REFUSE: &str = include_str!("../shader/refuse.wgsl");
+pub const READ: &str = include_str!("../shader/read.wgsl");
+pub const POINTWISE: &str = include_str!("../shader/pointwise.wgsl");
+pub const REDUCE: &str = include_str!("../shader/reduce.wgsl");
+pub const SOFTMAX: &str = include_str!("../shader/softmax.wgsl");
+pub const CHOICE: &str = include_str!("../shader/choice.wgsl");
+pub const SELECT: &str = include_str!("../shader/select.wgsl");
+pub const CONV: &str = include_str!("../shader/conv.wgsl");
 
 pub fn body(kind: Kind) -> &'static str {
     match kind {
@@ -41,7 +41,7 @@ pub fn fragments(geometry: Geometry, weights: Precision) -> Vec<String> {
     vec![
         REFUSE.to_owned(),
         READ.to_owned(),
-        ops::fragment(),
+        op::fragment(),
         storage(weights),
         POINTWISE.to_owned(),
         matmul::family(geometry),
