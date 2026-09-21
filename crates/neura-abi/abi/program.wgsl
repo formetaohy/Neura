@@ -44,7 +44,7 @@ struct Bounds {
 
 @group(0) @binding(0) var<storage, read> tasks: array<Task>;
 @group(0) @binding(1) var<storage, read> values: array<Value>;
-@group(0) @binding(2) var<storage, read_write> arena: array<f32>;
+@group(0) @binding(2) var<storage, read_write> heap: array<f32>;
 @group(0) @binding(3) var<storage, read_write> cursor: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> bounds: Bounds;
 @group(0) @binding(5) var<storage, read> steps: array<Step>;

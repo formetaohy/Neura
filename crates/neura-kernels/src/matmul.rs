@@ -30,11 +30,11 @@ fn load(source: &mut String, geometry: usize) {
     );
     source.push_str(&function);
     let left = format!(
-        "    let left_slot = buffer * MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry};\n    for (var unit = lid; unit < MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_row + unit / MATMUL_DEPTH_{geometry};\n        let column = base_depth + unit % MATMUL_DEPTH_{geometry};\n        let inside = row < rows && column < depth;\n        let address = select(0u, row * left.strides.z + column * left.strides.w, inside);\n        matmul_left[left_slot + unit] = select(0.0, arena[left.base + address], inside);\n    }}\n",
+        "    let left_slot = buffer * MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry};\n    for (var unit = lid; unit < MATMUL_ROWS_{geometry} * MATMUL_DEPTH_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_row + unit / MATMUL_DEPTH_{geometry};\n        let column = base_depth + unit % MATMUL_DEPTH_{geometry};\n        let inside = row < rows && column < depth;\n        let address = select(0u, row * left.strides.z + column * left.strides.w, inside);\n        matmul_left[left_slot + unit] = select(0.0, fetch(left.base, address), inside);\n    }}\n",
     );
     source.push_str(&left);
     let right = format!(
-        "    let right_slot = buffer * MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry};\n    for (var unit = lid; unit < MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_depth + unit / MATMUL_COLUMNS_{geometry};\n        let column = base_column + unit % MATMUL_COLUMNS_{geometry};\n        let inside = row < depth && column < columns;\n        let address = select(0u, row * right.strides.z + column * right.strides.w, inside);\n        matmul_right[right_slot + unit] = select(0.0, arena[right.base + address], inside);\n    }}\n}}\n\n",
+        "    let right_slot = buffer * MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry};\n    for (var unit = lid; unit < MATMUL_DEPTH_{geometry} * MATMUL_COLUMNS_{geometry}; unit = unit + WORKGROUP_SIZE) {{\n        let row = base_depth + unit / MATMUL_COLUMNS_{geometry};\n        let column = base_column + unit % MATMUL_COLUMNS_{geometry};\n        let inside = row < depth && column < columns;\n        let address = select(0u, row * right.strides.z + column * right.strides.w, inside);\n        matmul_right[right_slot + unit] = select(0.0, fetch(right.base, address), inside);\n    }}\n}}\n\n",
     );
     source.push_str(&right);
 }
@@ -120,7 +120,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
             let register = row * tile.register_columns() + column;
             writeln!(
                 source,
-                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            arena[output.base + row{register} * columns + column{register}] = chained(task, row{register} * columns + column{register}, acc{register});\n        }}",
+                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output.base, index{register}, chained(task, index{register}, acc{register}));\n        }}",
             )
             .unwrap();
         }

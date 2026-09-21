@@ -1,7 +1,7 @@
 use neura_abi::WORD_BYTES;
 use neura_gpu::wgpu;
 use neura_program::{Graph, Shape};
-use neura_runtime::RuntimeRequest;
+use neura_runtime::{Precision, RuntimeRequest};
 
 const VERTEX: &str = "
 @vertex
@@ -33,7 +33,8 @@ fn a_game_pipeline_draws_a_tensor_straight_out_of_the_arena() {
     let graph = Graph::new();
     let vertices = graph.input(Shape::matrix(4, 4));
     let drawn = graph.mul(vertices, graph.fill(Shape::matrix(4, 4), 1.0));
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let quad = [
         -1.0, -1.0, 0.0, 7.0, //
         1.0, -1.0, 0.0, 7.0, //
@@ -129,7 +130,7 @@ fn a_game_pipeline_draws_a_tensor_straight_out_of_the_arena() {
             multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_vertex_buffer(0, program.arena().buffer().slice(span.offset..));
+        pass.set_vertex_buffer(0, program.heap().buffer().slice(span.offset..));
         pass.draw(0..4, 0..1);
     }
     encoder.copy_texture_to_buffer(

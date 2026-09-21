@@ -147,6 +147,7 @@ ops! {
     Unary SIGMOID = "sigmoid" apply "sigmoid(a)" partials [(y "g * y * (1.0 - y)")];
     Unary NEG = "neg" apply "-a" partials [("-g")];
     Unary ABS = "abs" apply "abs(a)" partials [(x "select(-g, g, x > 0.0)")];
+    Unary IDENTITY = "identity" apply "a" partials [(direct)];
 }
 
 pub fn of(code: u32) -> &'static Op {

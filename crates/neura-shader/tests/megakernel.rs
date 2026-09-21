@@ -1,10 +1,16 @@
 use neura_abi::op::OPS;
-use neura_abi::{Geometry, PROFILES, Profile, kind};
+use neura_abi::{Geometry, PROFILES, Placement, Precision, Profile, kind};
 use neura_shader::{BINDINGS, Megakernel, reflect};
 use std::collections::BTreeSet;
 
+const PLACEMENT: Placement = Placement::new(1 << 20, 1 << 18, 1 << 16);
+
 fn assemble(profile: Profile) -> Megakernel {
-    Megakernel::assemble(Geometry::of(profile, profile.ladder()))
+    assemble_with(profile, Precision::Single)
+}
+
+fn assemble_with(profile: Profile, weights: Precision) -> Megakernel {
+    Megakernel::assemble(Geometry::of(profile, profile.ladder()), weights, PLACEMENT)
 }
 
 #[test]
@@ -157,7 +163,7 @@ fn ",
             );
             for role in op.partial(slot).roles() {
                 assert!(
-                    case.contains(&format!("let {} = arena[", role.name())),
+                    case.contains(&format!("let {} = fetch(", role.name())),
                     "the device never hands {} the {} its partial reads",
                     op.name,
                     role.name(),
@@ -234,7 +240,7 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
 fn a_program_carries_only_the_tiles_it_is_given() {
     let profile = PROFILES[PROFILES.len() - 1];
     let geometry = Geometry::of(profile, &profile.ladder()[..1]);
-    let kernel = Megakernel::assemble(geometry.clone());
+    let kernel = Megakernel::assemble(geometry.clone(), Precision::Single, PLACEMENT);
     assert!(
         kernel
             .source()
@@ -297,6 +303,33 @@ fn the_program_hands_the_device_one_group_of_six_buffers() {
             .count()
             == 1
     );
+}
+
+#[test]
+fn half_weights_unpack_where_single_weights_load() {
+    let single = assemble_with(PROFILES[0], Precision::Single);
+    let half = assemble_with(PROFILES[0], Precision::Half);
+    assert!(single.source().contains(
+        "fn fetch(base: u32, offset: u32) -> f32 {
+    return heap[base + offset];"
+    ));
+    assert!(!single.source().contains("unpack2x16float"));
+    assert!(
+        half.source()
+            .contains(&format!("const HEAP_WORDS: u32 = {}u;", PLACEMENT.heap()))
+    );
+    assert!(half.source().contains(&format!(
+        "const WEIGHT_WORDS: u32 = {}u;",
+        PLACEMENT.weights()
+    )));
+    assert!(half.source().contains("unpack2x16float"));
+    for kernel in [&single, &half] {
+        assert!(
+            kernel
+                .source()
+                .contains("fn publish(base: u32, offset: u32, data: f32)")
+        );
+    }
 }
 
 #[test]

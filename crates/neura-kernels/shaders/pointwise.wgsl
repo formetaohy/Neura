@@ -11,7 +11,7 @@ fn chain_operand(step: Step, index: u32, dims: vec4<u32>) -> f32 {
         return 0.0;
     }
     let source = values[step.operand];
-    return arena[source.base + value_offset(index, dims, source.strides)];
+    return fetch(source.base, value_offset(index, dims, source.strides));
 }
 
 fn chained(task: Task, index: u32, carried: f32) -> f32 {
@@ -36,9 +36,9 @@ fn run_binary(task: Task, lid: u32) {
     let right = values[task.b];
     let output = values[task.out];
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        let a = arena[left.base + value_offset(index, output.dims, left.strides)];
-        let b = arena[right.base + value_offset(index, output.dims, right.strides)];
-        arena[output.base + index] = chained(task, index, op_apply(task.kind, task.op, a, b));
+        let a = fetch(left.base, value_offset(index, output.dims, left.strides));
+        let b = fetch(right.base, value_offset(index, output.dims, right.strides));
+        publish(output.base, index, chained(task, index, op_apply(task.kind, task.op, a, b)));
     }
 }
 
@@ -46,22 +46,23 @@ fn run_unary(task: Task, lid: u32) {
     let source = values[task.a];
     let output = values[task.out];
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        let a = arena[source.base + value_offset(index, output.dims, source.strides)];
-        arena[output.base + index] = chained(task, index, op_apply(task.kind, task.op, a, 0.0));
+        let a = fetch(source.base, value_offset(index, output.dims, source.strides));
+        publish(output.base, index, chained(task, index, op_apply(task.kind, task.op, a, 0.0)));
     }
 }
 
 fn run_fill(task: Task, lid: u32) {
     let output = values[task.out];
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        arena[output.base + index] = chained(task, index, task.param);
+        publish(output.base, index, chained(task, index, task.param));
     }
 }
 
 fn run_broadcast(task: Task, lid: u32) {
     let output = values[task.out];
-    let scalar = arena[values[task.a].base + task.slot];
+    let source = values[task.a];
+    let scalar = fetch(source.base, task.slot);
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        arena[output.base + index] = chained(task, index, scalar);
+        publish(output.base, index, chained(task, index, scalar));
     }
 }

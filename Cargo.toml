@@ -11,6 +11,7 @@ repository = "https://github.com/formetaohy/Neura"
 
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
+half = "2"
 naga = { version = "30", default-features = false, features = ["wgsl-in"] }
 pollster = "0.4"
 wgpu = { version = "30", default-features = false, features = [

@@ -1,13 +1,16 @@
 use neura_abi::{PROFILES, WIDE};
 use neura_program::{Graph, Init, Shape, Value};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 #[path = "support/references.rs"]
 mod references;
+#[path = "support/softmax.rs"]
+mod softmax;
 #[path = "support/mod.rs"]
 mod support;
 
-use references::{log_softmax_reference, matmul_reference, random, softmax_reference};
+use references::{matmul_reference, random};
+use softmax::{log_softmax_reference, softmax_reference};
 use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {
@@ -20,7 +23,8 @@ fn independent_tasks_collapse_into_one_wave() {
     let wide = graph.parameter(Shape::vector(65_536), Init::Zero);
     let activated = graph.relu(wide);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     assert_eq!(
         program.task_count(),
         32,
@@ -40,7 +44,8 @@ fn a_matmul_matches_a_cpu_reference() {
     let right = graph.parameter(Shape::matrix(5, 9), Init::Zero);
     let out = graph.matmul(left, right);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let left_data = random(35, 11);
     let right_data = random(45, 29);
     runtime.write(&program, left, &left_data);
@@ -63,7 +68,8 @@ fn a_bias_broadcasts_over_every_row() {
     let shifted = graph.add(data, bias);
     let scaled = graph.mul(shifted, scale);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let data_values = random(32, 7);
     let bias_values = random(8, 13);
     runtime.write(&program, data, &data_values);
@@ -85,7 +91,8 @@ fn a_softmax_row_sums_to_one() {
     let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
     let probabilities = graph.softmax(logits);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let logits_values = random(54, 3);
     runtime.write(&program, logits, &logits_values);
     runtime.run(&program);
@@ -106,7 +113,8 @@ fn the_loss_gradient_of_a_matmul_is_the_column_sum_of_its_operand() {
     graph.retain(grads.of(left));
     graph.retain(grads.of(right));
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let left_data = random(12, 5);
     let right_data = random(15, 17);
     runtime.write(&program, left, &left_data);
@@ -149,7 +157,8 @@ fn a_bias_gradient_folds_every_row_it_was_added_to() {
     let loss = graph.sum(graph.add(data, bias));
     let grads = graph.backward(loss);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &random(20, 23));
     runtime.run(&program);
     assert_close(&runtime.read(&program, grads.of(bias)), &[5.0; 4], 1e-5);
@@ -162,7 +171,8 @@ fn a_rectifier_gradient_keeps_the_sign_of_its_input() {
     let loss = graph.sum(graph.relu(data));
     let grads = graph.backward(loss);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let values = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 3.0];
     runtime.write(&program, data, &values);
     runtime.run(&program);
@@ -180,7 +190,8 @@ fn the_loss_gradient_of_a_softmax_row_vanishes() {
     let loss = graph.sum(graph.softmax(logits));
     let grads = graph.backward(loss);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, logits, &random(24, 31));
     runtime.run(&program);
     let gradient = runtime.read(&program, grads.of(logits));
@@ -194,7 +205,8 @@ fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
     let root = graph.sqrt(data);
     let reciprocal = graph.recip(root);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 4.0, 9.0, 16.0]);
     runtime.run(&program);
     assert_close(
@@ -219,7 +231,8 @@ fn a_shape_change_never_declares_another_kernel() {
         );
         let data = graph.input(Shape::matrix(batch, 5));
         let out = graph.softmax(graph.matmul(data, weight));
-        let program = runtime.compile(&graph);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile(&graph, &weights);
         let data_values = random(batch * 5, batch);
         runtime.write(&program, data, &data_values);
         runtime.run(&program);
@@ -241,7 +254,8 @@ fn an_update_in_place_replays_on_every_run() {
     let update = graph.fill(Shape::vector(4), 0.25);
     graph.add_into(weight, update);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, weight, &[1.0; 4]);
     runtime.run(&program);
     assert_close(&runtime.read(&program, weight), &[1.25; 4], 1e-6);
@@ -270,7 +284,8 @@ fn a_tape_runs_a_whole_training_step_in_one_submission() {
     graph.add_into(weight, weight_step);
     graph.add_into(bias, bias_step);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &random(24, 41));
     runtime.run(&program);
     let first = (runtime.read(&program, loss), runtime.read(&program, weight));
@@ -299,7 +314,8 @@ fn reading_two_tensors_costs_one_submission() {
     let shifted = graph.add(doubled, graph.fill(Shape::vector(4), 1.0));
     graph.retain(doubled);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
     let values = runtime.read_many(&program, &[doubled, shifted]);
@@ -312,8 +328,10 @@ fn a_graph_without_tasks_is_refused_by_the_runtime() {
     let graph = Graph::new();
     graph.input(Shape::vector(4));
     let runtime = open();
-    let outcome =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.compile(&graph)));
+    let weights = runtime.weights(&graph, Precision::Single);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.compile(&graph, &weights)
+    }));
     assert!(
         outcome.is_err(),
         "a program with an empty tape was compiled"
@@ -330,7 +348,8 @@ fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
         ..Default::default()
     }))
     .expect("a device with a small staging buffer");
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let outcome =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.read(&program, out)));
     assert!(
@@ -346,7 +365,8 @@ fn a_reclaimed_temporary_is_refused_and_a_retained_one_reads_back() {
     let scaled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     let squared = graph.mul(scaled, scaled);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -375,7 +395,8 @@ fn a_retained_gradient_reads_back_after_the_step_that_consumed_it() {
     let step = graph.mul(gradient, graph.fill(Shape::vector(4), -0.5));
     graph.add_into(weight, step);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
     assert_close(
@@ -397,7 +418,8 @@ fn a_parameter_read_before_any_run_holds_its_seed() {
     let weight = graph.parameter(Shape::vector(4), Init::Constant(2.5));
     let out: Value = graph.relu(weight);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     assert_close(&runtime.read(&program, weight), &[2.5; 4], 1e-6);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &[2.5; 4], 1e-6);
@@ -409,44 +431,61 @@ fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
     let data = graph.input(Shape::vector(1024));
     let out = graph.relu(graph.mul(data, data));
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[2.0; 1024]);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out)[..4], &[4.0; 4], 1e-6);
-    assert_eq!(program.arena().size(), program.arena_bytes());
     assert_eq!(program.arena_bytes(), 8192);
+    assert_eq!(program.tensor_bytes(), program.arena_bytes());
+    assert_eq!(program.heap_bytes(), runtime.heap_bytes());
     assert!(
-        program.device_bytes() > program.arena_bytes(),
-        "a tape carries {} bytes of device memory beside its {} byte arena",
+        program.device_bytes() >= program.tensor_bytes(),
+        "a tape carries {} bytes of device memory beside its {} byte tensors",
         program.device_bytes(),
-        program.arena_bytes(),
+        program.tensor_bytes(),
     );
 }
 
 #[test]
-fn two_programs_hold_their_own_memory() {
+fn two_programs_of_one_model_share_their_weights_and_hold_their_own_arena() {
     let runtime = open();
     let first = Graph::new();
     let weight = first.parameter(Shape::vector(4), Init::Constant(2.5));
     let scaled = first.mul(weight, first.fill(Shape::vector(4), 3.0));
-    let a = runtime.compile(&first);
+    let weights = runtime.weights(&first, Precision::Single);
+    let a = runtime.compile(&first, &weights);
     runtime.run(&a);
     assert_close(&runtime.read(&a, scaled), &[7.5; 4], 1e-6);
 
     let second = Graph::new();
+    let shared = second.parameter(Shape::vector(4), Init::Constant(2.5));
     let data = second.input(Shape::vector(16));
     let doubled = second.mul(data, second.fill(Shape::vector(16), 2.0));
-    let b = runtime.compile(&second);
+    let b = runtime.compile(&second, &weights);
     runtime.write(&b, data, &[1.0; 16]);
     runtime.run(&b);
     assert_close(&runtime.read(&b, doubled), &[2.0; 16], 1e-6);
 
+    runtime.write(&a, weight, &[8.0; 4]);
+    assert_close(&runtime.read(&b, shared), &[8.0; 4], 1e-6);
+
     runtime.run(&a);
-    assert_close(&runtime.read(&a, scaled), &[7.5; 4], 1e-6);
+    assert_close(&runtime.read(&a, scaled), &[24.0; 4], 1e-6);
     assert_ne!(
-        a.arena().allocation(),
-        b.arena().allocation(),
-        "two programs were handed one arena",
+        a.span(scaled).offset,
+        b.span(doubled).offset,
+        "two programs of one model share one tensor region",
+    );
+    assert_eq!(
+        a.weights().offset(),
+        b.weights().offset(),
+        "two programs of one model hold two weight stores",
+    );
+    assert_eq!(
+        a.heap().allocation(),
+        b.heap().allocation(),
+        "two programs of one runtime were handed two heaps",
     );
     assert!(
         a.arena_bytes() < b.arena_bytes(),
@@ -462,7 +501,8 @@ fn a_fresh_program_holds_zeros_until_the_host_writes() {
     let data = graph.input(Shape::vector(4));
     let out = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &[0.0; 4], 1e-6);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
@@ -495,7 +535,8 @@ fn every_profile_the_device_offers_runs_the_same_matmul() {
     }
     let expected_transposed = matmul_reference(&transposed_right, &transposed_left, 43, 19, 37);
     for profile in runtime.profiles() {
-        let program = runtime.compile_with(&graph, profile);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile_with(&graph, &weights, profile);
         assert_eq!(program.profile(), profile);
         runtime.write(&program, left, &left_data);
         runtime.write(&program, right, &right_data);
@@ -520,7 +561,8 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
         let left = graph.parameter(Shape::matrix(tile.rows(), tile.depth()), Init::Zero);
         let right = graph.parameter(Shape::matrix(tile.depth(), tile.columns()), Init::Zero);
         let out = graph.matmul(left, right);
-        let program = runtime.compile_with(&graph, profile);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile_with(&graph, &weights, profile);
         assert_eq!(program.tiles(), &[tile]);
         assert_eq!(
             program.matmul_geometries(),
@@ -550,6 +592,7 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest::default().minimum_limits(),
         readback_bytes: 1 << 16,
+        ..Default::default()
     }))
     .expect("a device with the baseline pool");
     let profiles = runtime.profiles();
@@ -568,11 +611,12 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
     let data = graph.input(Shape::matrix(8, 4));
     let out = graph.matmul(data, weight);
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     assert_eq!(program.profile(), *profiles.last().expect("a profile"));
     assert!(
         refuses(|| {
-            let _ = runtime.compile_with(&graph, WIDE);
+            let _ = runtime.compile_with(&graph, &weights, WIDE);
         }),
         "a profile the device cannot hold was compiled",
     );
@@ -590,7 +634,8 @@ fn tuning_measures_every_profile_the_device_offers() {
     let left_data = random(64 * 32, 3);
     let right_data = random(32 * 64, 7);
     let expected = matmul_reference(&left_data, &right_data, 64, 32, 64);
-    let program = runtime.tune(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.tune(&graph, &weights);
     assert!(
         runtime.profiles().contains(&program.profile()),
         "a tuned program carries a profile the device offers",
@@ -617,7 +662,8 @@ fn an_operand_folded_into_a_subtraction_keeps_its_side() {
     graph.retain(difference);
     graph.retain(quotient);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     assert_eq!(
         program.task_count(),
         2,
@@ -645,7 +691,8 @@ fn a_log_softmax_row_holds_its_log_probabilities() {
     let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
     let log_probabilities = graph.log_softmax(logits);
     let runtime = open();
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let logits_values = random(54, 3);
     runtime.write(&program, logits, &logits_values);
     runtime.run(&program);
@@ -667,7 +714,8 @@ fn a_log_softmax_rides_the_shape_of_its_rows() {
         let graph = Graph::new();
         let logits = graph.parameter(Shape::matrix(3, columns), Init::Zero);
         let out = graph.log_softmax(logits);
-        let program = runtime.compile(&graph);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile(&graph, &weights);
         let data = random(3 * columns, columns);
         runtime.write(&program, logits, &data);
         runtime.run(&program);

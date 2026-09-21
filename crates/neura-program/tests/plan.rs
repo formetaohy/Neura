@@ -1,16 +1,19 @@
 use neura_abi::op;
-use neura_abi::{NARROW, PROFILES, Profile, StepRecord, TaskRecord, WIDE, kind};
-use neura_program::{Encoding, Graph, Init, Shape};
+use neura_abi::{
+    NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES, kind,
+};
+use neura_program::{Encoding, Graph, Init, Shape, Store};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
+const PLACEMENT: Placement = Placement::new(1 << 20, 1 << 18, 1 << 16);
 
 fn encoding(graph: &Graph) -> Encoding {
     encoding_with(graph, NARROW)
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    graph.encode(ALIGNMENT, profile)
+    graph.encode(ALIGNMENT, profile, Precision::Single, PLACEMENT)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -167,8 +170,13 @@ fn a_chain_of_temporaries_holds_one_tensor() {
     assert_eq!(encoding.task_count(), 1);
     assert_eq!(
         encoding.arena_bytes(),
-        256 * 4 + 256 * 4,
-        "the parameter and the value the fused chain produces",
+        256 * 4,
+        "the arena holds only the value the fused chain produces",
+    );
+    assert_eq!(
+        graph.layout(ALIGNMENT, Precision::Single).weights().words(),
+        256,
+        "the parameter lives in the weight store, not in the arena",
     );
 }
 
@@ -182,8 +190,8 @@ fn a_plan_sizes_its_own_arena() {
     large.relu(parameter);
     let small = encoding(&small);
     let large = encoding(&large);
-    assert_eq!(small.arena_bytes(), 256 * 4 + 256 * 4);
-    assert_eq!(large.arena_bytes(), 4096 * 4 + 4096 * 4);
+    assert_eq!(small.arena_bytes(), 256 * 4);
+    assert_eq!(large.arena_bytes(), 4096 * 4);
     assert!(
         small.arena_bytes() < large.arena_bytes(),
         "a wider tensor asks for a wider arena",
@@ -301,7 +309,7 @@ fn every_profile_plans_the_same_values() {
             graph.value_count(),
             "{profile:?} publishes values a graph without a reduction holds",
         );
-        assert_eq!(encoding.span(out).bytes, 16 * 4);
+        assert_eq!(encoding.span(out).elements, 16);
     }
 }
 
@@ -439,7 +447,7 @@ fn a_view_shares_the_storage_of_its_source() {
     let transposed = graph.transpose(matrix);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
     let encoding = encoding(&graph);
-    assert_eq!(encoding.span(matrix).bytes, 32 * 4);
+    assert_eq!(encoding.span(matrix).elements, 32);
     assert!(
         refuses(|| {
             let _ = encoding.span(transposed);
@@ -508,10 +516,13 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     assert!(encoding.value_count() as usize >= graph.value_count());
     assert!(encoding.arena_bytes() > 0);
     assert!(encoding.work() > 0);
-    let seed = encoding
-        .initial()
+    let layout = graph.layout(ALIGNMENT, Precision::Single);
+    let seed = layout
+        .uploads()
         .iter()
-        .find(|(offset, _)| *offset == encoding.span(weight).offset)
+        .find(|(address, _)| {
+            layout.weight_bytes(PLACEMENT, *address) == encoding.span(weight).offset
+        })
         .expect("the weight carries its initial samples");
     assert_eq!(seed.1.len(), 16);
 }
@@ -529,7 +540,7 @@ fn a_non_scalar_loss_is_refused() {
 }
 
 #[test]
-fn every_tensor_a_plan_names_lies_inside_its_arena() {
+fn every_tensor_a_plan_names_lies_inside_its_region() {
     for profile in PROFILES {
         let graph = Graph::new();
         let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
@@ -542,18 +553,25 @@ fn every_tensor_a_plan_names_lies_inside_its_arena() {
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
         let encoding = encoding_with(&graph, *profile);
+        let layout = graph.layout(ALIGNMENT, Precision::Single);
         for value in [weight, data, out, grads.of(weight)] {
             let span = encoding.span(value);
+            let bytes = u64::from(span.elements) * WORD_BYTES;
+            let (base, limit) = match span.store {
+                Store::Tensors => (PLACEMENT.tensors() * WORD_BYTES, encoding.tensor_bytes()),
+                Store::Weights => (PLACEMENT.weights() * WORD_BYTES, layout.weights().bytes()),
+            };
             assert!(
-                span.offset + span.bytes <= encoding.arena_bytes(),
-                "tensor {} of {} bytes at {} leaves the {} byte arena",
+                span.offset - base + bytes <= limit,
+                "tensor {} of {} bytes at {} leaves the {} bytes of its {:?}",
                 value.id(),
-                span.bytes,
-                span.offset,
-                encoding.arena_bytes(),
+                bytes,
+                span.offset - base,
+                limit,
+                span.store,
             );
             assert_eq!(
-                span.offset % ALIGNMENT,
+                (span.offset - base) % ALIGNMENT,
                 0,
                 "a tensor lies off the block grid"
             );

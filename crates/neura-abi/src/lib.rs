@@ -6,11 +6,15 @@ mod records {
 }
 pub mod kind;
 pub mod op;
+mod placement;
+mod precision;
 mod profile;
 
 pub const TAPE_WGSL: &str = include_str!("../abi/program.wgsl");
 
 pub use constants::*;
+pub use placement::Placement;
+pub use precision::Precision;
 pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
 pub use records::{BoundsRecord, StepRecord, TaskRecord, ValueRecord};
 

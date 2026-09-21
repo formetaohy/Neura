@@ -3,11 +3,11 @@ fn run_sum_chunk(task: Task, lid: u32) {
     let output = values[task.out];
     var local = 0.0;
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
-        local = local + arena[source.base + index];
+        local = local + fetch(source.base, index);
     }
     let total = workgroup_sum(lid, local);
     if (lid == 0u) {
-        arena[output.base + task.slot] = total;
+        publish(output.base, task.slot, total);
     }
 }
 
@@ -32,11 +32,11 @@ fn run_sum_to(task: Task, lid: u32) {
                         let oy = select(y, ry, output.dims.y == 1u);
                         let oz = select(z, rz, output.dims.z == 1u);
                         let ow = select(w, rw, output.dims.w == 1u);
-                        total = total + arena[source.base + ox * source.strides.x + oy * source.strides.y + oz * source.strides.z + ow * source.strides.w];
+                        total = total + fetch(source.base, ox * source.strides.x + oy * source.strides.y + oz * source.strides.z + ow * source.strides.w);
                     }
                 }
             }
         }
-        arena[output.base + index] = chained(task, index, total);
+        publish(output.base, index, chained(task, index, total));
     }
 }

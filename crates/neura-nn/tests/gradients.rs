@@ -1,6 +1,6 @@
 use neura_nn::{Linear, cross_entropy, mse_loss};
 use neura_program::{Graph, Init, Shape, Value};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
@@ -50,7 +50,8 @@ fn analytic_gradients_match_finite_differences() {
     for parameter in &parameters {
         graph.retain(gradients.of(*parameter));
     }
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
         inputs,
@@ -104,7 +105,8 @@ fn analytic_gradients_of_a_deep_stack_match_finite_differences() {
     for parameter in &parameters {
         graph.retain(gradients.of(*parameter));
     }
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
         inputs,
@@ -180,7 +182,8 @@ fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences()
     for parameter in &parameters {
         graph.retain(gradients.of(*parameter));
     }
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let inputs_data = (0..samples * 64)
         .map(|index| (index as f32 * 0.017).sin() * 0.5)
         .collect::<Vec<_>>();
@@ -242,7 +245,8 @@ fn one_step_of_adam_moves_a_weight_against_its_gradient() {
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     graph.retain(loss);
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
         inputs,
@@ -270,7 +274,8 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
     let loss = cross_entropy(&graph, logits, targets);
     let gradients = graph.backward(loss);
     graph.retain(gradients.of(logits));
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let logits_data = vec![
         0.5, -1.0, 0.25, //
         -0.75, 1.5, 0.1, //

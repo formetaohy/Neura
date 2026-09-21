@@ -1,17 +1,20 @@
 use crate::fuse;
 use crate::graph::{GraphState, Residency, ValueInfo};
+use crate::layout::{Layout, Region, Store, store_of};
 use crate::lower;
 use crate::lower::Task;
 use neura_abi::{
-    BoundsRecord, MatmulTile, Profile, StepRecord, TaskRecord, ValueRecord, WORD_BYTES, kind,
+    BoundsRecord, MatmulTile, Placement, Precision, Profile, StepRecord, TaskRecord, ValueRecord,
+    WORD_BYTES, kind,
 };
 use std::cmp::Reverse;
 use std::mem::size_of;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Span {
+    pub store: Store,
     pub offset: u64,
-    pub bytes: u64,
+    pub elements: u32,
 }
 
 struct Block {
@@ -25,10 +28,10 @@ struct Blocks {
 }
 
 impl Blocks {
-    fn new() -> Self {
+    fn with_base(base: u64) -> Self {
         Self {
             free: Vec::new(),
-            end: 0,
+            end: base,
         }
     }
 
@@ -91,13 +94,21 @@ pub struct Encoding {
     readable: Vec<bool>,
     tiles: Vec<MatmulTile>,
     geometries: Vec<u32>,
-    initial: Vec<(u64, Vec<f32>)>,
     arena_bytes: u64,
+    tensor_bytes: u64,
+    layout: Layout,
+    updates_weights: bool,
     work: u64,
 }
 
 impl Encoding {
-    pub(crate) fn plan(state: &GraphState, profile: Profile, alignment: u64) -> Self {
+    pub(crate) fn plan(
+        state: &GraphState,
+        profile: Profile,
+        alignment: u64,
+        precision: Precision,
+        placement: Placement,
+    ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
@@ -105,6 +116,7 @@ impl Encoding {
         let plan = lower::lower(&state.values, &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
+        let layout = Layout::of(values, precision, alignment);
         let depths = wave_depths(values, tasks);
         let mut order = (0..tasks.len()).collect::<Vec<_>>();
         order.sort_by_key(|index| (depths[*index], Reverse(tasks[*index].work)));
@@ -117,16 +129,21 @@ impl Encoding {
             neura_abi::MAX_WAVES,
         );
         let live = storage_liveness(values, tasks, &order);
-        let (offsets, arena_bytes) = allocate(values, &live, &waves, alignment);
+        let reserved = layout.tensors().bytes();
+        let (offsets, tensor_bytes) = allocate(values, &live, &waves, alignment, reserved);
+        let arena_bytes = tensor_bytes - reserved;
         assert!(
-            arena_bytes.is_multiple_of(WORD_BYTES),
-            "a plan of {arena_bytes} bytes leaves the word grid the device indexes",
+            tensor_bytes.is_multiple_of(WORD_BYTES),
+            "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
         );
 
         let mut records = Vec::new();
-        for info in values.iter() {
+        for (id, info) in values.iter().enumerate() {
+            let address = layout.address(values, &offsets, placement, id as u32);
             let mut record: ValueRecord = bytemuck::Zeroable::zeroed();
-            record.base = (offsets[info.storage as usize] / WORD_BYTES) as u32;
+            record.base = u32::try_from(address).unwrap_or_else(|_| {
+                panic!("value {id} lies at {address}, beyond the device address space")
+            });
             record.dims = info.shape.dims();
             record.strides = info.strides;
             records.extend_from_slice(bytemuck::bytes_of(&record));
@@ -135,6 +152,7 @@ impl Encoding {
         let used = used_tiles(profile, tasks, &order);
         let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
+        let mut updates_weights = false;
         let mut geometries = vec![0u32; used.len()];
         let mut work = 0;
         for index in &order {
@@ -171,6 +189,9 @@ impl Encoding {
             for step in &task.chain {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
             }
+            if task.in_place && store_of(info_of(values, task.out).residency) == Store::Weights {
+                updates_weights = true;
+            }
             work += task.work;
             tape.extend_from_slice(bytemuck::bytes_of(&record));
         }
@@ -192,31 +213,34 @@ impl Encoding {
         for index in &order {
             let task = &tasks[*index];
             let storage = values[task.out as usize].storage as usize;
+            if !arena_resident(values, storage) {
+                continue;
+            }
             last_writer.insert(offsets[storage], task.out);
         }
         for (id, info) in values.iter().enumerate() {
             if info.storage as usize != id {
                 continue;
             }
-            readable[id] = match last_writer.get(&offsets[id]) {
-                Some(writer) => *writer == id as u32,
-                None => held(values, id),
+            readable[id] = match info.residency {
+                Residency::Parameter | Residency::Resident => true,
+                _ => match last_writer.get(&offsets[id]) {
+                    Some(writer) => *writer == id as u32,
+                    None => held(values, id),
+                },
             };
         }
         let mut spans = vec![None; values.len()];
-        let mut initial = Vec::new();
         for (id, info) in values.iter().enumerate() {
             if info.storage as usize != id {
                 continue;
             }
-            let span = Span {
-                offset: offsets[id],
-                bytes: storage_bytes(values, id),
-            };
-            spans[id] = Some(span);
-            if let Some(data) = &info.initial {
-                initial.push((span.offset, data.clone()));
-            }
+            let (store, offset) = layout.span(values, &offsets, placement, id as u32);
+            spans[id] = Some(Span {
+                store,
+                offset,
+                elements: info.shape.elements(),
+            });
         }
 
         Self {
@@ -230,8 +254,10 @@ impl Encoding {
             readable,
             tiles: used,
             geometries,
-            initial,
             arena_bytes,
+            tensor_bytes,
+            layout,
+            updates_weights,
             work,
         }
     }
@@ -292,12 +318,28 @@ impl Encoding {
             .unwrap_or(false)
     }
 
-    pub fn initial(&self) -> &[(u64, Vec<f32>)] {
-        &self.initial
-    }
-
     pub fn arena_bytes(&self) -> u64 {
         self.arena_bytes
+    }
+
+    pub fn weights(&self) -> &Region {
+        self.layout.weights()
+    }
+
+    pub fn tensors(&self) -> &Region {
+        self.layout.tensors()
+    }
+
+    pub fn tensor_bytes(&self) -> u64 {
+        self.tensor_bytes
+    }
+
+    pub fn resident_bytes(&self) -> u64 {
+        self.layout.tensors().bytes()
+    }
+
+    pub fn updates_weights(&self) -> bool {
+        self.updates_weights
     }
 
     pub fn task_count(&self) -> u32 {
@@ -466,10 +508,21 @@ fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
     u64::from(values[storage].shape.elements()) * WORD_BYTES
 }
 
+fn info_of(values: &[ValueInfo], value: u32) -> &ValueInfo {
+    &values[values[value as usize].storage as usize]
+}
+
+fn arena_resident(values: &[ValueInfo], storage: usize) -> bool {
+    matches!(
+        values[storage].residency,
+        Residency::Input | Residency::Derived
+    )
+}
+
 fn held(values: &[ValueInfo], storage: usize) -> bool {
     matches!(
         values[storage].residency,
-        Residency::Input | Residency::Parameter
+        Residency::Input | Residency::Parameter | Residency::Resident
     )
 }
 
@@ -478,13 +531,17 @@ fn allocate(
     live: &[Option<Live>],
     waves: &[u32],
     alignment: u64,
+    reserved: u64,
 ) -> (Vec<u64>, u64) {
     let wave_of = |position: usize| waves.partition_point(|end| *end <= position as u32) as u32;
-    let mut arena = Blocks::new();
+    let mut arena = Blocks::with_base(reserved);
     let mut offsets = vec![0u64; live.len()];
     let owners = (0..values.len()).filter(|id| values[*id].storage as usize == *id);
     for id in owners.clone() {
-        if values[id].retained || held(values, id) {
+        if !arena_resident(values, id) {
+            continue;
+        }
+        if held(values, id) || values[id].retained {
             offsets[id] = arena.reserve(storage_bytes(values, id), alignment);
         }
     }

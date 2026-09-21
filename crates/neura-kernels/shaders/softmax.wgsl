@@ -3,20 +3,19 @@ fn run_softmax(task: Task, lid: u32) {
     let output = values[task.out];
     let columns = source.dims.w;
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
-        let source_base = source.base + row * columns;
-        let output_base = output.base + row * output.dims.w;
         var local_max = -3.4028235e38;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local_max = max(local_max, arena[source_base + column]);
+            local_max = max(local_max, fetch(source.base, row * columns + column));
         }
         let row_max = workgroup_max(lid, local_max);
         var local_sum = 0.0;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local_sum = local_sum + exp(arena[source_base + column] - row_max);
+            local_sum = local_sum + exp(fetch(source.base, row * columns + column) - row_max);
         }
         let row_sum = workgroup_sum(lid, local_sum);
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            arena[output_base + column] = chained(task, row * output.dims.w + column, exp(arena[source_base + column] - row_max) / row_sum);
+            let index = row * output.dims.w + column;
+            publish(output.base, index, chained(task, index, exp(fetch(source.base, row * columns + column) - row_max) / row_sum));
         }
         workgroupBarrier();
     }
@@ -28,18 +27,16 @@ fn run_softmax_grad(task: Task, lid: u32) {
     let output = values[task.out];
     let columns = probability.dims.w;
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
-        let probability_base = probability.base + row * columns;
-        let gradient_base = gradient.base + row * columns;
-        let output_base = output.base + row * output.dims.w;
         var local = 0.0;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local = local + arena[gradient_base + column] * arena[probability_base + column];
+            local = local + fetch(gradient.base, row * columns + column) * fetch(probability.base, row * columns + column);
         }
         let row_dot = workgroup_sum(lid, local);
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            let y = arena[probability_base + column];
-            let g = arena[gradient_base + column];
-            arena[output_base + column] = chained(task, row * output.dims.w + column, y * (g - row_dot));
+            let index = row * output.dims.w + column;
+            let y = fetch(probability.base, row * columns + column);
+            let g = fetch(gradient.base, row * columns + column);
+            publish(output.base, index, chained(task, index, y * (g - row_dot)));
         }
         workgroupBarrier();
     }
@@ -50,21 +47,20 @@ fn run_log_softmax(task: Task, lid: u32) {
     let output = values[task.out];
     let columns = source.dims.w;
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
-        let source_base = source.base + row * columns;
-        let output_base = output.base + row * output.dims.w;
         var local_max = -3.4028235e38;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local_max = max(local_max, arena[source_base + column]);
+            local_max = max(local_max, fetch(source.base, row * columns + column));
         }
         let row_max = workgroup_max(lid, local_max);
         var local_sum = 0.0;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local_sum = local_sum + exp(arena[source_base + column] - row_max);
+            local_sum = local_sum + exp(fetch(source.base, row * columns + column) - row_max);
         }
         let row_sum = workgroup_sum(lid, local_sum);
         let normalizer = log(row_sum);
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            arena[output_base + column] = chained(task, row * output.dims.w + column, arena[source_base + column] - row_max - normalizer);
+            let index = row * output.dims.w + column;
+            publish(output.base, index, chained(task, index, fetch(source.base, row * columns + column) - row_max - normalizer));
         }
         workgroupBarrier();
     }
@@ -76,18 +72,16 @@ fn run_log_softmax_grad(task: Task, lid: u32) {
     let output = values[task.out];
     let columns = probability.dims.w;
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
-        let probability_base = probability.base + row * columns;
-        let gradient_base = gradient.base + row * columns;
-        let output_base = output.base + row * output.dims.w;
         var local = 0.0;
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            local = local + arena[gradient_base + column];
+            local = local + fetch(gradient.base, row * columns + column);
         }
         let row_total = workgroup_sum(lid, local);
         for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-            let y = arena[probability_base + column];
-            let g = arena[gradient_base + column];
-            arena[output_base + column] = chained(task, row * output.dims.w + column, g - exp(y) * row_total);
+            let index = row * output.dims.w + column;
+            let y = fetch(probability.base, row * columns + column);
+            let g = fetch(gradient.base, row * columns + column);
+            publish(output.base, index, chained(task, index, g - exp(y) * row_total));
         }
         workgroupBarrier();
     }

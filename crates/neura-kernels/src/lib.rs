@@ -1,7 +1,7 @@
 mod matmul;
 mod ops;
 
-use neura_abi::{Geometry, kind};
+use neura_abi::{Geometry, Placement, Precision, kind};
 
 pub const REFUSE: &str = include_str!("../shaders/refuse.wgsl");
 pub const POINTWISE: &str = include_str!("../shaders/pointwise.wgsl");
@@ -72,16 +72,58 @@ pub fn body(code: u32) -> &'static str {
         .function
 }
 
-pub fn fragments(geometry: Geometry) -> Vec<String> {
+pub fn fragments(geometry: Geometry, weights: Precision, placement: Placement) -> Vec<String> {
     vec![
         REFUSE.to_owned(),
         ops::fragment(),
+        storage(weights, placement),
         POINTWISE.to_owned(),
         matmul::family(geometry),
         REDUCE.to_owned(),
         SOFTMAX.to_owned(),
         reductions(),
     ]
+}
+
+fn storage(weights: Precision, placement: Placement) -> String {
+    let mut source = String::new();
+    source.push_str(
+        "
+fn publish(base: u32, offset: u32, data: f32) {
+    heap[base + offset] = data;
+}
+",
+    );
+    match weights {
+        Precision::Single => source.push_str(
+            "
+fn fetch(base: u32, offset: u32) -> f32 {
+    return heap[base + offset];
+}
+",
+        ),
+        Precision::Half => {
+            source.push_str(&format!(
+                "
+const HEAP_WORDS: u32 = {}u;
+const WEIGHT_WORDS: u32 = {}u;
+
+fn fetch(base: u32, offset: u32) -> f32 {{
+    let address = base + offset;
+    if (address < HEAP_WORDS) {{
+        return heap[address];
+    }}
+    let element = address - HEAP_WORDS;
+    let pair = unpack2x16float(bitcast<u32>(heap[WEIGHT_WORDS + (element >> 1u)]));
+    return select(pair.x, pair.y, (element & 1u) == 1u);
+}}
+",
+                placement.heap(),
+                placement.weights(),
+            ));
+        }
+    }
+    source
 }
 
 struct Reduction {

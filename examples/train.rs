@@ -1,4 +1,4 @@
-use neura::{Adam, Graph, Init, Mlp, Runtime, RuntimeRequest, Shape, mse_loss};
+use neura::{Adam, Graph, Init, Mlp, Precision, Runtime, RuntimeRequest, Shape, mse_loss};
 use std::time::Instant;
 
 fn session(samples: u32) -> (Vec<f32>, Vec<f32>) {
@@ -38,7 +38,8 @@ fn main() {
     let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let (observation_data, target_data) = session(samples);
     runtime.write(&program, observations, &observation_data);
     runtime.write(&program, targets, &target_data);
@@ -49,10 +50,12 @@ fn main() {
         }
     }
     println!(
-        "one step: {} tasks in {} waves, {} bytes of arena, {} device programs",
+        "one step: {} tasks in {} waves, {} bytes of tensors beside {} bytes of weights on a {} byte heap, {} device programs",
         program.task_count(),
         program.wave_count(),
-        program.arena_bytes(),
+        program.tensor_bytes(),
+        program.weights().bytes(),
+        program.heap_bytes(),
         runtime.declared_kernels(),
     );
     for _ in 0..16 {

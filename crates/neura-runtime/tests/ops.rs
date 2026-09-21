@@ -1,5 +1,6 @@
 use neura_abi::op::{self, OPS};
 use neura_program::{Graph, Init, Shape, Value};
+use neura_runtime::Precision;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -128,6 +129,12 @@ fn probes() -> Vec<Probe> {
             apply: |a, _b| a.abs(),
             partial: |a, _b| (if a > 0.0 { 1.0 } else { -1.0 }, 0.0),
         },
+        Probe {
+            op: op::IDENTITY,
+            build: |graph, left, _right| graph.identity(left),
+            apply: |a, _b| a,
+            partial: |_a, _b| (1.0, 0.0),
+        },
     ]
 }
 
@@ -150,7 +157,8 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
         let right = graph.parameter(Shape::vector(ELEMENTS), Init::Zero);
         let out = (probe.build)(&graph, left, right);
         graph.retain(out);
-        let program = runtime.compile(&graph);
+        let store = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile(&graph, &store);
         let (first, second) = (observations(), others());
         runtime.write(&program, left, &first);
         runtime.write(&program, right, &second);
@@ -174,7 +182,8 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
         if binary {
             gradient.retain(gradients.of(right));
         }
-        let program = runtime.compile(&gradient);
+        let store = runtime.weights(&gradient, Precision::Single);
+        let program = runtime.compile(&gradient, &store);
         let scale = weights();
         runtime.write(&program, left, &first);
         runtime.write(&program, right, &second);

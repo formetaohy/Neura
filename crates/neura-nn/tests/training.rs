@@ -1,6 +1,6 @@
 use neura_nn::{Adam, Linear, Mlp, Sgd, cross_entropy, mse_loss};
 use neura_program::{Graph, Init, Shape};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
@@ -43,7 +43,8 @@ fn a_multilayer_perceptron_learns_a_nonlinear_surface() {
     let mut optimizer = Adam::new(&graph, 0.02, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let (inputs_data, targets_data) = surface(64);
     runtime.write(&program, inputs, &inputs_data);
     runtime.write(&program, targets, &targets_data);
@@ -83,7 +84,8 @@ fn descent_lowers_the_loss_of_a_single_layer() {
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.05);
     optimizer.step(&graph, &gradients, &layer.parameters());
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let inputs_data = (0..48)
         .map(|index| index as f32 * 0.02 - 0.5)
         .collect::<Vec<_>>();
@@ -181,7 +183,8 @@ fn a_network_learns_the_action_it_was_shown() {
     let mut optimizer = Adam::new(&graph, 0.05, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let program = runtime.compile(&graph);
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
     let (observation_data, target_data) = actions(24);
     runtime.write(&program, observations, &observation_data);
     runtime.write(&program, targets, &target_data);

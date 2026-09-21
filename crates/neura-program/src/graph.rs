@@ -1,9 +1,11 @@
 use crate::encode::Encoding;
 use crate::init::Init;
+use crate::layout::Layout;
 use crate::shape::Shape;
 use neura_abi::kind;
 use neura_abi::op;
 use neura_abi::{NO_VALUE, Profile, StepRecord};
+use neura_abi::{Placement, Precision};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -29,6 +31,7 @@ impl Value {
 pub(crate) enum Residency {
     Input,
     Parameter,
+    Resident,
     Derived,
     View,
 }
@@ -136,6 +139,10 @@ impl Graph {
 
     pub fn input(&self, shape: Shape) -> Value {
         self.hold(shape, Residency::Input, None)
+    }
+
+    pub fn resident(&self, shape: Shape) -> Value {
+        self.hold(shape, Residency::Resident, None)
     }
 
     pub fn parameter(&self, shape: Shape, init: Init) -> Value {
@@ -249,6 +256,10 @@ impl Graph {
         self.unary(op::ABS, value)
     }
 
+    pub fn identity(&self, value: Value) -> Value {
+        self.unary(op::IDENTITY, value)
+    }
+
     pub fn softmax(&self, value: Value) -> Value {
         self.rows(kind::SOFTMAX, value)
     }
@@ -296,6 +307,19 @@ impl Graph {
         self.update_in_place(op::MUL, target, factor);
     }
 
+    pub fn copy_into(&self, target: Value, source: Value) {
+        self.assert_in_place(target, source);
+        let mut task = TaskInfo::of(
+            kind::UNARY,
+            op::IDENTITY,
+            target.id(),
+            [source.id(), NO_VALUE, NO_VALUE],
+        );
+        task.in_place = true;
+        self.push(task);
+        self.wrote_in_place(target);
+    }
+
     pub fn shape(&self, value: Value) -> Shape {
         self.state.borrow().values[value.id() as usize].shape
     }
@@ -308,9 +332,19 @@ impl Graph {
         self.state.borrow().tasks.len()
     }
 
-    pub fn encode(&self, alignment: u64, profile: Profile) -> Encoding {
+    pub fn layout(&self, alignment: u64, precision: Precision) -> Layout {
+        Layout::of(&self.state.borrow().values, precision, alignment)
+    }
+
+    pub fn encode(
+        &self,
+        alignment: u64,
+        profile: Profile,
+        precision: Precision,
+        placement: Placement,
+    ) -> Encoding {
         let state = self.state.borrow();
-        Encoding::plan(&state, profile, alignment)
+        Encoding::plan(&state, profile, alignment, precision, placement)
     }
 
     pub fn backward(&self, loss: Value) -> Gradients {
@@ -510,18 +544,34 @@ impl Graph {
     }
 
     fn update_in_place(&self, op: u32, target: Value, operand: Value) {
+        self.assert_in_place(target, operand);
+        let mut task = TaskInfo::of(
+            op::kind(op),
+            op,
+            target.id(),
+            [target.id(), operand.id(), NO_VALUE],
+        );
+        task.in_place = true;
+        self.push(task);
+        self.wrote_in_place(target);
+    }
+
+    fn assert_in_place(&self, target: Value, operand: Value) {
         {
             let state = self.state.borrow();
             let info = &state.values[target.id() as usize];
             assert!(
-                matches!(info.residency, Residency::Input | Residency::Parameter),
+                matches!(
+                    info.residency,
+                    Residency::Input | Residency::Parameter | Residency::Resident
+                ),
                 "only a leaf tensor updates in place, and value {} is derived from other tasks",
                 target.id(),
             );
             assert_eq!(
                 info.shape.strides(),
                 info.strides,
-                "a parameter updated in place must be stored contiguously",
+                "a tensor written in place must be stored contiguously",
             );
         }
         let combined = self.shape(target).combined(self.shape(operand));
@@ -532,14 +582,9 @@ impl Graph {
             self.shape(target).elements(),
             self.shape(operand).elements(),
         );
-        let mut task = TaskInfo::of(
-            op::kind(op),
-            op,
-            target.id(),
-            [target.id(), operand.id(), NO_VALUE],
-        );
-        task.in_place = true;
-        self.push(task);
+    }
+
+    fn wrote_in_place(&self, target: Value) {
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
