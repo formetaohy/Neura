@@ -9,7 +9,7 @@ fn assemble(profile: Profile) -> Megakernel {
 }
 
 fn assemble_with(profile: Profile, weights: Precision) -> Megakernel {
-    Megakernel::assemble(Geometry::of(profile, profile.ladder()), weights)
+    Megakernel::assemble(Geometry::of(profile), weights)
 }
 
 #[test]
@@ -35,7 +35,7 @@ fn every_profile_assembles_a_program_that_declares_the_framework_bindings() {
         }
         assert_eq!(kernel.bindings(), reflected.as_slice());
         assert_eq!(kernel.workgroup_size(), profile.workgroup());
-        assert_eq!(kernel.geometry().tiles(), profile.ladder());
+        assert_eq!(kernel.geometry().tiles(), profile.tiles());
     }
 }
 
@@ -43,7 +43,7 @@ fn every_profile_assembles_a_program_that_declares_the_framework_bindings() {
 fn every_profile_declares_its_own_device_constants() {
     for profile in PROFILES {
         let kernel = assemble(*profile);
-        let declarations = Geometry::of(*profile, profile.ladder()).declarations();
+        let declarations = Geometry::of(*profile).declarations();
         for declaration in declarations.lines() {
             assert!(
                 kernel.source().contains(declaration),
@@ -200,7 +200,7 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
                 .source()
                 .contains("fn run_matmul(task: Task, lid: u32)")
         );
-        for (geometry, tile) in profile.ladder().iter().enumerate() {
+        for (geometry, tile) in profile.tiles().iter().enumerate() {
             assert!(
                 kernel.source().contains(&format!(
                     "case {geometry}u: {{ run_matmul_{geometry}(task, lid); }}"
@@ -227,40 +227,34 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
             Kind::Matmul.constant(),
         )));
         assert!(
-            kernel.source().matches("workgroupBarrier()").count() >= profile.ladder().len() * 2,
+            kernel.source().matches("workgroupBarrier()").count() >= profile.tiles().len() * 2,
             "a profile of {profile:?} stages its tiles without a barrier",
         );
     }
 }
 
 #[test]
-fn a_program_carries_only_the_tiles_it_is_given() {
+fn a_program_carries_every_tile_its_profile_offers() {
     let profile = PROFILES[PROFILES.len() - 1];
-    let geometry = Geometry::of(profile, &profile.ladder()[..1]);
-    let kernel = Megakernel::assemble(geometry.clone(), Precision::Single);
-    assert!(
-        kernel
-            .source()
-            .contains("fn run_matmul_0(task: Task, lid: u32)")
-    );
-    assert!(
-        !kernel
-            .source()
-            .contains("fn run_matmul_1(task: Task, lid: u32)")
-    );
-    assert!(!kernel.source().contains("const MATMUL_ROWS_1"));
-    assert!(
-        kernel
-            .source()
-            .contains("case 0u: { run_matmul_0(task, lid); }")
-    );
-    assert!(!kernel.source().contains("case 1u:"));
-    assert_eq!(kernel.geometry(), &geometry);
+    let kernel = assemble(profile);
+    for geometry in 0..profile.tiles().len() {
+        assert!(
+            kernel
+                .source()
+                .contains(&format!("fn run_matmul_{geometry}(task: Task, lid: u32)"))
+                && kernel.source().contains(&format!(
+                    "case {geometry}u: {{ run_matmul_{geometry}(task, lid); }}"
+                ))
+                && kernel
+                    .source()
+                    .contains(&format!("const MATMUL_ROWS_{geometry}")),
+            "a program that serves every shape carries geometry {geometry} of {profile:?}",
+        );
+    }
     assert!(
         kernel
             .source()
             .contains("matmul_left: array<f32, MATMUL_LEFT_STAGE>")
-            && !kernel.source().contains("MATMUL_LEFT_STAGE_1")
     );
 }
 
@@ -382,7 +376,7 @@ fn type_bytes(module: &naga::Module, ty: naga::Handle<naga::Type>) -> u64 {
 #[test]
 fn the_profile_carries_the_workgroup_memory_its_program_declares() {
     for profile in PROFILES {
-        let geometry = Geometry::of(*profile, profile.ladder());
+        let geometry = Geometry::of(*profile);
         let kernel = Megakernel::assemble(geometry, Precision::Single);
         let declared = workgroup_bytes(kernel.source());
         assert!(
@@ -399,6 +393,6 @@ fn the_profile_carries_the_workgroup_memory_its_program_declares() {
 
 #[test]
 fn the_reductions_and_choices_keep_a_scratch_of_their_own() {
-    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0], &[]), Precision::Single);
+    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0]), Precision::Single);
     assert!(workgroup_bytes(kernel.source()) >= 2 * u64::from(PROFILES[0].workgroup()) * 4);
 }

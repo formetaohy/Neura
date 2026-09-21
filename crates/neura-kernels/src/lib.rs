@@ -15,6 +15,7 @@ pub const CONV: &str = include_str!("../shaders/conv.wgsl");
 pub fn body(kind: Kind) -> &'static str {
     match kind {
         Kind::Matmul => "run_matmul",
+        Kind::MatmulFold => "run_matmul_fold",
         Kind::Binary => "run_binary",
         Kind::Unary => "run_unary",
         Kind::Partial => "run_partial",

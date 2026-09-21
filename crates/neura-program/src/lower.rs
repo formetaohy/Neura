@@ -9,7 +9,9 @@ const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
 const FOLD_ROW_CEILING: u32 = 8;
-const MATMUL_TILES_FLOOR: u32 = 128;
+const MATMUL_SPLITS_CEILING: u32 = 64;
+const MATMUL_SPLIT_BLOCKS: u32 = 4;
+const MATMUL_PARTIALS_CEILING: u32 = 1 << 20;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -23,6 +25,7 @@ pub(crate) struct Task {
     pub(crate) inputs: [u32; 3],
     pub(crate) param: f32,
     pub(crate) window: Window,
+    pub(crate) splits: u32,
     pub(crate) work: u64,
     pub(crate) in_place: bool,
     pub(crate) chain: Vec<StepRecord>,
@@ -42,6 +45,7 @@ impl Task {
             inputs: unit.inputs,
             param: unit.param,
             window: unit.window,
+            splits: 1,
             work,
             in_place: unit.in_place,
             chain: unit.chain.clone(),
@@ -91,19 +95,7 @@ impl Plan {
 
 fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     match unit.kind {
-        Kind::Matmul => {
-            let dims = plan.shape(unit.out).dims();
-            let geometry = matmul_geometry(profile, dims[2], dims[3]);
-            let tile = profile.ladder()[geometry as usize];
-            let planes = dims[0] * dims[1];
-            let row_blocks = dims[2].div_ceil(tile.rows());
-            let column_blocks = dims[3].div_ceil(tile.columns());
-            for tile_index in 0..planes * row_blocks * column_blocks {
-                let mut task = Task::span(unit, tile_index, 1, tile.tile_work());
-                task.geometry = geometry;
-                plan.tasks.push(task);
-            }
-        }
+        Kind::Matmul => matmul(plan, unit, profile),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let out = plan.shape(unit.out);
             for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows())) {
@@ -139,6 +131,9 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             }
         }
         Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit),
+        Kind::MatmulFold => {
+            panic!("a fold of depth partials comes from the product whose depth split")
+        }
         Kind::Binary
         | Kind::Unary
         | Kind::Partial
@@ -203,20 +198,87 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
-fn matmul_geometry(profile: Profile, rows: u32, columns: u32) -> u32 {
-    profile
-        .ladder()
+fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let dims = plan.shape(unit.out).dims();
+    let (rows, columns) = (dims[2], dims[3]);
+    let depth = plan.shape(unit.inputs[0]).dims()[3];
+    let planes = dims[0] * dims[1];
+    let tile = matmul_tile(profile, rows, columns);
+    let geometry = profile
+        .tiles()
         .iter()
-        .rposition(|tile| {
-            rows.is_multiple_of(tile.rows())
-                && columns.is_multiple_of(tile.columns())
-                && matmul_tiles(tile, rows, columns) >= MATMUL_TILES_FLOOR
-        })
-        .unwrap_or(0) as u32
+        .position(|candidate| *candidate == tile)
+        .expect("every tile a plan chooses lies in the profile that chose it")
+        as u32;
+    let tiles = planes * rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns());
+    let splits = matmul_splits(tile, rows, columns, depth, planes);
+    let partials =
+        (splits > 1).then(|| plan.publish(Shape::vector(splits * planes * rows * columns)));
+    for split in 0..splits {
+        for index in 0..tiles {
+            let mut task = Task::span(unit, index, 1, tile.tile_work());
+            task.geometry = geometry;
+            if let Some(partials) = partials {
+                task.out = partials;
+                task.slot = split;
+                task.splits = splits;
+                task.chain.clear();
+                task.in_place = false;
+            }
+            plan.tasks.push(task);
+        }
+    }
+    let Some(partials) = partials else {
+        return;
+    };
+    let elements = planes * rows * columns;
+    for (first, count) in spans(elements, task_elements(elements)) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
+        task.kind = Kind::MatmulFold;
+        task.inputs = [partials, NO_VALUE, NO_VALUE];
+        task.splits = splits;
+        plan.tasks.push(task);
+    }
 }
 
-fn matmul_tiles(tile: &MatmulTile, rows: u32, columns: u32) -> u32 {
-    rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns())
+fn matmul_tile(profile: Profile, rows: u32, columns: u32) -> MatmulTile {
+    let mut chosen = profile.tiles()[0];
+    let mut cheapest = u128::MAX;
+    for tile in profile.tiles() {
+        let cost = matmul_cost(*tile, rows, columns);
+        if cost < cheapest {
+            cheapest = cost;
+            chosen = *tile;
+        }
+    }
+    chosen
+}
+
+fn matmul_cost(tile: MatmulTile, rows: u32, columns: u32) -> u128 {
+    let computed = u128::from(tile.rows())
+        * u128::from(rows.div_ceil(tile.rows()))
+        * u128::from(tile.columns())
+        * u128::from(columns.div_ceil(tile.columns()));
+    let staged = u128::from(tile.rows() + tile.columns());
+    let loaded =
+        u128::from(tile.threads()) * u128::from(tile.register_rows() + tile.register_columns());
+    let multiplied = u128::from(tile.threads()) * u128::from(tile.registers());
+    computed * (staged + loaded) / multiplied
+}
+
+fn matmul_splits(tile: MatmulTile, rows: u32, columns: u32, depth: u32, planes: u32) -> u32 {
+    let elements = u64::from(planes) * u64::from(rows) * u64::from(columns);
+    let tiles = u64::from(planes)
+        * u64::from(rows.div_ceil(tile.rows()))
+        * u64::from(columns.div_ceil(tile.columns()));
+    let splits = u64::from(TARGET_TASKS).div_ceil(tiles);
+    let splits = splits.min(u64::from(
+        depth.div_ceil(tile.depth()) / MATMUL_SPLIT_BLOCKS,
+    ));
+    let splits = splits.min(u64::from(MATMUL_SPLITS_CEILING));
+    let splits = splits.min(u64::from(MATMUL_PARTIALS_CEILING) / elements);
+    let splits = splits.min(u64::from(depth) * u64::from(rows + columns) / elements);
+    splits.max(1) as u32
 }
 
 fn reduce(plan: &mut Plan, unit: &TaskInfo) {

@@ -435,6 +435,7 @@ fn refusal_message(word: u32) -> String {
         Kind::Fill
         | Kind::Broadcast
         | Kind::SumChunk
+        | Kind::MatmulFold
         | Kind::Softmax
         | Kind::SoftmaxGrad
         | Kind::LogSoftmax

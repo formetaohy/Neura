@@ -149,11 +149,17 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
     assert_eq!(shared.shape(), Shape::of([2, 3, 64, 32]));
     assert_eq!(spread.shape(), Shape::of([2, 3, 64, 32]));
     let encoding = encoding_with(&graph, WIDE);
-    let tile = encoding.profile().ladder()[0];
+    let geometries = encoding.matmul_geometries();
+    assert_eq!(
+        geometries.len(),
+        1,
+        "three products of one shape take one tile of it",
+    );
+    let (tile, count) = geometries[0];
     let per_plane = 64u32.div_ceil(tile.rows()) * 32u32.div_ceil(tile.columns());
     assert_eq!(
-        encoding.matmul_geometries(),
-        vec![(tile, 3 * 6 * per_plane)],
+        count,
+        3 * 6 * per_plane,
         "every plane of every product carries its own tiles",
     );
     for product in [batched, shared, spread] {
@@ -163,6 +169,10 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
             assert_eq!(Kind::of(task.kind), Kind::Matmul);
             assert_eq!(task.first, tile_index as u32);
             assert_eq!(task.count, 1);
+            assert_eq!(
+                task.splits, 1,
+                "a product of one depth block splits nothing"
+            );
         }
     }
     assert_eq!(

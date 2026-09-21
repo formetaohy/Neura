@@ -17,18 +17,19 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, store), 4);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 68);
+    assert_eq!(size_of::<TaskRecord>(), 72);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
-    assert_eq!(offset_of!(TaskRecord, a), 28);
-    assert_eq!(offset_of!(TaskRecord, param), 40);
-    assert_eq!(offset_of!(TaskRecord, chain), 44);
-    assert_eq!(offset_of!(TaskRecord, steps), 48);
-    assert_eq!(offset_of!(TaskRecord, stride_rows), 52);
-    assert_eq!(offset_of!(TaskRecord, stride_columns), 56);
-    assert_eq!(offset_of!(TaskRecord, pad_rows), 60);
-    assert_eq!(offset_of!(TaskRecord, pad_columns), 64);
+    assert_eq!(offset_of!(TaskRecord, splits), 24);
+    assert_eq!(offset_of!(TaskRecord, a), 32);
+    assert_eq!(offset_of!(TaskRecord, param), 44);
+    assert_eq!(offset_of!(TaskRecord, chain), 48);
+    assert_eq!(offset_of!(TaskRecord, steps), 52);
+    assert_eq!(offset_of!(TaskRecord, stride_rows), 56);
+    assert_eq!(offset_of!(TaskRecord, stride_columns), 60);
+    assert_eq!(offset_of!(TaskRecord, pad_rows), 64);
+    assert_eq!(offset_of!(TaskRecord, pad_columns), 68);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -205,6 +206,7 @@ fn a_record_declares_what_the_device_reads() {
     task.geometry = 2;
     task.first = 3;
     task.count = 5;
+    task.splits = 6;
     task.a = 2;
     task.b = 3;
     task.c = 4;
@@ -217,7 +219,7 @@ fn a_record_declares_what_the_device_reads() {
     task.pad_rows = 3;
     task.pad_columns = 4;
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 68);
+    assert_eq!(bytes.len(), 72);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -225,13 +227,14 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), op::MUL);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 5);
-    assert_eq!(f32::from_ne_bytes(bytes[40..44].try_into().unwrap()), 0.5);
-    assert_eq!(u32::from_ne_bytes(bytes[44..48].try_into().unwrap()), 7);
-    assert_eq!(u32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 1);
-    assert_eq!(u32::from_ne_bytes(bytes[56..60].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 3);
-    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()), 6);
+    assert_eq!(f32::from_ne_bytes(bytes[44..48].try_into().unwrap()), 0.5);
+    assert_eq!(u32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 7);
+    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[56..60].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[68..72].try_into().unwrap()), 4);
 }
 
 #[test]
@@ -313,22 +316,26 @@ fn a_window_declares_how_it_walks_its_input() {
 #[test]
 fn a_profile_offers_the_tiles_one_workgroup_carries() {
     for profile in PROFILES {
-        for tile in profile.ladder() {
+        for (index, tile) in profile.tiles().iter().enumerate() {
             assert_eq!(profile.workgroup(), tile.threads());
             assert_eq!(
                 tile.registers() * profile.workgroup(),
                 tile.rows() * tile.columns(),
             );
+            assert!(
+                !profile.tiles()[..index].contains(tile),
+                "a profile offers {tile:?} twice",
+            );
         }
         assert!(
             profile
-                .ladder()
+                .tiles()
                 .windows(2)
-                .all(|pair| pair[0].tile_work() < pair[1].tile_work()),
+                .all(|pair| pair[0].tile_work() <= pair[1].tile_work()),
             "a profile offers its tiles from the smallest to the widest",
         );
         let staged = profile
-            .ladder()
+            .tiles()
             .iter()
             .map(|tile| tile.shared_bytes())
             .max()
@@ -366,7 +373,7 @@ fn a_profile_offers_the_tiles_one_workgroup_carries() {
 }
 
 #[test]
-fn a_profile_refuses_a_ladder_one_workgroup_cannot_carry() {
+fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
     assert!(refuses(|| {
         let _ = Profile::of(&[]);
     }));
@@ -380,82 +387,60 @@ fn a_profile_refuses_a_ladder_one_workgroup_cannot_carry() {
 }
 
 #[test]
-fn a_geometry_without_a_tile_declares_only_its_workgroup() {
-    let geometry = Geometry::of(WIDE, &[]);
-    assert!(geometry.tiles().is_empty());
-    assert_eq!(geometry.workgroup(), WIDE.workgroup());
-    assert_eq!(
-        geometry.declarations(),
-        format!("const WORKGROUP_SIZE: u32 = {}u;\n", WIDE.workgroup()),
-    );
-}
-
-#[test]
-fn a_geometry_declares_the_tiles_its_program_carries() {
+fn a_geometry_declares_every_tile_its_profile_offers() {
     for profile in PROFILES {
-        for tiles in [
-            &profile.ladder()[..1],
-            &profile.ladder()[..2],
-            profile.ladder(),
-        ] {
-            let geometry = Geometry::of(*profile, tiles);
-            let declarations = geometry.declarations();
-            assert_eq!(geometry.workgroup(), profile.workgroup());
-            assert_eq!(geometry.tiles(), tiles);
-            assert!(declarations.contains(&format!(
-                "const WORKGROUP_SIZE: u32 = {}u;",
-                profile.workgroup()
-            )));
-            assert!(declarations.contains(&format!(
-                "const MATMUL_LEFT_STAGE: u32 = {}u;",
-                2 * tiles
-                    .iter()
-                    .map(|tile| tile.rows() * tile.depth())
-                    .max()
-                    .unwrap(),
-            )));
-            assert!(declarations.contains(&format!(
-                "const MATMUL_RIGHT_STAGE: u32 = {}u;",
-                2 * tiles
-                    .iter()
-                    .map(|tile| tile.depth() * tile.columns())
-                    .max()
-                    .unwrap(),
-            )));
-            for (index, tile) in tiles.iter().enumerate() {
-                assert_eq!(geometry.geometry(*tile), index as u32);
-                assert_eq!(geometry.tile(index as u32), *tile);
-                for (suffix, value) in [
-                    ("ROWS", tile.rows()),
-                    ("COLUMNS", tile.columns()),
-                    ("DEPTH", tile.depth()),
-                    ("THREAD_ROWS", tile.thread_rows()),
-                    ("THREAD_COLUMNS", tile.thread_columns()),
-                    ("REGISTER_ROWS", tile.register_rows()),
-                    ("REGISTER_COLUMNS", tile.register_columns()),
-                ] {
-                    let declaration = format!("const MATMUL_{suffix}_{index}: u32 = {value}u;");
-                    assert!(
-                        declarations.contains(&declaration),
-                        "a program carrying {tiles:?} misses {declaration}",
-                    );
-                }
+        let geometry = Geometry::of(*profile);
+        let declarations = geometry.declarations();
+        assert_eq!(geometry.workgroup(), profile.workgroup());
+        assert_eq!(geometry.tiles(), profile.tiles());
+        assert!(declarations.contains(&format!(
+            "const WORKGROUP_SIZE: u32 = {}u;",
+            profile.workgroup()
+        )));
+        assert!(declarations.contains(&format!(
+            "const MATMUL_LEFT_STAGE: u32 = {}u;",
+            2 * profile
+                .tiles()
+                .iter()
+                .map(|tile| tile.left_stage())
+                .max()
+                .unwrap(),
+        )));
+        assert!(declarations.contains(&format!(
+            "const MATMUL_RIGHT_STAGE: u32 = {}u;",
+            2 * profile
+                .tiles()
+                .iter()
+                .map(|tile| tile.right_stage())
+                .max()
+                .unwrap(),
+        )));
+        for (index, tile) in profile.tiles().iter().enumerate() {
+            assert_eq!(geometry.geometry(*tile), index as u32);
+            assert_eq!(geometry.tile(index as u32), *tile);
+            for (suffix, value) in [
+                ("ROWS", tile.rows()),
+                ("COLUMNS", tile.columns()),
+                ("DEPTH", tile.depth()),
+                ("THREAD_ROWS", tile.thread_rows()),
+                ("THREAD_COLUMNS", tile.thread_columns()),
+                ("REGISTER_ROWS", tile.register_rows()),
+                ("REGISTER_COLUMNS", tile.register_columns()),
+            ] {
+                let declaration = format!("const MATMUL_{suffix}_{index}: u32 = {value}u;");
+                assert!(
+                    declarations.contains(&declaration),
+                    "a program carrying {tile:?} misses {declaration}",
+                );
             }
-            assert!(refuses(|| {
-                let _ = geometry.tile(geometry.tiles().len() as u32);
-            }));
-            assert!(refuses(|| {
-                let _ = geometry.geometry(MatmulTile::new(24, 24, 16, 8, 8));
-            }));
         }
         assert!(refuses(|| {
-            let _ = Geometry::of(*profile, &[MatmulTile::new(24, 24, 16, 8, 8)]);
+            let _ = geometry.tile(profile.tiles().len() as u32);
+        }));
+        assert!(refuses(|| {
+            let _ = geometry.geometry(MatmulTile::new(24, 24, 16, 8, 8));
         }));
     }
-    assert!(refuses(|| {
-        static WIDE_TILE: &[MatmulTile] = &[MatmulTile::new(64, 64, 16, 16, 16)];
-        let _ = Geometry::of(NARROW, WIDE_TILE);
-    }));
 }
 
 #[test]

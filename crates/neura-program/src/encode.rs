@@ -107,7 +107,6 @@ pub struct Encoding {
     waves: Vec<u32>,
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
-    tiles: Vec<MatmulTile>,
     geometries: Vec<u32>,
     arena_bytes: u64,
     tensor_bytes: u64,
@@ -164,22 +163,23 @@ impl Encoding {
             records.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
-        let used = used_tiles(profile, tasks, &order);
         let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
         let mut updates_weights = false;
-        let mut geometries = vec![0u32; used.len()];
+        let mut geometries = vec![0u32; profile.tiles().len()];
         let mut work = 0;
         for index in &order {
             let task = &tasks[*index];
             let geometry = match task.kind {
                 Kind::Matmul => {
-                    let geometry = used
-                        .iter()
-                        .position(|tile| *tile == profile.ladder()[task.geometry as usize])
-                        .expect("every tile a tape names is carried by its program");
-                    geometries[geometry] += 1;
-                    geometry as u32
+                    assert!(
+                        (task.geometry as usize) < profile.tiles().len(),
+                        "a product names geometry {} beyond the {} tiles a profile offers",
+                        task.geometry,
+                        profile.tiles().len(),
+                    );
+                    geometries[task.geometry as usize] += 1;
+                    task.geometry
                 }
                 Kind::Argmax | Kind::Categorical | Kind::SumAxis | Kind::Conv2dWeightGrad => {
                     task.geometry
@@ -197,11 +197,16 @@ impl Encoding {
                 | Kind::OneHot
                 | Kind::Gather
                 | Kind::Conv2d
-                | Kind::Conv2dInputGrad => 0,
+                | Kind::Conv2dInputGrad
+                | Kind::MatmulFold => 0,
             };
             assert!(
                 task.kind != Kind::SumChunk || task.chain.is_empty(),
                 "a reduction task writes one slot per task and carries no chain",
+            );
+            assert!(
+                task.kind != Kind::Matmul || task.splits == 1 || task.chain.is_empty(),
+                "a product split across the depth hands its chain to the fold",
             );
             let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
             record.kind = task.kind.code();
@@ -210,6 +215,7 @@ impl Encoding {
             record.first = task.first;
             record.count = task.count;
             record.slot = task.slot;
+            record.splits = task.splits;
             record.out = task.out;
             record.a = task.inputs[0];
             record.b = task.inputs[1];
@@ -286,7 +292,6 @@ impl Encoding {
             waves,
             spans,
             readable,
-            tiles: used,
             geometries,
             arena_bytes,
             tensor_bytes,
@@ -301,14 +306,15 @@ impl Encoding {
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        &self.tiles
+        self.profile.tiles()
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
-        self.tiles
+        self.tiles()
             .iter()
             .copied()
             .zip(self.geometries.iter().copied())
+            .filter(|(_, count)| *count > 0)
             .collect()
     }
 
@@ -405,20 +411,6 @@ impl Encoding {
     pub fn work(&self) -> u64 {
         self.work
     }
-}
-
-fn used_tiles(profile: Profile, tasks: &[Task], order: &[usize]) -> Vec<MatmulTile> {
-    profile
-        .ladder()
-        .iter()
-        .filter(|tile| {
-            order.iter().any(|index| {
-                let task = &tasks[*index];
-                task.kind == Kind::Matmul && profile.ladder()[task.geometry as usize] == **tile
-            })
-        })
-        .copied()
-        .collect()
 }
 
 fn wave_depths(values: &[ValueInfo], tasks: &[Task]) -> Vec<u32> {

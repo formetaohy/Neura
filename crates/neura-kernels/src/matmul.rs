@@ -21,6 +21,7 @@ pub fn family(geometry: Geometry) -> String {
         run(&mut source, index, *tile);
     }
     dispatch(&mut source, geometry.tiles().len());
+    fold(&mut source);
     source
 }
 
@@ -41,7 +42,7 @@ fn load(source: &mut String, geometry: usize) {
 
 fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
     writeln!(source, "fn run_matmul_{geometry}(task: Task, lid: u32) {{").unwrap();
-    source.push_str("    let left = values[task.a];\n    let right = values[task.b];\n    let output = values[task.out];\n    let rows = left.dims.z;\n    let depth = left.dims.w;\n    let columns = right.dims.w;\n");
+    source.push_str("    let left = values[task.a];\n    let right = values[task.b];\n    let output = values[task.out];\n    let rows = left.dims.z;\n    let depth = left.dims.w;\n    let columns = right.dims.w;\n    let plane_columns = max(left.dims.y, right.dims.y);\n    let planes = max(left.dims.x, right.dims.x) * plane_columns;\n");
     writeln!(
         source,
         "    let row_blocks = (rows + MATMUL_ROWS_{geometry} - 1u) / MATMUL_ROWS_{geometry};",
@@ -62,6 +63,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
         "    let tiles_per_plane = row_blocks * column_blocks;",
     )
     .unwrap();
+    source.push_str("    let first_block = (task.slot * depth_blocks) / task.splits;\n    let last_block = ((task.slot + 1u) * depth_blocks) / task.splits;\n");
     writeln!(
         source,
         "    let thread_row = (lid / MATMUL_THREAD_COLUMNS_{geometry}) * MATMUL_REGISTER_ROWS_{geometry};",
@@ -76,8 +78,8 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
         "    for (var tile = task.first; tile < task.first + task.count; tile = tile + 1u) {\n",
     );
     writeln!(source, "        let plane = tile / tiles_per_plane;").unwrap();
-    writeln!(source, "        let plane_row = plane / output.dims.y;").unwrap();
-    writeln!(source, "        let plane_column = plane % output.dims.y;").unwrap();
+    writeln!(source, "        let plane_row = plane / plane_columns;").unwrap();
+    writeln!(source, "        let plane_column = plane % plane_columns;").unwrap();
     writeln!(source, "        let within = tile % tiles_per_plane;").unwrap();
     writeln!(
         source,
@@ -99,13 +101,17 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
         "        let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;",
     )
     .unwrap();
-    writeln!(source, "        let out_plane = plane * rows * columns;",).unwrap();
+    writeln!(
+        source,
+        "        let out_plane = (task.slot * planes + plane) * rows * columns;",
+    )
+    .unwrap();
     for register in 0..tile.registers() {
         writeln!(source, "        var acc{register} = 0.0;").unwrap();
     }
     writeln!(
         source,
-        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, 0u, 0u, left_plane, right_plane, left, right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = 0u; block < depth_blocks; block = block + 1u) {{\n            if (block + 1u < depth_blocks) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, left_plane, right_plane, left, right, rows, depth, columns);\n            }}",
+        "        var buffer = 0u;\n        matmul_load_{geometry}(lid, base_row, base_column, first_block * MATMUL_DEPTH_{geometry}, 0u, left_plane, right_plane, left, right, rows, depth, columns);\n        workgroupBarrier();\n        for (var block = first_block; block < last_block; block = block + 1u) {{\n            if (block + 1u < last_block) {{\n                matmul_load_{geometry}(lid, base_row, base_column, (block + 1u) * MATMUL_DEPTH_{geometry}, 1u - buffer, left_plane, right_plane, left, right, rows, depth, columns);\n            }}",
     )
     .unwrap();
     writeln!(
@@ -166,6 +172,25 @@ fn dispatch(source: &mut String, tiles: usize) {
         source,
         "        default: {{ refuse({}, task.geometry); }}\n    }}\n}}\n",
         Kind::Matmul.constant(),
+    )
+    .unwrap();
+}
+
+fn fold(source: &mut String) {
+    writeln!(
+        source,
+        "fn run_matmul_fold(task: Task, lid: u32) {{
+    let partials = values[task.a];
+    let output = values[task.out];
+    let elements = output.dims.x * output.dims.y * output.dims.z * output.dims.w;
+    for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {{
+        var total = 0.0;
+        for (var split = 0u; split < task.splits; split = split + 1u) {{
+            total = total + fetch(partials, split * elements + index);
+        }}
+        publish(output, index, chained(task, coordinates(index, output.dims), total));
+    }}
+}}"
     )
     .unwrap();
 }

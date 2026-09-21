@@ -265,48 +265,50 @@ fn elementwise_operands_must_meet() {
 }
 
 #[test]
-fn a_matmul_takes_the_widest_tile_that_still_fills_the_device() {
+fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(1024, 16), Init::Zero);
-    let right = graph.parameter(Shape::matrix(16, 1024), Init::Zero);
-    let blocked = graph.parameter(Shape::matrix(16, 48), Init::Zero);
-    let balanced = graph.matmul(left, right);
-    let ragged = graph.matmul(left, blocked);
+    let tall = graph.parameter(Shape::matrix(1024, 32), Init::Zero);
+    let weight = graph.parameter(Shape::matrix(32, 64), Init::Zero);
+    let blocked = graph.parameter(Shape::matrix(32, 48), Init::Zero);
+    let balanced = graph.matmul(tall, weight);
+    let ragged = graph.matmul(tall, blocked);
     graph.retain(balanced);
     graph.retain(ragged);
     let encoding = encoding_with(&graph, WIDE);
-    let ladder = encoding.profile().ladder();
     let tiles = encoding.tiles();
     let tasks = tape(&encoding);
     let balanced_task = *tasks
         .iter()
         .find(|task| task.out == balanced.id())
-        .expect("the 1024x1024 product holds a task");
+        .expect("the 1024x64 product holds a task");
+    let balanced_tile = tiles[balanced_task.geometry as usize];
     assert_eq!(
-        tiles[balanced_task.geometry as usize], ladder[2],
-        "a 1024x1024 product is tiled as widely as its profile divides it",
+        (balanced_tile.rows(), balanced_tile.columns()),
+        (64, 64),
+        "a product whose shape divides takes the tile that multiplies the most elements per staged load",
     );
+    assert_eq!(balanced_tile.registers(), 16);
     let ragged_task = *tasks
         .iter()
         .find(|task| task.out == ragged.id())
         .expect("the 1024x48 product holds a task");
     assert_eq!(
-        tiles[ragged_task.geometry as usize], ladder[0],
-        "a product no wide tile divides takes the narrowest tile of its profile",
+        tiles[ragged_task.geometry as usize], balanced_tile,
+        "a product no tile divides is masked by the tile its shape pays the least for",
     );
     assert_eq!(
         tiles,
-        &[ladder[0], ladder[2]],
-        "a device program carries only the tiles its tape names",
+        WIDE.tiles(),
+        "a device program carries every tile its profile offers, whatever shapes its tape names",
     );
     assert_eq!(
         encoding.matmul_geometries(),
-        vec![(ladder[0], 192), (ladder[2], 256)],
+        vec![(balanced_tile, 32)],
         "a tape reports the geometry of every task it hands the device",
     );
     assert_eq!(
         encoding.work(),
-        256 * ladder[2].tile_work() + 192 * ladder[0].tile_work(),
+        32 * balanced_tile.tile_work(),
         "a plan accounts the tile work it dispatches",
     );
     assert_ne!(
@@ -318,6 +320,92 @@ fn a_matmul_takes_the_widest_tile_that_still_fills_the_device() {
         encoding_with(&graph, WIDE).task_count() < encoding_with(&graph, NARROW).task_count(),
         "a wider tile hands the device fewer, larger tasks",
     );
+}
+
+#[test]
+fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
+    let graph = Graph::new();
+    let narrow = graph.parameter(Shape::matrix(8, 4096), Init::Zero);
+    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero);
+    let out = graph.matmul(narrow, weight);
+    graph.retain(out);
+    let encoding = encoding_with(&graph, WIDE);
+    let tape = tape(&encoding);
+    assert_eq!(out.shape(), Shape::matrix(8, 32));
+    let products = tape
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Matmul)
+        .collect::<Vec<_>>();
+    let folds = tape
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::MatmulFold)
+        .collect::<Vec<_>>();
+    assert_eq!(products.len(), 64);
+    assert_eq!(folds.len(), 1);
+    let partials = folds[0].a;
+    assert_eq!(
+        folds[0].out,
+        out.id(),
+        "the fold writes the product its graph names"
+    );
+    assert_ne!(partials, out.id(), "the fold reads partials of its own");
+    let splits = folds[0].splits;
+    let mut occupied = vec![false; splits as usize];
+    for task in &products {
+        assert_eq!(task.splits, splits);
+        assert_eq!(task.out, partials);
+        assert_eq!(task.count, 1);
+        let slot = task.slot as usize;
+        assert!(!occupied[slot], "two tasks fill one slot of the partials");
+        occupied[slot] = true;
+        assert_eq!(
+            task.first, 0,
+            "a product of one tile carries one tile per slot"
+        );
+    }
+    assert!(occupied.iter().all(|taken| *taken));
+    assert_eq!(folds[0].splits, 64);
+    assert_eq!(folds[0].count, 256);
+    assert_eq!(
+        wave_of(&encoding, tape.len() - 1),
+        encoding.wave_count() - 1,
+        "the fold reads every slot after the last slot is written",
+    );
+}
+
+#[test]
+fn a_split_product_hands_its_epilogue_to_the_fold() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero);
+    let bias = graph.parameter(Shape::vector(32), Init::Zero);
+    let data = graph.input(Shape::matrix(8, 4096));
+    let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
+    graph.retain(out);
+    let encoding = encoding_with(&graph, WIDE);
+    let tape = tape(&encoding);
+    let folds = tape
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::MatmulFold)
+        .collect::<Vec<_>>();
+    assert_eq!(folds.len(), 1);
+    assert_eq!(folds[0].out, out.id());
+    assert_eq!(
+        folds[0].steps, 2,
+        "the bias and the rectifier ride the fold"
+    );
+    let steps = steps(&encoding);
+    assert_eq!(steps[folds[0].chain as usize].op, op::ADD);
+    assert_eq!(steps[folds[0].chain as usize].operand, bias.id());
+    assert_eq!(steps[folds[0].chain as usize + 1].op, op::RELU);
+    for task in tape
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Matmul)
+    {
+        assert_eq!(
+            task.steps, 0,
+            "a product that splits its depth applies no epilogue of its own",
+        );
+    }
 }
 
 #[test]

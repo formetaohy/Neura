@@ -83,17 +83,23 @@ impl MatmulTile {
         self.rows as u64 * self.columns as u64 * self.depth as u64
     }
 
+    pub const fn left_stage(self) -> u64 {
+        self.rows as u64 * self.depth as u64
+    }
+
+    pub const fn right_stage(self) -> u64 {
+        self.depth as u64 * self.columns as u64
+    }
+
     pub const fn shared_bytes(self) -> u64 {
-        (self.rows as u64 * self.depth as u64 + self.depth as u64 * self.columns as u64)
-            * WORD_BYTES
-            * 2
+        2 * (self.left_stage() + self.right_stage()) * WORD_BYTES
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Profile {
     workgroup: u32,
-    ladder: &'static [MatmulTile],
+    tiles: &'static [MatmulTile],
     shared_bytes: u64,
 }
 
@@ -101,30 +107,36 @@ const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
 const CLAIMED_TASK: u64 = WORD_BYTES;
 
 impl Profile {
-    pub const fn of(ladder: &'static [MatmulTile]) -> Self {
-        let count = ladder.len();
+    pub const fn of(tiles: &'static [MatmulTile]) -> Self {
+        let count = tiles.len();
         assert!(
             count > 0,
             "a profile offers no matmul tile for the device to run",
         );
-        let workgroup = ladder[0].threads();
-        let mut staging = 0u64;
+        let workgroup = tiles[0].threads();
+        let mut left_stage = 0u64;
+        let mut right_stage = 0u64;
         let mut index = 0;
         while index < count {
-            let tile = ladder[index];
+            let tile = tiles[index];
             assert!(
                 tile.threads() == workgroup,
                 "a profile hands one device program two workgroup sizes",
             );
-            if tile.shared_bytes() > staging {
-                staging = tile.shared_bytes();
+            if tile.left_stage() > left_stage {
+                left_stage = tile.left_stage();
+            }
+            if tile.right_stage() > right_stage {
+                right_stage = tile.right_stage();
             }
             index += 1;
         }
         Self {
             workgroup,
-            ladder,
-            shared_bytes: staging + REDUCTION_SCRATCH * workgroup as u64 + CLAIMED_TASK,
+            tiles,
+            shared_bytes: 2 * (left_stage + right_stage) * WORD_BYTES
+                + REDUCTION_SCRATCH * workgroup as u64
+                + CLAIMED_TASK,
         }
     }
 
@@ -132,8 +144,8 @@ impl Profile {
         self.workgroup
     }
 
-    pub const fn ladder(self) -> &'static [MatmulTile] {
-        self.ladder
+    pub const fn tiles(self) -> &'static [MatmulTile] {
+        self.tiles
     }
 
     pub const fn shared_bytes(self) -> u64 {
@@ -149,24 +161,24 @@ impl Profile {
 pub struct Geometry {
     workgroup: u32,
     tiles: Vec<MatmulTile>,
-    staged_floats: u64,
+    left_stage: u64,
+    right_stage: u64,
 }
 
 impl Geometry {
-    pub fn of(profile: Profile, tiles: &[MatmulTile]) -> Self {
-        let mut staged_floats = 0u64;
+    pub fn of(profile: Profile) -> Self {
+        let tiles = profile.tiles();
+        let mut left_stage = 0u64;
+        let mut right_stage = 0u64;
         for tile in tiles {
-            assert!(
-                profile.ladder().contains(tile),
-                "{tile:?} lies outside the {} a profile offers",
-                profile.ladder().len(),
-            );
-            staged_floats = staged_floats.max(tile.rows() as u64 * tile.depth() as u64);
+            left_stage = left_stage.max(tile.left_stage());
+            right_stage = right_stage.max(tile.right_stage());
         }
         Self {
             workgroup: profile.workgroup(),
             tiles: tiles.to_vec(),
-            staged_floats,
+            left_stage,
+            right_stage,
         }
     }
 
@@ -202,23 +214,16 @@ impl Geometry {
     pub fn declarations(&self) -> String {
         let mut out = String::new();
         writeln!(out, "const WORKGROUP_SIZE: u32 = {}u;", self.workgroup).unwrap();
-        if self.tiles.is_empty() {
-            return out;
-        }
         writeln!(
             out,
             "const MATMUL_LEFT_STAGE: u32 = {}u;",
-            2 * self.staged_floats
+            2 * self.left_stage
         )
         .unwrap();
-        let mut staged_columns = 0u64;
-        for tile in &self.tiles {
-            staged_columns = staged_columns.max(tile.depth() as u64 * tile.columns() as u64);
-        }
         writeln!(
             out,
             "const MATMUL_RIGHT_STAGE: u32 = {}u;",
-            2 * staged_columns
+            2 * self.right_stage
         )
         .unwrap();
         for (geometry, tile) in self.tiles.iter().enumerate() {
@@ -265,16 +270,42 @@ impl Geometry {
 }
 
 pub const NARROW: Profile = Profile::of(&[
+    MatmulTile::new(8, 8, 16, 8, 8),
+    MatmulTile::new(8, 16, 16, 8, 8),
+    MatmulTile::new(16, 8, 16, 8, 8),
+    MatmulTile::new(8, 32, 16, 8, 8),
     MatmulTile::new(16, 16, 16, 8, 8),
+    MatmulTile::new(32, 8, 16, 8, 8),
+    MatmulTile::new(16, 32, 16, 8, 8),
+    MatmulTile::new(32, 16, 16, 8, 8),
     MatmulTile::new(32, 32, 16, 8, 8),
+    MatmulTile::new(64, 16, 16, 8, 8),
 ]);
 pub const MEDIUM: Profile = Profile::of(&[
-    MatmulTile::new(16, 16, 16, 16, 8),
-    MatmulTile::new(32, 32, 16, 16, 8),
+    MatmulTile::new(8, 16, 16, 8, 16),
+    MatmulTile::new(16, 8, 16, 16, 8),
+    MatmulTile::new(8, 32, 16, 8, 16),
+    MatmulTile::new(32, 8, 16, 16, 8),
+    MatmulTile::new(16, 16, 16, 8, 16),
+    MatmulTile::new(16, 32, 16, 8, 16),
+    MatmulTile::new(32, 16, 16, 8, 16),
+    MatmulTile::new(64, 16, 16, 16, 8),
+    MatmulTile::new(32, 32, 16, 8, 16),
+    MatmulTile::new(64, 32, 16, 8, 16),
 ]);
 pub const WIDE: Profile = Profile::of(&[
+    MatmulTile::new(8, 32, 16, 8, 32),
+    MatmulTile::new(32, 8, 16, 32, 8),
     MatmulTile::new(16, 16, 16, 16, 16),
+    MatmulTile::new(8, 64, 16, 8, 32),
+    MatmulTile::new(64, 8, 16, 32, 8),
+    MatmulTile::new(16, 32, 16, 16, 16),
+    MatmulTile::new(32, 16, 16, 16, 16),
+    MatmulTile::new(16, 64, 16, 16, 16),
+    MatmulTile::new(64, 16, 16, 16, 16),
     MatmulTile::new(32, 32, 16, 16, 16),
+    MatmulTile::new(32, 64, 16, 16, 16),
+    MatmulTile::new(64, 32, 16, 16, 16),
     MatmulTile::new(64, 64, 16, 16, 16),
 ]);
 

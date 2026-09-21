@@ -610,7 +610,8 @@ impl Graph {
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad
             | Kind::Conv2dInputGrad
-            | Kind::Conv2dWeightGrad => {}
+            | Kind::Conv2dWeightGrad
+            | Kind::MatmulFold => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot | Kind::Gather => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",

@@ -149,6 +149,7 @@ fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
             })
         }
         Kind::Matmul
+        | Kind::MatmulFold
         | Kind::Partial
         | Kind::Fill
         | Kind::Broadcast

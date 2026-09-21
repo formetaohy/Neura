@@ -60,6 +60,76 @@ fn a_matmul_matches_a_cpu_reference() {
 }
 
 #[test]
+fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(4, 512), Init::Zero);
+    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero);
+    let out = graph.matmul(left, right);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    assert!(
+        program
+            .matmul_geometries()
+            .iter()
+            .any(|(_, tasks)| *tasks > 1),
+        "a product of four by eight tiles none of the device's breadth, so its depth splits",
+    );
+    assert_eq!(
+        program.wave_count(),
+        2,
+        "a fold reads every slot of the depth"
+    );
+    let left_data = random(4 * 512, 41);
+    let right_data = random(512 * 8, 43);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, out),
+        &matmul_reference(&left_data, &right_data, 4, 512, 8),
+        1e-4,
+    );
+}
+
+#[test]
+fn a_split_product_keeps_its_epilogue_and_its_planes() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([2, 1, 4, 512]), Init::Zero);
+    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero);
+    let out = graph.relu(graph.add(graph.matmul(left, right), bias));
+    assert_eq!(out.shape(), Shape::of([2, 1, 4, 8]));
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let left_data = random(2 * 4 * 512, 47);
+    let right_data = random(512 * 8, 53);
+    let bias_data = random(8, 59);
+    runtime.write(&program, left, &left_data);
+    runtime.write(&program, right, &right_data);
+    runtime.write(&program, bias, &bias_data);
+    runtime.run(&program);
+    let mut expected = Vec::new();
+    for plane in 0..2usize {
+        let product = matmul_reference(
+            &left_data[plane * 4 * 512..(plane + 1) * 4 * 512],
+            &right_data,
+            4,
+            512,
+            8,
+        );
+        expected.extend(
+            product
+                .iter()
+                .enumerate()
+                .map(|(index, value)| (value + bias_data[index % 8]).max(0.0)),
+        );
+    }
+    assert_close(&runtime.read(&program, out), &expected, 1e-4);
+}
+
+#[test]
 fn a_product_pairs_the_batch_its_operands_share() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::of([2, 1, 3, 4]), Init::Zero);
@@ -779,10 +849,10 @@ fn every_profile_the_device_offers_runs_the_same_matmul() {
 #[test]
 fn every_tile_of_a_profile_runs_its_own_matmul() {
     let runtime = open();
-    let ladder = runtime.default_profile().ladder();
-    for index in 0..ladder.len() {
-        let tile = ladder[index];
-        let profile = neura_abi::Profile::of(&ladder[index..index + 1]);
+    let tiles = runtime.default_profile().tiles();
+    for index in 0..tiles.len() {
+        let tile = tiles[index];
+        let profile = neura_abi::Profile::of(&tiles[index..index + 1]);
         let graph = Graph::new();
         let left = graph.parameter(Shape::matrix(tile.rows(), tile.depth()), Init::Zero);
         let right = graph.parameter(Shape::matrix(tile.depth(), tile.columns()), Init::Zero);

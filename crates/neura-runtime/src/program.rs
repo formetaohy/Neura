@@ -158,7 +158,7 @@ impl Program {
         if !encoding.steps().is_empty() {
             steps.write(queue, encoding.steps());
         }
-        let geometry = Geometry::of(encoding.profile(), encoding.tiles());
+        let geometry = Geometry::of(encoding.profile());
         let kernel = context.declare(Megakernel::assemble(geometry, weights.precision()).program());
         let group = kernel.bind_group(&[
             BindGroupEntry {

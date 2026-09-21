@@ -51,6 +51,7 @@ macro_rules! kinds {
 
 kinds! {
     Matmul = "matmul" pointwise false chainable false;
+    MatmulFold = "matmul_fold" pointwise false chainable false;
     Binary = "binary" pointwise true chainable true;
     Unary = "unary" pointwise true chainable true;
     Partial = "partial" pointwise true chainable false;
