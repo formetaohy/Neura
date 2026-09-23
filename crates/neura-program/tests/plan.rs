@@ -697,13 +697,21 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     assert!(encoding.work() > 0);
     let layout = graph.layout(ALIGNMENT, Precision::Single);
     let seed = layout
-        .uploads()
+        .seeds()
         .iter()
-        .find(|(address, _)| {
-            layout.weight_bytes(PLACEMENT, *address) == encoding.span(weight, PLACEMENT).offset
+        .find(|seed| {
+            layout.weight_bytes(PLACEMENT, seed.address())
+                == encoding.span(weight, PLACEMENT).offset
         })
-        .expect("the weight carries its initial samples");
-    assert_eq!(seed.1.len(), 16);
+        .expect("the weight carries its sampler");
+    assert_eq!(seed.elements(), 16);
+    assert_eq!(
+        seed.init(),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5
+        }
+    );
 }
 
 #[test]

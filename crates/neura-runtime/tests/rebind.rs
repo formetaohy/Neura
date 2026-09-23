@@ -202,8 +202,6 @@ fn one_kernel_serves_every_batch() {
         "every batch of one model runs the device program its task kinds name once",
     );
 
-    // a batch past the depth split threshold adds the fold task kind and
-    // assembles the one device program that kind set names
     let graph = Graph::new();
     let model = trained(&graph, 128, 5);
     let weights = runtime.weights(&graph, Precision::Single);

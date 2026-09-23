@@ -54,6 +54,10 @@ impl<'r> Weights<'r> {
         &self.region
     }
 
+    pub(crate) fn allocation(&self) -> &Allocation {
+        &self.store
+    }
+
     pub(crate) fn lives_on(&self, heap: &Arc<crate::heap::Heap>) -> bool {
         self.store.lives_on(heap)
     }

@@ -1,12 +1,14 @@
-use crate::heap::{Allocation, Heap};
-use crate::pool::Pool;
+use crate::checkpoint::Checkpoint;
+use crate::heap::Heap;
+use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
     Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
 };
 use neura_gpu::{
-    ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
+    BufferUsages, ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback,
+    Submission, wgpu,
 };
 use neura_program::{Graph, Layout, Span, Store, Value};
 use neura_shader::Megakernel;
@@ -14,13 +16,15 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
-use wgpu::{BufferAsyncError, MapMode};
+use wgpu::{BufferAsyncError, MapMode, PollType};
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
 pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
+const ENTROPY_SEED: u32 = 0x9e37_79b9;
+const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Readout<'r> {
     brand: PhantomData<&'r ()>,
@@ -138,28 +142,131 @@ impl Runtime {
 
     pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
         self.context.assert_alive();
-        let (weights, _) = self.parameter_store(graph, precision);
+        let (weights, layout) = self.parameter_store(graph, precision);
+        self.seed(&layout, &weights);
         weights
+    }
+
+    pub fn load(
+        &self,
+        graph: &Graph,
+        checkpoint: &Checkpoint,
+        precision: Precision,
+    ) -> Weights<'_> {
+        self.context.assert_alive();
+        let (weights, layout) = self.parameter_store(graph, precision);
+        self.pour(&layout, &weights, checkpoint);
+        weights
+    }
+
+    pub fn restore(&self, weights: &Weights<'_>, checkpoint: &Checkpoint) {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        checkpoint.matches(weights.region());
+        weights
+            .buffer()
+            .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
+    }
+
+    pub fn checkpoint(&self, weights: &Weights<'_>) -> Checkpoint {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        let bytes = weights.region().bytes();
+        let staging = Recycled::claim(
+            &self.pool,
+            "neura checkpoint",
+            bytes,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        );
+        let device = self.context.device();
+        let mut submission = Submission::new(device, "neura checkpoint");
+        submission.copy_buffer_to_buffer(
+            weights.buffer().buffer(),
+            weights.offset(),
+            staging.buffer().buffer(),
+            0,
+            bytes,
+        );
+        let (sender, completed) = mpsc::channel();
+        submission.map_buffer_on_submit(
+            staging.buffer().buffer(),
+            MapMode::Read,
+            ..bytes,
+            move |result| {
+                let _ = sender.send(result);
+            },
+        );
+        let submission = submission.submit(self.context.queue());
+        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes);
+        Checkpoint::of(weights.region(), payload)
+    }
+
+    fn collect_checkpoint(
+        &self,
+        device: &wgpu::Device,
+        staging: Recycled,
+        submission: wgpu::SubmissionIndex,
+        completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
+        bytes: u64,
+    ) -> Vec<u8> {
+        device
+            .poll(PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(CHECKPOINT_TIMEOUT),
+            })
+            .unwrap_or_else(|error| {
+                panic!("waiting for the checkpoint submission failed: {error}")
+            });
+        completed
+            .recv_timeout(CHECKPOINT_TIMEOUT)
+            .unwrap_or_else(|error| panic!("the checkpoint callback never fired: {error}"))
+            .unwrap_or_else(|error: BufferAsyncError| {
+                panic!("mapping the checkpoint failed: {error}")
+            });
+        let payload = staging
+            .buffer()
+            .buffer()
+            .slice(..bytes)
+            .get_mapped_range()
+            .expect("a finished checkpoint is mapped")
+            .to_vec();
+        staging.buffer().buffer().unmap();
+        payload
     }
 
     fn parameter_store(&self, graph: &Graph, precision: Precision) -> (Weights<'_>, Layout) {
         let layout = graph.layout(self.alignment, precision);
         let store = self.heap.allocate(layout.weights().words());
-        self.upload(&layout, &store, precision);
         let weights = Weights::new(store, layout.weights().clone(), precision);
         (weights, layout)
     }
 
-    fn upload(&self, layout: &Layout, store: &Allocation, precision: Precision) {
+    fn seed(&self, layout: &Layout, weights: &Weights<'_>) {
+        let store = weights.allocation();
         let placement = Placement::new(0, store.word());
         let queue = self.context.queue();
-        for (address, data) in layout.uploads() {
+        let mut entropy = ENTROPY_SEED;
+        for seed in layout.seeds() {
+            let values = seed.init().samples(seed.elements(), &mut entropy);
             self.heap.buffer().write_at(
                 queue,
-                layout.weight_bytes(placement, *address),
-                &precision.pack(data),
+                layout.weight_bytes(placement, seed.address()),
+                &weights.precision().pack(&values),
             );
         }
+    }
+
+    fn pour(&self, layout: &Layout, weights: &Weights<'_>, checkpoint: &Checkpoint) {
+        checkpoint.matches(layout.weights());
+        weights
+            .buffer()
+            .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
     }
 
     pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
@@ -234,9 +341,6 @@ impl Runtime {
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
-        // a graph that updates its parameters in place would have the tuning
-        // runs corrupt the very store the model trains on, so those measure a
-        // scratch store instead
         let scratch = graph
             .updates_weights()
             .then(|| self.scratch_weights(graph, weights.precision()));
@@ -261,7 +365,8 @@ impl Runtime {
 
     fn scratch_weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
         self.context.assert_alive();
-        let (scratch, _) = self.parameter_store(graph, precision);
+        let (scratch, layout) = self.parameter_store(graph, precision);
+        self.seed(&layout, &scratch);
         scratch
     }
 

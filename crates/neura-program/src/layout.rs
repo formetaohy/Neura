@@ -1,4 +1,5 @@
 use crate::graph::{Residency, ValueInfo};
+use crate::init::Init;
 use neura_abi::{Placement, Precision, Store, WORD_BYTES};
 
 #[derive(Clone, Debug)]
@@ -51,6 +52,10 @@ impl Region {
         self.entries.len()
     }
 
+    pub fn entries(&self) -> &[(u64, u64)] {
+        &self.entries
+    }
+
     pub fn precision(&self) -> Precision {
         self.precision
     }
@@ -76,10 +81,30 @@ impl PartialEq for Region {
 
 impl Eq for Region {}
 
+pub struct Seed {
+    address: u64,
+    elements: u32,
+    init: Init,
+}
+
+impl Seed {
+    pub fn address(&self) -> u64 {
+        self.address
+    }
+
+    pub fn elements(&self) -> u32 {
+        self.elements
+    }
+
+    pub fn init(&self) -> Init {
+        self.init
+    }
+}
+
 pub struct Layout {
     weights: Region,
     tensors: Region,
-    uploads: Vec<(u64, Vec<f32>)>,
+    seeds: Vec<Seed>,
 }
 
 impl Layout {
@@ -96,26 +121,29 @@ impl Layout {
             Precision::Single,
             alignment,
         );
-        let uploads = values
+        let seeds = values
             .iter()
             .enumerate()
             .filter(|(id, info)| {
                 info.storage as usize == *id && info.residency == Residency::Parameter
             })
-            .filter_map(|(id, info)| {
-                let data = info.initial.as_ref()?;
-                weights
+            .map(|(id, info)| Seed {
+                address: weights
                     .addresses
                     .get(id)
                     .copied()
                     .flatten()
-                    .map(|address| (address, data.clone()))
+                    .expect("a parameter holds a tensor of the weight region"),
+                elements: info.shape.elements(),
+                init: info
+                    .seed
+                    .expect("a parameter carries the sampler it was declared with"),
             })
             .collect();
         Self {
             weights,
             tensors,
-            uploads,
+            seeds,
         }
     }
 
@@ -127,8 +155,8 @@ impl Layout {
         &self.tensors
     }
 
-    pub fn uploads(&self) -> &[(u64, Vec<f32>)] {
-        &self.uploads
+    pub fn seeds(&self) -> &[Seed] {
+        &self.seeds
     }
 
     pub(crate) fn store(&self, values: &[ValueInfo], value: u32) -> Store {

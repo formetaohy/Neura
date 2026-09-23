@@ -14,6 +14,13 @@ impl Precision {
         }
     }
 
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Single => 0,
+            Self::Half => 1,
+        }
+    }
+
     pub const fn half(self) -> bool {
         matches!(self, Self::Half)
     }

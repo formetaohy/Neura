@@ -11,8 +11,6 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const ENTROPY_SEED: u32 = 0x9e37_79b9;
-
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -91,7 +89,7 @@ pub(crate) struct ValueInfo {
     pub(crate) requires_grad: bool,
     pub(crate) retained: bool,
     pub(crate) written_in_place: bool,
-    pub(crate) initial: Option<Vec<f32>>,
+    pub(crate) seed: Option<Init>,
 }
 
 impl ValueInfo {
@@ -104,7 +102,7 @@ impl ValueInfo {
             requires_grad: false,
             retained: false,
             written_in_place: false,
-            initial: None,
+            seed: None,
         }
     }
 }
@@ -112,7 +110,6 @@ impl ValueInfo {
 pub(crate) struct GraphState {
     pub(crate) values: Vec<ValueInfo>,
     pub(crate) tasks: Vec<TaskInfo>,
-    pub(crate) entropy: u32,
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
 }
@@ -143,7 +140,6 @@ impl<'g> Graph<'g> {
             state: RefCell::new(GraphState {
                 values: Vec::new(),
                 tasks: Vec::new(),
-                entropy: ENTROPY_SEED,
                 differentiated: false,
                 updated_in_place: false,
             }),
@@ -161,12 +157,7 @@ impl<'g> Graph<'g> {
     }
 
     pub fn parameter(&self, shape: Shape, init: Init) -> Value<'g> {
-        let data = {
-            let mut state = self.state.borrow_mut();
-            let entropy = &mut state.entropy;
-            init.samples(shape.elements(), entropy)
-        };
-        self.hold(shape, Residency::Parameter, Some(data))
+        self.hold(shape, Residency::Parameter, Some(init))
     }
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
@@ -1024,7 +1015,7 @@ impl<'g> Graph<'g> {
         self.state.borrow().tasks[index].clone()
     }
 
-    fn hold(&self, shape: Shape, residency: Residency, initial: Option<Vec<f32>>) -> Value<'g> {
+    fn hold(&self, shape: Shape, residency: Residency, seed: Option<Init>) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
@@ -1035,7 +1026,7 @@ impl<'g> Graph<'g> {
             requires_grad: residency == Residency::Parameter,
             retained: false,
             written_in_place: false,
-            initial,
+            seed,
         });
         Value::of(self.instance, id, shape)
     }
@@ -1051,7 +1042,7 @@ impl<'g> Graph<'g> {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
-            initial: None,
+            seed: None,
         });
         Value::of(self.instance, id, shape)
     }
@@ -1067,7 +1058,7 @@ impl<'g> Graph<'g> {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
-            initial: None,
+            seed: None,
         });
         Value::of(self.instance, id, shape)
     }

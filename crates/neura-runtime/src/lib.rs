@@ -1,9 +1,11 @@
+mod checkpoint;
 mod heap;
 mod pool;
 mod program;
 mod runtime;
 mod tape;
 
+pub use checkpoint::Checkpoint;
 pub use neura_abi::{MatmulTile, PROFILES, Placement, Precision, Profile};
 pub use neura_program::Span;
 pub use program::{Program, Weights};
