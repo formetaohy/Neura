@@ -14,7 +14,7 @@ fn run_sum_chunk(task: Task, lid: u32) {
 fn sum_row_with_workgroup(lid: u32, source: Value, row: u32, columns: u32) -> f32 {
     var local = 0.0;
     for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-        local = local + fetch(source, row * columns + column);
+        local = local + fetch(source, row_origin(source, row) + column * source.strides.w);
     }
     return workgroup_sum(lid, local);
 }
@@ -22,7 +22,7 @@ fn sum_row_with_workgroup(lid: u32, source: Value, row: u32, columns: u32) -> f3
 fn sum_row_with_thread(source: Value, row: u32, columns: u32) -> f32 {
     var local = 0.0;
     for (var column = 0u; column < columns; column = column + 1u) {
-        local = local + fetch(source, row * columns + column);
+        local = local + fetch(source, row_origin(source, row) + column * source.strides.w);
     }
     return local;
 }

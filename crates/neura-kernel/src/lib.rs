@@ -12,6 +12,8 @@ pub const CHOICE: &str = include_str!("../shader/choice.wgsl");
 pub const SELECT: &str = include_str!("../shader/select.wgsl");
 pub const CONV: &str = include_str!("../shader/conv.wgsl");
 pub const SCATTER: &str = include_str!("../shader/scatter.wgsl");
+pub const CONCAT: &str = include_str!("../shader/concat.wgsl");
+pub const ACCUMULATE: &str = include_str!("../shader/accumulate.wgsl");
 
 pub fn body(kind: Kind) -> &'static str {
     match kind {
@@ -24,6 +26,8 @@ pub fn body(kind: Kind) -> &'static str {
         Kind::Broadcast => "run_broadcast",
         Kind::SumChunk => "run_sum_chunk",
         Kind::SumAxis => "run_sum_axis",
+        Kind::Concat => "run_concat",
+        Kind::Accumulate => "run_accumulate",
         Kind::Softmax => "run_softmax",
         Kind::SoftmaxGrad => "run_softmax_grad",
         Kind::LogSoftmax => "run_log_softmax",
@@ -104,6 +108,12 @@ pub fn fragments(kinds: &[Kind], geometry: Geometry, weights: Precision) -> Vec<
     }
     if kinds.contains(&Kind::Scatter) {
         fragments.push(SCATTER.to_owned());
+    }
+    if kinds.contains(&Kind::Concat) {
+        fragments.push(CONCAT.to_owned());
+    }
+    if kinds.contains(&Kind::Accumulate) {
+        fragments.push(ACCUMULATE.to_owned());
     }
     fragments
 }

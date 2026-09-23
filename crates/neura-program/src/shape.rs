@@ -103,4 +103,17 @@ impl Shape {
     pub fn is_scalar(self) -> bool {
         self.elements() == 1
     }
+
+    pub fn packs_contiguously(self, strides: [u32; 4]) -> bool {
+        let mut expected = 1u32;
+        for axis in (0..MAX_RANK as usize).rev() {
+            if self.dims[axis] > 1 {
+                if strides[axis] != expected {
+                    return false;
+                }
+                expected *= self.dims[axis];
+            }
+        }
+        true
+    }
 }

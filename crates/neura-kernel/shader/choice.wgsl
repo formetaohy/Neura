@@ -47,7 +47,7 @@ fn fold_row_by_workgroup(lid: u32, source: Value, row: u32, columns: u32, seed: 
     var local = -3.4028235e38;
     var local_index = 0u;
     for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-        let weight = choice_weight(fetch(source, row * columns + column), seed, row * columns + column, noised);
+        let weight = choice_weight(fetch(source, row_origin(source, row) + column * source.strides.w), seed, row * columns + column, noised);
         if (weight > local) {
             local = weight;
             local_index = column;
@@ -60,7 +60,7 @@ fn fold_row_by_thread(source: Value, row: u32, columns: u32, seed: u32, noised: 
     var local = -3.4028235e38;
     var local_index = 0u;
     for (var column = 0u; column < columns; column = column + 1u) {
-        let weight = choice_weight(fetch(source, row * columns + column), seed, row * columns + column, noised);
+        let weight = choice_weight(fetch(source, row_origin(source, row) + column * source.strides.w), seed, row * columns + column, noised);
         if (weight > local) {
             local = weight;
             local_index = column;

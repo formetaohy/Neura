@@ -148,7 +148,7 @@ impl Encoding {
 
         let mut records = Vec::new();
         for (id, info) in values.iter().enumerate() {
-            let address = layout.address(values, &offsets, id as u32);
+            let address = layout.address(values, &offsets, id as u32) + u64::from(info.offset);
             let mut record: ValueRecord = bytemuck::Zeroable::zeroed();
             record.base = u32::try_from(address).unwrap_or_else(|_| {
                 panic!("value {id} lies at {address}, beyond the device address space")
@@ -186,6 +186,8 @@ impl Encoding {
                 | Kind::Fill
                 | Kind::Broadcast
                 | Kind::SumChunk
+                | Kind::Concat
+                | Kind::Accumulate
                 | Kind::Softmax
                 | Kind::SoftmaxGrad
                 | Kind::LogSoftmax
@@ -212,6 +214,7 @@ impl Encoding {
             record.first = task.first;
             record.count = task.count;
             record.slot = task.slot;
+            record.origin = task.origin;
             record.splits = task.splits;
             record.out = task.out;
             record.a = task.inputs[0];

@@ -21,6 +21,7 @@ pub(crate) struct Task {
     pub(crate) first: u32,
     pub(crate) count: u32,
     pub(crate) slot: u32,
+    pub(crate) origin: u32,
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
     pub(crate) param: f32,
@@ -40,6 +41,7 @@ impl Task {
             first,
             count,
             slot: unit.slot,
+            origin: unit.origin,
             out: unit.out,
             inputs: unit.inputs,
             param: unit.param,
@@ -105,6 +107,14 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile),
         Kind::SumChunk => reduce(plan, unit),
         Kind::SumAxis => fold(plan, unit, profile),
+        Kind::Concat => concat(plan, unit),
+        Kind::Accumulate => {
+            let elements = plan.shape(unit.inputs[0]).elements();
+            for (first, count) in spans(elements, task_elements(elements)) {
+                let task = Task::span(unit, first, count, u64::from(count) * 2);
+                plan.tasks.push(task);
+            }
+        }
         Kind::Conv2d => {
             let out = plan.shape(unit.out);
             let filter = plan.shape(unit.inputs[1]);
@@ -186,6 +196,24 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo) {
         task.geometry = strategy::WEIGHT_FOLD;
         task.inputs = [partials, NO_VALUE, NO_VALUE];
         plan.tasks.push(task);
+    }
+}
+
+fn concat(plan: &mut Plan, unit: &TaskInfo) {
+    let axis = unit.slot as usize;
+    let left = plan.shape(unit.inputs[0]);
+    let right = plan.shape(unit.inputs[1]);
+    let origin = left.dims()[axis];
+    for (source, elements, start) in [
+        (unit.inputs[0], left.elements(), 0),
+        (unit.inputs[1], right.elements(), origin),
+    ] {
+        for (first, count) in spans(elements, task_elements(elements)) {
+            let mut task = Task::span(unit, first, count, u64::from(count) * 2);
+            task.inputs = [source, NO_VALUE, NO_VALUE];
+            task.origin = start;
+            plan.tasks.push(task);
+        }
     }
 }
 
@@ -326,7 +354,7 @@ fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let axis = unit.slot;
     let folds = shape.dims()[axis as usize];
     let out = plan.shape(unit.out);
-    if axis == MAX_RANK - 1 && strides == shape.strides() {
+    if axis == MAX_RANK - 1 && (shape.dims()[3] == 1 || strides[3] == 1) {
         let columns = shape.columns();
         let geometry = if columns <= profile.workgroup() {
             strategy::THREAD_ROW

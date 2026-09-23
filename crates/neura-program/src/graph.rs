@@ -56,6 +56,7 @@ pub(crate) struct TaskInfo {
     pub(crate) out: u32,
     pub(crate) inputs: [u32; 3],
     pub(crate) slot: u32,
+    pub(crate) origin: u32,
     pub(crate) param: f32,
     pub(crate) window: Window,
     pub(crate) in_place: bool,
@@ -71,6 +72,7 @@ impl TaskInfo {
             out,
             inputs,
             slot: 0,
+            origin: 0,
             param: 0.0,
             window: Window::sliding([1, 1]),
             in_place: false,
@@ -85,6 +87,7 @@ pub(crate) struct ValueInfo {
     pub(crate) shape: Shape,
     pub(crate) strides: [u32; 4],
     pub(crate) storage: u32,
+    pub(crate) offset: u32,
     pub(crate) residency: Residency,
     pub(crate) requires_grad: bool,
     pub(crate) retained: bool,
@@ -98,6 +101,7 @@ impl ValueInfo {
             shape,
             strides: shape.strides(),
             storage: id,
+            offset: 0,
             residency: Residency::Derived,
             requires_grad: false,
             retained: false,
@@ -374,8 +378,8 @@ impl<'g> Graph<'g> {
     fn choice(&self, kind: Kind, source: Value<'g>, seed: u32) -> Value<'g> {
         let source = self.own(source);
         assert!(
-            self.contiguous(source),
-            "a {} folds a row of a tensor stored row by row, and value {} is a view",
+            self.rows_contiguous(source),
+            "a {} folds rows whose elements sit {MAX_RANK} strides apart, and value {} is not row contiguous",
             kind.name(),
             source.id(),
         );
@@ -400,11 +404,6 @@ impl<'g> Graph<'g> {
             "an index list holds one index per row, and {:?} holds {} of them",
             shape.dims(),
             shape.dims()[3],
-        );
-        assert!(
-            self.contiguous(indices),
-            "an index list is walked row by row, and value {} is a view",
-            indices.id(),
         );
     }
 
@@ -432,8 +431,8 @@ impl<'g> Graph<'g> {
         let indices = self.own(indices);
         self.index_list(indices);
         assert!(
-            self.contiguous(table),
-            "a gather walks a table row by row, and value {} is a view",
+            self.rows_contiguous(table),
+            "a gather walks table rows whose elements sit a stride apart, and value {} is not row contiguous",
             table.id(),
         );
         let mut dims = self.shape(indices).dims();
@@ -458,9 +457,9 @@ impl<'g> Graph<'g> {
             assert!(
                 matches!(
                     info.residency,
-                    Residency::Input | Residency::Parameter | Residency::Resident
+                    Residency::Input | Residency::Parameter | Residency::Resident | Residency::View
                 ),
-                "only a leaf tensor scatters in place, and value {} is derived from other tasks",
+                "only a leaf tensor or one of its views scatters in place, and value {} is derived from other tasks",
                 target.id(),
             );
         }
@@ -472,7 +471,7 @@ impl<'g> Graph<'g> {
         let value = self.own(value);
         assert!(
             self.contiguous(value),
-            "a sum walks its operand element by element, and value {} is a view",
+            "a sum walks its operand element by element, and value {} is not contiguous",
             value.id(),
         );
         let out = self.fresh(Shape::scalar(), Residency::Derived, self.tracked(&[value]));
@@ -486,17 +485,114 @@ impl<'g> Graph<'g> {
     }
 
     pub fn transpose(&self, value: Value<'g>) -> Value<'g> {
+        self.swap_axes(value, 2, 3)
+    }
+
+    pub fn swap_axes(&self, value: Value<'g>, first: u32, second: u32) -> Value<'g> {
         let value = self.own(value);
-        let (strides, storage, tracked) = {
+        assert!(
+            first < MAX_RANK && second < MAX_RANK && first != second,
+            "a swap names two of the {MAX_RANK} axes, not {first} and {second}",
+        );
+        let (strides, storage, offset, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.strides, info.storage, info.requires_grad)
+            (info.strides, info.storage, info.offset, info.requires_grad)
         };
         let mut strides = strides;
-        strides.swap(2, 3);
+        strides.swap(first as usize, second as usize);
         let mut dims = value.shape().dims();
-        dims.swap(2, 3);
-        self.alias(Shape::of(dims), strides, storage, tracked)
+        dims.swap(first as usize, second as usize);
+        self.alias(Shape::of(dims), strides, storage, offset, tracked)
+    }
+
+    pub fn reshape(&self, value: Value<'g>, dims: impl AsRef<[u32]>) -> Value<'g> {
+        let value = self.own(value);
+        let shape = Shape::of(dims);
+        let (strides, storage, offset, tracked) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            (info.strides, info.storage, info.offset, info.requires_grad)
+        };
+        assert!(
+            value.shape().packs_contiguously(strides),
+            "a reshape walks the elements of {:?} in storage order, and its strides {:?} scatter them; feed it through identity to materialize it first",
+            value.shape().dims(),
+            strides,
+        );
+        assert_eq!(
+            shape.elements(),
+            value.shape().elements(),
+            "a reshape of {:?} into {:?} loses or invents elements",
+            value.shape().dims(),
+            shape.dims(),
+        );
+        self.alias(shape, shape.strides(), storage, offset, tracked)
+    }
+
+    pub fn slice(&self, value: Value<'g>, axis: u32, start: u32, length: u32) -> Value<'g> {
+        let value = self.own(value);
+        assert!(
+            axis < MAX_RANK,
+            "a slice names one of the {MAX_RANK} axes, not {axis}",
+        );
+        let dims = value.shape().dims();
+        assert!(
+            length > 0 && start + length <= dims[axis as usize],
+            "a slice of {} elements at {} of an axis of {} leaves the tensor",
+            length,
+            start,
+            dims[axis as usize],
+        );
+        let (strides, storage, offset, tracked) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            (info.strides, info.storage, info.offset, info.requires_grad)
+        };
+        let mut dims = dims;
+        dims[axis as usize] = length;
+        self.alias(
+            Shape::of(dims),
+            strides,
+            storage,
+            offset + start * strides[axis as usize],
+            tracked,
+        )
+    }
+
+    pub fn concat(&self, axis: u32, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        assert!(
+            axis < MAX_RANK,
+            "a concat names one of the {MAX_RANK} axes, not {axis}",
+        );
+        let left_dims = self.shape(left).dims();
+        let right_dims = self.shape(right).dims();
+        assert!(
+            (0..MAX_RANK)
+                .filter(|candidate| *candidate != axis)
+                .all(|candidate| left_dims[candidate as usize] == right_dims[candidate as usize]),
+            "shapes {:?} and {:?} meet on every axis but the one they concat over",
+            left_dims,
+            right_dims,
+        );
+        let mut dims = left_dims;
+        dims[axis as usize] += right_dims[axis as usize];
+        let out = self.fresh(
+            Shape::of(dims),
+            Residency::Derived,
+            self.tracked(&[left, right]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Concat,
+            op::NONE,
+            out.id(),
+            [left.id(), right.id(), NO_VALUE],
+        );
+        task.slot = axis;
+        self.push(task);
+        out
     }
 
     pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
@@ -686,6 +782,28 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, table, zeros);
                 }
             }
+            Kind::Concat => {
+                let axis = task.slot;
+                let left = self.value_of(task.inputs[0]);
+                let right = self.value_of(task.inputs[1]);
+                let left_length = self.shape(left).dims()[axis as usize];
+                let strides = self.shape(gradient).strides();
+                for (part, origin) in [(left, 0), (right, left_length)] {
+                    if !self.tracked(&[part]) {
+                        continue;
+                    }
+                    let mut dims = self.shape(gradient).dims();
+                    dims[axis as usize] = self.shape(part).dims()[axis as usize];
+                    let region = self.alias(
+                        Shape::of(dims),
+                        strides,
+                        gradient.id(),
+                        origin * strides[axis as usize],
+                        false,
+                    );
+                    self.accumulate(grads, part, region);
+                }
+            }
             Kind::Fill
             | Kind::Broadcast
             | Kind::Partial
@@ -694,6 +812,7 @@ impl<'g> Graph<'g> {
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
             | Kind::MatmulFold
+            | Kind::Accumulate
             | Kind::Scatter => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
@@ -762,8 +881,8 @@ impl<'g> Graph<'g> {
     fn rows(&self, kind: Kind, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         assert!(
-            self.contiguous(value),
-            "a {} folds a row of a tensor stored row by row, and value {} is a view",
+            self.rows_contiguous(value),
+            "a {} folds rows whose elements sit a stride apart, and value {} is not row contiguous",
             kind.name(),
             value.id(),
         );
@@ -866,13 +985,13 @@ impl<'g> Graph<'g> {
     fn scatter(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
         self.index_list(indices);
         assert!(
-            self.contiguous(target),
-            "a scatter walks a table row by row, and value {} is a view",
+            self.rows_contiguous(target),
+            "a scatter walks table rows whose elements sit a stride apart, and value {} is not row contiguous",
             target.id(),
         );
         assert!(
-            self.contiguous(updates),
-            "a scatter walks its updates row by row, and value {} is a view",
+            self.rows_contiguous(updates),
+            "a scatter walks update rows whose elements sit a stride apart, and value {} is not row contiguous",
             updates.id(),
         );
         let expected = self.shape(indices).dims();
@@ -971,21 +1090,57 @@ impl<'g> Graph<'g> {
 
     fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {
         let value = self.own(value);
+        let contribution = self.own(contribution);
         let contribution = self.reduced_to(contribution, value);
-        grads[value.id() as usize] = Some(match grads[value.id() as usize] {
-            None => contribution.id(),
-            Some(existing) => {
-                let existing = self.value_of(existing);
-                self.add(existing, contribution).id()
+        let state = self.state.borrow();
+        let info = &state.values[value.id() as usize];
+        let view = info.residency == Residency::View;
+        let (target, origin) = if view {
+            (self.value_of(info.storage), info.offset)
+        } else {
+            (value, 0)
+        };
+        let carried = state.values[contribution.id() as usize].residency == Residency::View;
+        drop(state);
+        if !view && !carried {
+            grads[target.id() as usize] = Some(match grads[target.id() as usize] {
+                None => contribution.id(),
+                Some(existing) => self.add(self.value_of(existing), contribution).id(),
+            });
+            return;
+        }
+        let routed = match grads[target.id() as usize] {
+            Some(existing) => self.value_of(existing),
+            None => {
+                let zeros = self.fill(self.shape(target), 0.0);
+                grads[target.id() as usize] = Some(zeros.id());
+                zeros
             }
-        });
+        };
+        let descriptor = if view { value } else { routed };
+        let mut task = TaskInfo::of(
+            Kind::Accumulate,
+            op::NONE,
+            routed.id(),
+            [descriptor.id(), routed.id(), contribution.id()],
+        );
+        task.origin = origin;
+        task.in_place = true;
+        self.push(task);
     }
 
     fn contiguous(&self, value: Value<'g>) -> bool {
         let value = self.own(value);
         let state = self.state.borrow();
         let info = &state.values[value.id() as usize];
-        info.strides == info.shape.strides()
+        info.shape.packs_contiguously(info.strides)
+    }
+
+    fn rows_contiguous(&self, value: Value<'g>) -> bool {
+        let value = self.own(value);
+        let state = self.state.borrow();
+        let info = &state.values[value.id() as usize];
+        info.shape.dims()[3] == 1 || info.strides[3] == 1
     }
 
     fn tracked(&self, values: &[Value<'g>]) -> bool {
@@ -1022,6 +1177,7 @@ impl<'g> Graph<'g> {
             shape,
             strides: shape.strides(),
             storage: id,
+            offset: 0,
             residency,
             requires_grad: residency == Residency::Parameter,
             retained: false,
@@ -1038,6 +1194,7 @@ impl<'g> Graph<'g> {
             shape,
             strides: shape.strides(),
             storage: id,
+            offset: 0,
             residency,
             requires_grad: tracked,
             retained: false,
@@ -1047,13 +1204,21 @@ impl<'g> Graph<'g> {
         Value::of(self.instance, id, shape)
     }
 
-    fn alias(&self, shape: Shape, strides: [u32; 4], storage: u32, tracked: bool) -> Value<'g> {
+    fn alias(
+        &self,
+        shape: Shape,
+        strides: [u32; 4],
+        storage: u32,
+        offset: u32,
+        tracked: bool,
+    ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
             strides,
             storage,
+            offset,
             residency: Residency::View,
             requires_grad: tracked,
             retained: false,

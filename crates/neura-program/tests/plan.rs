@@ -1,6 +1,7 @@
 use neura_abi::op;
 use neura_abi::{
-    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES,
+    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, ValueRecord,
+    WIDE, WORD_BYTES,
 };
 use neura_program::{Encoding, Graph, Init, Shape, Store};
 use std::mem::size_of;
@@ -935,4 +936,89 @@ fn a_chain_of_single_task_levels_rides_one_segment() {
         assert_eq!(segment_of(&encoding, task), 0);
         assert_eq!(dispatch_of(&encoding, task), 0);
     }
+}
+
+#[test]
+fn a_concat_splits_into_two_writers_that_never_order_each_other() {
+    let graph = Graph::new();
+    let left = graph.input(Shape::matrix(4, 4));
+    let right = graph.input(Shape::matrix(3, 4));
+    let joined = graph.concat(2, left, right);
+    let encoding = encoding(&graph);
+    assert_eq!(kinds(&encoding), vec![Kind::Concat, Kind::Concat]);
+    let tape = tape(&encoding);
+    let (first, second) = (tape[0], tape[1]);
+    assert_eq!(first.out, joined.id());
+    assert_eq!(second.out, joined.id());
+    assert_eq!((first.first, first.count), (0, 16));
+    assert_eq!((second.first, second.count), (0, 12));
+    assert_eq!(first.origin, 0);
+    assert_eq!(second.origin, 4);
+    assert_eq!(first.slot, 2);
+    assert!(
+        !follows(&encoding, 0, 1) && !follows(&encoding, 1, 0),
+        "the two parts write disjoint regions and share one wave",
+    );
+}
+
+#[test]
+fn a_gradient_routed_through_a_view_follows_the_fill_it_needs() {
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::matrix(8, 4), Init::Zero);
+    let region = graph.slice(table, 3, 1, 3);
+    let data = graph.input(Shape::matrix(5, 8));
+    let product = graph.matmul(data, region);
+    let loss = graph.sum(product);
+    let gradients = graph.backward(loss);
+    let encoding = encoding(&graph);
+    let kinds = kinds(&encoding);
+    assert!(
+        kinds.contains(&Kind::Accumulate),
+        "the view hands its gradient to the store it carves out"
+    );
+    let tape = tape(&encoding);
+    let accumulates = tape
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| task.kind == Kind::Accumulate.code())
+        .collect::<Vec<_>>();
+    assert_eq!(accumulates.len(), 1);
+    let (_, task) = accumulates[0];
+    assert_eq!(task.out, gradients.of(table).id());
+    assert_eq!(task.b, gradients.of(table).id());
+    assert_eq!(task.a, region.id());
+    assert_eq!(task.origin, 1);
+    for writer in writers(&encoding, gradients.of(table).id()) {
+        if writer == accumulates[0].0 {
+            continue;
+        }
+        assert!(
+            follows(&encoding, writer, accumulates[0].0),
+            "the fill precedes the accumulation"
+        );
+    }
+}
+
+#[test]
+fn a_slice_encodes_the_offset_its_region_starts_at() {
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::matrix(6, 8), Init::Zero);
+    let region = graph.slice(table, 2, 2, 3);
+    graph.retain(region);
+    let encoding = encoding(&graph);
+    let values = encoding
+        .values()
+        .as_chunks::<{ size_of::<ValueRecord>() }>()
+        .0
+        .iter()
+        .map(|value| bytemuck::pod_read_unaligned::<ValueRecord>(value))
+        .collect::<Vec<_>>();
+    let base = values[table.id() as usize].base;
+    let region_base = values[region.id() as usize].base;
+    assert_eq!(
+        region_base - base,
+        16,
+        "two skipped rows of eight columns offset the view by sixteen words",
+    );
+    assert_eq!(values[region.id() as usize].dims, [1, 1, 3, 8]);
 }

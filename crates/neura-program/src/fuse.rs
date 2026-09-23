@@ -155,6 +155,8 @@ fn consumer_step(consumer: &TaskInfo, value: u32) -> Option<StepRecord> {
         | Kind::Broadcast
         | Kind::SumChunk
         | Kind::SumAxis
+        | Kind::Concat
+        | Kind::Accumulate
         | Kind::Softmax
         | Kind::SoftmaxGrad
         | Kind::LogSoftmax
