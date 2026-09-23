@@ -18,7 +18,7 @@ struct Measured {
     profile: Profile,
     tiles: Vec<(MatmulTile, u32)>,
     tasks: u32,
-    waves: u32,
+    dispatches: u32,
     work: u64,
     timing: Timing,
 }
@@ -72,7 +72,7 @@ fn measured(label: String, program: &Program, timing: Timing) -> Measured {
         profile: program.profile(),
         tiles: program.matmul_geometries(),
         tasks: program.task_count(),
-        waves: program.wave_count(),
+        dispatches: program.dispatch_count(),
         work: program.work(),
         timing,
     }
@@ -205,7 +205,7 @@ fn main() {
         "workgroup",
         "matmul tiles",
         "tasks",
-        "waves",
+        "dispatches",
         "work",
         "submit us",
         "step us",
@@ -218,11 +218,11 @@ fn main() {
             profile_name(entry.profile),
             tile_list(&entry.tiles),
             entry.tasks,
-            entry.waves,
+            entry.dispatches,
             entry.work,
             entry.timing.submit,
             entry.timing.step,
-            entry.timing.step / f64::from(entry.waves.max(1)),
+            entry.timing.step / f64::from(entry.dispatches.max(1)),
         );
     }
     println!();

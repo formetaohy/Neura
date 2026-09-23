@@ -27,11 +27,4 @@ pub use store::Store;
 pub use window::Window;
 
 pub const WORD_BYTES: u64 = 4;
-pub const BOUNDS_BYTES: u64 = BOUNDS_WORDS as u64 * WORD_BYTES;
-pub const CURSOR_BYTES: u64 = CURSOR_WORDS as u64 * WORD_BYTES;
-
-const _: () = assert!(CURSOR_WORDS == MAX_WAVES + CURSOR_WAVE_BASE);
-
-pub fn slot_offset(slot: u32) -> u64 {
-    slot as u64 * WORD_BYTES
-}
+pub const REFUSAL_BYTES: u64 = REFUSAL_WORDS as u64 * WORD_BYTES;

@@ -2,12 +2,12 @@ use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::tape::DeviceTape;
 use neura_abi::{
-    BoundsRecord, CURSOR_BYTES, MatmulTile, Placement, PlacementRecord, Precision, Profile,
+    BoundsRecord, MatmulTile, Placement, PlacementRecord, Precision, Profile, REFUSAL_BYTES,
     WORD_BYTES,
 };
 use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_program::{Region, Span, Value};
-use neura_shader::{BOUNDS, CURSOR, HEAP, PLACEMENT, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_shader::{BOUNDS, HEAP, PLACEMENT, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -62,7 +62,7 @@ impl<'r> Weights<'r> {
 pub struct Program<'r> {
     brand: PhantomData<&'r ()>,
     pub(crate) tape: Arc<DeviceTape>,
-    pub(crate) cursor: Recycled,
+    pub(crate) refusal: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
     pub(crate) weights: Weights<'r>,
@@ -77,10 +77,10 @@ impl<'r> Program<'r> {
         weights: Weights<'r>,
     ) -> Self {
         let pool = tape.pool();
-        let cursor = Recycled::claim(
+        let refusal = Recycled::claim(
             pool,
-            "neura cursor",
-            CURSOR_BYTES,
+            "neura refusal",
+            REFUSAL_BYTES,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         let placement = Recycled::claim(
@@ -125,8 +125,8 @@ impl<'r> Program<'r> {
                 resource: tensors.buffer().resource(0, tensors.buffer().size()),
             },
             BindGroupEntry {
-                binding: CURSOR,
-                resource: cursor.buffer().resource(0, cursor.buffer().size()),
+                binding: REFUSAL,
+                resource: refusal.buffer().resource(0, refusal.buffer().size()),
             },
             BindGroupEntry {
                 binding: BOUNDS,
@@ -154,7 +154,7 @@ impl<'r> Program<'r> {
         Self {
             brand: PhantomData,
             tape,
-            cursor,
+            refusal,
             group,
             tensors,
             weights,
@@ -201,7 +201,7 @@ impl<'r> Program<'r> {
             + self.tape.bounds.buffer().size()
             + self.tape.steps.buffer().size()
             + self.tape.segments.buffer().size()
-            + self.cursor.buffer().size()
+            + self.refusal.buffer().size()
             + self.placement.buffer().size()
     }
 
@@ -225,8 +225,8 @@ impl<'r> Program<'r> {
         self.tape.encoding.step_count()
     }
 
-    pub fn wave_count(&self) -> u32 {
-        self.tape.encoding.wave_count()
+    pub fn dispatch_count(&self) -> u32 {
+        self.tape.encoding.dispatch_count()
     }
 
     pub fn value_count(&self) -> u32 {

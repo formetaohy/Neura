@@ -64,3 +64,7 @@ workspace = true
 
 [dev-dependencies]
 pollster = { workspace = true }
+
+[profile.dev.package."*"]
+opt-level = 3
+debug-assertions = false

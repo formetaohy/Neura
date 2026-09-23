@@ -1,18 +1,23 @@
 use crate::graph::ValueInfo;
 use crate::lower::Task;
-use neura_abi::{BoundsRecord, SegmentRecord};
+use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentRecord};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Dispatch {
+    pub first_segment: u32,
+    pub segments: u32,
+}
 
 pub(crate) struct Schedule {
     order: Vec<u32>,
     ends: Vec<u32>,
     segments: Vec<SegmentRecord>,
-    bounds: Vec<BoundsRecord>,
+    dispatches: Vec<Dispatch>,
 }
 
 struct Packed {
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
-    segment_of: Vec<u32>,
 }
 
 impl Schedule {
@@ -20,7 +25,7 @@ impl Schedule {
         let conflicts = conflicts(values, tasks);
         let packed = pack(tasks, &conflicts);
         let schedule = Self::layout(&packed);
-        assert_ordered(values, tasks, &packed);
+        assert_ordered(values, tasks, &schedule);
         schedule
     }
 
@@ -35,7 +40,7 @@ impl Schedule {
         let mut order = Vec::new();
         let mut segments = Vec::with_capacity(packed.segments.len());
         let mut ends = Vec::new();
-        let mut bounds = Vec::new();
+        let mut dispatches = Vec::new();
         let mut cursor = 0;
         while cursor < grouped.len() {
             let wave = packed.waves[packed.segments[grouped[cursor]][0] as usize];
@@ -45,27 +50,28 @@ impl Schedule {
             {
                 last += 1;
             }
-            let first_segment = segments.len() as u32;
-            for segment in &grouped[cursor..last] {
-                segments.push(SegmentRecord {
-                    first: order.len() as u32,
-                    count: packed.segments[*segment].len() as u32,
+            for chunk in grouped[cursor..last].chunks(MAX_DISPATCH_SEGMENTS as usize) {
+                let first_segment = segments.len() as u32;
+                for segment in chunk {
+                    segments.push(SegmentRecord {
+                        first: order.len() as u32,
+                        count: packed.segments[*segment].len() as u32,
+                    });
+                    order.extend(packed.segments[*segment].iter().copied());
+                }
+                dispatches.push(Dispatch {
+                    first_segment,
+                    segments: chunk.len() as u32,
                 });
-                order.extend(packed.segments[*segment].iter().copied());
+                ends.push(order.len() as u32);
             }
-            let mut record: BoundsRecord = bytemuck::Zeroable::zeroed();
-            record.first_segment = first_segment;
-            record.segment_count = (last - cursor) as u32;
-            record.wave = bounds.len() as u32;
-            bounds.push(record);
-            ends.push(order.len() as u32);
             cursor = last;
         }
         Self {
             order,
             ends,
             segments,
-            bounds,
+            dispatches,
         }
     }
 
@@ -81,8 +87,8 @@ impl Schedule {
         &self.segments
     }
 
-    pub(crate) fn bounds(&self) -> &[BoundsRecord] {
-        &self.bounds
+    pub(crate) fn dispatches(&self) -> &[Dispatch] {
+        &self.dispatches
     }
 }
 
@@ -183,11 +189,7 @@ fn pack(tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed {
         work[segment as usize] += tasks[index as usize].work;
         segments[segment as usize].push(index);
     }
-    Packed {
-        waves,
-        segments,
-        segment_of,
-    }
+    Packed { waves, segments }
 }
 
 fn lonely(conflicts: &[Vec<u32>]) -> Vec<bool> {
@@ -210,18 +212,28 @@ fn lonely(conflicts: &[Vec<u32>]) -> Vec<bool> {
         .collect()
 }
 
-fn assert_ordered(values: &[ValueInfo], tasks: &[Task], packed: &Packed) {
+fn assert_ordered(values: &[ValueInfo], tasks: &[Task], schedule: &Schedule) {
+    let mut dispatch_of = vec![0u32; schedule.segments.len()];
+    for (index, dispatch) in schedule.dispatches.iter().enumerate() {
+        for segment in dispatch.first_segment..dispatch.first_segment + dispatch.segments {
+            dispatch_of[segment as usize] = index as u32;
+        }
+    }
+    let mut dispatch = vec![0u32; tasks.len()];
+    let mut segment = vec![0u32; tasks.len()];
     let mut position = vec![0u32; tasks.len()];
-    for members in &packed.segments {
-        for (index, task) in members.iter().enumerate() {
-            position[*task as usize] = index as u32;
+    for (index, record) in schedule.segments.iter().enumerate() {
+        for (within, task) in (record.first..record.first + record.count).enumerate() {
+            let task = schedule.order[task as usize] as usize;
+            dispatch[task] = dispatch_of[index];
+            segment[task] = index as u32;
+            position[task] = within as u32;
         }
     }
     accesses(values, tasks, |before, after| {
         let (before, after) = (before as usize, after as usize);
-        let ordered = packed.waves[before] < packed.waves[after]
-            || (packed.segment_of[before] == packed.segment_of[after]
-                && position[before] < position[after]);
+        let ordered = dispatch[before] < dispatch[after]
+            || (segment[before] == segment[after] && position[before] < position[after]);
         assert!(
             ordered,
             "task {after} touches a tensor that task {before} only reaches later on the tape",

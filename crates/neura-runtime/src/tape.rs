@@ -47,7 +47,8 @@ impl DeviceTape {
             );
         }
         let geometry = Geometry::of(encoding.profile());
-        let kernel = context.declare(Megakernel::assemble(geometry, precision).program());
+        let kernel =
+            context.declare(Megakernel::assemble(encoding.kinds(), geometry, precision).program());
         let tasks_bytes = encoding.tasks().len() as u64;
         let values_bytes = encoding.values().len() as u64;
         let bounds_bytes = encoding.bounds().len() as u64;

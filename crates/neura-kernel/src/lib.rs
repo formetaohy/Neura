@@ -39,22 +39,73 @@ pub fn body(kind: Kind) -> &'static str {
     }
 }
 
-pub fn fragments(geometry: Geometry, weights: Precision) -> Vec<String> {
-    vec![
+pub fn fragments(kinds: &[Kind], geometry: Geometry, weights: Precision) -> Vec<String> {
+    let mut fragments = vec![
         REFUSE.to_owned(),
         READ.to_owned(),
         op::fragment(),
         storage(weights),
         POINTWISE.to_owned(),
-        matmul::family(geometry),
-        REDUCE.to_owned(),
-        reductions(),
-        SOFTMAX.to_owned(),
-        CHOICE.to_owned(),
-        SELECT.to_owned(),
-        CONV.to_owned(),
-        SCATTER.to_owned(),
-    ]
+    ];
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, Kind::Matmul | Kind::MatmulFold))
+    {
+        fragments.push(matmul::family(geometry));
+    }
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, Kind::SumChunk | Kind::SumAxis))
+    {
+        fragments.push(REDUCE.to_owned());
+    }
+    if kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            Kind::SumChunk
+                | Kind::SumAxis
+                | Kind::Softmax
+                | Kind::SoftmaxGrad
+                | Kind::LogSoftmax
+                | Kind::LogSoftmaxGrad
+                | Kind::Argmax
+                | Kind::Categorical
+        )
+    }) {
+        fragments.push(reductions());
+    }
+    if kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
+        )
+    }) {
+        fragments.push(SOFTMAX.to_owned());
+    }
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, Kind::Argmax | Kind::Categorical))
+    {
+        fragments.push(CHOICE.to_owned());
+    }
+    if kinds
+        .iter()
+        .any(|kind| matches!(kind, Kind::OneHot | Kind::Gather))
+    {
+        fragments.push(SELECT.to_owned());
+    }
+    if kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            Kind::Conv2d | Kind::Conv2dInputGrad | Kind::Conv2dWeightGrad
+        )
+    }) {
+        fragments.push(CONV.to_owned());
+    }
+    if kinds.contains(&Kind::Scatter) {
+        fragments.push(SCATTER.to_owned());
+    }
+    fragments
 }
 
 fn storage(weights: Precision) -> String {

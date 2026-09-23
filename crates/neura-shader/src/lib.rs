@@ -1,8 +1,6 @@
 mod reflection;
 
-use neura_abi::{
-    CURSOR_WAVE_BASE, Geometry, Kind, Precision, TAPE_WGSL, kind, op, store, strategy,
-};
+use neura_abi::{Geometry, Kind, Precision, TAPE_WGSL, kind, op, store, strategy};
 use neura_gpu::{BindingKind, BindingSpec, ComputeProgram};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -14,7 +12,7 @@ pub const GROUP: u32 = 0;
 pub const TASKS: u32 = 0;
 pub const VALUES: u32 = 1;
 pub const HEAP: u32 = 2;
-pub const CURSOR: u32 = 3;
+pub const REFUSAL: u32 = 3;
 pub const BOUNDS: u32 = 4;
 pub const STEPS: u32 = 5;
 pub const PLACEMENT: u32 = 6;
@@ -47,10 +45,10 @@ pub const BINDINGS: &[KernelBinding] = &[
         name: "heap",
     },
     KernelBinding {
-        binding: CURSOR,
+        binding: REFUSAL,
         kind: BindingKind::ReadWriteStorage,
         dynamic_offset: false,
-        name: "cursor",
+        name: "refusal",
     },
     KernelBinding {
         binding: BOUNDS,
@@ -79,13 +77,18 @@ pub const BINDINGS: &[KernelBinding] = &[
 ];
 
 pub struct Megakernel {
+    kinds: Vec<Kind>,
     geometry: Geometry,
     source: Arc<str>,
     bindings: Vec<ShaderBinding>,
 }
 
 impl Megakernel {
-    pub fn assemble(geometry: Geometry, weights: Precision) -> Self {
+    pub fn assemble(kinds: &[Kind], geometry: Geometry, weights: Precision) -> Self {
+        assert!(
+            !kinds.is_empty(),
+            "a device program that carries no task has nothing to run",
+        );
         let mut source = String::from(TAPE_WGSL);
         source.push('\n');
         source.push_str(&kind::declarations());
@@ -93,20 +96,25 @@ impl Megakernel {
         source.push_str(&strategy::declarations());
         source.push_str(&store::declarations());
         source.push_str(&geometry.declarations());
-        for fragment in neura_kernel::fragments(geometry.clone(), weights) {
+        for fragment in neura_kernel::fragments(kinds, geometry.clone(), weights) {
             source.push_str(&fragment);
             source.push('\n');
         }
-        source.push_str(&dispatch());
+        source.push_str(&dispatch(kinds));
         source.push_str(&task_loop());
         let source = Arc::<str>::from(source);
         let bindings = reflect(&source);
         assert_declared(&bindings);
         Self {
+            kinds: kinds.to_vec(),
             geometry,
             source,
             bindings,
         }
+    }
+
+    pub fn kinds(&self) -> &[Kind] {
+        &self.kinds
     }
 
     pub fn geometry(&self) -> &Geometry {
@@ -136,9 +144,10 @@ impl Megakernel {
             .collect::<Vec<_>>();
         ComputeProgram::new(
             &format!(
-                "neura megakernel {} threads over {} tiles",
+                "neura megakernel {} threads over {} tiles and {} kinds",
                 self.geometry.workgroup(),
                 self.geometry.tiles().len(),
+                self.kinds.len(),
             ),
             self.source.clone(),
             ENTRY,
@@ -147,11 +156,14 @@ impl Megakernel {
     }
 }
 
-fn dispatch() -> String {
+fn dispatch(kinds: &[Kind]) -> String {
     let mut out = String::from(
         "fn run_task(index: u32, lid: u32) {\n    let task = tasks[index];\n    switch (task.kind) {\n",
     );
     for kind in Kind::ALL {
+        if !kinds.contains(kind) {
+            continue;
+        }
         writeln!(
             out,
             "        case {}: {{ {}(task, lid); }}",
@@ -167,23 +179,12 @@ fn dispatch() -> String {
 fn task_loop() -> String {
     format!(
         "
-var<workgroup> claimed_segment: u32;
-
 @compute @workgroup_size(WORKGROUP_SIZE)
-fn {ENTRY}(@builtin(local_invocation_index) lid: u32) {{
-    loop {{
-        if (lid == 0u) {{
-            claimed_segment = atomicAdd(&cursor[{CURSOR_WAVE_BASE} + bounds.wave], 1u);
-        }}
-        workgroupBarrier();
-        if (claimed_segment >= bounds.segment_count) {{
-            break;
-        }}
-        let segment = segments[bounds.first_segment + claimed_segment];
-        for (var index = segment.first; index < segment.first + segment.count; index = index + 1u) {{
-            run_task(index, lid);
-            storageBarrier();
-        }}
+fn {ENTRY}(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) group: vec3<u32>) {{
+    let segment = segments[bounds.first_segment + group.x];
+    for (var index = segment.first; index < segment.first + segment.count; index = index + 1u) {{
+        run_task(index, lid);
+        storageBarrier();
     }}
 }}
 "

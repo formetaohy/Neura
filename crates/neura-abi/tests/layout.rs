@@ -34,10 +34,8 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
     assert_eq!(offset_of!(StepRecord, swapped), 8);
-    assert_eq!(size_of::<BoundsRecord>(), 12);
+    assert_eq!(size_of::<BoundsRecord>(), 4);
     assert_eq!(offset_of!(BoundsRecord, first_segment), 0);
-    assert_eq!(offset_of!(BoundsRecord, segment_count), 4);
-    assert_eq!(offset_of!(BoundsRecord, wave), 8);
     assert_eq!(size_of::<SegmentRecord>(), 8);
     assert_eq!(offset_of!(SegmentRecord, first), 0);
     assert_eq!(offset_of!(SegmentRecord, count), 4);

@@ -104,7 +104,6 @@ pub struct Profile {
 }
 
 const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
-const CLAIMED_TASK: u64 = WORD_BYTES;
 
 impl Profile {
     pub const fn of(tiles: &'static [MatmulTile]) -> Self {
@@ -135,8 +134,7 @@ impl Profile {
             workgroup,
             tiles,
             shared_bytes: 2 * (left_stage + right_stage) * WORD_BYTES
-                + REDUCTION_SCRATCH * workgroup as u64
-                + CLAIMED_TASK,
+                + REDUCTION_SCRATCH * workgroup as u64,
         }
     }
 

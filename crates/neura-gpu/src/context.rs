@@ -264,6 +264,7 @@ async fn select_adapter(request: &GpuRequest) -> Result<Adapter, GpuUnavailable>
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: request.backends,
         flags: instance_flags(),
+        backend_options: backend_options(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapters = instance.enumerate_adapters(request.backends).await;
@@ -348,4 +349,15 @@ fn instance_flags() -> wgpu::InstanceFlags {
     diagnostics
         .union(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
         .with_env()
+}
+
+fn backend_options() -> wgpu::BackendOptions {
+    let mut options = wgpu::BackendOptions::from_env_or_default();
+    #[cfg(windows)]
+    if wgpu::Dx12Compiler::from_env().is_none()
+        && let Some(compiler) = crate::dxcompiler::modern()
+    {
+        options.dx12.shader_compiler = compiler;
+    }
+    options
 }

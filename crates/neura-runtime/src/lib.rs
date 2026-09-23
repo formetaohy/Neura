@@ -9,5 +9,4 @@ pub use neura_program::Span;
 pub use program::{Program, Weights};
 pub use runtime::{
     DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, READBACK_SLOTS, Readout, Runtime, RuntimeRequest,
-    WORKGROUP_BUDGET,
 };

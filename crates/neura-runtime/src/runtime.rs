@@ -3,7 +3,7 @@ use crate::pool::Pool;
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
-    CURSOR_REFUSED, Kind, PROFILES, Placement, Precision, Profile, WORD_BYTES, op, slot_offset,
+    Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
 };
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
@@ -15,7 +15,6 @@ use std::sync::mpsc;
 use std::time::Instant;
 use wgpu::{BufferAsyncError, MapMode};
 
-pub const WORKGROUP_BUDGET: u32 = 1024;
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
 pub const READBACK_SLOTS: u64 = 2;
@@ -90,6 +89,11 @@ impl Runtime {
             heap_bytes <= context.limits().max_storage_buffer_binding_size,
             "a device heap of {heap_bytes} bytes outruns the {} bytes one storage binding holds",
             context.limits().max_storage_buffer_binding_size,
+        );
+        assert!(
+            MAX_DISPATCH_SEGMENTS <= context.limits().max_compute_workgroups_per_dimension,
+            "one dispatch addresses {MAX_DISPATCH_SEGMENTS} segments where the device launches workgroups in steps of {}",
+            context.limits().max_compute_workgroups_per_dimension,
         );
         Self {
             alignment: context.binding_alignment(),
@@ -239,15 +243,15 @@ impl Runtime {
         self.context.assert_alive();
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
-        submission.clear_buffer(program.cursor.buffer().buffer(), 0, None);
+        submission.clear_buffer(program.refusal.buffer().buffer(), 0, None);
         let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
             label: Some("neura tape"),
             timestamp_writes: None,
         });
         pass.set_pipeline(program.tape.kernel.pipeline());
-        for (index, wave) in program.tape.encoding.waves().iter().enumerate() {
+        for (index, dispatch) in program.tape.encoding.dispatches().iter().enumerate() {
             pass.set_bind_group(0, &program.group, &[(index as u64 * self.alignment) as u32]);
-            pass.dispatch_workgroups(wave.segment_count.min(WORKGROUP_BUDGET), 1, 1);
+            pass.dispatch_workgroups(dispatch.segments, 1, 1);
         }
         drop(pass);
         submission.submit(self.context.queue());
@@ -331,8 +335,8 @@ impl Runtime {
             at += bytes;
         }
         submission.copy_buffer_to_buffer(
-            program.cursor.buffer().buffer(),
-            slot_offset(CURSOR_REFUSED),
+            program.refusal.buffer().buffer(),
+            0,
             staging.buffer(),
             at,
             WORD_BYTES,

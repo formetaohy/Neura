@@ -1,11 +1,3 @@
-fn whole_index(value: f32, rows: u32, kind: u32) -> u32 {
-    if (trunc(value) != value || !(value >= 0.0) || !(value < f32(rows))) {
-        refuse(kind, 0u);
-        return 0u;
-    }
-    return u32(value);
-}
-
 fn run_one_hot(task: Task, lid: u32) {
     let indices = values[task.a];
     let output = values[task.out];

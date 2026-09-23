@@ -9,7 +9,11 @@ fn assemble(profile: Profile) -> Megakernel {
 }
 
 fn assemble_with(profile: Profile, weights: Precision) -> Megakernel {
-    Megakernel::assemble(Geometry::of(profile), weights)
+    Megakernel::assemble(Kind::ALL, Geometry::of(profile), weights)
+}
+
+fn assemble_carrying(profile: Profile, kinds: &[Kind]) -> Megakernel {
+    Megakernel::assemble(kinds, Geometry::of(profile), Precision::Single)
 }
 
 #[test]
@@ -259,6 +263,45 @@ fn a_program_carries_every_tile_its_profile_offers() {
 }
 
 #[test]
+fn a_program_carries_only_the_kinds_its_plan_names() {
+    let profile = PROFILES[PROFILES.len() - 1];
+    let kernel = assemble_carrying(profile, &[Kind::Matmul]);
+    assert_eq!(kernel.kinds(), &[Kind::Matmul]);
+    let dispatch = kernel
+        .source()
+        .split_once("fn run_task(index: u32, lid: u32)")
+        .expect("the assembled program dispatches its kinds")
+        .1;
+    assert!(dispatch.contains(&format!(
+        "case {}: {{ run_matmul(task, lid); }}",
+        Kind::Matmul.constant(),
+    )));
+    assert!(!dispatch.contains(&format!("case {}:", Kind::Binary.constant())));
+    assert!(!dispatch.contains(&format!("case {}:", Kind::MatmulFold.constant())));
+    for absent in [
+        "run_conv2d",
+        "run_softmax",
+        "run_scatter",
+        "run_gather",
+        "run_argmax",
+        "reduction_scratch",
+        "choice_index",
+    ] {
+        assert!(
+            !kernel.source().contains(absent),
+            "a program that runs one kind carries {absent}",
+        );
+    }
+    let whole = assemble(profile);
+    assert!(
+        kernel.source().len() < whole.source().len(),
+        "a program of one kind holds {} bytes where the whole vocabulary holds {}",
+        kernel.source().len(),
+        whole.source().len(),
+    );
+}
+
+#[test]
 fn the_program_identity_is_stable_for_every_profile() {
     for profile in PROFILES {
         let first = assemble(*profile);
@@ -336,17 +379,64 @@ fn every_kernel_body_carries_its_chain() {
 }
 
 #[test]
-fn the_devices_bound_every_tensor_the_tape_names() {
+fn the_entry_hands_each_workgroup_one_segment_of_its_dispatch() {
     let kernel = assemble(PROFILES[0]);
-    assert!(kernel.source().contains("atomicAdd(&cursor["));
-    assert!(kernel.source().contains("bounds.segment_count"));
-    assert!(kernel.source().contains("bounds.first_segment"));
+    let entry = kernel
+        .source()
+        .split_once("fn main(")
+        .expect("the assembled program carries its entry point")
+        .1;
+    assert!(entry.contains("@builtin(workgroup_id) group: vec3<u32>"));
+    assert!(entry.contains("segments[bounds.first_segment + group.x]"));
+    assert!(entry.contains("storageBarrier()"));
     assert!(
-        kernel
-            .source()
-            .contains("segments[bounds.first_segment + claimed_segment]")
+        !entry.contains("atomicAdd") && !entry.contains("workgroupBarrier()"),
+        "the entry claims no work of its own: a claim on the device lands in control flow no backend proves uniform",
     );
-    assert!(kernel.source().contains("storageBarrier()"));
+    assert!(
+        !entry.contains("var<workgroup>"),
+        "the entry carries no workgroup state between the segments it runs",
+    );
+}
+
+#[test]
+fn the_device_program_reads_a_lane_by_name_and_never_by_runtime_index() {
+    for profile in PROFILES {
+        let kernel = assemble(*profile);
+        let module =
+            naga::front::wgsl::parse_str(kernel.source()).expect("the assembled program parses");
+        for (_, function) in module.functions.iter() {
+            let context = naga::proc::ResolveContext::with_locals(
+                &module,
+                &function.local_variables,
+                &function.arguments,
+            );
+            let mut resolved = Vec::with_capacity(function.expressions.len());
+            for (handle, expression) in function.expressions.iter() {
+                let resolution = context
+                    .resolve(expression, |base| {
+                        resolved
+                            .get(base.index())
+                            .ok_or(naga::proc::ResolveError::InvalidAccess {
+                                expr: base,
+                                indexed: true,
+                            })
+                    })
+                    .expect("every expression of a validated program resolves");
+                if let naga::Expression::Access { base, .. } = expression {
+                    assert!(
+                        !matches!(
+                            resolved[base.index()].inner_with(&module.types),
+                            naga::TypeInner::Vector { .. }
+                        ),
+                        "expression {handle:?} of {function:?} indexes a vector by a runtime lane, and the dx12 compiler lowers a program of this size that carries one to no code at all",
+                        function = function.name,
+                    );
+                }
+                resolved.push(resolution);
+            }
+        }
+    }
 }
 
 fn workgroup_bytes(source: &str) -> u64 {
@@ -383,7 +473,7 @@ fn type_bytes(module: &naga::Module, ty: naga::Handle<naga::Type>) -> u64 {
 fn the_profile_carries_the_workgroup_memory_its_program_declares() {
     for profile in PROFILES {
         let geometry = Geometry::of(*profile);
-        let kernel = Megakernel::assemble(geometry, Precision::Single);
+        let kernel = Megakernel::assemble(Kind::ALL, geometry, Precision::Single);
         let declared = workgroup_bytes(kernel.source());
         assert!(
             declared > 0,
@@ -399,6 +489,6 @@ fn the_profile_carries_the_workgroup_memory_its_program_declares() {
 
 #[test]
 fn the_reductions_and_choices_keep_a_scratch_of_their_own() {
-    let kernel = Megakernel::assemble(Geometry::of(PROFILES[0]), Precision::Single);
+    let kernel = assemble(PROFILES[0]);
     assert!(workgroup_bytes(kernel.source()) >= 2 * u64::from(PROFILES[0].workgroup()) * 4);
 }

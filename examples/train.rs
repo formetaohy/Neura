@@ -50,9 +50,9 @@ fn main() {
         }
     }
     println!(
-        "one step: {} tasks in {} waves, {} bytes of tensors beside {} bytes of weights on a {} byte heap, {} device programs",
+        "one step: {} tasks in {} dispatches, {} bytes of tensors beside {} bytes of weights on a {} byte heap, {} device programs",
         program.task_count(),
-        program.wave_count(),
+        program.dispatch_count(),
         program.tensor_bytes(),
         program.weights().bytes(),
         program.heap_bytes(),

@@ -3,7 +3,7 @@ use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
-use crate::schedule;
+use crate::schedule::{self, Dispatch};
 use neura_abi::{
     BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, SegmentRecord, StepRecord,
     Store, TaskRecord, ValueRecord, WORD_BYTES,
@@ -100,12 +100,13 @@ struct Placed {
 
 pub struct Encoding {
     profile: Profile,
+    kinds: Vec<Kind>,
     tasks: Vec<u8>,
     values: Vec<u8>,
     bounds: Vec<u8>,
     steps: Vec<u8>,
     segments: Vec<SegmentRecord>,
-    waves: Vec<BoundsRecord>,
+    dispatches: Vec<Dispatch>,
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     geometries: Vec<u32>,
@@ -130,17 +131,12 @@ impl Encoding {
         let plan = lower::lower(&state.values, &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
+        let kinds = carried_kinds(tasks);
         let layout = Layout::of(values, precision, alignment);
         assert_writers_precede_readers(values, tasks);
         let schedule = schedule::Schedule::of(values, tasks);
         let order = schedule.order();
         let ends = schedule.ends();
-        assert!(
-            ends.len() as u32 <= neura_abi::MAX_WAVES,
-            "a tape of {} waves outruns the {} cursor slots one dispatch hands the device",
-            ends.len(),
-            neura_abi::MAX_WAVES,
-        );
         let live = storage_liveness(values, tasks, order);
         let reserved = layout.tensors().bytes();
         let (offsets, tensor_bytes) = allocate(values, &live, ends, alignment, reserved);
@@ -239,12 +235,14 @@ impl Encoding {
         }
 
         let mut bounds = Vec::new();
-        let mut segments = Vec::new();
-        for record in schedule.bounds() {
-            bounds.extend_from_slice(bytemuck::bytes_of(record));
+        for dispatch in schedule.dispatches() {
+            let record = BoundsRecord {
+                first_segment: dispatch.first_segment,
+            };
+            bounds.extend_from_slice(bytemuck::bytes_of(&record));
             bounds.resize(bounds.len().next_multiple_of(alignment as usize), 0);
         }
-        segments.extend_from_slice(schedule.segments());
+        let segments = schedule.segments().to_vec();
 
         let mut readable = vec![false; values.len()];
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
@@ -282,12 +280,13 @@ impl Encoding {
 
         Self {
             profile,
+            kinds,
             tasks: tape,
             values: records,
             bounds,
             steps,
             segments,
-            waves: schedule.bounds().to_vec(),
+            dispatches: schedule.dispatches().to_vec(),
             spans,
             readable,
             geometries,
@@ -305,6 +304,10 @@ impl Encoding {
 
     pub fn tiles(&self) -> &[MatmulTile] {
         self.profile.tiles()
+    }
+
+    pub fn kinds(&self) -> &[Kind] {
+        &self.kinds
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
@@ -336,8 +339,8 @@ impl Encoding {
         &self.segments
     }
 
-    pub fn waves(&self) -> &[BoundsRecord] {
-        &self.waves
+    pub fn dispatches(&self) -> &[Dispatch] {
+        &self.dispatches
     }
 
     pub fn span(&self, value: crate::graph::Value, placement: Placement) -> Span {
@@ -406,13 +409,21 @@ impl Encoding {
         (self.values.len() / size_of::<ValueRecord>()) as u32
     }
 
-    pub fn wave_count(&self) -> u32 {
-        self.waves.len() as u32
+    pub fn dispatch_count(&self) -> u32 {
+        self.dispatches.len() as u32
     }
 
     pub fn work(&self) -> u64 {
         self.work
     }
+}
+
+fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
+    Kind::ALL
+        .iter()
+        .copied()
+        .filter(|kind| tasks.iter().any(|task| task.kind == *kind))
+        .collect()
 }
 
 fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {

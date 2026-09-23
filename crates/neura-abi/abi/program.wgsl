@@ -1,10 +1,6 @@
 const MAX_RANK: u32 = 4u;
-const MAX_WAVES: u32 = 4096u;
-const CURSOR_WORDS: u32 = 4097u;
-const BOUNDS_WORDS: u32 = 3u;
-
-const CURSOR_REFUSED: u32 = 0u;
-const CURSOR_WAVE_BASE: u32 = 1u;
+const MAX_DISPATCH_SEGMENTS: u32 = 65535u;
+const REFUSAL_WORDS: u32 = 1u;
 
 const NO_VALUE: u32 = 0xffffffffu;
 
@@ -44,8 +40,6 @@ struct Step {
 
 struct Bounds {
     first_segment: u32,
-    segment_count: u32,
-    wave: u32,
 }
 
 struct Segment {
@@ -61,7 +55,7 @@ struct Placement {
 @group(0) @binding(0) var<storage, read> tasks: array<Task>;
 @group(0) @binding(1) var<storage, read> values: array<Value>;
 @group(0) @binding(2) var<storage, read_write> heap: array<f32>;
-@group(0) @binding(3) var<storage, read_write> cursor: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> refusal: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> bounds: Bounds;
 @group(0) @binding(5) var<storage, read> steps: array<Step>;
 @group(0) @binding(6) var<storage, read> placement: Placement;

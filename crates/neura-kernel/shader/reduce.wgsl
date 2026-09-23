@@ -52,7 +52,7 @@ fn sum_axis_element(task: Task, lid: u32, source: Value, output: Value, axis: u3
         select(0u, 1u, axis == 2u),
         select(0u, 1u, axis == 3u),
     );
-    let folds = source.dims[axis];
+    let folds = component(source.dims, axis);
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
         let at = coordinates(index, output.dims);
         var total = 0.0;
