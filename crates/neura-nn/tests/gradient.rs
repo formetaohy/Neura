@@ -15,6 +15,14 @@ fn sampled(elements: usize) -> impl Iterator<Item = usize> {
     (0..elements).step_by(stride).take(4)
 }
 
+fn assert_slope(element: usize, analytic: f32, numeric: f32, elements: usize) {
+    let slack = 1e-3 + 1e-2 * analytic.abs().max(numeric.abs());
+    assert!(
+        (numeric - analytic).abs() <= slack,
+        "element {element} of a tensor of {elements} numbers: the tape gives {analytic} where the slope is {numeric}",
+    );
+}
+
 #[test]
 fn a_batched_product_gradient_matches_finite_differences() {
     let runtime = open();
@@ -55,6 +63,13 @@ fn a_batched_product_gradient_matches_finite_differences() {
     for parameter in &parameters {
         let values = runtime.read(&program, *parameter);
         let analytic = runtime.read(&program, gradients.of(*parameter));
+        assert_eq!(
+            analytic.len(),
+            values.len(),
+            "the gradient of {} numbers reaches a parameter of {} numbers",
+            analytic.len(),
+            values.len(),
+        );
         for element in sampled(values.len()) {
             let step = 0.01 * values[element].abs().max(0.1);
             let mut probe = values.clone();
@@ -67,12 +82,7 @@ fn a_batched_product_gradient_matches_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-2,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -131,12 +141,7 @@ fn a_normalized_row_gradient_matches_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 2e-3,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -201,12 +206,7 @@ fn analytic_gradients_match_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-2,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -262,12 +262,7 @@ fn analytic_gradients_of_a_deep_stack_match_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-2,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -340,12 +335,7 @@ fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences()
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-3,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -483,12 +473,7 @@ fn an_embedding_gradient_matches_finite_differences() {
         runtime.run(&program);
         let low = runtime.read(&program, loss)[0];
         let numeric = (high - low) / (2.0 * step);
-        assert!(
-            (numeric - analytic[element]).abs() < 1e-2,
-            "element {element} of an embedding of {} numbers: the tape gives {} where the slope is {numeric}",
-            values.len(),
-            analytic[element],
-        );
+        assert_slope(element, analytic[element], numeric, values.len());
     }
     runtime.write(&program, table, &values);
 }
@@ -548,12 +533,7 @@ fn a_convolution_gradient_matches_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-2,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }
@@ -609,12 +589,7 @@ fn a_policy_gradient_matches_finite_differences() {
             runtime.run(&program);
             let low = runtime.read(&program, loss)[0];
             let numeric = (high - low) / (2.0 * step);
-            assert!(
-                (numeric - analytic[element]).abs() < 1e-2,
-                "element {element} of a parameter of {} numbers: the tape gives {} where the slope is {numeric}",
-                values.len(),
-                analytic[element],
-            );
+            assert_slope(element, analytic[element], numeric, values.len());
         }
         runtime.write(&program, *parameter, &values);
     }

@@ -506,6 +506,30 @@ fn a_backward_pass_reaches_every_parameter() {
 }
 
 #[test]
+fn a_broadcast_product_folds_its_gradient_back_to_the_shape_of_its_operand() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::of([4, 1, 3, 2]), Init::Zero);
+    let right = graph.parameter(Shape::of([1, 5, 2, 3]), Init::Zero);
+    let product = graph.matmul(left, right);
+    assert_eq!(product.shape(), Shape::of([4, 5, 3, 3]));
+    let grads = graph.backward(graph.sum(product));
+    assert_eq!(
+        grads.of(left).shape(),
+        left.shape(),
+        "a gradient of a broadcast operand carries the shape of that operand",
+    );
+    assert_eq!(grads.of(right).shape(), right.shape());
+    assert_eq!(
+        kinds(&encoding(&graph))
+            .iter()
+            .filter(|kind| **kind == Kind::SumAxis)
+            .count(),
+        2,
+        "one fold returns each operand to the rows its product spread",
+    );
+}
+
+#[test]
 fn a_reduction_folds_through_as_many_levels_as_it_takes() {
     let graph = Graph::new();
     let wide = graph.parameter(Shape::vector(1 << 21), Init::Zero);

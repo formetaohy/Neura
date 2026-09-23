@@ -587,7 +587,7 @@ impl<'g> Graph<'g> {
         };
         let mut grads: Vec<Option<u32>> = vec![None; self.value_count()];
         let seed = self.fill(self.shape(loss), 1.0);
-        grads[loss.id() as usize] = Some(seed.id());
+        self.accumulate(&mut grads, loss, seed);
         for index in (0..forward).rev() {
             let task = self.task(index);
             let Some(gradient) = grads[task.out as usize] else {
@@ -628,8 +628,7 @@ impl<'g> Graph<'g> {
                     if !self.tracked(&[operand]) {
                         continue;
                     }
-                    let partial = self.partial(definition, task, slot, gradient);
-                    let contribution = self.reduce_to(partial, operand);
+                    let contribution = self.partial(definition, task, slot, gradient);
                     self.accumulate(grads, operand, contribution);
                 }
             }
@@ -898,18 +897,18 @@ impl<'g> Graph<'g> {
         self.push(task);
     }
 
-    fn reduce_to(&self, gradient: Value<'g>, target: Value<'g>) -> Value<'g> {
+    fn reduced_to(&self, gradient: Value<'g>, value: Value<'g>) -> Value<'g> {
         let gradient = self.own(gradient);
-        let target = self.own(target);
-        let shape = self.shape(target);
+        let value = self.own(value);
+        let shape = self.shape(value);
         if self.shape(gradient) == shape {
             return gradient;
         }
         assert!(
             shape.fits_within(self.shape(gradient)),
-            "a gradient of {} elements cannot fold back into {} elements",
-            self.shape(gradient).elements(),
-            shape.elements(),
+            "a gradient of {:?} does not fold back into the {:?} it belongs to",
+            self.shape(gradient).dims(),
+            shape.dims(),
         );
         let mut folded = gradient;
         for axis in (0..MAX_RANK).rev() {
@@ -974,7 +973,7 @@ impl<'g> Graph<'g> {
 
     fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {
         let value = self.own(value);
-        let contribution = self.own(contribution);
+        let contribution = self.reduced_to(contribution, value);
         grads[value.id() as usize] = Some(match grads[value.id() as usize] {
             None => contribution.id(),
             Some(existing) => {

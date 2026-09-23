@@ -104,6 +104,49 @@ fn descent_lowers_the_loss_of_a_single_layer() {
 }
 
 #[test]
+fn a_batch_of_sequences_trains_one_dense_layer() {
+    let runtime = open();
+    let graph = Graph::new();
+    let layer = Linear::new(
+        &graph,
+        4,
+        2,
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+    );
+    let observations = graph.input(Shape::of([8, 5, 4]));
+    let targets = graph.input(Shape::of([8, 5, 2]));
+    let prediction = layer.forward(&graph, observations);
+    assert_eq!(prediction.shape(), Shape::of([8, 5, 2]));
+    let loss = mse_loss(&graph, prediction, targets);
+    let gradients = graph.backward(loss);
+    let optimizer = Sgd::new(&graph, 0.05);
+    optimizer.step(&graph, &gradients, &layer.parameters());
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        observations,
+        &(0..160)
+            .map(|index| (index as f32 * 0.021).sin())
+            .collect::<Vec<_>>(),
+    );
+    runtime.write(&program, targets, &[0.5; 80]);
+    runtime.run(&program);
+    let first = runtime.read(&program, loss)[0];
+    for _ in 0..20 {
+        runtime.run(&program);
+    }
+    let last = runtime.read(&program, loss)[0];
+    assert!(
+        last < first,
+        "twenty steps over eight sequences of five observations moved the loss from {first} to {last}",
+    );
+}
+
+#[test]
 fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
     let runtime = open();
     let graph = Graph::new();
