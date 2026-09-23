@@ -155,7 +155,7 @@ impl Profile {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Geometry {
     workgroup: u32,
     tiles: Vec<MatmulTile>,

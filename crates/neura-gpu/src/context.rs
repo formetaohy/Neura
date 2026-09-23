@@ -3,8 +3,8 @@ use crate::pipeline::{ComputeProgram, PipelineHandle};
 use std::fmt::{self, Display, Formatter};
 use std::sync::{Arc, Mutex};
 use wgpu::{
-    Adapter, AdapterInfo, Backend, Backends, Device, DeviceLostReason, DeviceType,
-    ExperimentalFeatures, Features, Limits, PowerPreference, Queue,
+    Adapter, AdapterInfo, Backends, Device, DeviceLostReason, ExperimentalFeatures, Features,
+    Limits, PowerPreference, Queue,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,7 +16,6 @@ pub enum LimitsPolicy {
 pub struct GpuRequest {
     pub backends: Backends,
     pub power_preference: PowerPreference,
-    pub device_name: Option<String>,
     pub required_features: Features,
     pub limits: LimitsPolicy,
 }
@@ -26,7 +25,6 @@ impl Default for GpuRequest {
         Self {
             backends: Self::NATIVE_BACKENDS,
             power_preference: PowerPreference::HighPerformance,
-            device_name: None,
             required_features: Features::empty(),
             limits: LimitsPolicy::Adapter,
         }
@@ -37,13 +35,6 @@ impl GpuRequest {
     pub const NATIVE_BACKENDS: Backends = Backends::DX12
         .union(Backends::METAL)
         .union(Backends::VULKAN);
-
-    pub fn adapter_named(name: impl Into<String>) -> Self {
-        Self {
-            device_name: Some(name.into()),
-            ..Self::default()
-        }
-    }
 
     pub fn minimum_limits(self) -> Self {
         Self {
@@ -56,11 +47,7 @@ impl GpuRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuUnavailable {
     NoAdapter {
-        backends: Backends,
-    },
-    DeviceNotFound {
-        requested: String,
-        available: Vec<String>,
+        reason: String,
     },
     MissingFeatures {
         missing: Features,
@@ -74,16 +61,9 @@ pub enum GpuUnavailable {
 impl Display for GpuUnavailable {
     fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoAdapter { backends } => {
-                write!(out, "no adapter exposed by the backends {backends:?}")
+            Self::NoAdapter { reason } => {
+                write!(out, "no adapter matched the request: {reason}")
             }
-            Self::DeviceNotFound {
-                requested,
-                available,
-            } => write!(
-                out,
-                "no adapter name contains {requested:?}; the device offers {available:?}"
-            ),
             Self::MissingFeatures { missing, available } => {
                 write!(
                     out,
@@ -264,80 +244,18 @@ async fn select_adapter(request: &GpuRequest) -> Result<Adapter, GpuUnavailable>
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: request.backends,
         flags: instance_flags(),
-        backend_options: backend_options(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
-    let adapters = instance.enumerate_adapters(request.backends).await;
-    if adapters.is_empty() {
-        return Err(GpuUnavailable::NoAdapter {
-            backends: request.backends,
-        });
-    }
-    let candidates = match &request.device_name {
-        Some(needle) => {
-            let wanted = needle.to_lowercase();
-            let matched = adapters
-                .iter()
-                .filter(|adapter| adapter.get_info().name.to_lowercase().contains(&wanted))
-                .cloned()
-                .collect::<Vec<_>>();
-            if matched.is_empty() {
-                return Err(GpuUnavailable::DeviceNotFound {
-                    requested: needle.clone(),
-                    available: adapters
-                        .iter()
-                        .map(|adapter| adapter.get_info().name)
-                        .collect(),
-                });
-            }
-            matched
-        }
-        None => adapters,
-    };
-    Ok(prefer(candidates, request.power_preference))
-}
-
-fn prefer(mut candidates: Vec<Adapter>, power: PowerPreference) -> Adapter {
-    let rank = |adapter: &Adapter| {
-        let info = adapter.get_info();
-        let device = match power {
-            PowerPreference::HighPerformance => match info.device_type {
-                DeviceType::DiscreteGpu => 0u8,
-                DeviceType::VirtualGpu => 1,
-                DeviceType::IntegratedGpu => 2,
-                _ => 3,
-            },
-            PowerPreference::LowPower => match info.device_type {
-                DeviceType::IntegratedGpu => 0u8,
-                DeviceType::VirtualGpu => 1,
-                DeviceType::DiscreteGpu => 2,
-                _ => 3,
-            },
-            PowerPreference::None => 0u8,
-        };
-        (native_backend_rank(info.backend), device)
-    };
-    candidates.sort_by_key(|adapter| rank(adapter));
-    candidates
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| panic!("an adapter candidate list is never empty"))
-}
-
-fn native_backend_rank(backend: Backend) -> u8 {
-    #[cfg(target_os = "windows")]
-    const PRIMARY: Backend = Backend::Dx12;
-    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "visionos"))]
-    const PRIMARY: Backend = Backend::Metal;
-    #[cfg(not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "visionos"
-    )))]
-    const PRIMARY: Backend = Backend::Vulkan;
-
-    u8::from(backend != PRIMARY)
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: request.power_preference,
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| GpuUnavailable::NoAdapter {
+            reason: error.to_string(),
+        })
 }
 
 fn instance_flags() -> wgpu::InstanceFlags {
@@ -349,15 +267,4 @@ fn instance_flags() -> wgpu::InstanceFlags {
     diagnostics
         .union(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL)
         .with_env()
-}
-
-fn backend_options() -> wgpu::BackendOptions {
-    let mut options = wgpu::BackendOptions::from_env_or_default();
-    #[cfg(windows)]
-    if wgpu::Dx12Compiler::from_env().is_none()
-        && let Some(compiler) = crate::dxcompiler::modern()
-    {
-        options.dx12.shader_compiler = compiler;
-    }
-    options
 }

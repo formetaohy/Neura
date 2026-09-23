@@ -1,14 +1,15 @@
-use crate::heap::Heap;
+use crate::heap::{Allocation, Heap};
 use crate::pool::Pool;
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
-    Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
+    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
 };
 use neura_gpu::{
     ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission, wgpu,
 };
-use neura_program::{Graph, Span, Store, Value};
+use neura_program::{Graph, Layout, Span, Store, Value};
+use neura_shader::Megakernel;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -137,8 +138,19 @@ impl Runtime {
 
     pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
         self.context.assert_alive();
+        let (weights, _) = self.parameter_store(graph, precision);
+        weights
+    }
+
+    fn parameter_store(&self, graph: &Graph, precision: Precision) -> (Weights<'_>, Layout) {
         let layout = graph.layout(self.alignment, precision);
         let store = self.heap.allocate(layout.weights().words());
+        self.upload(&layout, &store, precision);
+        let weights = Weights::new(store, layout.weights().clone(), precision);
+        (weights, layout)
+    }
+
+    fn upload(&self, layout: &Layout, store: &Allocation, precision: Precision) {
         let placement = Placement::new(0, store.word());
         let queue = self.context.queue();
         for (address, data) in layout.uploads() {
@@ -148,7 +160,20 @@ impl Runtime {
                 &precision.pack(data),
             );
         }
-        Weights::new(store, layout.weights().clone(), precision)
+    }
+
+    pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
+        self.context.assert_alive();
+        let layout = graph.layout(self.alignment, weights.precision());
+        assert_eq!(
+            layout.weights(),
+            weights.region(),
+            "this parameter store of {} tensors holds {} bytes where the graph asks for {} tensors and {} bytes; a store rebinds only onto a graph that declares the very same parameters in the very same order",
+            weights.tensors(),
+            weights.bytes(),
+            layout.weights().tensors(),
+            layout.weights().bytes(),
+        );
     }
 
     pub fn compile<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
@@ -191,14 +216,16 @@ impl Runtime {
             Precision::Single,
         );
         let signature = tape::signature(&encoding, profile, weights.precision(), self.alignment);
+        let kinds = encoding.kinds().to_vec();
+        let geometry = Geometry::of(profile);
+        let precision = weights.precision();
+        let kernel = self
+            .tapes
+            .kernel(kinds.as_slice(), geometry.clone(), precision, || {
+                Megakernel::assemble(&kinds, geometry, precision)
+            });
         let tape = self.tapes.of(signature, |signature| {
-            DeviceTape::build(
-                &self.context,
-                &self.pool,
-                encoding,
-                weights.precision(),
-                signature,
-            )
+            DeviceTape::build(&self.context, &self.pool, encoding, kernel, signature)
         });
         let tensors = self
             .heap
@@ -207,10 +234,17 @@ impl Runtime {
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
+        // a graph that updates its parameters in place would have the tuning
+        // runs corrupt the very store the model trains on, so those measure a
+        // scratch store instead
+        let scratch = graph
+            .updates_weights()
+            .then(|| self.scratch_weights(graph, weights.precision()));
         let mut measured = self.profiles().into_iter().map(|profile| {
+            let measuring = scratch.as_ref().unwrap_or(weights);
             (
                 profile,
-                self.measure(&self.compile_with(graph, weights, profile)),
+                self.measure(&self.compile_with(graph, measuring, profile)),
             )
         });
         let (mut fastest, mut seconds) = measured
@@ -223,6 +257,12 @@ impl Runtime {
             }
         }
         self.compile_with(graph, weights, fastest)
+    }
+
+    fn scratch_weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
+        self.context.assert_alive();
+        let (scratch, _) = self.parameter_store(graph, precision);
+        scratch
     }
 
     fn measure(&self, program: &Program<'_>) -> f64 {
@@ -413,6 +453,10 @@ impl Runtime {
 
     pub fn declared_kernels(&self) -> usize {
         self.context.declared_kernels()
+    }
+
+    pub fn assembled_kernels(&self) -> usize {
+        self.tapes.kernels()
     }
 }
 

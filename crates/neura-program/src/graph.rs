@@ -552,6 +552,13 @@ impl<'g> Graph<'g> {
         Layout::of(&self.state.borrow().values, precision, alignment)
     }
 
+    pub fn updates_weights(&self) -> bool {
+        let state = self.state.borrow();
+        state.tasks.iter().any(|task| {
+            task.in_place && state.values[task.out as usize].residency == Residency::Parameter
+        })
+    }
+
     pub fn encode(&self, alignment: u64, profile: Profile, precision: Precision) -> Encoding {
         let state = self.state.borrow();
         Encoding::plan(&state, profile, alignment, precision)

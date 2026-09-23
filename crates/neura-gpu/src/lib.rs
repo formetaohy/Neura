@@ -1,7 +1,5 @@
 mod buffer;
 mod context;
-#[cfg(windows)]
-mod dxcompiler;
 mod library;
 mod pipeline;
 mod readback;

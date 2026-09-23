@@ -1,5 +1,5 @@
 use crate::pool::{Pool, Recycled};
-use neura_abi::{Geometry, Precision, StepRecord};
+use neura_abi::{Geometry, Kind, Precision, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
 use neura_program::Encoding;
 use neura_shader::Megakernel;
@@ -25,7 +25,7 @@ impl DeviceTape {
         context: &GpuContext,
         pool: &Arc<Pool>,
         encoding: Encoding,
-        precision: Precision,
+        kernel: Arc<Megakernel>,
         signature: Vec<u8>,
     ) -> Arc<Self> {
         let limits = context.limits();
@@ -46,9 +46,7 @@ impl DeviceTape {
                 limits.max_buffer_size,
             );
         }
-        let geometry = Geometry::of(encoding.profile());
-        let kernel =
-            context.declare(Megakernel::assemble(encoding.kinds(), geometry, precision).program());
+        let kernel = context.declare(kernel.program());
         let tasks_bytes = encoding.tasks().len() as u64;
         let values_bytes = encoding.values().len() as u64;
         let bounds_bytes = encoding.bounds().len() as u64;
@@ -88,15 +86,53 @@ impl DeviceTape {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct KernelIdentity {
+    kinds: Vec<Kind>,
+    geometry: Geometry,
+    precision: Precision,
+}
+
 pub(crate) struct Tapes {
+    kernels: Mutex<HashMap<KernelIdentity, Arc<Megakernel>>>,
     entries: Mutex<HashMap<u64, Vec<Weak<DeviceTape>>>>,
 }
 
 impl Tapes {
     pub(crate) fn new() -> Self {
         Self {
+            kernels: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn kernels(&self) -> usize {
+        self.kernels
+            .lock()
+            .expect("a kernel cache is never poisoned")
+            .len()
+    }
+
+    pub(crate) fn kernel(
+        &self,
+        kinds: &[Kind],
+        geometry: Geometry,
+        precision: Precision,
+        assemble: impl FnOnce() -> Megakernel,
+    ) -> Arc<Megakernel> {
+        let identity = KernelIdentity {
+            kinds: kinds.to_vec(),
+            geometry,
+            precision,
+        };
+        let mut kernels = self
+            .kernels
+            .lock()
+            .expect("a kernel cache is never poisoned");
+        kernels
+            .entry(identity)
+            .or_insert_with(|| Arc::new(assemble()))
+            .clone()
     }
 
     pub(crate) fn resident(&self) -> usize {
