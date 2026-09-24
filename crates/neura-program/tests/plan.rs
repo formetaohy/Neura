@@ -1,7 +1,6 @@
 use neura_abi::op;
 use neura_abi::{
-    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, ValueRecord,
-    WIDE, WORD_BYTES,
+    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES,
 };
 use neura_program::{Encoding, Graph, Init, Shape, Store};
 use std::mem::size_of;
@@ -939,86 +938,102 @@ fn a_chain_of_single_task_levels_rides_one_segment() {
 }
 
 #[test]
-fn a_concat_splits_into_two_writers_that_never_order_each_other() {
+fn a_fold_reads_a_leaf_no_later_than_the_task_it_lands_behind() {
     let graph = Graph::new();
-    let left = graph.input(Shape::matrix(4, 4));
-    let right = graph.input(Shape::matrix(3, 4));
-    let joined = graph.concat(2, left, right);
+    let state = graph.resident(Shape::vector(4));
+    let bias = graph.parameter(Shape::vector(4), Init::Zero);
+    let read = graph.mul(state, bias);
+    let patch = graph.fill(Shape::vector(4), 7.0);
+    graph.copy_into(state, patch);
+    let out = graph.relu(read);
+    graph.retain(out);
     let encoding = encoding(&graph);
-    assert_eq!(kinds(&encoding), vec![Kind::Concat, Kind::Concat]);
-    let tape = tape(&encoding);
-    let (first, second) = (tape[0], tape[1]);
-    assert_eq!(first.out, joined.id());
-    assert_eq!(second.out, joined.id());
-    assert_eq!((first.first, first.count), (0, 16));
-    assert_eq!((second.first, second.count), (0, 12));
-    assert_eq!(first.origin, 0);
-    assert_eq!(second.origin, 4);
-    assert_eq!(first.slot, 2);
-    assert!(
-        !follows(&encoding, 0, 1) && !follows(&encoding, 1, 0),
-        "the two parts write disjoint regions and share one wave",
-    );
-}
-
-#[test]
-fn a_gradient_routed_through_a_view_follows_the_fill_it_needs() {
-    let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(8, 4), Init::Zero);
-    let region = graph.slice(table, 3, 1, 3);
-    let data = graph.input(Shape::matrix(5, 8));
-    let product = graph.matmul(data, region);
-    let loss = graph.sum(product);
-    let gradients = graph.backward(loss);
-    let encoding = encoding(&graph);
-    let kinds = kinds(&encoding);
-    assert!(
-        kinds.contains(&Kind::Accumulate),
-        "the view hands its gradient to the store it carves out"
-    );
-    let tape = tape(&encoding);
-    let accumulates = tape
-        .iter()
-        .enumerate()
-        .filter(|(_, task)| task.kind == Kind::Accumulate.code())
-        .collect::<Vec<_>>();
-    assert_eq!(accumulates.len(), 1);
-    let (_, task) = accumulates[0];
-    assert_eq!(task.out, gradients.of(table).id());
-    assert_eq!(task.b, gradients.of(table).id());
-    assert_eq!(task.a, region.id());
-    assert_eq!(task.origin, 1);
-    for writer in writers(&encoding, gradients.of(table).id()) {
-        if writer == accumulates[0].0 {
-            continue;
-        }
-        assert!(
-            follows(&encoding, writer, accumulates[0].0),
-            "the fill precedes the accumulation"
-        );
-    }
-}
-
-#[test]
-fn a_slice_encodes_the_offset_its_region_starts_at() {
-    let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(6, 8), Init::Zero);
-    let region = graph.slice(table, 2, 2, 3);
-    graph.retain(region);
-    let encoding = encoding(&graph);
-    let values = encoding
-        .values()
-        .as_chunks::<{ size_of::<ValueRecord>() }>()
-        .0
-        .iter()
-        .map(|value| bytemuck::pod_read_unaligned::<ValueRecord>(value))
-        .collect::<Vec<_>>();
-    let base = values[table.id() as usize].base;
-    let region_base = values[region.id() as usize].base;
+    let writer = writers(&encoding, out.id());
+    assert_eq!(writer.len(), 1);
     assert_eq!(
-        region_base - base,
-        16,
-        "two skipped rows of eight columns offset the view by sixteen words",
+        kinds(&encoding)[writer[0]],
+        Kind::Unary,
+        "the rectifier kept a task of its own behind the write of the leaf it reads",
     );
-    assert_eq!(values[region.id() as usize].dims, [1, 1, 3, 8]);
+    assert!(readers(&encoding, read.id()).contains(&writer[0]));
+}
+
+#[test]
+fn a_fold_reaches_past_a_task_the_chain_does_not_read() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::vector(8), Init::Zero);
+    let right = graph.parameter(Shape::vector(8), Init::Zero);
+    let product = graph.mul(left, right);
+    let filler = graph.fill(Shape::vector(8), 1.0);
+    let out = graph.add(product, filler);
+    graph.retain(out);
+    let encoding = encoding(&graph);
+    assert_eq!(
+        encoding.task_count(),
+        2,
+        "the product folded into the sum it feeds and left the filler on the tape",
+    );
+    assert_eq!(kinds(&encoding), vec![Kind::Fill, Kind::Binary]);
+    let tape = tape(&encoding);
+    assert_eq!(tape[1].out, out.id());
+    assert_eq!(tape[1].steps, 1);
+}
+
+#[test]
+fn a_fold_keeps_the_storage_a_view_reads_written() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero);
+    let right = graph.parameter(Shape::matrix(2, 3), Init::Zero);
+    let product = graph.mul(left, right);
+    let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
+    let rows = graph.sum_rows(graph.transpose(product));
+    graph.retain(doubled);
+    graph.retain(rows);
+    let encoding = encoding(&graph);
+    assert_eq!(
+        writers(&encoding, product.id()).len(),
+        1,
+        "the product a view reads kept the task that writes it",
+    );
+    assert_eq!(encoding.task_count(), 3);
+}
+
+#[test]
+fn an_update_in_place_reads_the_tensor_it_writes_through_its_own_layout() {
+    let graph = Graph::new();
+    let table = graph.resident(Shape::matrix(4, 4));
+    let patch = graph.parameter(Shape::matrix(4, 4), Init::Zero);
+    graph.add_into(table, patch);
+    assert!(
+        refuses(|| {
+            graph.add_into(table, graph.transpose(table));
+        }),
+        "an update in place accepted a transposed view of the tensor it writes",
+    );
+    graph.add_into(table, graph.transpose(graph.transpose(table)));
+}
+
+#[test]
+fn a_shape_the_device_cannot_address_is_refused_before_it_is_built() {
+    let largest = Shape::of([46340, 46340]);
+    assert_eq!(largest.elements(), 2_147_395_600);
+    assert_eq!(largest.dims(), [1, 1, 46340, 46340]);
+    assert_eq!(largest.rows(), 46340);
+    assert_eq!(largest.strides(), [0, 0, 46340, 1]);
+    assert!(refuses(|| {
+        let _ = Shape::of([65536, 65536]);
+    }));
+    assert!(refuses(|| {
+        let _ = Shape::of([4096, 1024, 1024]);
+    }));
+    assert!(refuses(|| {
+        let _ = Shape::of([65536, 1, 1, 1]).combined(Shape::of([1, 1, 1, 65536]));
+    }));
+    assert!(refuses(|| {
+        let _ = Shape::of([0]);
+    }));
+    assert!(refuses(|| {
+        let _ = Shape::of([1, 1, 1, 1, 1]);
+    }));
+    assert_eq!(Shape::of([3, 4, 5]).reduced(2).elements(), 15);
 }

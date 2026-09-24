@@ -41,11 +41,7 @@ fn load(source: &mut String, geometry: usize) {
 }
 
 fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
-    writeln!(
-        source,
-        "fn run_matmul_{geometry}(task: Task, lid: u32, slot: u32) {{"
-    )
-    .unwrap();
+    writeln!(source, "fn run_matmul_{geometry}(task: Task, lid: u32) {{").unwrap();
     source.push_str("    let left = values[task.a];\n    let right = values[task.b];\n    let output = values[task.out];\n    let rows = left.dims.z;\n    let depth = left.dims.w;\n    let columns = right.dims.w;\n    let plane_columns = max(left.dims.y, right.dims.y);\n    let planes = max(left.dims.x, right.dims.x) * plane_columns;\n");
     writeln!(
         source,
@@ -155,7 +151,7 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
             let register = row * tile.register_columns() + column;
             writeln!(
                 source,
-                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output, out_plane + index{register}, chained(task, vec4<u32>(plane_row, plane_column, row{register}, column{register}), acc{register}, slot));\n        }}",
+                "        let row{register} = base_row + thread_row + {row}u;\n        let column{register} = base_column + thread_column + {column}u;\n        if (row{register} < rows && column{register} < columns) {{\n            let index{register} = row{register} * columns + column{register};\n            publish(output, out_plane + index{register}, chained(task, vec4<u32>(plane_row, plane_column, row{register}, column{register}), acc{register}));\n        }}",
             )
             .unwrap();
         }
@@ -164,19 +160,17 @@ fn run(source: &mut String, geometry: usize, tile: MatmulTile) {
 }
 
 fn dispatch(source: &mut String, tiles: usize) {
-    source.push_str(
-        "fn run_matmul(task: Task, lid: u32, slot: u32) {\n    switch (task.geometry) {\n",
-    );
+    source.push_str("fn run_matmul(task: Task, lid: u32) {\n    switch (task.geometry) {\n");
     for geometry in 0..tiles {
         writeln!(
             source,
-            "        case {geometry}u: {{ run_matmul_{geometry}(task, lid, slot); }}",
+            "        case {geometry}u: {{ run_matmul_{geometry}(task, lid); }}",
         )
         .unwrap();
     }
     writeln!(
         source,
-        "        default: {{ refuse(slot, {}, task.geometry); }}\n    }}\n}}\n",
+        "        default: {{ refuse({}, task.geometry); }}\n    }}\n}}\n",
         Kind::Matmul.constant(),
     )
     .unwrap();
@@ -185,7 +179,7 @@ fn dispatch(source: &mut String, tiles: usize) {
 fn fold(source: &mut String) {
     writeln!(
         source,
-        "fn run_matmul_fold(task: Task, lid: u32, slot: u32) {{
+        "fn run_matmul_fold(task: Task, lid: u32) {{
     let partials = values[task.a];
     let output = values[task.out];
     let elements = output.dims.x * output.dims.y * output.dims.z * output.dims.w;
@@ -194,7 +188,7 @@ fn fold(source: &mut String) {
         for (var split = 0u; split < task.splits; split = split + 1u) {{
             total = total + fetch(partials, split * elements + index);
         }}
-        publish(output, index, chained(task, coordinates(index, output.dims), total, slot));
+        publish(output, index, chained(task, coordinates(index, output.dims), total));
     }}
 }}"
     )

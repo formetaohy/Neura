@@ -14,14 +14,9 @@ fn component(at: vec4<u32>, axis: u32) -> u32 {
     return select(select(at.x, at.y, axis == 1u), select(at.z, at.w, axis == 3u), axis >= 2u);
 }
 
-fn row_origin(value: Value, row: u32) -> u32 {
-    let at = coordinates(row, vec4<u32>(value.dims.x, value.dims.y, value.dims.z, 1u));
-    return at.x * value.strides.x + at.y * value.strides.y + at.z * value.strides.z;
-}
-
-fn whole_index(value: f32, rows: u32, kind: u32, slot: u32) -> u32 {
+fn whole_index(value: f32, rows: u32, kind: u32) -> u32 {
     if (trunc(value) != value || !(value >= 0.0) || !(value < f32(rows))) {
-        refuse(slot, kind, 0u);
+        refuse(kind, 0u);
         return 0u;
     }
     return u32(value);

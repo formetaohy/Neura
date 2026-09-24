@@ -1,8 +1,10 @@
+use bytemuck::Zeroable;
 use neura_abi::Kind;
 use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
     BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, PlacementRecord, Profile,
-    SegmentRecord, StepRecord, Store, TaskRecord, ValueRecord, WIDE, WORD_BYTES, Window,
+    SegmentRecord, StepFields, StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord,
+    WIDE, WORD_BYTES, Window,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -17,20 +19,19 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, store), 4);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 76);
+    assert_eq!(size_of::<TaskRecord>(), 72);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
-    assert_eq!(offset_of!(TaskRecord, origin), 24);
-    assert_eq!(offset_of!(TaskRecord, splits), 28);
-    assert_eq!(offset_of!(TaskRecord, a), 36);
-    assert_eq!(offset_of!(TaskRecord, param), 48);
-    assert_eq!(offset_of!(TaskRecord, chain), 52);
-    assert_eq!(offset_of!(TaskRecord, steps), 56);
-    assert_eq!(offset_of!(TaskRecord, stride_rows), 60);
-    assert_eq!(offset_of!(TaskRecord, stride_columns), 64);
-    assert_eq!(offset_of!(TaskRecord, pad_rows), 68);
-    assert_eq!(offset_of!(TaskRecord, pad_columns), 72);
+    assert_eq!(offset_of!(TaskRecord, splits), 24);
+    assert_eq!(offset_of!(TaskRecord, a), 32);
+    assert_eq!(offset_of!(TaskRecord, param), 44);
+    assert_eq!(offset_of!(TaskRecord, chain), 48);
+    assert_eq!(offset_of!(TaskRecord, steps), 52);
+    assert_eq!(offset_of!(TaskRecord, stride_rows), 56);
+    assert_eq!(offset_of!(TaskRecord, stride_columns), 60);
+    assert_eq!(offset_of!(TaskRecord, pad_rows), 64);
+    assert_eq!(offset_of!(TaskRecord, pad_columns), 68);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -188,11 +189,12 @@ fn mentions(formula: &str, name: &str) -> bool {
 
 #[test]
 fn a_record_declares_what_the_device_reads() {
-    let mut value: ValueRecord = bytemuck::Zeroable::zeroed();
-    value.base = 6;
-    value.store = Store::Weights.code();
-    value.dims = [1, 2, 3, 4];
-    value.strides = [12, 6, 2, 1];
+    let value = ValueRecord::of(ValueFields {
+        base: 6,
+        store: Store::Weights.code(),
+        dims: [1, 2, 3, 4],
+        strides: [12, 6, 2, 1],
+    });
     let bytes = bytemuck::bytes_of(&value);
     assert_eq!(bytes.len(), 48);
     assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 6);
@@ -202,27 +204,28 @@ fn a_record_declares_what_the_device_reads() {
     );
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 1);
     assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);
-    let mut task: TaskRecord = bytemuck::Zeroable::zeroed();
-    task.kind = Kind::Matmul.code();
-    task.op = op::MUL;
-    task.geometry = 2;
-    task.first = 3;
-    task.count = 5;
-    task.origin = 9;
-    task.splits = 6;
-    task.a = 2;
-    task.b = 3;
-    task.c = 4;
-    task.out = 1;
-    task.param = 0.5;
-    task.chain = 7;
-    task.steps = 2;
-    task.stride_rows = 1;
-    task.stride_columns = 2;
-    task.pad_rows = 3;
-    task.pad_columns = 4;
+    let task = TaskRecord::of(TaskFields {
+        kind: Kind::Matmul.code(),
+        op: op::MUL,
+        geometry: 2,
+        first: 3,
+        count: 5,
+        slot: 0,
+        splits: 6,
+        out: 1,
+        a: 2,
+        b: 3,
+        c: 4,
+        param: 0.5,
+        chain: 7,
+        steps: 2,
+        stride_rows: 1,
+        stride_columns: 2,
+        pad_rows: 3,
+        pad_columns: 4,
+    });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 76);
+    assert_eq!(bytes.len(), 72);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -230,24 +233,23 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), op::MUL);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 5);
-    assert_eq!(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()), 9);
-    assert_eq!(u32::from_ne_bytes(bytes[28..32].try_into().unwrap()), 6);
-    assert_eq!(f32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 0.5);
-    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 7);
-    assert_eq!(u32::from_ne_bytes(bytes[56..60].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 1);
-    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[68..72].try_into().unwrap()), 3);
-    assert_eq!(u32::from_ne_bytes(bytes[72..76].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()), 6);
+    assert_eq!(f32::from_ne_bytes(bytes[44..48].try_into().unwrap()), 0.5);
+    assert_eq!(u32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 7);
+    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[56..60].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[68..72].try_into().unwrap()), 4);
 }
 
 #[test]
 fn a_step_declares_what_the_device_applies() {
-    let step = StepRecord {
+    let step = StepRecord::of(StepFields {
         op: op::RELU,
         operand: 9,
         swapped: 1,
-    };
+    });
     let bytes = bytemuck::bytes_of(&step);
     assert_eq!(bytes.len(), 12);
     assert_eq!(
@@ -464,4 +466,28 @@ fn a_matmul_tile_refuses_a_geometry_its_workgroup_cannot_carry() {
     assert!(refuses(|| {
         let _ = MatmulTile::new(16, 16, 0, 8, 8);
     }));
+}
+
+#[test]
+fn a_zeroed_record_holds_no_number_the_shader_could_read() {
+    let bounds = BoundsRecord::zeroed();
+    let placement = PlacementRecord::zeroed();
+    let segment = SegmentRecord::zeroed();
+    let step = StepRecord::zeroed();
+    let task = TaskRecord::zeroed();
+    let value = ValueRecord::zeroed();
+    let records: [&[u8]; 6] = [
+        bytemuck::bytes_of(&bounds),
+        bytemuck::bytes_of(&placement),
+        bytemuck::bytes_of(&segment),
+        bytemuck::bytes_of(&step),
+        bytemuck::bytes_of(&task),
+        bytemuck::bytes_of(&value),
+    ];
+    for bytes in records {
+        assert!(
+            bytes.iter().all(|byte| *byte == 0),
+            "a zeroed record carries {bytes:?} where the shader reads every byte of it",
+        );
+    }
 }

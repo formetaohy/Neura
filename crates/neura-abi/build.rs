@@ -72,12 +72,13 @@ fn emit_record(
     writeln!(output, "#[repr(C)]").unwrap();
     writeln!(
         output,
-        "#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]"
+        "#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod)]"
     )
     .unwrap();
     writeln!(output, "pub struct {name}{RECORD_SUFFIX} {{").unwrap();
     let mut offset = 0u32;
     let mut pads = 0;
+    let mut fields = Vec::new();
     for member in members {
         let field = member
             .name
@@ -90,12 +91,13 @@ fn emit_record(
         );
         if offset < member.offset {
             let gap = member.offset - offset;
-            writeln!(output, "    pub _wgsl_pad{pads}: [u8; {gap}],").unwrap();
+            writeln!(output, "    _wgsl_pad{pads}: [u8; {gap}],").unwrap();
             pads += 1;
             offset += gap;
         }
         let rust = rust_type(module, member.ty, name, field);
         writeln!(output, "    pub {field}: {rust},").unwrap();
+        fields.push((field.to_owned(), rust));
         offset += rust_size(module, member.ty, name, field);
     }
     assert!(
@@ -103,10 +105,56 @@ fn emit_record(
         "the rust fields of {name} outrun the {span} byte shader struct",
     );
     if offset < span {
-        writeln!(output, "    pub _wgsl_pad{pads}: [u8; {}],", span - offset).unwrap();
+        writeln!(output, "    _wgsl_pad{pads}: [u8; {}],", span - offset).unwrap();
     }
     writeln!(output, "}}").unwrap();
     writeln!(output).unwrap();
+    emit_constructor(output, name, &fields, pads);
+}
+
+fn emit_constructor(output: &mut String, name: &str, fields: &[(String, String)], pads: usize) {
+    writeln!(output, "#[derive(Clone, Copy, Debug, PartialEq)]").unwrap();
+    writeln!(output, "pub struct {name}Fields {{").unwrap();
+    for (field, rust) in fields {
+        writeln!(output, "    pub {field}: {rust},").unwrap();
+    }
+    writeln!(output, "}}").unwrap();
+    writeln!(output).unwrap();
+    writeln!(output, "impl {name}{RECORD_SUFFIX} {{").unwrap();
+    writeln!(output, "    pub fn of(fields: {name}Fields) -> Self {{").unwrap();
+    writeln!(output, "        Self {{").unwrap();
+    for (field, _) in fields {
+        writeln!(output, "            {field}: fields.{field},").unwrap();
+    }
+    for pad in 0..pads {
+        writeln!(output, "            _wgsl_pad{pad}: [0; _],").unwrap();
+    }
+    writeln!(output, "        }}").unwrap();
+    writeln!(output, "    }}").unwrap();
+    writeln!(output, "}}").unwrap();
+    writeln!(output).unwrap();
+    writeln!(
+        output,
+        "unsafe impl bytemuck::Zeroable for {name}{RECORD_SUFFIX} {{"
+    )
+    .unwrap();
+    writeln!(output, "    fn zeroed() -> Self {{").unwrap();
+    writeln!(output, "        Self::of({name}Fields {{").unwrap();
+    for (field, rust) in fields {
+        writeln!(output, "            {field}: {},", zero_literal(rust)).unwrap();
+    }
+    writeln!(output, "        }})").unwrap();
+    writeln!(output, "    }}").unwrap();
+    writeln!(output, "}}").unwrap();
+    writeln!(output).unwrap();
+}
+
+fn zero_literal(rust: &str) -> &'static str {
+    match rust {
+        "[u32; 4]" => "[0; 4]",
+        "f32" => "0.0",
+        _ => "0",
+    }
 }
 
 fn rust_type(module: &Module, ty: Handle<Type>, owner: &str, field: &str) -> String {

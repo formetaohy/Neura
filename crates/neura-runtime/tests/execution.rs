@@ -1127,3 +1127,73 @@ fn a_tensor_of_every_rank_reads_the_row_it_broadcasts() {
         assert_close(&runtime.read(&program, shifted), &expected, 1e-6);
     }
 }
+
+#[test]
+fn a_task_reads_a_leaf_before_the_task_that_rewrites_it() {
+    let graph = Graph::new();
+    let state = graph.resident(Shape::vector(4));
+    let bias = graph.input(Shape::vector(4));
+    let read = graph.mul(state, bias);
+    let patch = graph.fill(Shape::vector(4), 7.0);
+    graph.copy_into(state, patch);
+    let out = graph.relu(read);
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, bias, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[0.0; 4], 1e-6);
+    assert_close(&runtime.read(&program, state), &[7.0; 4], 1e-6);
+}
+
+#[test]
+fn a_task_reads_a_parameter_before_the_task_that_updates_it() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(0.5));
+    let bias = graph.input(Shape::vector(4));
+    let read = graph.mul(weight, bias);
+    let step = graph.fill(Shape::vector(4), 1.0);
+    graph.add_into(weight, step);
+    let out = graph.relu(read);
+    graph.retain(out);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, bias, &[1.0, 2.0, 3.0, 4.0]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, out), &[0.5, 1.0, 1.5, 2.0], 1e-6);
+    assert_close(&runtime.read(&program, weight), &[1.5; 4], 1e-6);
+}
+
+#[test]
+fn a_storage_a_view_reads_keeps_the_task_that_writes_it() {
+    let graph = Graph::new();
+    let left = graph.input(Shape::matrix(2, 3));
+    let right = graph.input(Shape::matrix(2, 3));
+    let product = graph.mul(left, right);
+    let flipped = graph.transpose(product);
+    let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
+    let columns = graph.sum_rows(flipped);
+    graph.retain(doubled);
+    graph.retain(columns);
+    let runtime = open();
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    let left_values = random(6, 3);
+    let right_values = random(6, 5);
+    runtime.write(&program, left, &left_values);
+    runtime.write(&program, right, &right_values);
+    runtime.run(&program);
+    let products = left_values
+        .iter()
+        .zip(&right_values)
+        .map(|(left, right)| left * right)
+        .collect::<Vec<_>>();
+    let expected = products.iter().map(|value| value + 1.0).collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, doubled), &expected, 1e-6);
+    let expected = (0..3)
+        .map(|column| (0..2).map(|row| products[row * 3 + column]).sum::<f32>())
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, columns), &expected, 1e-6);
+}

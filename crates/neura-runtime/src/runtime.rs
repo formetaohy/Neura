@@ -4,8 +4,7 @@ use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
-    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, REFUSAL_BYTES,
-    WORD_BYTES, op,
+    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
 };
 use neura_gpu::{
     BufferUsages, ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback,
@@ -172,16 +171,17 @@ impl Runtime {
             .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
     }
 
-    pub fn checkpoint<'r>(&self, program: &Program<'r>) -> Checkpoint {
-        self.assert_owns(program);
+    pub fn checkpoint(&self, weights: &Weights<'_>) -> Checkpoint {
         self.context.assert_alive();
-        let weights = program.weights();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
         let bytes = weights.region().bytes();
-        let total = bytes + REFUSAL_BYTES;
         let staging = Recycled::claim(
             &self.pool,
             "neura checkpoint",
-            total,
+            bytes,
             BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         );
         let device = self.context.device();
@@ -193,24 +193,17 @@ impl Runtime {
             0,
             bytes,
         );
-        submission.copy_buffer_to_buffer(
-            program.refusal.buffer().buffer(),
-            0,
-            staging.buffer().buffer(),
-            bytes,
-            REFUSAL_BYTES,
-        );
         let (sender, completed) = mpsc::channel();
         submission.map_buffer_on_submit(
             staging.buffer().buffer(),
             MapMode::Read,
-            ..total,
+            ..bytes,
             move |result| {
                 let _ = sender.send(result);
             },
         );
         let submission = submission.submit(self.context.queue());
-        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes, total);
+        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes);
         Checkpoint::of(weights.region(), payload)
     }
 
@@ -221,7 +214,6 @@ impl Runtime {
         submission: wgpu::SubmissionIndex,
         completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
         bytes: u64,
-        total: u64,
     ) -> Vec<u8> {
         device
             .poll(PollType::Wait {
@@ -237,20 +229,13 @@ impl Runtime {
             .unwrap_or_else(|error: BufferAsyncError| {
                 panic!("mapping the checkpoint failed: {error}")
             });
-        let words = staging
+        let payload = staging
             .buffer()
             .buffer()
-            .slice(..total)
+            .slice(..bytes)
             .get_mapped_range()
-            .expect("a finished checkpoint is mapped");
-        let refusal = u32::from_ne_bytes(
-            words[bytes as usize..total as usize]
-                .try_into()
-                .expect("a fault word was copied back"),
-        );
-        assert_eq!(refusal, 0, "{}", refusal_message(refusal));
-        let payload = words[..bytes as usize].to_vec();
-        drop(words);
+            .expect("a finished checkpoint is mapped")
+            .to_vec();
         staging.buffer().buffer().unmap();
         payload
     }
@@ -419,12 +404,12 @@ impl Runtime {
 
     pub fn write(&self, program: &Program<'_>, value: Value<'_>, data: &[f32]) {
         self.assert_owns(program);
+        let span = program.span(value);
         assert!(
             program.readable(value),
             "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to write it",
             value.id(),
         );
-        let span = program.span(value);
         assert_eq!(
             data.len(),
             span.elements as usize,
@@ -454,6 +439,10 @@ impl Runtime {
         self.assert_owns(program);
         self.context.assert_alive();
         assert!(!values.is_empty(), "a pull names at least one tensor");
+        let spans = values
+            .iter()
+            .map(|value| program.span(*value))
+            .collect::<Vec<_>>();
         for value in values {
             assert!(
                 program.readable(*value),
@@ -461,10 +450,6 @@ impl Runtime {
                 value.id(),
             );
         }
-        let spans = values
-            .iter()
-            .map(|value| program.span(*value))
-            .collect::<Vec<_>>();
         let precision = program.weights.precision();
         let total = spans
             .iter()
@@ -630,8 +615,6 @@ fn refusal_message(word: u32) -> String {
         Kind::Fill
         | Kind::Broadcast
         | Kind::SumChunk
-        | Kind::Concat
-        | Kind::Accumulate
         | Kind::MatmulFold
         | Kind::Softmax
         | Kind::SoftmaxGrad

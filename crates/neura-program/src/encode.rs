@@ -1,3 +1,4 @@
+use crate::access::{self, Access, Reads};
 use crate::fuse;
 use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::layout::{Layout, Region, store_of};
@@ -5,8 +6,8 @@ use crate::lower;
 use crate::lower::Task;
 use crate::schedule::{self, Dispatch};
 use neura_abi::{
-    BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, SegmentRecord, StepRecord,
-    Store, TaskRecord, ValueRecord, WORD_BYTES,
+    BoundsFields, BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, SegmentRecord,
+    StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use std::mem::size_of;
 
@@ -134,6 +135,7 @@ impl Encoding {
         let kinds = carried_kinds(tasks);
         let layout = Layout::of(values, precision, alignment);
         assert_writers_precede_readers(values, tasks);
+        assert_units_keep_their_order(tasks);
         let schedule = schedule::Schedule::of(values, tasks);
         let order = schedule.order();
         let ends = schedule.ends();
@@ -148,14 +150,15 @@ impl Encoding {
 
         let mut records = Vec::new();
         for (id, info) in values.iter().enumerate() {
-            let address = layout.address(values, &offsets, id as u32) + u64::from(info.offset);
-            let mut record: ValueRecord = bytemuck::Zeroable::zeroed();
-            record.base = u32::try_from(address).unwrap_or_else(|_| {
-                panic!("value {id} lies at {address}, beyond the device address space")
+            let address = layout.address(values, &offsets, id as u32);
+            let record = ValueRecord::of(ValueFields {
+                base: u32::try_from(address).unwrap_or_else(|_| {
+                    panic!("value {id} lies at {address}, beyond the device address space")
+                }),
+                store: layout.store(values, id as u32).code(),
+                dims: info.shape.dims(),
+                strides: info.strides,
             });
-            record.store = layout.store(values, id as u32).code();
-            record.dims = info.shape.dims();
-            record.strides = info.strides;
             records.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
@@ -186,8 +189,6 @@ impl Encoding {
                 | Kind::Fill
                 | Kind::Broadcast
                 | Kind::SumChunk
-                | Kind::Concat
-                | Kind::Accumulate
                 | Kind::Softmax
                 | Kind::SoftmaxGrad
                 | Kind::LogSoftmax
@@ -207,26 +208,26 @@ impl Encoding {
                 task.kind != Kind::Matmul || task.splits == 1 || task.chain.is_empty(),
                 "a product split across the depth hands its chain to the fold",
             );
-            let mut record: TaskRecord = bytemuck::Zeroable::zeroed();
-            record.kind = task.kind.code();
-            record.op = task.op;
-            record.geometry = geometry;
-            record.first = task.first;
-            record.count = task.count;
-            record.slot = task.slot;
-            record.origin = task.origin;
-            record.splits = task.splits;
-            record.out = task.out;
-            record.a = task.inputs[0];
-            record.b = task.inputs[1];
-            record.c = task.inputs[2];
-            record.param = task.param;
-            record.chain = (steps.len() / size_of::<StepRecord>()) as u32;
-            record.steps = task.chain.len() as u32;
-            record.stride_rows = task.window.stride_rows();
-            record.stride_columns = task.window.stride_columns();
-            record.pad_rows = task.window.pad_rows();
-            record.pad_columns = task.window.pad_columns();
+            let record = TaskRecord::of(TaskFields {
+                kind: task.kind.code(),
+                op: task.op,
+                geometry,
+                first: task.first,
+                count: task.count,
+                slot: task.slot,
+                splits: task.splits,
+                out: task.out,
+                a: task.inputs[0],
+                b: task.inputs[1],
+                c: task.inputs[2],
+                param: task.param,
+                chain: (steps.len() / size_of::<StepRecord>()) as u32,
+                steps: task.chain.len() as u32,
+                stride_rows: task.window.stride_rows(),
+                stride_columns: task.window.stride_columns(),
+                pad_rows: task.window.pad_rows(),
+                pad_columns: task.window.pad_columns(),
+            });
             for step in &task.chain {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
             }
@@ -239,9 +240,9 @@ impl Encoding {
 
         let mut bounds = Vec::new();
         for dispatch in schedule.dispatches() {
-            let record = BoundsRecord {
+            let record = BoundsRecord::of(BoundsFields {
                 first_segment: dispatch.first_segment,
-            };
+            });
             bounds.extend_from_slice(bytemuck::bytes_of(&record));
             bounds.resize(bounds.len().next_multiple_of(alignment as usize), 0);
         }
@@ -432,24 +433,34 @@ fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
 fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
     let mut last_writer = vec![None::<usize>; values.len()];
     for (position, task) in tasks.iter().enumerate() {
-        let out = values[task.out as usize].storage as usize;
-        for value in task.reads() {
-            let storage = values[value as usize].storage as usize;
-            if task.in_place && storage == out {
+        let access = Access::of(values, task);
+        for storage in access.reads() {
+            if access.in_place() && *storage == access.write() {
                 continue;
             }
-            match last_writer[storage] {
+            match last_writer[*storage as usize] {
                 Some(writer) => assert!(
                     writer < position,
                     "task {position} reads a tensor that its own tape only writes later",
                 ),
                 None => assert!(
-                    held(values, storage),
+                    held(values, *storage as usize),
                     "task {position} reads a tensor no task of the tape writes before it",
                 ),
             }
         }
-        last_writer[out] = Some(position);
+        last_writer[access.write() as usize] = Some(position);
+    }
+}
+
+fn assert_units_keep_their_order(tasks: &[Task]) {
+    for pair in tasks.windows(2) {
+        assert!(
+            pair[0].unit <= pair[1].unit,
+            "a task of the fold that became unit {} stands before a task of unit {}",
+            pair[1].unit,
+            pair[0].unit,
+        );
     }
 }
 
@@ -458,19 +469,20 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
     let mut readers = Vec::new();
     for (position, index) in order.iter().enumerate() {
         let task = &tasks[*index as usize];
-        let aliases = reads_every_element_in_place(values, task);
-        touch(values, &mut live, task.out, position, false, None);
+        let write = access::storage(values, task.out);
+        let aliases = reads_every_element_in_place(values, task, write);
+        touch(&mut live, write, position, false, None);
         readers.clear();
-        for input in task.reads() {
-            if readers.contains(&input) {
+        for value in task.reads() {
+            if readers.contains(&value) {
                 continue;
             }
-            readers.push(input);
-            let in_place = aliases && input != task.out;
+            readers.push(value);
+            let storage = access::storage(values, value);
+            let in_place = aliases && storage != write;
             touch(
-                values,
                 &mut live,
-                input,
+                storage,
                 position,
                 true,
                 in_place.then_some(position),
@@ -480,11 +492,11 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
     live
 }
 
-fn reads_every_element_in_place(values: &[ValueInfo], task: &Task) -> bool {
+fn reads_every_element_in_place(values: &[ValueInfo], task: &Task, write: u32) -> bool {
     if !task.kind.pointwise() {
         return false;
     }
-    let out = &values[task.out as usize];
+    let out = &values[write as usize];
     task.reads().all(|value| {
         let value = &values[value as usize];
         value.shape == out.shape && value.strides == out.strides
@@ -492,15 +504,13 @@ fn reads_every_element_in_place(values: &[ValueInfo], task: &Task) -> bool {
 }
 
 fn touch(
-    values: &[ValueInfo],
     live: &mut [Option<Live>],
-    value: u32,
+    storage: u32,
     position: usize,
     read: bool,
     aliased_at: Option<usize>,
 ) {
-    let storage = values[value as usize].storage as usize;
-    match &mut live[storage] {
+    match &mut live[storage as usize] {
         Some(entry) => {
             entry.first = entry.first.min(position);
             entry.last = entry.last.max(position);

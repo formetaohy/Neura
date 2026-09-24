@@ -594,3 +594,97 @@ fn a_policy_gradient_matches_finite_differences() {
         runtime.write(&program, *parameter, &values);
     }
 }
+
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
+fn random(elements: u32, seed: u32) -> Vec<f32> {
+    let mut state = seed;
+    (0..elements)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 / (1u32 << 24) as f32) - 0.5
+        })
+        .collect()
+}
+
+#[test]
+fn a_gradient_walks_back_through_a_view() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(
+        Shape::matrix(2, 3),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let observations = graph.input(Shape::matrix(4, 2));
+    let turned = graph.input(Shape::matrix(5, 3));
+    let targets = graph.input(Shape::matrix(4, 3));
+    let turned_targets = graph.input(Shape::matrix(5, 2));
+    let squared_targets = graph.input(Shape::matrix(3, 4));
+    let hidden = graph.relu(graph.matmul(observations, weight));
+    let flipped = graph.transpose(hidden);
+    let loss = graph.add(
+        graph.add(
+            mse_loss(&graph, graph.matmul(observations, weight), targets),
+            mse_loss(
+                &graph,
+                graph.matmul(turned, graph.transpose(weight)),
+                turned_targets,
+            ),
+        ),
+        mse_loss(&graph, graph.mul(flipped, flipped), squared_targets),
+    );
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph, Precision::Single);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, observations, &random(8, 3));
+    runtime.write(&program, turned, &random(15, 5));
+    runtime.write(&program, targets, &random(12, 7));
+    runtime.write(&program, turned_targets, &random(10, 11));
+    runtime.write(&program, squared_targets, &random(12, 13));
+    runtime.run(&program);
+    let values = runtime.read(&program, weight);
+    let analytic = runtime.read(&program, gradients.of(weight));
+    assert_eq!(
+        analytic.len(),
+        values.len(),
+        "the gradient of a weight reaches the weight it belongs to",
+    );
+    for element in sampled(values.len()) {
+        let step = 0.01 * values[element].abs().max(0.1);
+        let mut probe = values.clone();
+        probe[element] += step;
+        runtime.write(&program, weight, &probe);
+        runtime.run(&program);
+        let high = runtime.read(&program, loss)[0];
+        probe[element] -= 2.0 * step;
+        runtime.write(&program, weight, &probe);
+        runtime.run(&program);
+        let low = runtime.read(&program, loss)[0];
+        let numeric = (high - low) / (2.0 * step);
+        assert_slope(element, analytic[element], numeric, values.len());
+    }
+    runtime.write(&program, weight, &values);
+}
+
+#[test]
+fn a_gradient_of_a_view_lands_on_the_tensor_that_owns_its_storage() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(3, 2), Init::Zero);
+    let turned = graph.transpose(weight);
+    let data = graph.input(Shape::matrix(4, 2));
+    let loss = graph.sum(graph.matmul(data, turned));
+    let gradients = graph.backward(loss);
+    assert!(
+        refuses(|| {
+            let _ = gradients.of(turned);
+        }),
+        "a gradient landed on a view instead of the tensor that owns its storage",
+    );
+    graph.retain(gradients.of(weight));
+}

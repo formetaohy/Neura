@@ -18,7 +18,6 @@ struct Task {
     first: u32,
     count: u32,
     slot: u32,
-    origin: u32,
     splits: u32,
     out: u32,
     a: u32,

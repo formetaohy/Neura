@@ -2,7 +2,8 @@ use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::tape::DeviceTape;
 use neura_abi::{
-    BoundsRecord, MatmulTile, Placement, PlacementRecord, Precision, Profile, WORD_BYTES,
+    BoundsRecord, MatmulTile, Placement, PlacementFields, PlacementRecord, Precision, Profile,
+    REFUSAL_BYTES, WORD_BYTES,
 };
 use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_program::{Region, Span, Value};
@@ -80,11 +81,10 @@ impl<'r> Program<'r> {
         weights: Weights<'r>,
     ) -> Self {
         let pool = tape.pool();
-        let refusal_words = 1 + tape.encoding.segments().len() as u64;
         let refusal = Recycled::claim(
             pool,
             "neura refusal",
-            refusal_words * WORD_BYTES,
+            REFUSAL_BYTES,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         let placement = Recycled::claim(
@@ -100,18 +100,17 @@ impl<'r> Program<'r> {
             tensors.offset(),
             Some(tensors.bytes()),
         );
-        clearing.clear_buffer(refusal.buffer().buffer(), 0, None);
         clearing.submit(queue);
         placement.buffer().write(
             queue,
-            bytemuck::bytes_of(&PlacementRecord {
+            bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
                 tensors: u32::try_from(tensors.word()).unwrap_or_else(|_| {
                     panic!("the tensors of a program start beyond the device address space")
                 }),
                 weights: u32::try_from(weights.offset() / WORD_BYTES).unwrap_or_else(|_| {
                     panic!("the weights of a program start beyond the device address space")
                 }),
-            }),
+            })),
         );
         let group = tape.kernel.bind_group(&[
             BindGroupEntry {

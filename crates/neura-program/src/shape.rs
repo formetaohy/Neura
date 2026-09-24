@@ -1,13 +1,19 @@
 use neura_abi::MAX_RANK;
 
+const ELEMENT_LIMIT: u64 = i32::MAX as u64;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Shape {
     dims: [u32; 4],
+    elements: u32,
 }
 
 impl Shape {
     pub const fn scalar() -> Self {
-        Self { dims: [1; 4] }
+        Self {
+            dims: [1; 4],
+            elements: 1,
+        }
     }
 
     pub fn vector(elements: u32) -> Self {
@@ -26,24 +32,28 @@ impl Shape {
             dims.len(),
         );
         let mut padded = [1u32; 4];
+        let mut elements = 1u64;
         for (slot, dim) in padded[4 - dims.len()..].iter_mut().zip(dims) {
             assert!(*dim > 0, "a tensor dimension must be positive");
             *slot = *dim;
+            elements *= u64::from(*dim);
         }
-        Self { dims: padded }
+        assert!(
+            elements <= ELEMENT_LIMIT,
+            "a tensor of {elements} elements outruns the index space the device addresses",
+        );
+        Self {
+            dims: padded,
+            elements: elements as u32,
+        }
     }
 
     pub const fn dims(self) -> [u32; 4] {
         self.dims
     }
 
-    pub fn elements(self) -> u32 {
-        let elements = self.dims.iter().product::<u32>();
-        assert!(
-            elements < i32::MAX as u32,
-            "a tensor of {elements} elements outruns the device index space",
-        );
-        elements
+    pub const fn elements(self) -> u32 {
+        self.elements
     }
 
     pub fn strides(self) -> [u32; 4] {
@@ -75,7 +85,7 @@ impl Shape {
         for (axis, dim) in dims.iter_mut().enumerate() {
             *dim = self.dims[axis].max(other.dims[axis]);
         }
-        Self { dims }
+        Self::of(dims)
     }
 
     pub fn fits_within(self, other: Self) -> bool {
@@ -87,13 +97,18 @@ impl Shape {
     }
 
     pub fn reduced(self, axis: u32) -> Self {
+        assert!(
+            axis < MAX_RANK,
+            "a fold names one of the {MAX_RANK} axes of {:?}",
+            self.dims,
+        );
         let mut dims = self.dims;
         dims[axis as usize] = 1;
-        Self { dims }
+        Self::of(dims)
     }
 
     pub fn rows(self) -> u32 {
-        self.elements() / self.dims[3]
+        self.elements / self.dims[3]
     }
 
     pub fn columns(self) -> u32 {
@@ -101,19 +116,6 @@ impl Shape {
     }
 
     pub fn is_scalar(self) -> bool {
-        self.elements() == 1
-    }
-
-    pub fn packs_contiguously(self, strides: [u32; 4]) -> bool {
-        let mut expected = 1u32;
-        for axis in (0..MAX_RANK as usize).rev() {
-            if self.dims[axis] > 1 {
-                if strides[axis] != expected {
-                    return false;
-                }
-                expected *= self.dims[axis];
-            }
-        }
-        true
+        self.elements == 1
     }
 }

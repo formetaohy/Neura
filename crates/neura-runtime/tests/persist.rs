@@ -57,7 +57,7 @@ fn a_checkpoint_outlives_its_runtime() {
         runtime.run(&program);
     }
     let prediction = runtime.read(&program, model.prediction);
-    let checkpoint = runtime.checkpoint(&program);
+    let checkpoint = runtime.checkpoint(&weights);
 
     let another = open();
     let rebuilt = Graph::new();
@@ -80,12 +80,12 @@ fn a_store_restores_its_trained_parameters() {
     runtime.write(&program, model.observations, &observations);
     runtime.run(&program);
     let fresh = runtime.read(&program, model.prediction);
-    let initial = runtime.checkpoint(&program);
+    let initial = runtime.checkpoint(&weights);
     for _ in 0..40 {
         runtime.run(&program);
     }
     let prediction = runtime.read(&program, model.prediction);
-    let checkpoint = runtime.checkpoint(&program);
+    let checkpoint = runtime.checkpoint(&weights);
 
     runtime.restore(&weights, &initial);
     runtime.run(&program);
@@ -100,8 +100,7 @@ fn a_checkpoint_of_another_region_is_refused() {
     let runtime = open();
     let graph = Graph::new();
     let _model = network(&graph, 5);
-    let store = runtime.weights(&graph, Precision::Single);
-    let checkpoint = runtime.checkpoint(&runtime.compile(&graph, &store));
+    let checkpoint = runtime.checkpoint(&runtime.weights(&graph, Precision::Single));
 
     let wider = Graph::new();
     let _wider = network(&wider, 6);
@@ -127,7 +126,7 @@ fn a_half_store_round_trips_bit_for_bit() {
     runtime.write(&program, model.observations, &batch(11));
     runtime.run(&program);
     let before = runtime.read(&program, model.prediction);
-    let checkpoint = runtime.checkpoint(&program);
+    let checkpoint = runtime.checkpoint(&weights);
     assert_eq!(checkpoint.precision(), Precision::Half);
 
     let reloaded = runtime.load(&graph, &checkpoint, Precision::Half);

@@ -21,7 +21,8 @@ pub use placement::Placement;
 pub use precision::Precision;
 pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
 pub use records::{
-    BoundsRecord, PlacementRecord, SegmentRecord, StepRecord, TaskRecord, ValueRecord,
+    BoundsFields, BoundsRecord, PlacementFields, PlacementRecord, SegmentFields, SegmentRecord,
+    StepFields, StepRecord, TaskFields, TaskRecord, ValueFields, ValueRecord,
 };
 pub use store::Store;
 pub use window::Window;

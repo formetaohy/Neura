@@ -1,3 +1,4 @@
+mod access;
 mod encode;
 mod fuse;
 mod graph;

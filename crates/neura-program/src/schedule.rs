@@ -1,6 +1,7 @@
+use crate::access::Access;
 use crate::graph::ValueInfo;
 use crate::lower::Task;
-use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentRecord};
+use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentFields, SegmentRecord};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dispatch {
@@ -53,10 +54,10 @@ impl Schedule {
             for chunk in grouped[cursor..last].chunks(MAX_DISPATCH_SEGMENTS as usize) {
                 let first_segment = segments.len() as u32;
                 for segment in chunk {
-                    segments.push(SegmentRecord {
+                    segments.push(SegmentRecord::of(SegmentFields {
                         first: order.len() as u32,
                         count: packed.segments[*segment].len() as u32,
-                    });
+                    }));
                     order.extend(packed.segments[*segment].iter().copied());
                 }
                 dispatches.push(Dispatch {
@@ -97,31 +98,25 @@ fn accesses(values: &[ValueInfo], tasks: &[Task], mut visit: impl FnMut(u32, u32
     let mut readers = vec![Vec::<u32>::new(); values.len()];
     for (index, task) in tasks.iter().enumerate() {
         let index = index as u32;
-        let mut reads = task
-            .reads()
-            .map(|value| values[value as usize].storage)
-            .collect::<Vec<_>>();
-        reads.sort_unstable();
-        reads.dedup();
-        for storage in &reads {
+        let access = Access::of(values, task);
+        for storage in access.reads() {
             for writer in &writers[*storage as usize] {
                 visit(*writer, index);
             }
         }
-        let out = values[task.out as usize].storage;
-        for reader in &readers[out as usize] {
+        for reader in &readers[access.write() as usize] {
             visit(*reader, index);
         }
-        if task.in_place {
-            for writer in &writers[out as usize] {
+        if access.in_place() {
+            for writer in &writers[access.write() as usize] {
                 visit(*writer, index);
             }
         }
-        for storage in reads {
-            readers[storage as usize].push(index);
+        for storage in access.reads() {
+            readers[*storage as usize].push(index);
         }
-        writers[out as usize].push(index);
-        readers[out as usize].clear();
+        writers[access.write() as usize].push(index);
+        readers[access.write() as usize].clear();
     }
 }
 

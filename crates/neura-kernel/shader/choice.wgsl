@@ -47,7 +47,7 @@ fn fold_row_by_workgroup(lid: u32, source: Value, row: u32, columns: u32, seed: 
     var local = -3.4028235e38;
     var local_index = 0u;
     for (var column = lid; column < columns; column = column + WORKGROUP_SIZE) {
-        let weight = choice_weight(fetch(source, row_origin(source, row) + column * source.strides.w), seed, row * columns + column, noised);
+        let weight = choice_weight(fetch(source, row * columns + column), seed, row * columns + column, noised);
         if (weight > local) {
             local = weight;
             local_index = column;
@@ -60,7 +60,7 @@ fn fold_row_by_thread(source: Value, row: u32, columns: u32, seed: u32, noised: 
     var local = -3.4028235e38;
     var local_index = 0u;
     for (var column = 0u; column < columns; column = column + 1u) {
-        let weight = choice_weight(fetch(source, row_origin(source, row) + column * source.strides.w), seed, row * columns + column, noised);
+        let weight = choice_weight(fetch(source, row * columns + column), seed, row * columns + column, noised);
         if (weight > local) {
             local = weight;
             local_index = column;
@@ -69,41 +69,41 @@ fn fold_row_by_thread(source: Value, row: u32, columns: u32, seed: u32, noised: 
     return local_index;
 }
 
-fn fold_rows_by_workgroup(task: Task, lid: u32, slot: u32, source: Value, seed: u32, noised: bool) {
+fn fold_rows_by_workgroup(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
     let output = values[task.out];
     let columns = source.dims.w;
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
         let chosen = fold_row_by_workgroup(lid, source, row, columns, seed, noised);
         if (lid == 0u) {
-            publish(output, row, chained(task, coordinates(row, output.dims), f32(chosen), slot));
+            publish(output, row, chained(task, coordinates(row, output.dims), f32(chosen)));
         }
         workgroupBarrier();
     }
 }
 
-fn fold_rows_by_thread(task: Task, lid: u32, slot: u32, source: Value, seed: u32, noised: bool) {
+fn fold_rows_by_thread(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
     let output = values[task.out];
     let columns = source.dims.w;
     for (var row = task.first + lid; row < task.first + task.count; row = row + WORKGROUP_SIZE) {
-        publish(output, row, chained(task, coordinates(row, output.dims), f32(fold_row_by_thread(source, row, columns, seed, noised)), slot));
+        publish(output, row, chained(task, coordinates(row, output.dims), f32(fold_row_by_thread(source, row, columns, seed, noised))));
     }
 }
 
-fn run_argmax(task: Task, lid: u32, slot: u32) {
+fn run_argmax(task: Task, lid: u32) {
     let source = values[task.a];
     switch (task.geometry) {
-        case THREAD_ROW: { fold_rows_by_thread(task, lid, slot, source, 0u, false); }
-        case WORKGROUP_ROW: { fold_rows_by_workgroup(task, lid, slot, source, 0u, false); }
-        default: { refuse(slot, Argmax, task.geometry); }
+        case THREAD_ROW: { fold_rows_by_thread(task, lid, source, 0u, false); }
+        case WORKGROUP_ROW: { fold_rows_by_workgroup(task, lid, source, 0u, false); }
+        default: { refuse(Argmax, task.geometry); }
     }
 }
 
-fn run_categorical(task: Task, lid: u32, slot: u32) {
+fn run_categorical(task: Task, lid: u32) {
     let source = values[task.a];
     let seed = bitcast<u32>(fetch(values[task.b], 0));
     switch (task.geometry) {
-        case THREAD_ROW: { fold_rows_by_thread(task, lid, slot, source, seed, true); }
-        case WORKGROUP_ROW: { fold_rows_by_workgroup(task, lid, slot, source, seed, true); }
-        default: { refuse(slot, Categorical, task.geometry); }
+        case THREAD_ROW: { fold_rows_by_thread(task, lid, source, seed, true); }
+        case WORKGROUP_ROW: { fold_rows_by_workgroup(task, lid, source, seed, true); }
+        default: { refuse(Categorical, task.geometry); }
     }
 }
