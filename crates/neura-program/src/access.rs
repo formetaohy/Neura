@@ -1,4 +1,5 @@
-use crate::graph::ValueInfo;
+use neura_abi::NO_VALUE;
+use neura_graph::{TaskInfo, ValueInfo};
 
 pub(crate) trait Reads {
     fn out(&self) -> u32;
@@ -6,12 +7,26 @@ pub(crate) trait Reads {
     fn reads(&self) -> impl Iterator<Item = u32> + '_;
 }
 
-pub(crate) fn storage(values: &[ValueInfo], value: u32) -> u32 {
-    values[value as usize].storage
+impl Reads for TaskInfo {
+    fn out(&self) -> u32 {
+        self.out
+    }
+
+    fn in_place(&self) -> bool {
+        self.in_place
+    }
+
+    fn reads(&self) -> impl Iterator<Item = u32> + '_ {
+        self.inputs
+            .iter()
+            .copied()
+            .chain(self.chain.iter().map(|step| step.operand))
+            .filter(|value| *value != NO_VALUE)
+    }
 }
 
-pub(crate) fn owner(values: &[ValueInfo], value: u32) -> bool {
-    storage(values, value) == value
+pub(crate) fn storage(values: &[ValueInfo], value: u32) -> u32 {
+    values[value as usize].storage
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

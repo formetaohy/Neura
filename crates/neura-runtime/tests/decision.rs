@@ -1,4 +1,4 @@
-use neura_program::{Graph, Init, Shape};
+use neura_graph::{Graph, Init, Shape};
 use neura_runtime::{PROFILES, Precision};
 
 #[path = "support/decision.rs"]

@@ -1,4 +1,5 @@
-use neura_abi::{Precision, WORD_BYTES};
+use neura_abi::WORD_BYTES;
+use neura_precision::Precision;
 use neura_program::Region;
 
 const MAGIC: [u8; 4] = *b"NRCP";

@@ -28,6 +28,9 @@ jobs:
       - name: Install software Vulkan driver
         run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
 
+      - name: Install native backend targets
+        run: rustup target add x86_64-pc-windows-msvc x86_64-apple-darwin
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -36,6 +39,12 @@ jobs:
 
       - name: Lint with every feature
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check Windows compute backend
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+
+      - name: Check macOS compute backend
+        run: cargo check --workspace --all-targets --target x86_64-apple-darwin
 
       - name: Test
         run: cargo test --workspace

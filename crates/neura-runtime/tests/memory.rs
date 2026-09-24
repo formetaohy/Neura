@@ -1,5 +1,8 @@
+use neura_abi::Store;
 use neura_gpu::{BufferUsages, GpuBuffer, Submission};
-use neura_program::{Graph, Init, Shape, Store};
+use neura_graph::{Graph, Init, Shape, Value};
+use neura_profile::NARROW;
+use neura_program::Encoding;
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
@@ -14,11 +17,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn linear<'g>(
-    graph: &Graph<'g>,
-    inputs: u32,
-    outputs: u32,
-) -> (neura_program::Value<'g>, neura_program::Value<'g>) {
+fn linear<'g>(graph: &Graph<'g>, inputs: u32, outputs: u32) -> (Value<'g>, Value<'g>) {
     (
         graph.parameter(
             Shape::matrix(inputs, outputs),
@@ -87,7 +86,7 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256));
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = graph.encode(256, neura_abi::NARROW, Precision::Single);
+    let encoding = Encoding::of(&graph, 256, NARROW, Precision::Single);
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() <= 8 * 1024,
@@ -231,10 +230,10 @@ fn the_engine_writes_a_resident_tensor_without_the_host() {
     );
     engine.write(queue, bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]));
     let mut submission = Submission::new(device, "engine frame");
-    submission.copy_buffer_to_buffer(
-        engine.buffer(),
+    submission.copy(
+        &engine,
         0,
-        program.heap().buffer(),
+        program.heap(),
         program.span(observation).offset,
         4 * 4,
     );

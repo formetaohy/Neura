@@ -2,11 +2,13 @@ use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::tape::DeviceTape;
 use neura_abi::{
-    BoundsRecord, MatmulTile, Placement, PlacementFields, PlacementRecord, Precision, Profile,
-    REFUSAL_BYTES, WORD_BYTES,
+    BoundsRecord, Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES,
 };
-use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, Submission};
-use neura_program::{Region, Span, Value};
+use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
+use neura_graph::Value;
+use neura_precision::Precision;
+use neura_profile::{MatmulTile, Profile};
+use neura_program::{Region, Span};
 use neura_shader::{BOUNDS, HEAP, PLACEMENT, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
 use std::marker::PhantomData;
 use std::mem::size_of;
@@ -95,11 +97,7 @@ impl<'r> Program<'r> {
         );
         let queue = context.queue();
         let mut clearing = Submission::new(context.device(), "neura tensors");
-        clearing.clear_buffer(
-            tensors.buffer().buffer(),
-            tensors.offset(),
-            Some(tensors.bytes()),
-        );
+        clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
         placement.buffer().write(
             queue,
@@ -113,46 +111,43 @@ impl<'r> Program<'r> {
             })),
         );
         let group = tape.kernel.bind_group(&[
-            BindGroupEntry {
-                binding: TASKS,
-                resource: tape.tasks.buffer().resource(0, tape.tasks.buffer().size()),
+            Binding {
+                index: TASKS,
+                buffer: tape.tasks.buffer().binding(0, tape.tasks.buffer().size()),
             },
-            BindGroupEntry {
-                binding: VALUES,
-                resource: tape
-                    .values
-                    .buffer()
-                    .resource(0, tape.values.buffer().size()),
+            Binding {
+                index: VALUES,
+                buffer: tape.values.buffer().binding(0, tape.values.buffer().size()),
             },
-            BindGroupEntry {
-                binding: HEAP,
-                resource: tensors.buffer().resource(0, tensors.buffer().size()),
+            Binding {
+                index: HEAP,
+                buffer: tensors.buffer().binding(0, tensors.buffer().size()),
             },
-            BindGroupEntry {
-                binding: REFUSAL,
-                resource: refusal.buffer().resource(0, refusal.buffer().size()),
+            Binding {
+                index: REFUSAL,
+                buffer: refusal.buffer().binding(0, refusal.buffer().size()),
             },
-            BindGroupEntry {
-                binding: BOUNDS,
-                resource: tape
+            Binding {
+                index: BOUNDS,
+                buffer: tape
                     .bounds
                     .buffer()
-                    .resource(0, size_of::<BoundsRecord>() as u64),
+                    .binding(0, size_of::<BoundsRecord>() as u64),
             },
-            BindGroupEntry {
-                binding: STEPS,
-                resource: tape.steps.buffer().resource(0, tape.steps.buffer().size()),
+            Binding {
+                index: STEPS,
+                buffer: tape.steps.buffer().binding(0, tape.steps.buffer().size()),
             },
-            BindGroupEntry {
-                binding: PLACEMENT,
-                resource: placement.buffer().resource(0, placement.buffer().size()),
+            Binding {
+                index: PLACEMENT,
+                buffer: placement.buffer().binding(0, placement.buffer().size()),
             },
-            BindGroupEntry {
-                binding: SEGMENTS,
-                resource: tape
+            Binding {
+                index: SEGMENTS,
+                buffer: tape
                     .segments
                     .buffer()
-                    .resource(0, tape.segments.buffer().size()),
+                    .binding(0, tape.segments.buffer().size()),
             },
         ]);
         Self {

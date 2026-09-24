@@ -1,7 +1,10 @@
 mod reflection;
 
-use neura_abi::{Geometry, Kind, Precision, TAPE_WGSL, kind, op, store, strategy};
+use neura_abi::{Kind, TAPE_WGSL, kind, store, strategy};
 use neura_gpu::{BindingKind, BindingSpec, ComputeProgram};
+use neura_op as op;
+use neura_precision::Precision;
+use neura_profile::Geometry;
 use std::fmt::Write as _;
 use std::sync::Arc;
 

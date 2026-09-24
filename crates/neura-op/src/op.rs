@@ -1,4 +1,4 @@
-use crate::Kind;
+use neura_abi::Kind;
 use std::fmt::Write as _;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -1,4 +1,4 @@
-use neura_abi::op::{OPS, Partial, Role};
+use neura_op::{OPS, Partial, Role};
 use std::fmt::Write as _;
 
 pub fn fragment() -> String {

@@ -1,4 +1,5 @@
-use neura_abi::{Geometry, Kind, MatmulTile};
+use neura_abi::Kind;
+use neura_profile::{Geometry, MatmulTile};
 use std::fmt::Write as _;
 
 pub fn family(geometry: Geometry) -> String {

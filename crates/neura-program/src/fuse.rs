@@ -1,11 +1,11 @@
 use crate::access::{self, Access, Reads};
-use crate::graph::{GraphState, Residency, TaskInfo, ValueInfo};
 use neura_abi::{Kind, NO_VALUE, StepFields, StepRecord};
+use neura_graph::{GraphSnapshot, Residency, TaskInfo, ValueInfo};
 
 const CHAIN_SLOT: u32 = u32::MAX;
 
-pub(crate) fn fuse(state: &GraphState) -> Vec<TaskInfo> {
-    Fold::of(&state.values, &state.tasks).fold()
+pub(crate) fn fuse(state: &GraphSnapshot) -> Vec<TaskInfo> {
+    Fold::of(state.values(), state.tasks()).fold()
 }
 
 #[derive(Clone, Copy)]
@@ -121,7 +121,10 @@ impl<'a> Fold<'a> {
     fn merge(&self, producer: usize, consumer: usize, slot: u32) -> Option<(TaskInfo, StepRecord)> {
         let head = self.tasks[producer].as_ref()?;
         let tail = self.tasks[consumer].as_ref()?;
-        if head.kind == Kind::SumChunk || head.in_place || !tail.kind.chainable() {
+        if head.kind == Kind::SumChunk
+            || head.in_place
+            || !matches!(tail.kind, Kind::Unary | Kind::Binary)
+        {
             return None;
         }
         if self.values[head.out as usize].shape != self.values[tail.out as usize].shape {

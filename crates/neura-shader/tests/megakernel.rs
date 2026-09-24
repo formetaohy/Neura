@@ -1,6 +1,9 @@
 use naga::AddressSpace;
-use neura_abi::op::OPS;
-use neura_abi::{Geometry, Kind, PROFILES, Precision, Profile};
+use neura_abi::Kind;
+use neura_gpu::{Backend, ShaderTranslation};
+use neura_op::OPS;
+use neura_precision::Precision;
+use neura_profile::{Geometry, PROFILES, Profile};
 use neura_shader::{BINDINGS, Megakernel, reflect};
 use std::collections::BTreeSet;
 
@@ -14,6 +17,36 @@ fn assemble_with(profile: Profile, weights: Precision) -> Megakernel {
 
 fn assemble_carrying(profile: Profile, kinds: &[Kind]) -> Megakernel {
     Megakernel::assemble(kinds, Geometry::of(profile), Precision::Single)
+}
+
+#[test]
+fn every_native_compiler_lowers_the_complete_compute_vocabulary() {
+    let kernel = assemble(PROFILES[0]);
+    let program = kernel.program();
+    let ShaderTranslation::Spirv(words) = program.translate(Backend::Vulkan) else {
+        panic!("Vulkan requires SPIR-V");
+    };
+    assert_eq!(words[0], 0x0723_0203);
+    assert!(words.len() > 100);
+    let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
+        panic!("D3D12 requires HLSL");
+    };
+    assert!(!entry.is_empty());
+    assert!(source.contains("register(u2)"));
+    assert!(source.contains("register(t4)"));
+    let ShaderTranslation::Msl {
+        source,
+        entry,
+        size_bindings,
+    } = program.translate(Backend::Metal)
+    else {
+        panic!("Metal requires MSL");
+    };
+    assert!(!entry.is_empty());
+    assert!(size_bindings.contains(&2));
+    assert!(source.contains("[[buffer(30)]]"));
+    assert!(source.contains("[[buffer(2)]]"));
+    assert!(source.contains("[[buffer(7)]]"));
 }
 
 #[test]

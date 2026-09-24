@@ -1,4 +1,4 @@
-use neura_program::{Graph, Init, Shape, Value, Window};
+use neura_graph::{Graph, Init, Shape, Value, Window};
 
 pub struct Linear<'g> {
     weight: Value<'g>,

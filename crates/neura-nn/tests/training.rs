@@ -1,5 +1,5 @@
+use neura_graph::{Graph, Init, Shape, Window};
 use neura_nn::{Adam, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
-use neura_program::{Graph, Init, Shape, Window};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {

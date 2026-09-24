@@ -1,4 +1,4 @@
-use neura_program::{Gradients, Graph, Init, Shape, Value};
+use neura_graph::{Gradients, Graph, Init, Shape, Value};
 
 pub struct Sgd<'g> {
     descent: Value<'g>,

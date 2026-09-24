@@ -1,4 +1,4 @@
-use neura_program::{Graph, Init, Shape, Value};
+use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Precision, Runtime};
 
 #[path = "support/reference.rs"]

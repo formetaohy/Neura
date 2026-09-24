@@ -1,14 +1,16 @@
 use crate::access::{self, Access, Reads};
 use crate::fuse;
-use crate::graph::{GraphState, Residency, ValueInfo};
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
 use crate::schedule::{self, Dispatch};
 use neura_abi::{
-    BoundsFields, BoundsRecord, Kind, MatmulTile, Placement, Precision, Profile, SegmentRecord,
-    StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    BoundsFields, BoundsRecord, Kind, Placement, SegmentRecord, StepRecord, Store, TaskFields,
+    TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
+use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
+use neura_precision::Precision;
+use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -119,21 +121,20 @@ pub struct Encoding {
 }
 
 impl Encoding {
-    pub(crate) fn plan(
-        state: &GraphState,
-        profile: Profile,
-        alignment: u64,
-        precision: Precision,
-    ) -> Self {
+    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile, precision: Precision) -> Self {
+        Self::plan(&graph.snapshot(), profile, alignment, precision)
+    }
+
+    fn plan(state: &GraphSnapshot, profile: Profile, alignment: u64, precision: Precision) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(&state.values, &fuse::fuse(state), profile);
+        let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
         let kinds = carried_kinds(tasks);
-        let layout = Layout::of(values, precision, alignment);
+        let layout = Layout::of_values(values, precision, alignment);
         assert_writers_precede_readers(values, tasks);
         assert_units_keep_their_order(tasks);
         let schedule = schedule::Schedule::of(values, tasks);
@@ -347,7 +348,7 @@ impl Encoding {
         &self.dispatches
     }
 
-    pub fn span(&self, value: crate::graph::Value, placement: Placement) -> Span {
+    pub fn span(&self, value: Value<'_>, placement: Placement) -> Span {
         let placed = self
             .spans
             .get(value.id() as usize)
@@ -370,7 +371,7 @@ impl Encoding {
         }
     }
 
-    pub fn readable(&self, value: crate::graph::Value) -> bool {
+    pub fn readable(&self, value: Value<'_>) -> bool {
         self.readable
             .get(value.id() as usize)
             .copied()
@@ -493,7 +494,10 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
 }
 
 fn reads_every_element_in_place(values: &[ValueInfo], task: &Task, write: u32) -> bool {
-    if !task.kind.pointwise() {
+    if !matches!(
+        task.kind,
+        Kind::Binary | Kind::Unary | Kind::Partial | Kind::Fill | Kind::Broadcast
+    ) {
         return false;
     }
     let out = &values[write as usize];

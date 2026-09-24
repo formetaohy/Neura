@@ -3,20 +3,20 @@ use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
-use neura_abi::{
-    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
-};
+use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Store, WORD_BYTES};
 use neura_gpu::{
-    BufferUsages, ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback,
-    Submission, wgpu,
+    BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
+    SubmissionIndex,
 };
-use neura_program::{Graph, Layout, Span, Store, Value};
+use neura_graph::{Graph, Value};
+use neura_op as op;
+use neura_precision::Precision;
+use neura_profile::{Geometry, PROFILES, Profile};
+use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::mpsc;
 use std::time::Instant;
-use wgpu::{BufferAsyncError, MapMode, PollType};
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
@@ -24,13 +24,11 @@ pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
-const CHECKPOINT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub struct Readout<'r> {
     brand: PhantomData<&'r ()>,
     slot: usize,
-    submission: wgpu::SubmissionIndex,
-    completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
+    submission: SubmissionIndex,
     precision: Precision,
     spans: Vec<(Span, u64, u64)>,
     total: u64,
@@ -72,14 +70,9 @@ impl Runtime {
         ))
     }
 
-    pub fn adopt(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        info: wgpu::AdapterInfo,
-        heap_bytes: u64,
-    ) -> Self {
+    pub fn from_device(device: Device, heap_bytes: u64) -> Self {
         Self::of_context(
-            GpuContext::adopt(device, queue, info),
+            GpuContext::of_device(device),
             DEFAULT_READBACK_BYTES,
             heap_bytes,
         )
@@ -186,62 +179,22 @@ impl Runtime {
         );
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura checkpoint");
-        submission.copy_buffer_to_buffer(
-            weights.buffer().buffer(),
+        submission.copy(
+            weights.buffer(),
             weights.offset(),
-            staging.buffer().buffer(),
+            staging.buffer(),
             0,
             bytes,
         );
-        let (sender, completed) = mpsc::channel();
-        submission.map_buffer_on_submit(
-            staging.buffer().buffer(),
-            MapMode::Read,
-            ..bytes,
-            move |result| {
-                let _ = sender.send(result);
-            },
-        );
         let submission = submission.submit(self.context.queue());
-        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes);
+        let payload = staging
+            .buffer()
+            .read(self.context.queue(), submission, bytes);
         Checkpoint::of(weights.region(), payload)
     }
 
-    fn collect_checkpoint(
-        &self,
-        device: &wgpu::Device,
-        staging: Recycled,
-        submission: wgpu::SubmissionIndex,
-        completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
-        bytes: u64,
-    ) -> Vec<u8> {
-        device
-            .poll(PollType::Wait {
-                submission_index: Some(submission),
-                timeout: Some(CHECKPOINT_TIMEOUT),
-            })
-            .unwrap_or_else(|error| {
-                panic!("waiting for the checkpoint submission failed: {error}")
-            });
-        completed
-            .recv_timeout(CHECKPOINT_TIMEOUT)
-            .unwrap_or_else(|error| panic!("the checkpoint callback never fired: {error}"))
-            .unwrap_or_else(|error: BufferAsyncError| {
-                panic!("mapping the checkpoint failed: {error}")
-            });
-        let payload = staging
-            .buffer()
-            .buffer()
-            .slice(..bytes)
-            .get_mapped_range()
-            .expect("a finished checkpoint is mapped")
-            .to_vec();
-        staging.buffer().buffer().unmap();
-        payload
-    }
-
     fn parameter_store(&self, graph: &Graph, precision: Precision) -> (Weights<'_>, Layout) {
-        let layout = graph.layout(self.alignment, precision);
+        let layout = Layout::of(graph, self.alignment, precision);
         let store = self.heap.allocate(layout.weights().words());
         let weights = Weights::new(store, layout.weights().clone(), precision);
         (weights, layout)
@@ -271,7 +224,7 @@ impl Runtime {
 
     pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
         self.context.assert_alive();
-        let layout = graph.layout(self.alignment, weights.precision());
+        let layout = Layout::of(graph, self.alignment, weights.precision());
         assert_eq!(
             layout.weights(),
             weights.region(),
@@ -305,7 +258,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let encoding = graph.encode(self.alignment, profile, weights.precision());
+        let encoding = Encoding::of(graph, self.alignment, profile, weights.precision());
         assert!(
             encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
@@ -388,17 +341,17 @@ impl Runtime {
         self.context.assert_alive();
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
-        submission.clear_buffer(program.refusal.buffer().buffer(), 0, None);
-        let mut pass = submission.begin_compute_pass(&ComputePassDescriptor {
-            label: Some("neura tape"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(program.tape.kernel.pipeline());
+        submission.clear(program.refusal.buffer(), 0, program.refusal.buffer().size());
         for (index, dispatch) in program.tape.encoding.dispatches().iter().enumerate() {
-            pass.set_bind_group(0, &program.group, &[(index as u64 * self.alignment) as u32]);
-            pass.dispatch_workgroups(dispatch.segments, 1, 1);
+            let offset = u32::try_from(index as u64 * self.alignment)
+                .expect("a dispatch bounds offset fits in the native binding range");
+            submission.dispatch(
+                &program.tape.kernel,
+                &program.group,
+                &[offset],
+                [dispatch.segments, 1, 1],
+            );
         }
-        drop(pass);
         submission.submit(self.context.queue());
     }
 
@@ -469,33 +422,16 @@ impl Runtime {
         let mut at = 0;
         for span in &spans {
             let bytes = span_bytes(*span, precision);
-            submission.copy_buffer_to_buffer(
-                program.heap().buffer(),
-                span.offset,
-                staging.buffer(),
-                at,
-                bytes,
-            );
+            submission.copy(program.heap(), span.offset, staging, at, bytes);
             collected.push((*span, at, bytes));
             at += bytes;
         }
-        submission.copy_buffer_to_buffer(
-            program.refusal.buffer().buffer(),
-            0,
-            staging.buffer(),
-            at,
-            WORD_BYTES,
-        );
-        let (sender, completed) = mpsc::channel();
-        submission.map_buffer_on_submit(staging.buffer(), MapMode::Read, ..total, move |result| {
-            let _ = sender.send(result);
-        });
+        submission.copy(program.refusal.buffer(), 0, staging, at, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
             brand: PhantomData,
             slot,
             submission,
-            completed,
             precision,
             spans: collected,
             total,
@@ -506,10 +442,9 @@ impl Runtime {
     pub fn collect(&self, readout: Readout<'_>) -> Vec<Vec<f32>> {
         self.context.assert_alive();
         let bytes = self.readback.finish(
-            self.context.device(),
+            self.context.queue(),
             readout.slot,
             readout.submission,
-            readout.completed,
             readout.total,
         );
         self.context.assert_alive();

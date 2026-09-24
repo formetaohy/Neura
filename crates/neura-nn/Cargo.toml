@@ -10,7 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-neura-program = { workspace = true }
+neura-graph = { workspace = true }
 
 [dev-dependencies]
 neura-runtime = { workspace = true }

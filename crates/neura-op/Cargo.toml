@@ -1,0 +1,13 @@
+[package]
+name = "neura-op"
+version.workspace = true
+edition.workspace = true
+description = "Pointwise operations and differentiation rules shared by graph and shader"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }

@@ -1,8 +1,9 @@
-use neura_abi::op;
-use neura_abi::{
-    Kind, NARROW, PROFILES, Placement, Precision, Profile, StepRecord, TaskRecord, WIDE, WORD_BYTES,
-};
-use neura_program::{Encoding, Graph, Init, Shape, Store};
+use neura_abi::{Kind, Placement, StepRecord, Store, TaskRecord, WORD_BYTES};
+use neura_graph::{Graph, Init, Shape};
+use neura_op as op;
+use neura_precision::Precision;
+use neura_profile::{NARROW, PROFILES, Profile, WIDE};
+use neura_program::{Encoding, Layout};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
@@ -13,7 +14,7 @@ fn encoding(graph: &Graph) -> Encoding {
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    graph.encode(ALIGNMENT, profile, Precision::Single)
+    Encoding::of(graph, ALIGNMENT, profile, Precision::Single)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -240,7 +241,9 @@ fn a_chain_of_temporaries_holds_one_tensor() {
         "the arena holds only the value the fused chain produces",
     );
     assert_eq!(
-        graph.layout(ALIGNMENT, Precision::Single).weights().words(),
+        Layout::of(&graph, ALIGNMENT, Precision::Single)
+            .weights()
+            .words(),
         256,
         "the parameter lives in the weight store, not in the arena",
     );
@@ -695,7 +698,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     assert!(encoding.value_count() as usize >= graph.value_count());
     assert!(encoding.arena_bytes() > 0);
     assert!(encoding.work() > 0);
-    let layout = graph.layout(ALIGNMENT, Precision::Single);
+    let layout = Layout::of(&graph, ALIGNMENT, Precision::Single);
     let seed = layout
         .seeds()
         .iter()
@@ -740,7 +743,7 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
         let encoding = encoding_with(&graph, *profile);
-        let layout = graph.layout(ALIGNMENT, Precision::Single);
+        let layout = Layout::of(&graph, ALIGNMENT, Precision::Single);
         for value in [weight, data, out, grads.of(weight)] {
             let span = encoding.span(value, PLACEMENT);
             let bytes = u64::from(span.elements) * WORD_BYTES;

@@ -1,6 +1,8 @@
 use crate::pool::{Pool, Recycled};
-use neura_abi::{Geometry, Kind, Precision, StepRecord};
+use neura_abi::{Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
+use neura_precision::Precision;
+use neura_profile::Geometry;
 use neura_program::Encoding;
 use neura_shader::Megakernel;
 use std::collections::HashMap;
@@ -171,7 +173,7 @@ impl Tapes {
 
 pub(crate) fn signature(
     encoding: &Encoding,
-    profile: neura_abi::Profile,
+    profile: neura_profile::Profile,
     precision: Precision,
     alignment: u64,
 ) -> Vec<u8> {

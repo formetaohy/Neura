@@ -3,7 +3,7 @@ pub fn conv2d_reference(
     taps: &[f32],
     input_shape: [u32; 4],
     output_channels: u32,
-    window: neura_program::Window,
+    window: neura_graph::Window,
 ) -> Vec<f32> {
     let [batch, channels, rows, columns] = input_shape;
     let reach_rows = window.reach_rows();

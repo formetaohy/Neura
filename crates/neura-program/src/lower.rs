@@ -1,7 +1,7 @@
 use crate::access::Reads;
-use crate::graph::{TaskInfo, ValueInfo};
-use crate::shape::Shape;
-use neura_abi::{Kind, MAX_RANK, MatmulTile, NO_VALUE, Profile, StepRecord, Window, strategy};
+use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
+use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
+use neura_profile::{MatmulTile, Profile};
 
 const TARGET_TASKS: u32 = 256;
 const TASK_ELEMENTS_FLOOR: u32 = 2048;

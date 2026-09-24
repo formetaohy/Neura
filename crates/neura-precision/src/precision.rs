@@ -1,4 +1,4 @@
-use crate::WORD_BYTES;
+use neura_abi::WORD_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Precision {

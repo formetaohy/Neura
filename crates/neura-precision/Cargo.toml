@@ -1,0 +1,15 @@
+[package]
+name = "neura-precision"
+version.workspace = true
+edition.workspace = true
+description = "Tensor storage precision and host packing"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }

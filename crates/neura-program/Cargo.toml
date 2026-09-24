@@ -2,7 +2,7 @@
 name = "neura-program"
 version.workspace = true
 edition.workspace = true
-description = "Host graph, wave schedule, arena plan and autograd over the device tape"
+description = "Graph lowering, wave scheduling and device tape encoding"
 license.workspace = true
 repository.workspace = true
 
@@ -12,3 +12,9 @@ workspace = true
 [dependencies]
 bytemuck = { workspace = true }
 neura-abi = { workspace = true }
+neura-profile = { workspace = true }
+neura-precision = { workspace = true }
+neura-graph = { workspace = true }
+
+[dev-dependencies]
+neura-op = { workspace = true }

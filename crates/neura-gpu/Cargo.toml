@@ -2,7 +2,7 @@
 name = "neura-gpu"
 version.workspace = true
 edition.workspace = true
-description = "Device, buffers, pipelines and readback the framework builds its arena on"
+description = "Native compute devices, memory, pipelines and submissions"
 license.workspace = true
 repository.workspace = true
 
@@ -10,4 +10,44 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-wgpu = { workspace = true }
+bitflags = { workspace = true }
+naga = { workspace = true }
+spirv = { workspace = true }
+
+[dev-dependencies]
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+ash = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+libloading = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Dxc",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
+objc2-metal = { workspace = true, features = [
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLDevice",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLTypes",
+] }

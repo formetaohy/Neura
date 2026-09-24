@@ -1,5 +1,5 @@
-use neura_abi::op::{self, OPS};
-use neura_program::{Graph, Init, Shape, Value};
+use neura_graph::{Graph, Init, Shape, Value};
+use neura_op::{self as op, OPS};
 use neura_runtime::Precision;
 
 #[path = "support/mod.rs"]

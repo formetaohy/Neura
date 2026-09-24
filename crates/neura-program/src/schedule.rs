@@ -1,7 +1,7 @@
 use crate::access::Access;
-use crate::graph::ValueInfo;
 use crate::lower::Task;
 use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentFields, SegmentRecord};
+use neura_graph::ValueInfo;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dispatch {

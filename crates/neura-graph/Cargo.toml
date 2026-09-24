@@ -1,0 +1,14 @@
+[package]
+name = "neura-graph"
+version.workspace = true
+edition.workspace = true
+description = "Tensor graph construction, differentiation and shape semantics"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+neura-op = { workspace = true }

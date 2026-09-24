@@ -1,4 +1,4 @@
-use neura_program::{Graph, Shape, Value};
+use neura_graph::{Graph, Shape, Value};
 
 pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>) -> Value<'g> {
     let shape = graph.shape(prediction);

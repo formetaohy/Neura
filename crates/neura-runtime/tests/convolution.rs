@@ -1,4 +1,4 @@
-use neura_program::{Graph, Init, Shape, Window};
+use neura_graph::{Graph, Init, Shape, Window};
 use neura_runtime::Precision;
 
 #[path = "support/convolution.rs"]

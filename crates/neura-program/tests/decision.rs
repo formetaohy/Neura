@@ -1,12 +1,15 @@
-use neura_abi::{Kind, NARROW, Precision, Profile, TaskRecord, ValueRecord, WIDE, strategy};
-use neura_program::{Encoding, Graph, Init, Placement, Shape, Value, Window};
+use neura_abi::{Kind, Placement, TaskRecord, ValueRecord, strategy};
+use neura_graph::{Graph, Init, Shape, Value, Window};
+use neura_precision::Precision;
+use neura_profile::{NARROW, Profile, WIDE};
+use neura_program::Encoding;
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    graph.encode(ALIGNMENT, profile, Precision::Single)
+    Encoding::of(graph, ALIGNMENT, profile, Precision::Single)
 }
 
 fn refuses(action: impl FnOnce()) -> bool {

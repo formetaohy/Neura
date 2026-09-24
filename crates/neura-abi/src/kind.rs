@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 macro_rules! kinds {
-    ($($variant:ident = $label:literal pointwise $pointwise:literal chainable $chainable:literal;)+) => {
+    ($($variant:ident = $label:literal;)+) => {
         #[repr(u32)]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
         pub enum Kind {
@@ -34,43 +34,32 @@ macro_rules! kinds {
                 }
             }
 
-            pub const fn pointwise(self) -> bool {
-                match self {
-                    $(Self::$variant => $pointwise),+
-                }
-            }
-
-            pub const fn chainable(self) -> bool {
-                match self {
-                    $(Self::$variant => $chainable),+
-                }
-            }
         }
     };
 }
 
 kinds! {
-    Matmul = "matmul" pointwise false chainable false;
-    MatmulFold = "matmul_fold" pointwise false chainable false;
-    Binary = "binary" pointwise true chainable true;
-    Unary = "unary" pointwise true chainable true;
-    Partial = "partial" pointwise true chainable false;
-    Fill = "fill" pointwise true chainable false;
-    Broadcast = "broadcast" pointwise true chainable false;
-    SumChunk = "sum_chunk" pointwise false chainable false;
-    SumAxis = "sum_axis" pointwise false chainable false;
-    Softmax = "softmax" pointwise false chainable false;
-    SoftmaxGrad = "softmax_grad" pointwise false chainable false;
-    LogSoftmax = "log_softmax" pointwise false chainable false;
-    LogSoftmaxGrad = "log_softmax_grad" pointwise false chainable false;
-    Argmax = "argmax" pointwise false chainable false;
-    Categorical = "categorical" pointwise false chainable false;
-    OneHot = "one_hot" pointwise false chainable false;
-    Gather = "gather" pointwise false chainable false;
-    Scatter = "scatter" pointwise false chainable false;
-    Conv2d = "conv2d" pointwise false chainable false;
-    Conv2dInputGrad = "conv2d_input_grad" pointwise false chainable false;
-    Conv2dWeightGrad = "conv2d_weight_grad" pointwise false chainable false;
+    Matmul = "matmul";
+    MatmulFold = "matmul_fold";
+    Binary = "binary";
+    Unary = "unary";
+    Partial = "partial";
+    Fill = "fill";
+    Broadcast = "broadcast";
+    SumChunk = "sum_chunk";
+    SumAxis = "sum_axis";
+    Softmax = "softmax";
+    SoftmaxGrad = "softmax_grad";
+    LogSoftmax = "log_softmax";
+    LogSoftmaxGrad = "log_softmax_grad";
+    Argmax = "argmax";
+    Categorical = "categorical";
+    OneHot = "one_hot";
+    Gather = "gather";
+    Scatter = "scatter";
+    Conv2d = "conv2d";
+    Conv2dInputGrad = "conv2d_input_grad";
+    Conv2dWeightGrad = "conv2d_weight_grad";
 }
 
 pub fn declarations() -> String {

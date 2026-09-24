@@ -1,6 +1,6 @@
-use crate::graph::{Residency, ValueInfo};
-use crate::init::Init;
-use neura_abi::{Placement, Precision, Store, WORD_BYTES};
+use neura_abi::{Placement, Store, WORD_BYTES};
+use neura_graph::{Graph, Init, Residency, ValueInfo};
+use neura_precision::Precision;
 
 #[derive(Clone, Debug)]
 pub struct Region {
@@ -108,7 +108,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub(crate) fn of(values: &[ValueInfo], precision: Precision, alignment: u64) -> Self {
+    pub fn of(graph: &Graph<'_>, alignment: u64, precision: Precision) -> Self {
+        Self::of_values(graph.snapshot().values(), precision, alignment)
+    }
+
+    pub(crate) fn of_values(values: &[ValueInfo], precision: Precision, alignment: u64) -> Self {
         let weights = Region::of(
             values,
             |info| info.residency == Residency::Parameter,

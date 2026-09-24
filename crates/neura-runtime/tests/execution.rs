@@ -1,5 +1,5 @@
-use neura_abi::{PROFILES, WIDE};
-use neura_program::{Graph, Init, Shape, Value};
+use neura_graph::{Graph, Init, Shape, Value};
+use neura_profile::{PROFILES, WIDE};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
@@ -901,7 +901,7 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
     let tiles = runtime.default_profile().tiles();
     for index in 0..tiles.len() {
         let tile = tiles[index];
-        let profile = neura_abi::Profile::of(&tiles[index..index + 1]);
+        let profile = neura_profile::Profile::of(&tiles[index..index + 1]);
         let graph = Graph::new();
         let left = graph.parameter(Shape::matrix(tile.rows(), tile.depth()), Init::Zero);
         let right = graph.parameter(Shape::matrix(tile.depth(), tile.columns()), Init::Zero);

@@ -12,5 +12,8 @@ workspace = true
 [dependencies]
 naga = { workspace = true }
 neura-abi = { workspace = true }
+neura-op = { workspace = true }
+neura-profile = { workspace = true }
+neura-precision = { workspace = true }
 neura-gpu = { workspace = true }
 neura-kernel = { workspace = true }

@@ -1,7 +1,7 @@
+use crate::context::Device;
 use crate::pipeline::{ComputeProgram, PipelineHandle};
 use std::collections::HashMap;
 use std::sync::Arc;
-use wgpu::Device;
 
 pub(crate) struct PipelineLibrary {
     entries: HashMap<Arc<ComputeProgram>, PipelineHandle>,

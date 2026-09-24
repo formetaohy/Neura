@@ -12,17 +12,21 @@ repository = "https://github.com/formetaohy/Neura"
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
-naga = { version = "30", default-features = false, features = ["wgsl-in"] }
+naga = { version = "30", default-features = false, features = ["wgsl-in", "spv-out", "hlsl-out", "msl-out"] }
+spirv = "0.4"
 pollster = "0.4"
-wgpu = { version = "30", default-features = false, features = [
-    "std",
-    "parking_lot",
-    "dx12",
-    "metal",
-    "vulkan",
-    "wgsl",
-] }
+bitflags = "2"
+ash = "0.38"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+windows = "0.62"
+libloading = "0.8"
 neura-abi = { version = "0.1.0", path = "crates/neura-abi" }
+neura-op = { version = "0.1.0", path = "crates/neura-op" }
+neura-profile = { version = "0.1.0", path = "crates/neura-profile" }
+neura-precision = { version = "0.1.0", path = "crates/neura-precision" }
+neura-graph = { version = "0.1.0", path = "crates/neura-graph" }
 neura-kernel = { version = "0.1.0", path = "crates/neura-kernel" }
 neura-shader = { version = "0.1.0", path = "crates/neura-shader" }
 neura-gpu = { version = "0.1.0", path = "crates/neura-gpu" }
@@ -46,6 +50,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+neura-abi = { workspace = true }
+neura-graph = { workspace = true }
 neura-program = { workspace = true }
 neura-runtime = { workspace = true }
 neura-nn = { workspace = true }

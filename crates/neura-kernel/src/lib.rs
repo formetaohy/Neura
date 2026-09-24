@@ -1,7 +1,9 @@
 mod matmul;
 mod op;
 
-use neura_abi::{Geometry, Kind, Precision};
+use neura_abi::Kind;
+use neura_precision::Precision;
+use neura_profile::Geometry;
 
 pub const REFUSE: &str = include_str!("../shader/refuse.wgsl");
 pub const READ: &str = include_str!("../shader/read.wgsl");

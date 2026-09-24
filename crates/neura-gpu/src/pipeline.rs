@@ -1,32 +1,15 @@
-use std::sync::{Arc, OnceLock};
-use wgpu::{
-    BindGroup, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
-    BindingType, BufferBindingType, ComputePipeline as WgpuComputePipeline,
-    ComputePipelineDescriptor, Device, PipelineLayout, PipelineLayoutDescriptor,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages,
-};
+use crate::buffer::{BufferBinding, GpuBuffer};
+use crate::capability::{Backend, BufferUsages};
+use crate::context::Device;
+use crate::native::{NativeGroup, NativePipeline};
+use std::sync::Arc;
+
+pub const METAL_SIZE_BUFFER_SLOT: u8 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BindingKind {
     ReadOnlyStorage,
     ReadWriteStorage,
-}
-
-impl BindingKind {
-    fn entry(self, binding: u32, dynamic_offset: bool) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: ShaderStages::COMPUTE,
-            ty: BindingType::Buffer {
-                ty: BufferBindingType::Storage {
-                    read_only: self == Self::ReadOnlyStorage,
-                },
-                has_dynamic_offset: dynamic_offset,
-                min_binding_size: None,
-            },
-            count: None,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -62,6 +45,20 @@ impl BindingSpec {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShaderTranslation {
+    Spirv(Vec<u32>),
+    Hlsl {
+        source: String,
+        entry: String,
+    },
+    Msl {
+        source: String,
+        entry: String,
+        size_bindings: Vec<u32>,
+    },
+}
+
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ComputeProgram {
     label: String,
@@ -87,7 +84,17 @@ impl ComputeProgram {
         entry: &str,
         bindings: &[BindingSpec],
     ) -> Self {
-        assert!(!bindings.is_empty(), "a program binds something");
+        assert!(
+            !bindings.is_empty() && bindings.len() <= METAL_SIZE_BUFFER_SLOT as usize,
+            "a compute program binds between one and 30 storage buffers"
+        );
+        assert!(!entry.is_empty(), "a compute program needs an entry point");
+        for (index, binding) in bindings.iter().enumerate() {
+            assert_eq!(
+                binding.binding as usize, index,
+                "storage bindings must be densely numbered"
+            );
+        }
         Self {
             label: label.to_owned(),
             source: source.into(),
@@ -111,45 +118,69 @@ impl ComputeProgram {
     pub fn bindings(&self) -> &[BindingSpec] {
         &self.bindings
     }
+
+    pub fn translate(&self, backend: Backend) -> ShaderTranslation {
+        match backend {
+            Backend::Vulkan => ShaderTranslation::Spirv(crate::native::shader::spirv(self)),
+            Backend::Dx12 => {
+                let (source, entry) = crate::native::shader::hlsl(self);
+                ShaderTranslation::Hlsl { source, entry }
+            }
+            Backend::Metal => {
+                let (source, entry, size_bindings) = crate::native::shader::msl(self);
+                ShaderTranslation::Msl {
+                    source,
+                    entry,
+                    size_bindings,
+                }
+            }
+        }
+    }
 }
 
-struct Slot {
-    device: Device,
-    program: Arc<ComputeProgram>,
-    layout: PipelineLayout,
-    group: BindGroupLayout,
-    compiled: OnceLock<WgpuComputePipeline>,
+#[derive(Clone, Copy)]
+pub struct Binding<'a> {
+    pub index: u32,
+    pub buffer: BufferBinding<'a>,
+}
+
+#[derive(Clone)]
+pub(crate) struct BoundBuffer {
+    pub(crate) buffer: GpuBuffer,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+    pub(crate) dynamic: bool,
+}
+
+pub(crate) struct Slot {
+    pub(crate) native: NativePipeline,
+    pub(crate) program: Arc<ComputeProgram>,
+    pub(crate) device: Device,
 }
 
 #[derive(Clone)]
 pub struct PipelineHandle {
-    slot: Arc<Slot>,
+    pub(crate) slot: Arc<Slot>,
+}
+
+#[derive(Clone)]
+pub struct BindGroup {
+    pub(crate) native: NativeGroup,
+    pub(crate) buffers: Vec<BoundBuffer>,
+    pub(crate) slot: Arc<Slot>,
 }
 
 impl PipelineHandle {
     pub(crate) fn new(device: &Device, program: Arc<ComputeProgram>) -> Self {
-        let entries = program
-            .bindings()
-            .iter()
-            .map(|spec| spec.kind.entry(spec.binding, spec.dynamic_offset))
-            .collect::<Vec<_>>();
-        let group = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some(program.label()),
-            entries: &entries,
-        });
-        let layouts = [Some(&group)];
-        let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some(program.label()),
-            bind_group_layouts: &layouts,
-            immediate_size: 0,
-        });
+        assert!(
+            program.bindings().len() as u32 <= device.limits().max_storage_buffers_per_shader_stage
+        );
+        let native = device.native().create_pipeline(&program);
         Self {
             slot: Arc::new(Slot {
                 device: device.clone(),
                 program,
-                layout,
-                group,
-                compiled: OnceLock::new(),
+                native,
             }),
         }
     }
@@ -158,40 +189,68 @@ impl PipelineHandle {
         self.slot.program.label()
     }
 
-    pub fn is_compiled(&self) -> bool {
-        self.slot.compiled.get().is_some()
-    }
-
-    pub fn bind_group(&self, entries: &[BindGroupEntry<'_>]) -> BindGroup {
-        self.slot
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(self.slot.program.label()),
-                layout: &self.slot.group,
-                entries,
+    pub fn bind_group(&self, entries: &[Binding<'_>]) -> BindGroup {
+        let specs = self.slot.program.bindings();
+        assert_eq!(
+            entries.len(),
+            specs.len(),
+            "a group must bind exactly the program's buffers"
+        );
+        let buffers = entries
+            .iter()
+            .zip(specs)
+            .map(|(entry, spec)| {
+                assert_eq!(
+                    entry.index, spec.binding,
+                    "a binding occupies the wrong slot"
+                );
+                let buffer = entry.buffer.buffer;
+                assert!(
+                    buffer.device().same(&self.slot.device),
+                    "a bind group cannot reference a different device"
+                );
+                assert!(
+                    buffer.usage().contains(BufferUsages::STORAGE),
+                    "a storage binding requires shader storage"
+                );
+                assert!(
+                    entry.buffer.offset.is_multiple_of(
+                        self.slot
+                            .device
+                            .limits()
+                            .min_storage_buffer_offset_alignment
+                    ),
+                    "a storage binding is misaligned"
+                );
+                assert!(
+                    entry.buffer.size <= self.slot.device.limits().max_storage_buffer_binding_size,
+                    "a storage binding exceeds the device's maximum range"
+                );
+                BoundBuffer {
+                    buffer: buffer.clone(),
+                    offset: entry.buffer.offset,
+                    size: entry.buffer.size,
+                    dynamic: spec.dynamic_offset,
+                }
             })
+            .collect::<Vec<_>>();
+        let native = self
+            .slot
+            .device
+            .native()
+            .create_group(&self.slot.native, &buffers);
+        BindGroup {
+            slot: self.slot.clone(),
+            buffers,
+            native,
+        }
     }
 
-    pub fn pipeline(&self) -> &WgpuComputePipeline {
-        let slot = &self.slot;
-        slot.compiled.get_or_init(|| {
-            let module = slot.device.create_shader_module(ShaderModuleDescriptor {
-                label: Some(slot.program.label()),
-                source: ShaderSource::Wgsl(slot.program.source().into()),
-            });
-            slot.device
-                .create_compute_pipeline(&ComputePipelineDescriptor {
-                    label: Some(slot.program.label()),
-                    layout: Some(&slot.layout),
-                    module: &module,
-                    entry_point: Some(slot.program.entry()),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
-        })
+    pub fn is_compiled(&self) -> bool {
+        self.slot.native.is_compiled()
     }
 
     pub fn compile(&self) {
-        self.pipeline();
+        self.slot.native.compile(&self.slot.program);
     }
 }

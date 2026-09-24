@@ -6,7 +6,9 @@ mod runtime;
 mod tape;
 
 pub use checkpoint::Checkpoint;
-pub use neura_abi::{MatmulTile, PROFILES, Placement, Precision, Profile};
+pub use neura_abi::Placement;
+pub use neura_precision::Precision;
+pub use neura_profile::{MatmulTile, PROFILES, Profile};
 pub use neura_program::Span;
 pub use program::{Program, Weights};
 pub use runtime::{

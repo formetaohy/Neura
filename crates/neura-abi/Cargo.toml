@@ -2,7 +2,7 @@
 name = "neura-abi"
 version.workspace = true
 edition.workspace = true
-description = "Device layouts, kinds and counters the Neura megakernel reads from the tape"
+description = "WGSL device records and numeric codes shared with the host"
 license.workspace = true
 repository.workspace = true
 
@@ -14,4 +14,3 @@ naga = { workspace = true }
 
 [dependencies]
 bytemuck = { workspace = true }
-half = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "neura-profile"
+version.workspace = true
+edition.workspace = true
+description = "Compute workgroup and matrix tile configurations"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }

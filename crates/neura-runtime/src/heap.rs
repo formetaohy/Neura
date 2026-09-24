@@ -27,11 +27,7 @@ impl Heap {
             context.device(),
             "neura heap",
             words * WORD_BYTES,
-            BufferUsages::STORAGE
-                | BufferUsages::COPY_SRC
-                | BufferUsages::COPY_DST
-                | BufferUsages::VERTEX
-                | BufferUsages::INDIRECT,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         Self {
             buffer,

@@ -1,10 +1,8 @@
 use bytemuck::Zeroable;
 use neura_abi::Kind;
-use neura_abi::op::{self, OPS, Role};
 use neura_abi::{
-    BoundsRecord, Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, PlacementRecord, Profile,
-    SegmentRecord, StepFields, StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord,
-    WIDE, WORD_BYTES, Window,
+    BoundsRecord, PlacementRecord, SegmentRecord, StepFields, StepRecord, Store, TaskFields,
+    TaskRecord, ValueFields, ValueRecord,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -81,110 +79,9 @@ fn every_task_kind_is_declared_once() {
     assert_eq!(Kind::Matmul.name(), "matmul");
     assert_eq!(Kind::LogSoftmax.name(), "log_softmax");
     assert_eq!(Kind::Conv2d.name(), "conv2d");
-    assert!(Kind::Partial.pointwise());
-    assert!(!Kind::Matmul.pointwise());
-    assert!(!Kind::Conv2d.pointwise());
-    assert!(Kind::Binary.chainable());
-    assert!(!Kind::Partial.chainable());
-    assert!(!Kind::Conv2d.chainable());
     assert!(refuses(|| {
         let _ = Kind::of(Kind::COUNT);
     }));
-}
-
-#[test]
-fn every_pointwise_op_is_declared_once() {
-    assert_eq!(op::COUNT as usize, OPS.len());
-    for (code, entry) in OPS.iter().enumerate() {
-        assert_eq!(
-            entry.code, code as u32,
-            "the {} op leaves a hole",
-            entry.name
-        );
-        assert_eq!(op::of(entry.code), entry);
-        assert_eq!(op::name(entry.code), entry.name);
-        assert_eq!(op::kind(entry.code), entry.family.kind());
-        assert!(!entry.apply.is_empty());
-        assert_eq!(
-            entry.partials.len() as u32,
-            entry.family.operands(),
-            "the {} op declares a partial for every operand it reads",
-            entry.name,
-        );
-        for slot in 0..entry.family.operands() {
-            let _ = entry.partial(slot);
-        }
-        assert!(refuses(|| {
-            let _ = entry.partial(entry.family.operands());
-        }));
-    }
-    let mut names = OPS.iter().map(|entry| entry.name).collect::<Vec<_>>();
-    names.sort_unstable();
-    names.dedup();
-    assert_eq!(names.len(), OPS.len(), "two ops share a name");
-    assert_eq!(op::name(op::ADD), "add");
-    assert_eq!(op::name(op::RELU), "relu");
-    assert_eq!(op::name(op::SIGMOID), "sigmoid");
-    assert!(refuses(|| {
-        let _ = op::of(op::COUNT);
-    }));
-    assert!(refuses(|| {
-        let _ = op::of(op::NONE);
-    }));
-}
-
-#[test]
-fn every_partial_reads_exactly_the_roles_it_names() {
-    for op in OPS {
-        for slot in 0..op.family.operands() {
-            let partial = op.partial(slot);
-            let roles = partial.roles();
-            assert!(
-                !(roles.contains(&Role::Operand) && roles.contains(&Role::Result)),
-                "the {} partial {slot} differentiates an operand and its own result at once",
-                op.name,
-            );
-            assert!(
-                !roles.contains(&Role::Result) || roles.len() == 1,
-                "the {} partial {slot} reads its own result next to an operand",
-                op.name,
-            );
-            if op.family == op::Family::Unary {
-                assert!(
-                    !roles.contains(&Role::Other),
-                    "the {} partial {slot} reads a second operand its op never has",
-                    op.name,
-                );
-            }
-            let Some(formula) = partial.formula() else {
-                assert!(
-                    roles.is_empty(),
-                    "the {} partial {slot} reads a role it never asks to be handed",
-                    op.name,
-                );
-                continue;
-            };
-            assert!(
-                mentions(formula, "g"),
-                "the {} partial {slot} ignores the gradient it descends from",
-                op.name,
-            );
-            for role in roles {
-                assert!(
-                    mentions(formula, role.name()),
-                    "the {} partial {slot} asks for {} it never reads",
-                    op.name,
-                    role.name(),
-                );
-            }
-        }
-    }
-}
-
-fn mentions(formula: &str, name: &str) -> bool {
-    formula
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|word| word == name)
 }
 
 #[test]
@@ -206,7 +103,7 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);
     let task = TaskRecord::of(TaskFields {
         kind: Kind::Matmul.code(),
-        op: op::MUL,
+        op: 2,
         geometry: 2,
         first: 3,
         count: 5,
@@ -230,7 +127,7 @@ fn a_record_declares_what_the_device_reads() {
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
     );
-    assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), op::MUL);
+    assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 5);
     assert_eq!(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()), 6);
@@ -246,16 +143,13 @@ fn a_record_declares_what_the_device_reads() {
 #[test]
 fn a_step_declares_what_the_device_applies() {
     let step = StepRecord::of(StepFields {
-        op: op::RELU,
+        op: 6,
         operand: 9,
         swapped: 1,
     });
     let bytes = bytemuck::bytes_of(&step);
     assert_eq!(bytes.len(), 12);
-    assert_eq!(
-        u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
-        op::RELU
-    );
+    assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 6);
     assert_eq!(u32::from_ne_bytes(bytes[4..8].try_into().unwrap()), 9);
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 1);
 }
@@ -291,181 +185,6 @@ fn every_value_lives_in_one_declared_store() {
         Store::ALL.len(),
         "two stores share a device constant",
     );
-}
-
-#[test]
-fn a_window_declares_how_it_walks_its_input() {
-    let window = Window::new([3, 5], [2, 4], [1, 6]);
-    assert_eq!(window.reach_rows(), 3);
-    assert_eq!(window.reach_columns(), 5);
-    assert_eq!(window.stride_rows(), 2);
-    assert_eq!(window.stride_columns(), 4);
-    assert_eq!(window.pad_rows(), 1);
-    assert_eq!(window.pad_columns(), 6);
-    let sliding = Window::sliding([3, 3]);
-    assert_eq!(sliding.stride_rows(), 1);
-    assert_eq!(sliding.stride_columns(), 1);
-    assert_eq!(sliding.pad_rows(), 0);
-    assert_eq!(sliding.pad_columns(), 0);
-    assert_eq!(sliding.reach_rows(), 3);
-    assert!(refuses(|| {
-        let _ = Window::new([0, 3], [1, 1], [0, 0]);
-    }));
-    assert!(refuses(|| {
-        let _ = Window::new([3, 3], [0, 1], [0, 0]);
-    }));
-    assert!(refuses(|| {
-        let _ = Window::sliding([3, 0]);
-    }));
-}
-
-#[test]
-fn a_profile_offers_the_tiles_one_workgroup_carries() {
-    for profile in PROFILES {
-        for (index, tile) in profile.tiles().iter().enumerate() {
-            assert_eq!(profile.workgroup(), tile.threads());
-            assert_eq!(
-                tile.registers() * profile.workgroup(),
-                tile.rows() * tile.columns(),
-            );
-            assert!(
-                !profile.tiles()[..index].contains(tile),
-                "a profile offers {tile:?} twice",
-            );
-        }
-        assert!(
-            profile
-                .tiles()
-                .windows(2)
-                .all(|pair| pair[0].tile_work() <= pair[1].tile_work()),
-            "a profile offers its tiles from the smallest to the widest",
-        );
-        let staged = profile
-            .tiles()
-            .iter()
-            .map(|tile| tile.shared_bytes())
-            .max()
-            .unwrap();
-        assert!(
-            profile.shared_bytes() >= staged + u64::from(profile.workgroup()) * WORD_BYTES,
-            "a profile carries the widest tile it stages beside the scratch its reductions declare",
-        );
-        assert!(profile.fits(u32::MAX, profile.shared_bytes()));
-        assert!(!profile.fits(profile.workgroup() - 1, profile.shared_bytes()));
-        assert!(!profile.fits(u32::MAX, profile.shared_bytes() - 1));
-    }
-    assert!(
-        NARROW.shared_bytes() < MEDIUM.shared_bytes(),
-        "a wider workgroup stages more",
-    );
-    assert!(
-        MEDIUM.shared_bytes() < WIDE.shared_bytes(),
-        "a wider workgroup stages more",
-    );
-    assert!(
-        WIDE.shared_bytes() > 16 * 1024,
-        "the widest profile must ask the device for more than the baseline pool",
-    );
-    assert!(
-        MEDIUM.shared_bytes() <= 16 * 1024,
-        "the middle profile must run on the baseline pool",
-    );
-    assert!(
-        PROFILES
-            .windows(2)
-            .all(|pair| pair[0].workgroup() < pair[1].workgroup()),
-        "the profiles are ordered by the workgroup they hand the device",
-    );
-}
-
-#[test]
-fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
-    assert!(refuses(|| {
-        let _ = Profile::of(&[]);
-    }));
-    assert!(refuses(|| {
-        static MIXED: &[MatmulTile] = &[
-            MatmulTile::new(16, 16, 16, 8, 8),
-            MatmulTile::new(32, 32, 16, 16, 16),
-        ];
-        let _ = Profile::of(MIXED);
-    }));
-}
-
-#[test]
-fn a_geometry_declares_every_tile_its_profile_offers() {
-    for profile in PROFILES {
-        let geometry = Geometry::of(*profile);
-        let declarations = geometry.declarations();
-        assert_eq!(geometry.workgroup(), profile.workgroup());
-        assert_eq!(geometry.tiles(), profile.tiles());
-        assert!(declarations.contains(&format!(
-            "const WORKGROUP_SIZE: u32 = {}u;",
-            profile.workgroup()
-        )));
-        assert!(declarations.contains(&format!(
-            "const MATMUL_LEFT_STAGE: u32 = {}u;",
-            2 * profile
-                .tiles()
-                .iter()
-                .map(|tile| tile.left_stage())
-                .max()
-                .unwrap(),
-        )));
-        assert!(declarations.contains(&format!(
-            "const MATMUL_RIGHT_STAGE: u32 = {}u;",
-            2 * profile
-                .tiles()
-                .iter()
-                .map(|tile| tile.right_stage())
-                .max()
-                .unwrap(),
-        )));
-        for (index, tile) in profile.tiles().iter().enumerate() {
-            assert_eq!(geometry.geometry(*tile), index as u32);
-            assert_eq!(geometry.tile(index as u32), *tile);
-            for (suffix, value) in [
-                ("ROWS", tile.rows()),
-                ("COLUMNS", tile.columns()),
-                ("DEPTH", tile.depth()),
-                ("THREAD_ROWS", tile.thread_rows()),
-                ("THREAD_COLUMNS", tile.thread_columns()),
-                ("REGISTER_ROWS", tile.register_rows()),
-                ("REGISTER_COLUMNS", tile.register_columns()),
-            ] {
-                let declaration = format!("const MATMUL_{suffix}_{index}: u32 = {value}u;");
-                assert!(
-                    declarations.contains(&declaration),
-                    "a program carrying {tile:?} misses {declaration}",
-                );
-            }
-        }
-        assert!(refuses(|| {
-            let _ = geometry.tile(profile.tiles().len() as u32);
-        }));
-        assert!(refuses(|| {
-            let _ = geometry.geometry(MatmulTile::new(24, 24, 16, 8, 8));
-        }));
-    }
-}
-
-#[test]
-fn a_matmul_tile_refuses_a_geometry_its_workgroup_cannot_carry() {
-    assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 16, 8, 0);
-    }));
-    assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 16, 5, 8);
-    }));
-    assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 24, 16, 8, 16);
-    }));
-    assert!(refuses(|| {
-        let _ = MatmulTile::new(0, 16, 16, 8, 8);
-    }));
-    assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 0, 8, 8);
-    }));
 }
 
 #[test]

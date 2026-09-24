@@ -1,12 +1,8 @@
-use crate::access;
-use crate::encode::Encoding;
 use crate::init::Init;
-use crate::layout::Layout;
 use crate::shape::Shape;
-use neura_abi::Kind;
-use neura_abi::op;
-use neura_abi::{MAX_RANK, Precision, Window};
-use neura_abi::{NO_VALUE, Profile, StepRecord};
+use crate::window::Window;
+use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepRecord};
+use neura_op as op;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -42,7 +38,7 @@ impl<'g> Value<'g> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Residency {
+pub enum Residency {
     Input,
     Parameter,
     Resident,
@@ -50,17 +46,18 @@ pub(crate) enum Residency {
     View,
 }
 
+#[non_exhaustive]
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) struct TaskInfo {
-    pub(crate) kind: Kind,
-    pub(crate) op: u32,
-    pub(crate) out: u32,
-    pub(crate) inputs: [u32; 3],
-    pub(crate) slot: u32,
-    pub(crate) param: f32,
-    pub(crate) window: Window,
-    pub(crate) in_place: bool,
-    pub(crate) chain: Vec<StepRecord>,
+pub struct TaskInfo {
+    pub kind: Kind,
+    pub op: u32,
+    pub out: u32,
+    pub inputs: [u32; 3],
+    pub slot: u32,
+    pub param: f32,
+    pub window: Window,
+    pub in_place: bool,
+    pub chain: Vec<StepRecord>,
 }
 
 impl TaskInfo {
@@ -79,38 +76,21 @@ impl TaskInfo {
     }
 }
 
-impl access::Reads for TaskInfo {
-    fn out(&self) -> u32 {
-        self.out
-    }
-
-    fn in_place(&self) -> bool {
-        self.in_place
-    }
-
-    fn reads(&self) -> impl Iterator<Item = u32> + '_ {
-        self.inputs
-            .iter()
-            .copied()
-            .chain(self.chain.iter().map(|step| step.operand))
-            .filter(|value| *value != NO_VALUE)
-    }
-}
-
+#[non_exhaustive]
 #[derive(Clone)]
-pub(crate) struct ValueInfo {
-    pub(crate) shape: Shape,
-    pub(crate) strides: [u32; 4],
-    pub(crate) storage: u32,
-    pub(crate) residency: Residency,
-    pub(crate) requires_grad: bool,
-    pub(crate) retained: bool,
-    pub(crate) written_in_place: bool,
-    pub(crate) seed: Option<Init>,
+pub struct ValueInfo {
+    pub shape: Shape,
+    pub strides: [u32; 4],
+    pub storage: u32,
+    pub residency: Residency,
+    pub requires_grad: bool,
+    pub retained: bool,
+    pub written_in_place: bool,
+    pub seed: Option<Init>,
 }
 
 impl ValueInfo {
-    pub(crate) fn derived(shape: Shape, id: u32) -> Self {
+    pub fn derived(shape: Shape, id: u32) -> Self {
         Self {
             shape,
             strides: shape.strides(),
@@ -124,11 +104,26 @@ impl ValueInfo {
     }
 }
 
-pub(crate) struct GraphState {
-    pub(crate) values: Vec<ValueInfo>,
-    pub(crate) tasks: Vec<TaskInfo>,
-    pub(crate) differentiated: bool,
-    pub(crate) updated_in_place: bool,
+struct GraphState {
+    values: Vec<ValueInfo>,
+    tasks: Vec<TaskInfo>,
+    differentiated: bool,
+    updated_in_place: bool,
+}
+
+pub struct GraphSnapshot {
+    values: Vec<ValueInfo>,
+    tasks: Vec<TaskInfo>,
+}
+
+impl GraphSnapshot {
+    pub fn values(&self) -> &[ValueInfo] {
+        &self.values
+    }
+
+    pub fn tasks(&self) -> &[TaskInfo] {
+        &self.tasks
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -558,8 +553,12 @@ impl<'g> Graph<'g> {
         self.state.borrow().tasks.len()
     }
 
-    pub fn layout(&self, alignment: u64, precision: Precision) -> Layout {
-        Layout::of(&self.state.borrow().values, precision, alignment)
+    pub fn snapshot(&self) -> GraphSnapshot {
+        let state = self.state.borrow();
+        GraphSnapshot {
+            values: state.values.clone(),
+            tasks: state.tasks.clone(),
+        }
     }
 
     pub fn updates_weights(&self) -> bool {
@@ -567,11 +566,6 @@ impl<'g> Graph<'g> {
         state.tasks.iter().any(|task| {
             task.in_place && state.values[task.out as usize].residency == Residency::Parameter
         })
-    }
-
-    pub fn encode(&self, alignment: u64, profile: Profile, precision: Precision) -> Encoding {
-        let state = self.state.borrow();
-        Encoding::plan(&state, profile, alignment, precision)
     }
 
     pub fn backward(&self, loss: Value<'g>) -> Gradients<'g> {
@@ -1028,7 +1022,7 @@ impl<'g> Graph<'g> {
 
     fn stored(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        if access::owner(&self.state.borrow().values, value.id()) {
+        if self.owner_of(value.id()) == value.id() {
             return value;
         }
         self.identity(value)
