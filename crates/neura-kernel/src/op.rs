@@ -10,7 +10,7 @@ pub fn fragment() -> String {
 ",
     );
     source.push_str(
-        "fn op_apply(kind: u32, op: u32, a: f32, b: f32) -> f32 {
+        "fn op_apply(kind: u32, op: u32, a: f32, b: f32, slot: u32) -> f32 {
     switch (op) {
 ",
     );
@@ -23,7 +23,7 @@ pub fn fragment() -> String {
         .unwrap();
     }
     source.push_str(
-        "        default: { refuse(kind, op); }
+        "        default: { refuse(slot, kind, op); }
     }
     return 0.0;
 }
@@ -31,7 +31,7 @@ pub fn fragment() -> String {
 ",
     );
     source.push_str(
-        "fn run_partial(task: Task, lid: u32) {
+        "fn run_partial(task: Task, lid: u32, slot: u32) {
     let primary = values[select(task.a, task.out, task.a == NO_VALUE)];
     let other = values[select(task.b, task.out, task.b == NO_VALUE)];
     let gradient = values[task.c];
@@ -59,9 +59,9 @@ pub fn fragment() -> String {
         }
     }
     source.push_str(
-        "            default: { refuse(task.kind, task.op * 2u + task.slot); }
+        "            default: { refuse(slot, task.kind, task.op * 2u + task.slot); }
         }
-        publish(output, index, chained(task, at, result));
+        publish(output, index, chained(task, at, result, slot));
     }
 }
 ",

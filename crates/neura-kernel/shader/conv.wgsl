@@ -1,4 +1,4 @@
-fn run_conv2d(task: Task, lid: u32) {
+fn run_conv2d(task: Task, lid: u32, slot: u32) {
     let input = values[task.a];
     let taps = values[task.b];
     let output = values[task.out];
@@ -23,11 +23,11 @@ fn run_conv2d(task: Task, lid: u32) {
                 }
             }
         }
-        publish(output, index, chained(task, at, total));
+        publish(output, index, chained(task, at, total, slot));
     }
 }
 
-fn run_conv2d_input_grad(task: Task, lid: u32) {
+fn run_conv2d_input_grad(task: Task, lid: u32, slot: u32) {
     let taps = values[task.a];
     let gradient = values[task.b];
     let output = values[task.out];
@@ -56,11 +56,11 @@ fn run_conv2d_input_grad(task: Task, lid: u32) {
                 }
             }
         }
-        publish(output, index, chained(task, at, total));
+        publish(output, index, chained(task, at, total, slot));
     }
 }
 
-fn run_conv2d_weight_chunk(task: Task, lid: u32) {
+fn run_conv2d_weight_chunk(task: Task, lid: u32, slot: u32) {
     let input = values[task.a];
     let gradient = values[task.b];
     let taps = values[task.c];
@@ -101,7 +101,7 @@ fn run_conv2d_weight_chunk(task: Task, lid: u32) {
     }
 }
 
-fn run_conv2d_weight_fold(task: Task, lid: u32) {
+fn run_conv2d_weight_fold(task: Task, lid: u32, slot: u32) {
     let partials = values[task.a];
     let output = values[task.out];
     let chunks = partials.dims.z;
@@ -110,14 +110,14 @@ fn run_conv2d_weight_fold(task: Task, lid: u32) {
         for (var chunk = 0u; chunk < chunks; chunk = chunk + 1u) {
             total = total + fetch(partials, read_address(vec4<u32>(0u, 0u, chunk, index), partials.strides));
         }
-        publish(output, index, chained(task, coordinates(index, output.dims), total));
+        publish(output, index, chained(task, coordinates(index, output.dims), total, slot));
     }
 }
 
-fn run_conv2d_weight_grad(task: Task, lid: u32) {
+fn run_conv2d_weight_grad(task: Task, lid: u32, slot: u32) {
     switch (task.geometry) {
-        case WEIGHT_CHUNK: { run_conv2d_weight_chunk(task, lid); }
-        case WEIGHT_FOLD: { run_conv2d_weight_fold(task, lid); }
-        default: { refuse(Conv2dWeightGrad, task.geometry); }
+        case WEIGHT_CHUNK: { run_conv2d_weight_chunk(task, lid, slot); }
+        case WEIGHT_FOLD: { run_conv2d_weight_fold(task, lid, slot); }
+        default: { refuse(slot, Conv2dWeightGrad, task.geometry); }
     }
 }

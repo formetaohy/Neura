@@ -19,9 +19,9 @@ fn row_origin(value: Value, row: u32) -> u32 {
     return at.x * value.strides.x + at.y * value.strides.y + at.z * value.strides.z;
 }
 
-fn whole_index(value: f32, rows: u32, kind: u32) -> u32 {
+fn whole_index(value: f32, rows: u32, kind: u32, slot: u32) -> u32 {
     if (trunc(value) != value || !(value >= 0.0) || !(value < f32(rows))) {
-        refuse(kind, 0u);
+        refuse(slot, kind, 0u);
         return 0u;
     }
     return u32(value);

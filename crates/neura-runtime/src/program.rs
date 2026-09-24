@@ -2,8 +2,7 @@ use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::tape::DeviceTape;
 use neura_abi::{
-    BoundsRecord, MatmulTile, Placement, PlacementRecord, Precision, Profile, REFUSAL_BYTES,
-    WORD_BYTES,
+    BoundsRecord, MatmulTile, Placement, PlacementRecord, Precision, Profile, WORD_BYTES,
 };
 use neura_gpu::{BindGroup, BindGroupEntry, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_program::{Region, Span, Value};
@@ -81,10 +80,11 @@ impl<'r> Program<'r> {
         weights: Weights<'r>,
     ) -> Self {
         let pool = tape.pool();
+        let refusal_words = 1 + tape.encoding.segments().len() as u64;
         let refusal = Recycled::claim(
             pool,
             "neura refusal",
-            REFUSAL_BYTES,
+            refusal_words * WORD_BYTES,
             BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         let placement = Recycled::claim(
@@ -100,6 +100,7 @@ impl<'r> Program<'r> {
             tensors.offset(),
             Some(tensors.bytes()),
         );
+        clearing.clear_buffer(refusal.buffer().buffer(), 0, None);
         clearing.submit(queue);
         placement.buffer().write(
             queue,

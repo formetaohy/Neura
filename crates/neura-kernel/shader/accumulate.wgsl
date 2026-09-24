@@ -1,4 +1,4 @@
-fn run_accumulate(task: Task, lid: u32) {
+fn run_accumulate(task: Task, lid: u32, slot: u32) {
     let view = values[task.a];
     let into = values[task.b];
     let source = values[task.c];

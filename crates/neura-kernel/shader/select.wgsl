@@ -1,4 +1,4 @@
-fn run_one_hot(task: Task, lid: u32) {
+fn run_one_hot(task: Task, lid: u32, slot: u32) {
     let indices = values[task.a];
     let output = values[task.out];
     let classes = output.dims.w;
@@ -6,12 +6,12 @@ fn run_one_hot(task: Task, lid: u32) {
         let row = index / classes;
         let column = index % classes;
         let at = coordinates(row, indices.dims);
-        let chosen = whole_index(fetch(indices, read_address(at, indices.strides)), classes, OneHot);
-        publish(output, index, chained(task, coordinates(index, output.dims), select(0.0, 1.0, column == chosen)));
+        let chosen = whole_index(fetch(indices, read_address(at, indices.strides)), classes, OneHot, slot);
+        publish(output, index, chained(task, coordinates(index, output.dims), select(0.0, 1.0, column == chosen), slot));
     }
 }
 
-fn run_gather(task: Task, lid: u32) {
+fn run_gather(task: Task, lid: u32, slot: u32) {
     let table = values[task.a];
     let indices = values[task.b];
     let output = values[task.out];
@@ -21,7 +21,7 @@ fn run_gather(task: Task, lid: u32) {
         let row = index / width;
         let column = index % width;
         let at = coordinates(row, indices.dims);
-        let chosen = whole_index(fetch(indices, read_address(at, indices.strides)), rows, Gather);
-        publish(output, index, chained(task, coordinates(index, output.dims), fetch(table, row_origin(table, chosen) + column * table.strides.w)));
+        let chosen = whole_index(fetch(indices, read_address(at, indices.strides)), rows, Gather, slot);
+        publish(output, index, chained(task, coordinates(index, output.dims), fetch(table, row_origin(table, chosen) + column * table.strides.w), slot));
     }
 }

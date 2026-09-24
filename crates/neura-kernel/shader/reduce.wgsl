@@ -1,4 +1,4 @@
-fn run_sum_chunk(task: Task, lid: u32) {
+fn run_sum_chunk(task: Task, lid: u32, slot: u32) {
     let source = values[task.a];
     let output = values[task.out];
     var local = 0.0;
@@ -27,25 +27,25 @@ fn sum_row_with_thread(source: Value, row: u32, columns: u32) -> f32 {
     return local;
 }
 
-fn sum_rows_with_workgroup(task: Task, lid: u32, source: Value, columns: u32) {
+fn sum_rows_with_workgroup(task: Task, lid: u32, slot: u32, source: Value, columns: u32) {
     let output = values[task.out];
     for (var row = task.first; row < task.first + task.count; row = row + 1u) {
         let total = sum_row_with_workgroup(lid, source, row, columns);
         if (lid == 0u) {
-            publish(output, row, chained(task, coordinates(row, output.dims), total));
+            publish(output, row, chained(task, coordinates(row, output.dims), total, slot));
         }
         workgroupBarrier();
     }
 }
 
-fn sum_rows_with_thread(task: Task, lid: u32, source: Value, columns: u32) {
+fn sum_rows_with_thread(task: Task, lid: u32, slot: u32, source: Value, columns: u32) {
     let output = values[task.out];
     for (var row = task.first + lid; row < task.first + task.count; row = row + WORKGROUP_SIZE) {
-        publish(output, row, chained(task, coordinates(row, output.dims), sum_row_with_thread(source, row, columns)));
+        publish(output, row, chained(task, coordinates(row, output.dims), sum_row_with_thread(source, row, columns), slot));
     }
 }
 
-fn sum_axis_element(task: Task, lid: u32, source: Value, output: Value, axis: u32) {
+fn sum_axis_element(task: Task, lid: u32, slot: u32, source: Value, output: Value, axis: u32) {
     let step = vec4<u32>(
         select(0u, 1u, axis == 0u),
         select(0u, 1u, axis == 1u),
@@ -59,29 +59,29 @@ fn sum_axis_element(task: Task, lid: u32, source: Value, output: Value, axis: u3
         for (var fold = 0u; fold < folds; fold = fold + 1u) {
             total = total + fetch(source, read_address(at + step * fold, source.strides));
         }
-        publish(output, index, chained(task, at, total));
+        publish(output, index, chained(task, at, total, slot));
     }
 }
 
-fn run_sum_axis(task: Task, lid: u32) {
+fn run_sum_axis(task: Task, lid: u32, slot: u32) {
     let source = values[task.a];
     let output = values[task.out];
     switch (task.geometry) {
-        case THREAD_ELEMENT: { sum_axis_element(task, lid, source, output, task.slot); }
+        case THREAD_ELEMENT: { sum_axis_element(task, lid, slot, source, output, task.slot); }
         case THREAD_ROW: {
             if (task.slot == 3u) {
-                sum_rows_with_thread(task, lid, source, source.dims.w);
+                sum_rows_with_thread(task, lid, slot, source, source.dims.w);
             } else {
-                refuse(SumAxis, task.geometry);
+                refuse(slot, SumAxis, task.geometry);
             }
         }
         case WORKGROUP_ROW: {
             if (task.slot == 3u) {
-                sum_rows_with_workgroup(task, lid, source, source.dims.w);
+                sum_rows_with_workgroup(task, lid, slot, source, source.dims.w);
             } else {
-                refuse(SumAxis, task.geometry);
+                refuse(slot, SumAxis, task.geometry);
             }
         }
-        default: { refuse(SumAxis, task.geometry); }
+        default: { refuse(slot, SumAxis, task.geometry); }
     }
 }

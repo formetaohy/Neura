@@ -158,7 +158,7 @@ impl Megakernel {
 
 fn dispatch(kinds: &[Kind]) -> String {
     let mut out = String::from(
-        "fn run_task(index: u32, lid: u32) {\n    let task = tasks[index];\n    switch (task.kind) {\n",
+        "fn run_task(index: u32, lid: u32, slot: u32) {\n    let task = tasks[index];\n    switch (task.kind) {\n",
     );
     for kind in Kind::ALL {
         if !kinds.contains(kind) {
@@ -166,13 +166,13 @@ fn dispatch(kinds: &[Kind]) -> String {
         }
         writeln!(
             out,
-            "        case {}: {{ {}(task, lid); }}",
+            "        case {}: {{ {}(task, lid, slot); }}",
             kind.constant(),
             neura_kernel::body(*kind),
         )
         .unwrap();
     }
-    out.push_str("        default: { refuse(task.kind, 0u); }\n    }\n}\n");
+    out.push_str("        default: { refuse(slot, task.kind, 0u); }\n    }\n}\n");
     out
 }
 
@@ -181,9 +181,13 @@ fn task_loop() -> String {
         "
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn {ENTRY}(@builtin(local_invocation_index) lid: u32, @builtin(workgroup_id) group: vec3<u32>) {{
+    let slot = 1u + bounds.first_segment + group.x;
+    let halted = atomicLoad(&refusal[0u]) != 0u;
     let segment = segments[bounds.first_segment + group.x];
     for (var index = segment.first; index < segment.first + segment.count; index = index + 1u) {{
-        run_task(index, lid);
+        if (!halted && atomicLoad(&refusal[slot]) == 0u) {{
+            run_task(index, lid, slot);
+        }}
         storageBarrier();
     }}
 }}

@@ -1,4 +1,4 @@
-fn run_concat(task: Task, lid: u32) {
+fn run_concat(task: Task, lid: u32, slot: u32) {
     let source = values[task.a];
     let output = values[task.out];
     for (var index = task.first + lid; index < task.first + task.count; index = index + WORKGROUP_SIZE) {
@@ -17,6 +17,6 @@ fn run_concat(task: Task, lid: u32) {
             shifted.w = shifted.w + task.origin;
         }
         let value = fetch(source, read_address(at, source.strides));
-        publish(output, read_address(shifted, output.strides), chained(task, shifted, value));
+        publish(output, read_address(shifted, output.strides), chained(task, shifted, value, slot));
     }
 }

@@ -4,7 +4,8 @@ use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
 use neura_abi::{
-    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, WORD_BYTES, op,
+    Geometry, Kind, MAX_DISPATCH_SEGMENTS, PROFILES, Placement, Precision, Profile, REFUSAL_BYTES,
+    WORD_BYTES, op,
 };
 use neura_gpu::{
     BufferUsages, ComputePassDescriptor, GpuContext, GpuRequest, GpuUnavailable, Readback,
@@ -171,17 +172,16 @@ impl Runtime {
             .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
     }
 
-    pub fn checkpoint(&self, weights: &Weights<'_>) -> Checkpoint {
+    pub fn checkpoint<'r>(&self, program: &Program<'r>) -> Checkpoint {
+        self.assert_owns(program);
         self.context.assert_alive();
-        assert!(
-            weights.lives_on(&self.heap),
-            "this weight store lives on the device heap of another runtime",
-        );
+        let weights = program.weights();
         let bytes = weights.region().bytes();
+        let total = bytes + REFUSAL_BYTES;
         let staging = Recycled::claim(
             &self.pool,
             "neura checkpoint",
-            bytes,
+            total,
             BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         );
         let device = self.context.device();
@@ -193,17 +193,24 @@ impl Runtime {
             0,
             bytes,
         );
+        submission.copy_buffer_to_buffer(
+            program.refusal.buffer().buffer(),
+            0,
+            staging.buffer().buffer(),
+            bytes,
+            REFUSAL_BYTES,
+        );
         let (sender, completed) = mpsc::channel();
         submission.map_buffer_on_submit(
             staging.buffer().buffer(),
             MapMode::Read,
-            ..bytes,
+            ..total,
             move |result| {
                 let _ = sender.send(result);
             },
         );
         let submission = submission.submit(self.context.queue());
-        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes);
+        let payload = self.collect_checkpoint(device, staging, submission, completed, bytes, total);
         Checkpoint::of(weights.region(), payload)
     }
 
@@ -214,6 +221,7 @@ impl Runtime {
         submission: wgpu::SubmissionIndex,
         completed: mpsc::Receiver<Result<(), BufferAsyncError>>,
         bytes: u64,
+        total: u64,
     ) -> Vec<u8> {
         device
             .poll(PollType::Wait {
@@ -229,13 +237,20 @@ impl Runtime {
             .unwrap_or_else(|error: BufferAsyncError| {
                 panic!("mapping the checkpoint failed: {error}")
             });
-        let payload = staging
+        let words = staging
             .buffer()
             .buffer()
-            .slice(..bytes)
+            .slice(..total)
             .get_mapped_range()
-            .expect("a finished checkpoint is mapped")
-            .to_vec();
+            .expect("a finished checkpoint is mapped");
+        let refusal = u32::from_ne_bytes(
+            words[bytes as usize..total as usize]
+                .try_into()
+                .expect("a fault word was copied back"),
+        );
+        assert_eq!(refusal, 0, "{}", refusal_message(refusal));
+        let payload = words[..bytes as usize].to_vec();
+        drop(words);
         staging.buffer().buffer().unmap();
         payload
     }

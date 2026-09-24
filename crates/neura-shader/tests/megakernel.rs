@@ -109,7 +109,7 @@ fn the_megakernel_dispatches_every_kind_by_its_declared_constant() {
             );
             assert!(
                 kernel.source().contains(&format!(
-                    "case {}: {{ {}(task, lid); }}",
+                    "case {}: {{ {}(task, lid, slot); }}",
                     kind.constant(),
                     neura_kernel::body(*kind),
                 )),
@@ -123,7 +123,7 @@ fn the_megakernel_dispatches_every_kind_by_its_declared_constant() {
 #[test]
 fn the_device_applies_every_declared_op() {
     let kernel = assemble(PROFILES[0]);
-    let head = "fn run_partial(task: Task, lid: u32) {";
+    let head = "fn run_partial(task: Task, lid: u32, slot: u32) {";
     let rest = &kernel.source()[kernel.source().find(head).expect(head) + head.len()..];
     let partials = &rest[..rest
         .find(
@@ -202,19 +202,19 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
         assert!(
             kernel
                 .source()
-                .contains("fn run_matmul(task: Task, lid: u32)")
+                .contains("fn run_matmul(task: Task, lid: u32, slot: u32)")
         );
         for (geometry, tile) in profile.tiles().iter().enumerate() {
             assert!(
                 kernel.source().contains(&format!(
-                    "case {geometry}u: {{ run_matmul_{geometry}(task, lid); }}"
+                    "case {geometry}u: {{ run_matmul_{geometry}(task, lid, slot); }}"
                 )),
                 "the device never dispatches geometry {geometry} of {profile:?}",
             );
             assert!(
-                kernel
-                    .source()
-                    .contains(&format!("fn run_matmul_{geometry}(task: Task, lid: u32)")),
+                kernel.source().contains(&format!(
+                    "fn run_matmul_{geometry}(task: Task, lid: u32, slot: u32)"
+                )),
                 "a profile of {profile:?} carries no body for geometry {geometry}",
             );
             for register in (0..tile.registers()).step_by(tile.register_columns() as usize) {
@@ -227,7 +227,7 @@ fn a_profile_generates_a_body_for_every_tile_it_carries() {
             }
         }
         assert!(kernel.source().contains(&format!(
-            "default: {{ refuse({}, task.geometry); }}",
+            "default: {{ refuse(slot, {}, task.geometry); }}",
             Kind::Matmul.constant(),
         )));
         assert!(
@@ -243,15 +243,13 @@ fn a_program_carries_every_tile_its_profile_offers() {
     let kernel = assemble(profile);
     for geometry in 0..profile.tiles().len() {
         assert!(
-            kernel
+            kernel.source().contains(&format!(
+                "fn run_matmul_{geometry}(task: Task, lid: u32, slot: u32)"
+            )) && kernel.source().contains(&format!(
+                "case {geometry}u: {{ run_matmul_{geometry}(task, lid, slot); }}"
+            )) && kernel
                 .source()
-                .contains(&format!("fn run_matmul_{geometry}(task: Task, lid: u32)"))
-                && kernel.source().contains(&format!(
-                    "case {geometry}u: {{ run_matmul_{geometry}(task, lid); }}"
-                ))
-                && kernel
-                    .source()
-                    .contains(&format!("const MATMUL_ROWS_{geometry}")),
+                .contains(&format!("const MATMUL_ROWS_{geometry}")),
             "a program that serves every shape carries geometry {geometry} of {profile:?}",
         );
     }
@@ -269,11 +267,11 @@ fn a_program_carries_only_the_kinds_its_plan_names() {
     assert_eq!(kernel.kinds(), &[Kind::Matmul]);
     let dispatch = kernel
         .source()
-        .split_once("fn run_task(index: u32, lid: u32)")
+        .split_once("fn run_task(index: u32, lid: u32, slot: u32)")
         .expect("the assembled program dispatches its kinds")
         .1;
     assert!(dispatch.contains(&format!(
-        "case {}: {{ run_matmul(task, lid); }}",
+        "case {}: {{ run_matmul(task, lid, slot); }}",
         Kind::Matmul.constant(),
     )));
     assert!(!dispatch.contains(&format!("case {}:", Kind::Binary.constant())));
