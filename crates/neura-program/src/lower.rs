@@ -3,7 +3,6 @@ use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_profile::{MatmulTile, Profile};
 
-const TARGET_TASKS: u32 = 256;
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
@@ -76,12 +75,14 @@ impl Task {
 pub(crate) struct Plan {
     pub(crate) values: Vec<ValueInfo>,
     pub(crate) tasks: Vec<Task>,
+    pub(crate) tiles: Vec<MatmulTile>,
 }
 
 pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
+        tiles: Vec::new(),
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
@@ -98,6 +99,16 @@ impl Plan {
         self.values[value as usize].shape
     }
 
+    fn geometry(&mut self, tile: MatmulTile) -> u32 {
+        match self.tiles.iter().position(|candidate| *candidate == tile) {
+            Some(index) => index as u32,
+            None => {
+                self.tiles.push(tile);
+                (self.tiles.len() - 1) as u32
+            }
+        }
+    }
+
     fn publish(&mut self, shape: Shape) -> u32 {
         let id = self.values.len() as u32;
         self.values.push(ValueInfo::derived(shape, id));
@@ -106,11 +117,12 @@ impl Plan {
 }
 
 fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let target = device_workgroups(profile);
     match unit.kind {
         Kind::Matmul => matmul(plan, unit, profile),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows())) {
+            for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows(), target)) {
                 plan.tasks.push(Task::span(
                     unit,
                     first,
@@ -119,15 +131,15 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                 ));
             }
         }
-        Kind::Argmax | Kind::Categorical => choice(plan, unit, profile),
-        Kind::SumChunk => reduce(plan, unit),
-        Kind::SumAxis => fold(plan, unit, profile),
+        Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
+        Kind::SumChunk => reduce(plan, unit, target),
+        Kind::SumAxis => fold(plan, unit, profile, target),
         Kind::Conv2d => {
             let out = plan.shape(unit.out);
             let filter = plan.shape(unit.inputs[1]);
             let dims = filter.dims();
             let taps = u64::from(dims[1] * dims[2] * dims[3]);
-            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count) * taps));
             }
@@ -137,12 +149,12 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let filter = plan.shape(unit.inputs[0]);
             let dims = filter.dims();
             let taps = u64::from(dims[0] * dims[2] * dims[3]);
-            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count) * taps));
             }
         }
-        Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit),
+        Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit, profile),
         Kind::MatmulFold => {
             panic!("a fold of depth partials comes from the product whose depth split")
         }
@@ -154,7 +166,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         | Kind::OneHot
         | Kind::Gather => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count)));
             }
@@ -174,14 +186,18 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
-fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo) {
+fn device_workgroups(profile: Profile) -> u32 {
+    profile.workgroups()
+}
+
+fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let input = plan.shape(unit.inputs[0]);
     let gradient = plan.shape(unit.inputs[1]);
     let filters = plan.shape(unit.inputs[2]).elements();
     let positions = input.dims()[0] * gradient.dims()[2] * gradient.dims()[3];
-    let per_task = task_elements(filters);
+    let per_task = task_elements(filters, device_workgroups(profile));
     let spans_per_chunk = filters.div_ceil(per_task);
-    let chunks = (TARGET_TASKS / spans_per_chunk).clamp(1, positions);
+    let chunks = (device_workgroups(profile) / spans_per_chunk).clamp(1, positions);
     let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
     for chunk in 0..chunks {
         for (first, count) in spans(filters, per_task) {
@@ -206,7 +222,7 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo) {
     }
 }
 
-fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
@@ -215,7 +231,7 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     } else {
         strategy::WORKGROUP_ROW
     };
-    for (first, count) in spans(rows, choice_rows_per_task(rows)) {
+    for (first, count) in spans(rows, choice_rows_per_task(rows, target)) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
         task.geometry = geometry;
         plan.tasks.push(task);
@@ -227,15 +243,10 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let (rows, columns) = (dims[2], dims[3]);
     let depth = plan.shape(unit.inputs[0]).dims()[3];
     let planes = dims[0] * dims[1];
-    let tile = matmul_tile(profile, rows, columns);
-    let geometry = profile
-        .tiles()
-        .iter()
-        .position(|candidate| *candidate == tile)
-        .expect("every tile a plan chooses lies in the profile that chose it")
-        as u32;
+    let tile = matmul_tile(profile, rows, columns, depth);
+    let geometry = plan.geometry(tile);
     let tiles = planes * rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns());
-    let splits = matmul_splits(tile, rows, columns, depth, planes);
+    let splits = matmul_splits(tile, rows, columns, depth, planes, profile);
     let partials =
         (splits > 1).then(|| plan.publish(Shape::vector(splits * planes * rows * columns)));
     for split in 0..splits {
@@ -256,7 +267,10 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         return;
     };
     let elements = planes * rows * columns;
-    for (first, count) in spans(elements, task_elements(elements)) {
+    for (first, count) in spans(
+        elements,
+        task_elements(elements, device_workgroups(profile)),
+    ) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
         task.kind = Kind::MatmulFold;
         task.inputs = [partials, NO_VALUE, NO_VALUE];
@@ -265,11 +279,11 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
-fn matmul_tile(profile: Profile, rows: u32, columns: u32) -> MatmulTile {
+fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32) -> MatmulTile {
     let mut chosen = profile.tiles()[0];
     let mut cheapest = u128::MAX;
     for tile in profile.tiles() {
-        let cost = matmul_cost(*tile, rows, columns);
+        let cost = matmul_cost(*tile, rows, columns, depth);
         if cost < cheapest {
             cheapest = cost;
             chosen = *tile;
@@ -278,24 +292,35 @@ fn matmul_tile(profile: Profile, rows: u32, columns: u32) -> MatmulTile {
     chosen
 }
 
-fn matmul_cost(tile: MatmulTile, rows: u32, columns: u32) -> u128 {
-    let computed = u128::from(tile.rows())
-        * u128::from(rows.div_ceil(tile.rows()))
-        * u128::from(tile.columns())
-        * u128::from(columns.div_ceil(tile.columns()));
-    let staged = u128::from(tile.rows() + tile.columns());
-    let loaded =
-        u128::from(tile.threads()) * u128::from(tile.register_rows() + tile.register_columns());
-    let multiplied = u128::from(tile.threads()) * u128::from(tile.registers());
-    computed * (staged + loaded) / multiplied
+const BARRIER_SLOTS: u128 = 16;
+
+fn matmul_cost(tile: MatmulTile, rows: u32, columns: u32, depth: u32) -> u128 {
+    let block_rows = u128::from(tile.rows());
+    let block_columns = u128::from(tile.columns());
+    let tiles =
+        u128::from(rows.div_ceil(tile.rows())) * u128::from(columns.div_ceil(tile.columns()));
+    let registers = u128::from(tile.registers());
+    let blocks = u128::from(depth.div_ceil(tile.depth()));
+    let threads = u128::from(tile.threads());
+    let shared_loads = registers + u128::from(tile.register_rows() + tile.register_columns());
+    tiles * block_rows * block_columns * u128::from(depth) * shared_loads / registers
+        + tiles * u128::from(depth) * (block_rows + block_columns) / threads
+        + tiles * blocks * threads * BARRIER_SLOTS
 }
 
-fn matmul_splits(tile: MatmulTile, rows: u32, columns: u32, depth: u32, planes: u32) -> u32 {
+fn matmul_splits(
+    tile: MatmulTile,
+    rows: u32,
+    columns: u32,
+    depth: u32,
+    planes: u32,
+    profile: Profile,
+) -> u32 {
     let elements = u64::from(planes) * u64::from(rows) * u64::from(columns);
     let tiles = u64::from(planes)
         * u64::from(rows.div_ceil(tile.rows()))
         * u64::from(columns.div_ceil(tile.columns()));
-    let splits = u64::from(TARGET_TASKS).div_ceil(tiles);
+    let splits = u64::from(device_workgroups(profile)).div_ceil(tiles);
     let splits = splits.min(u64::from(
         depth.div_ceil(tile.depth()) / MATMUL_SPLIT_BLOCKS,
     ));
@@ -305,11 +330,11 @@ fn matmul_splits(tile: MatmulTile, rows: u32, columns: u32, depth: u32, planes: 
     splits.max(1) as u32
 }
 
-fn reduce(plan: &mut Plan, unit: &TaskInfo) {
+fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
     let mut source = unit.inputs[0];
     loop {
         let elements = plan.shape(source).elements();
-        let per_reduction = reduction_elements(elements);
+        let per_reduction = reduction_elements(elements, target);
         if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
             task.inputs = [source, NO_VALUE, NO_VALUE];
@@ -329,13 +354,13 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo) {
     }
 }
 
-fn task_elements(elements: u32) -> u32 {
-    (elements / TARGET_TASKS)
+fn task_elements(elements: u32, target: u32) -> u32 {
+    (elements / target)
         .next_power_of_two()
         .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
 }
 
-fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     let (shape, strides) = {
         let source = &plan.values[unit.inputs[0] as usize];
         (source.shape, source.strides)
@@ -350,36 +375,36 @@ fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         } else {
             strategy::WORKGROUP_ROW
         };
-        for (first, count) in spans(out.elements(), fold_rows_per_task(out.elements())) {
+        for (first, count) in spans(out.elements(), fold_rows_per_task(out.elements(), target)) {
             let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
             task.geometry = geometry;
             plan.tasks.push(task);
         }
         return;
     }
-    for (first, count) in spans(out.elements(), task_elements(out.elements())) {
+    for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(folds));
         task.geometry = strategy::THREAD_ELEMENT;
         plan.tasks.push(task);
     }
 }
 
-fn reduction_elements(elements: u32) -> u32 {
-    (elements / TARGET_TASKS)
+fn reduction_elements(elements: u32, target: u32) -> u32 {
+    (elements / target)
         .next_power_of_two()
         .clamp(REDUCTION_FLOOR, REDUCTION_CEILING)
 }
 
-fn softmax_rows_per_task(rows: u32) -> u32 {
-    rows.div_ceil(TARGET_TASKS).clamp(1, SOFTMAX_ROW_CEILING)
+fn softmax_rows_per_task(rows: u32, target: u32) -> u32 {
+    rows.div_ceil(target).clamp(1, SOFTMAX_ROW_CEILING)
 }
 
-fn fold_rows_per_task(rows: u32) -> u32 {
-    rows.div_ceil(TARGET_TASKS).clamp(1, FOLD_ROW_CEILING)
+fn fold_rows_per_task(rows: u32, target: u32) -> u32 {
+    rows.div_ceil(target).clamp(1, FOLD_ROW_CEILING)
 }
 
-fn choice_rows_per_task(rows: u32) -> u32 {
-    rows.div_ceil(TARGET_TASKS).max(1)
+fn choice_rows_per_task(rows: u32, target: u32) -> u32 {
+    rows.div_ceil(target).max(1)
 }
 
 const SCATTER_ROW_CEILING: u32 = 4096;

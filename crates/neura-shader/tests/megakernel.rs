@@ -3,7 +3,13 @@ use neura_abi::{Kind, RECORDS};
 use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
 use neura_precision::Precision;
-use neura_profile::{Geometry, PROFILES, Profile};
+use neura_profile::{Budget, Geometry, Profile};
+
+const DEVICE: Budget = Budget::of(1024, 48 << 10);
+
+fn profiles() -> Vec<Profile> {
+    Profile::derive(DEVICE)
+}
 use neura_shader::{BINDINGS, Megakernel};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
@@ -11,17 +17,25 @@ use std::sync::OnceLock;
 fn all(profile: usize) -> &'static Megakernel {
     static PROGRAMS: OnceLock<Vec<Megakernel>> = OnceLock::new();
     &PROGRAMS.get_or_init(|| {
-        PROFILES
+        profiles()
             .iter()
             .map(|profile| {
-                Megakernel::assemble(Kind::ALL, Geometry::of(*profile), Precision::Single)
+                Megakernel::assemble(
+                    Kind::ALL,
+                    Geometry::of(profile.workgroup(), profile.tiles()),
+                    Precision::Single,
+                )
             })
             .collect()
     })[profile]
 }
 
 fn selected(profile: Profile, kinds: &[Kind], precision: Precision) -> Megakernel {
-    Megakernel::assemble(kinds, Geometry::of(profile), precision)
+    Megakernel::assemble(
+        kinds,
+        Geometry::of(profile.workgroup(), profile.tiles()),
+        precision,
+    )
 }
 
 fn functions(program: &ComputeProgram) -> BTreeSet<&str> {
@@ -69,7 +83,7 @@ fn rust_source_compiles_into_three_native_shader_formats() {
 
 #[test]
 fn half_precision_compiles_every_task_for_every_native_backend() {
-    let program = selected(PROFILES[0], Kind::ALL, Precision::Half).program();
+    let program = selected(profiles()[0], Kind::ALL, Precision::Half).program();
     assert!(matches!(
         program.translate(Backend::Vulkan),
         ShaderTranslation::Spirv(_)
@@ -86,7 +100,7 @@ fn half_precision_compiles_every_task_for_every_native_backend() {
 
 #[test]
 fn every_profile_compiles_the_rust_abi_and_bindings() {
-    for (index, profile) in PROFILES.iter().enumerate() {
+    for (index, profile) in profiles().iter().enumerate() {
         let kernel = all(index);
         let program = kernel.program();
         assert_eq!(kernel.workgroup_size(), profile.workgroup());
@@ -121,7 +135,7 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
 
 #[test]
 fn specialization_includes_only_reachable_rust_functions() {
-    let kernel = selected(PROFILES[0], &[Kind::Fill], Precision::Single);
+    let kernel = selected(profiles()[0], &[Kind::Fill], Precision::Single);
     let program = kernel.program();
     let reachable = functions(&program);
     assert!(reachable.contains("run_fill"));
@@ -152,7 +166,12 @@ fn specialization_includes_only_reachable_rust_functions() {
 
 #[test]
 fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
-    let program = selected(PROFILES[0], &[Kind::Fill, Kind::Binary], Precision::Single).program();
+    let program = selected(
+        profiles()[0],
+        &[Kind::Fill, Kind::Binary],
+        Precision::Single,
+    )
+    .program();
     let function = program
         .module()
         .functions
@@ -180,7 +199,7 @@ fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
 #[test]
 fn the_rust_operation_dispatcher_contains_every_declared_code() {
     let program = selected(
-        PROFILES[0],
+        profiles()[0],
         &[Kind::Binary, Kind::Partial],
         Precision::Single,
     )
@@ -216,8 +235,8 @@ fn the_rust_operation_dispatcher_contains_every_declared_code() {
 
 #[test]
 fn single_and_half_precision_compile_distinct_device_loads() {
-    let single = selected(PROFILES[0], &[Kind::Unary], Precision::Single).program();
-    let half = selected(PROFILES[0], &[Kind::Unary], Precision::Half).program();
+    let single = selected(profiles()[0], &[Kind::Unary], Precision::Single).program();
+    let half = selected(profiles()[0], &[Kind::Unary], Precision::Half).program();
     assert_ne!(single, half);
     assert!(
         !single
@@ -250,7 +269,7 @@ fn single_and_half_precision_compile_distinct_device_loads() {
 
 #[test]
 fn matrix_specialization_contains_every_tile_in_the_profile() {
-    for (index, profile) in PROFILES.iter().enumerate() {
+    for (index, profile) in profiles().iter().enumerate() {
         let kernel = all(index);
         let program = kernel.program();
         let names = functions(&program);
@@ -263,7 +282,7 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
 
 #[test]
 fn workgroup_allocation_fits_the_advertised_profile() {
-    for (index, profile) in PROFILES.iter().enumerate() {
+    for (index, profile) in profiles().iter().enumerate() {
         let program = all(index).program();
         let used = program
             .module()
@@ -291,8 +310,8 @@ fn workgroup_allocation_fits_the_advertised_profile() {
 
 #[test]
 fn the_same_rust_specialization_produces_the_same_device_program() {
-    let first = selected(PROFILES[0], &[Kind::Fill], Precision::Single).program();
-    let second = selected(PROFILES[0], &[Kind::Fill], Precision::Single).program();
+    let first = selected(profiles()[0], &[Kind::Fill], Precision::Single).program();
+    let second = selected(profiles()[0], &[Kind::Fill], Precision::Single).program();
     assert_eq!(first, second);
     assert_eq!(first.spirv(), second.spirv());
 }

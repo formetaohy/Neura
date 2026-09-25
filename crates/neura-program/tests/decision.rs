@@ -1,7 +1,15 @@
 use neura_abi::{Kind, Placement, TaskRecord, ValueRecord, strategy};
 use neura_graph::{Graph, Init, Shape, Value, Window};
 use neura_precision::Precision;
-use neura_profile::{NARROW, Profile, WIDE};
+use neura_profile::{Budget, Profile};
+
+fn narrow() -> Profile {
+    Profile::derive(Budget::BASELINE)[0]
+}
+
+fn wide() -> Profile {
+    *Profile::derive(Budget::BASELINE).last().expect("a profile")
+}
 use neura_program::Encoding;
 use std::mem::size_of;
 
@@ -53,12 +61,18 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
     graph.retain(middle);
     graph.retain(long);
     for (profile, middle_geometry) in [
-        (NARROW, strategy::WORKGROUP_ROW),
-        (WIDE, strategy::THREAD_ROW),
+        (narrow(), strategy::WORKGROUP_ROW),
+        (wide(), strategy::THREAD_ROW),
     ] {
         let encoding = encoding_with(&graph, profile);
         assert_eq!(tasks_of(&encoding, short).len(), 4);
-        assert_eq!(tasks_of(&encoding, middle).len(), 167);
+        let folds = tasks_of(&encoding, middle);
+        let rows_per_task = 333u32.div_ceil(profile.workgroups());
+        assert_eq!(
+            folds.len(),
+            333usize.div_ceil(rows_per_task as usize),
+            "a row fold hands the device the tasks its device width asks for",
+        );
         assert_eq!(tasks_of(&encoding, long).len(), 2);
         for (index, task) in tasks_of(&encoding, short).into_iter().enumerate() {
             assert_eq!(task.geometry, strategy::THREAD_ROW);
@@ -72,7 +86,7 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
                 task.geometry, middle_geometry,
                 "a row of 200 elements folds through {middle_geometry} on {profile:?}",
             );
-            assert!(task.count > 0 && task.count <= 2);
+            assert!(task.count > 0 && task.count <= 333);
             covered += task.count;
         }
         assert_eq!(covered, 333);
@@ -94,8 +108,8 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
     graph.retain(long);
     graph.retain(view);
     for (profile, long_geometry) in [
-        (NARROW, strategy::WORKGROUP_ROW),
-        (WIDE, strategy::THREAD_ROW),
+        (narrow(), strategy::WORKGROUP_ROW),
+        (wide(), strategy::THREAD_ROW),
     ] {
         let encoding = encoding_with(&graph, profile);
         let short = tasks_of(&encoding, short);
@@ -151,7 +165,7 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
     assert_eq!(batched.shape(), Shape::of([2, 3, 64, 32]));
     assert_eq!(shared.shape(), Shape::of([2, 3, 64, 32]));
     assert_eq!(spread.shape(), Shape::of([2, 3, 64, 32]));
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let geometries = encoding.matmul_geometries();
     assert_eq!(
         geometries.len(),
@@ -207,7 +221,7 @@ fn a_choice_covers_every_row_once() {
     let seed = graph.input(Shape::scalar());
     let action = graph.categorical(graph.input(Shape::matrix(rows, 16)), seed);
     graph.retain(action);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, action);
     assert_eq!(tasks.len(), 250);
     let mut cursor = 0;
@@ -228,7 +242,7 @@ fn an_index_list_carries_one_index_per_row() {
     let indices = graph.input(Shape::matrix(6, 1));
     let mask = graph.one_hot(indices, 4);
     graph.retain(mask);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, mask);
     assert_eq!(tasks.len(), 1);
     assert_eq!(Kind::of(tasks[0].kind), Kind::OneHot);
@@ -244,7 +258,7 @@ fn a_gather_copies_the_rows_of_the_table_it_names() {
     let indices = graph.input(Shape::matrix(7, 1));
     let picked = graph.gather(table, indices);
     graph.retain(picked);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, picked);
     assert_eq!(tasks.len(), 1);
     assert_eq!(Kind::of(tasks[0].kind), Kind::Gather);
@@ -263,7 +277,7 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 32, 32]));
     graph.retain(convolved);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, convolved);
     assert_eq!(tasks.len(), 4);
     let mut cursor = 0;
@@ -299,7 +313,7 @@ fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
     let output_grad = gradients.of(convolved);
     let weight_grad = gradients.of(filter);
     graph.retain(weight_grad);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let gradient_tasks = tape(&encoding)
         .into_iter()
         .filter(|task| Kind::of(task.kind) == Kind::Conv2dWeightGrad)
@@ -418,7 +432,7 @@ fn a_scatter_adds_updates_into_the_leaf_it_names() {
     let indices = graph.input(Shape::matrix(2, 1));
     let updates = graph.input(Shape::matrix(2, 3));
     graph.scatter_into(table, indices, updates);
-    let encoding = encoding_with(&graph, NARROW);
+    let encoding = encoding_with(&graph, narrow());
     assert_eq!(encoding.task_count(), 1);
     assert!(!encoding.updates_weights());
 }

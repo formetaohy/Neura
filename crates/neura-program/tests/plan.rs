@@ -2,7 +2,21 @@ use neura_abi::{Kind, Placement, StepRecord, Store, TaskRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_op as op;
 use neura_precision::Precision;
-use neura_profile::{NARROW, PROFILES, Profile, WIDE};
+use neura_profile::{Budget, Profile};
+
+const DEVICE: Budget = Budget::of(1024, 48 << 10);
+
+fn narrow() -> Profile {
+    Profile::derive(Budget::BASELINE)[0]
+}
+
+fn wide() -> Profile {
+    *Profile::derive(Budget::BASELINE).last().expect("a profile")
+}
+
+fn every_profile() -> Vec<Profile> {
+    Profile::derive(DEVICE)
+}
 use neura_program::{Encoding, Layout};
 use std::mem::size_of;
 
@@ -10,7 +24,7 @@ const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding(graph: &Graph) -> Encoding {
-    encoding_with(graph, NARROW)
+    encoding_with(graph, narrow())
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
@@ -303,7 +317,7 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
     let ragged = graph.matmul(tall, blocked);
     graph.retain(balanced);
     graph.retain(ragged);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tiles = encoding.tiles();
     let tasks = tape(&encoding);
     let balanced_task = *tasks
@@ -326,9 +340,9 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
         "a product no tile divides is masked by the tile its shape pays the least for",
     );
     assert_eq!(
-        tiles,
-        WIDE.tiles(),
-        "a device program carries every tile its profile offers, whatever shapes its tape names",
+        encoding.tiles(),
+        [balanced_tile],
+        "a program carries the tiles its products name and no other",
     );
     assert_eq!(
         encoding.matmul_geometries(),
@@ -341,12 +355,12 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
         "a plan accounts the tile work it dispatches",
     );
     assert_ne!(
-        encoding_with(&graph, NARROW).tiles(),
-        encoding_with(&graph, WIDE).tiles(),
+        encoding_with(&graph, narrow()).tiles(),
+        encoding_with(&graph, wide()).tiles(),
         "a profile decides which tiles a product is tiled with",
     );
     assert!(
-        encoding_with(&graph, WIDE).task_count() < encoding_with(&graph, NARROW).task_count(),
+        encoding_with(&graph, wide()).task_count() < encoding_with(&graph, narrow()).task_count(),
         "a wider tile hands the device fewer, larger tasks",
     );
 }
@@ -358,7 +372,7 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
     let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero);
     let out = graph.matmul(narrow, weight);
     graph.retain(out);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tape = tape(&encoding);
     assert_eq!(out.shape(), Shape::matrix(8, 32));
     let products = tape
@@ -369,8 +383,16 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         .iter()
         .filter(|task| Kind::of(task.kind) == Kind::MatmulFold)
         .collect::<Vec<_>>();
-    assert_eq!(products.len(), 64);
     assert_eq!(folds.len(), 1);
+    let tile = encoding.tiles()[products[0].geometry as usize];
+    let tiles =
+        out.shape().rows().div_ceil(tile.rows()) * out.shape().columns().div_ceil(tile.columns());
+    let splits = folds[0].splits;
+    assert!(
+        splits > 1,
+        "a product of {tiles} tiles fills no device without splitting its depth",
+    );
+    assert_eq!(products.len() as u32, tiles * splits);
     let partials = folds[0].a;
     assert_eq!(
         folds[0].out,
@@ -378,23 +400,22 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         "the fold writes the product its graph names"
     );
     assert_ne!(partials, out.id(), "the fold reads partials of its own");
-    let splits = folds[0].splits;
-    let mut occupied = vec![false; splits as usize];
+    let mut filled = vec![0u32; splits as usize];
     for task in &products {
         assert_eq!(task.splits, splits);
         assert_eq!(task.out, partials);
         assert_eq!(task.count, 1);
-        let slot = task.slot as usize;
-        assert!(!occupied[slot], "two tasks fill one slot of the partials");
-        occupied[slot] = true;
-        assert_eq!(
-            task.first, 0,
-            "a product of one tile carries one tile per slot"
-        );
+        filled[task.slot as usize] += 1;
     }
-    assert!(occupied.iter().all(|taken| *taken));
-    assert_eq!(folds[0].splits, 64);
-    assert_eq!(folds[0].count, 256);
+    assert!(
+        filled.iter().all(|count| *count == tiles),
+        "every split fills every tile of the product",
+    );
+    assert_eq!(
+        folds[0].count,
+        out.shape().elements(),
+        "the fold writes one element per task",
+    );
     assert_eq!(
         dispatch_of(&encoding, tape.len() - 1),
         encoding.dispatch_count() - 1,
@@ -410,7 +431,7 @@ fn a_split_product_hands_its_epilogue_to_the_fold() {
     let data = graph.input(Shape::matrix(8, 4096));
     let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
     graph.retain(out);
-    let encoding = encoding_with(&graph, WIDE);
+    let encoding = encoding_with(&graph, wide());
     let tape = tape(&encoding);
     let folds = tape
         .iter()
@@ -439,7 +460,7 @@ fn a_split_product_hands_its_epilogue_to_the_fold() {
 
 #[test]
 fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
-    for (elements, tasks) in [(32u32, 1u32), (4096, 2), (65536, 32), (1 << 20, 256)] {
+    for (elements, tasks) in [(32u32, 1u32), (4096, 2), (65536, 32), (1 << 20, 512)] {
         let graph = Graph::new();
         let data = graph.input(Shape::vector(elements));
         graph.relu(data);
@@ -454,13 +475,13 @@ fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
 
 #[test]
 fn every_profile_plans_the_same_values() {
-    for profile in PROFILES {
+    for profile in every_profile() {
         let graph = Graph::new();
         let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
         let bias = graph.parameter(Shape::vector(8), Init::Zero);
         let data = graph.input(Shape::matrix(2, 4));
         let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
-        let encoding = encoding_with(&graph, *profile);
+        let encoding = encoding_with(&graph, profile);
         assert_eq!(
             encoding.value_count() as usize,
             graph.value_count(),
@@ -731,7 +752,7 @@ fn a_non_scalar_loss_is_refused() {
 
 #[test]
 fn every_tensor_a_plan_names_lies_inside_its_region() {
-    for profile in PROFILES {
+    for profile in every_profile() {
         let graph = Graph::new();
         let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
         let data = graph.input(Shape::matrix(2, 8));
@@ -742,7 +763,7 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
         graph.retain(out);
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
-        let encoding = encoding_with(&graph, *profile);
+        let encoding = encoding_with(&graph, profile);
         let layout = Layout::of(&graph, ALIGNMENT, Precision::Single);
         for value in [weight, data, out, grads.of(weight)] {
             let span = encoding.span(value, PLACEMENT);

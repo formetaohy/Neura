@@ -11,7 +11,7 @@ use neura_gpu::{
 use neura_graph::{Graph, Value};
 use neura_op as op;
 use neura_precision::Precision;
-use neura_profile::{Geometry, PROFILES, Profile};
+use neura_profile::{Budget, Geometry, Profile};
 use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
 use std::marker::PhantomData;
@@ -108,12 +108,12 @@ impl Runtime {
     }
 
     pub fn profiles(&self) -> Vec<Profile> {
+        Profile::derive(self.budget())
+    }
+
+    pub fn budget(&self) -> Budget {
         let (threads, shared_bytes) = self.workgroup_budget();
-        PROFILES
-            .iter()
-            .copied()
-            .filter(|profile| profile.fits(threads, shared_bytes))
-            .collect()
+        Budget::of(threads, shared_bytes)
     }
 
     fn workgroup_budget(&self) -> (u32, u64) {
@@ -127,9 +127,11 @@ impl Runtime {
     }
 
     pub fn default_profile(&self) -> Profile {
-        self.profiles()
-            .into_iter()
-            .next_back()
+        let profiles = self.profiles();
+        profiles
+            .iter()
+            .copied()
+            .min_by_key(|profile| profile.workgroup().abs_diff(Budget::BALANCED_THREADS))
             .expect("the device offers no workgroup the framework can schedule")
     }
 
@@ -277,7 +279,7 @@ impl Runtime {
         );
         let signature = tape::signature(&encoding, profile, weights.precision(), self.alignment);
         let kinds = encoding.kinds().to_vec();
-        let geometry = Geometry::of(profile);
+        let geometry = Geometry::of(profile.workgroup(), encoding.tiles());
         let precision = weights.precision();
         let kernel = self
             .tapes

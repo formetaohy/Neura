@@ -104,6 +104,7 @@ struct Placed {
 pub struct Encoding {
     profile: Profile,
     kinds: Vec<Kind>,
+    tiles: Vec<MatmulTile>,
     tasks: Vec<u8>,
     values: Vec<u8>,
     bounds: Vec<u8>,
@@ -133,6 +134,8 @@ impl Encoding {
         let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
+        let tiles = &plan.tiles;
+
         let kinds = carried_kinds(tasks);
         let layout = Layout::of_values(values, precision, alignment);
         assert_writers_precede_readers(values, tasks);
@@ -166,17 +169,17 @@ impl Encoding {
         let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
         let mut updates_weights = false;
-        let mut geometries = vec![0u32; profile.tiles().len()];
+        let mut geometries = vec![0u32; tiles.len()];
         let mut work = 0;
         for index in order {
             let task = &tasks[*index as usize];
             let geometry = match task.kind {
                 Kind::Matmul => {
                     assert!(
-                        (task.geometry as usize) < profile.tiles().len(),
-                        "a product names geometry {} beyond the {} tiles a profile offers",
+                        (task.geometry as usize) < tiles.len(),
+                        "a product names geometry {} beyond the {} tiles its tape carries",
                         task.geometry,
-                        profile.tiles().len(),
+                        tiles.len(),
                     );
                     geometries[task.geometry as usize] += 1;
                     task.geometry
@@ -286,6 +289,7 @@ impl Encoding {
         Self {
             profile,
             kinds,
+            tiles: tiles.clone(),
             tasks: tape,
             values: records,
             bounds,
@@ -308,7 +312,7 @@ impl Encoding {
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        self.profile.tiles()
+        &self.tiles
     }
 
     pub fn kinds(&self) -> &[Kind] {

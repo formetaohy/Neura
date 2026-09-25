@@ -1,5 +1,5 @@
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::{PROFILES, Precision};
+use neura_runtime::Precision;
 
 #[path = "support/decision.rs"]
 mod decision;
@@ -38,8 +38,8 @@ fn every_row_picks_the_largest_element_it_holds() {
     let weights = runtime.weights(&graph, Precision::Single);
     let data = tied(rows * classes, 7);
     let expected = argmax_reference(&data, rows, classes);
-    for profile in PROFILES {
-        let program = runtime.compile_with(&graph, &weights, *profile);
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, &weights, profile);
         runtime.write(&program, logits, &data);
         runtime.run(&program);
         assert_eq!(
@@ -302,8 +302,8 @@ fn a_seeded_draw_rides_every_profile_the_same_way() {
     let weights = runtime.weights(&graph, Precision::Single);
     let data = tied(rows * classes, 9);
     let mut drawn = Vec::new();
-    for profile in PROFILES {
-        let program = runtime.compile_with(&graph, &weights, *profile);
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, &weights, profile);
         runtime.write(&program, logits, &data);
         runtime.write(&program, seed, &[f32::from_bits(11)]);
         runtime.run(&program);
@@ -312,7 +312,7 @@ fn a_seeded_draw_rides_every_profile_the_same_way() {
     for pair in drawn.windows(2) {
         assert_eq!(
             pair[0], pair[1],
-            "a seeded draw lies on the row schedule {PROFILES:?} hands it",
+            "a seeded draw lies on the row schedule a profile hands it",
         );
     }
 }

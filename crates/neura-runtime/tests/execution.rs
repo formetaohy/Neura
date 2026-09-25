@@ -1,5 +1,5 @@
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_profile::{PROFILES, WIDE};
+use neura_profile::{Budget, Profile};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
@@ -459,10 +459,11 @@ fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
 }
 
 #[test]
-fn a_shape_change_never_declares_another_kernel() {
+fn a_device_program_is_declared_once_per_tile_a_tape_walks() {
     let runtime = open();
+    let mut declared: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
     let mut results = Vec::new();
-    for batch in [8u32, 64] {
+    for batch in [8u32, 64, 8] {
         let graph = Graph::new();
         let weight = graph.parameter(
             Shape::matrix(5, 3),
@@ -475,18 +476,26 @@ fn a_shape_change_never_declares_another_kernel() {
         let out = graph.softmax(graph.matmul(data, weight));
         let weights = runtime.weights(&graph, Precision::Single);
         let program = runtime.compile(&graph, &weights);
+        if !declared.contains(&program.tiles().to_vec()) {
+            declared.push(program.tiles().to_vec());
+        }
+        assert_eq!(
+            runtime.declared_kernels(),
+            declared.len(),
+            "a device program is assembled once per tile its tape walks",
+        );
         let data_values = random(batch * 5, batch);
         runtime.write(&program, data, &data_values);
         runtime.run(&program);
         results.push(runtime.read(&program, out));
-        assert_eq!(
-            runtime.declared_kernels(),
-            1,
-            "the device program is assembled once, whatever the shape",
-        );
     }
     assert_eq!(results[0].len(), 8 * 3);
     assert_eq!(results[1].len(), 64 * 3);
+    assert_eq!(
+        declared.len(),
+        2,
+        "two shapes that walk two tiles declare two programs",
+    );
 }
 
 #[test]
@@ -898,7 +907,8 @@ fn every_profile_the_device_offers_runs_the_same_matmul() {
 #[test]
 fn every_tile_of_a_profile_runs_its_own_matmul() {
     let runtime = open();
-    let tiles = runtime.default_profile().tiles();
+    let profile = runtime.default_profile();
+    let tiles = profile.tiles();
     for index in 0..tiles.len() {
         let tile = tiles[index];
         let profile = neura_profile::Profile::of(&tiles[index..index + 1]);
@@ -949,7 +959,7 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
         "a profile asks for more than the baseline pool",
     );
     assert!(
-        profiles.len() < PROFILES.len(),
+        profiles.len() < Profile::derive(Budget::of(1024, 48 << 10)).len(),
         "the baseline pool must drop a profile the wide pool keeps",
     );
     let graph = Graph::new();
@@ -961,7 +971,10 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     assert_eq!(program.profile(), *profiles.last().expect("a profile"));
     assert!(
         refuses(|| {
-            let _ = runtime.compile_with(&graph, &weights, WIDE);
+            let widest = *Profile::derive(Budget::of(1024, 48 << 10))
+                .last()
+                .expect("a profile");
+            let _ = runtime.compile_with(&graph, &weights, widest);
         }),
         "a profile the device cannot hold was compiled",
     );

@@ -1,3 +1,3 @@
 mod profile;
 
-pub use profile::{Geometry, MEDIUM, MatmulTile, NARROW, PROFILES, Profile, WIDE};
+pub use profile::{Budget, Geometry, MAX_TILES, MatmulTile, Profile};

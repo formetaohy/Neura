@@ -7,6 +7,6 @@ pub use neura_nn::{
 };
 pub use neura_program::{Layout, Region, Seed};
 pub use neura_runtime::{
-    Checkpoint, MatmulTile, PROFILES, Placement, Precision, Profile, Program, Readout, Runtime,
+    Budget, Checkpoint, MatmulTile, Placement, Precision, Profile, Program, Readout, Runtime,
     RuntimeRequest, Span, Weights,
 };

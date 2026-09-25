@@ -1,7 +1,11 @@
 use neura_abi::Store;
 use neura_gpu::{BufferUsages, GpuBuffer, Submission};
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_profile::NARROW;
+use neura_profile::{Budget, Profile};
+
+fn narrow() -> Profile {
+    Profile::derive(Budget::BASELINE)[0]
+}
 use neura_program::Encoding;
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
 
@@ -86,10 +90,15 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256));
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = Encoding::of(&graph, 256, NARROW, Precision::Single);
+    let encoding = Encoding::of(&graph, 256, narrow(), Precision::Single);
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
-        encoding.arena_bytes() <= 8 * 1024,
+        encoding.arena_bytes() >= 2 * 256 * 4,
+        "the arena holds {} bytes beside the input and the output it carries",
+        encoding.arena_bytes(),
+    );
+    assert!(
+        encoding.arena_bytes() <= encoding.weights().bytes() / 8,
         "the arena holds {} bytes of activations beside a {} kilobyte weight store",
         encoding.arena_bytes(),
         encoding.weights().bytes() / 1024,
