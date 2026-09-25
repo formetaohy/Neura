@@ -1,4 +1,5 @@
-use std::fmt::Write as _;
+pub const TENSORS: u32 = 0;
+pub const WEIGHTS: u32 = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Store {
@@ -11,23 +12,8 @@ impl Store {
 
     pub const fn code(self) -> u32 {
         match self {
-            Self::Tensors => 0,
-            Self::Weights => 1,
+            Self::Tensors => TENSORS,
+            Self::Weights => WEIGHTS,
         }
     }
-
-    pub const fn constant(self) -> &'static str {
-        match self {
-            Self::Tensors => "STORE_TENSORS",
-            Self::Weights => "STORE_WEIGHTS",
-        }
-    }
-}
-
-pub fn declarations() -> String {
-    let mut out = String::new();
-    for store in Store::ALL {
-        writeln!(out, "const {}: u32 = {}u;", store.constant(), store.code()).unwrap();
-    }
-    out
 }

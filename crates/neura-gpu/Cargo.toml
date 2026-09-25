@@ -11,8 +11,7 @@ workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
-naga = { workspace = true }
-spirv = { workspace = true }
+neura-compiler = { workspace = true }
 
 [dev-dependencies]
 bytemuck = { workspace = true }

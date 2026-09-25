@@ -1,0 +1,18 @@
+[package]
+name = "neura-macro"
+version.workspace = true
+edition.workspace = true
+description = "Compile-time Rust frontend for native compute kernels"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true
+
+[dependencies]
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+syn = { workspace = true }

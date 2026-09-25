@@ -1,9 +1,9 @@
-use super::{NativeBuffer, NativePipeline, shader};
+use super::{NativeBuffer, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
 };
-use crate::pipeline::ComputeProgram;
+use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -420,7 +420,14 @@ impl Pipeline {
 
     pub(crate) fn compile(&self, program: &ComputeProgram) {
         self.resource.compiled.get_or_init(|| {
-            let (source, entry, sizes) = shader::msl(program);
+            let ShaderTranslation::Msl {
+                source,
+                entry,
+                size_bindings,
+            } = program.translate(Backend::Metal)
+            else {
+                panic!("Metal accepts MSL compute programs");
+            };
             let library = self
                 .device
                 .newLibraryWithSource_options_error(&NSString::from_str(&source), None)
@@ -439,14 +446,7 @@ impl Pipeline {
                         program.label()
                     )
                 });
-            let module = naga::front::wgsl::parse_str(program.source())
-                .expect("a validated compute program parses");
-            let workgroup = module
-                .entry_points
-                .iter()
-                .find(|entry| entry.name == program.entry())
-                .expect("a validated compute entry exists")
-                .workgroup_size[0];
+            let workgroup = program.workgroup_size();
             assert!(
                 workgroup > 0 && workgroup as usize <= pipeline.maxTotalThreadsPerThreadgroup(),
                 "a Metal compute pipeline cannot schedule its declared workgroup"
@@ -457,7 +457,7 @@ impl Pipeline {
                 .expect("a pipeline stores its workgroup once");
             self.resource
                 .sizes
-                .set(sizes)
+                .set(size_bindings)
                 .expect("a pipeline stores its bindings once");
             pipeline
         });

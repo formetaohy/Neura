@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "GPU-driven deep learning framework for games"
 license = "MIT"
@@ -12,7 +12,10 @@ repository = "https://github.com/formetaohy/Neura"
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
-naga = { version = "30", default-features = false, features = ["wgsl-in", "spv-out", "hlsl-out", "msl-out"] }
+naga = { version = "30", default-features = false, features = ["spv-out", "hlsl-out", "msl-out"] }
+syn = { version = "2", features = ["full", "visit-mut", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
 spirv = "0.4"
 pollster = "0.4"
 bitflags = "2"
@@ -22,17 +25,20 @@ objc2-foundation = "0.3"
 objc2-metal = "0.3"
 windows = "0.62"
 libloading = "0.8"
-neura-abi = { version = "0.1.0", path = "crates/neura-abi" }
-neura-op = { version = "0.1.0", path = "crates/neura-op" }
-neura-profile = { version = "0.1.0", path = "crates/neura-profile" }
-neura-precision = { version = "0.1.0", path = "crates/neura-precision" }
-neura-graph = { version = "0.1.0", path = "crates/neura-graph" }
-neura-kernel = { version = "0.1.0", path = "crates/neura-kernel" }
-neura-shader = { version = "0.1.0", path = "crates/neura-shader" }
-neura-gpu = { version = "0.1.0", path = "crates/neura-gpu" }
-neura-program = { version = "0.1.0", path = "crates/neura-program" }
-neura-runtime = { version = "0.1.0", path = "crates/neura-runtime" }
-neura-nn = { version = "0.1.0", path = "crates/neura-nn" }
+neura-abi = { version = "0.2.0", path = "crates/neura-abi" }
+neura-compiler = { version = "0.2.0", path = "crates/neura-compiler" }
+neura-ir = { version = "0.2.0", path = "crates/neura-ir" }
+neura-macro = { version = "0.2.0", path = "crates/neura-macro" }
+neura-op = { version = "0.2.0", path = "crates/neura-op" }
+neura-profile = { version = "0.2.0", path = "crates/neura-profile" }
+neura-precision = { version = "0.2.0", path = "crates/neura-precision" }
+neura-graph = { version = "0.2.0", path = "crates/neura-graph" }
+neura-kernel = { version = "0.2.0", path = "crates/neura-kernel" }
+neura-shader = { version = "0.2.0", path = "crates/neura-shader" }
+neura-gpu = { version = "0.2.0", path = "crates/neura-gpu" }
+neura-program = { version = "0.2.0", path = "crates/neura-program" }
+neura-runtime = { version = "0.2.0", path = "crates/neura-runtime" }
+neura-nn = { version = "0.2.0", path = "crates/neura-nn" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

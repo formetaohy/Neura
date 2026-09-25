@@ -1,5 +1,4 @@
 use neura_abi::WORD_BYTES;
-use std::fmt::Write as _;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MatmulTile {
@@ -209,61 +208,15 @@ impl Geometry {
             })
     }
 
-    pub fn declarations(&self) -> String {
-        let mut out = String::new();
-        writeln!(out, "const WORKGROUP_SIZE: u32 = {}u;", self.workgroup).unwrap();
-        writeln!(
-            out,
-            "const MATMUL_LEFT_STAGE: u32 = {}u;",
-            2 * self.left_stage
+    pub fn stage_lengths(&self) -> (u32, u32) {
+        (
+            (2 * self.left_stage)
+                .try_into()
+                .expect("a left tile fits in device memory"),
+            (2 * self.right_stage)
+                .try_into()
+                .expect("a right tile fits in device memory"),
         )
-        .unwrap();
-        writeln!(
-            out,
-            "const MATMUL_RIGHT_STAGE: u32 = {}u;",
-            2 * self.right_stage
-        )
-        .unwrap();
-        for (geometry, tile) in self.tiles.iter().enumerate() {
-            writeln!(out, "const MATMUL_ROWS_{geometry}: u32 = {}u;", tile.rows()).unwrap();
-            writeln!(
-                out,
-                "const MATMUL_COLUMNS_{geometry}: u32 = {}u;",
-                tile.columns()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MATMUL_DEPTH_{geometry}: u32 = {}u;",
-                tile.depth()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MATMUL_THREAD_ROWS_{geometry}: u32 = {}u;",
-                tile.thread_rows()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MATMUL_THREAD_COLUMNS_{geometry}: u32 = {}u;",
-                tile.thread_columns()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MATMUL_REGISTER_ROWS_{geometry}: u32 = {}u;",
-                tile.register_rows()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "const MATMUL_REGISTER_COLUMNS_{geometry}: u32 = {}u;",
-                tile.register_columns()
-            )
-            .unwrap();
-        }
-        out
     }
 }
 

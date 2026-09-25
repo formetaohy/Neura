@@ -1,4 +1,4 @@
-use super::{NativeBuffer, NativeGroup, NativePipeline, shader};
+use super::{NativeBuffer, NativeGroup, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
@@ -792,11 +792,11 @@ impl Pipeline {
 
     pub(crate) fn compile(&self, program: &ComputeProgram) {
         self.resource.compiled.get_or_init(|| {
-            let words = shader::spirv(program);
+            let words = program.spirv();
             let module = unsafe {
                 self.resource
                     .raw
-                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None)
             }
             .unwrap_or_else(|error| {
                 panic!(

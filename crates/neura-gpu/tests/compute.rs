@@ -1,7 +1,12 @@
+use neura_compiler::{DynamicRead, ReadWrite, kernel};
 use neura_gpu::{
-    Backend, Backends, Binding, BindingSpec, BufferUsages, ComputeProgram, GpuBuffer, GpuContext,
-    GpuRequest, Submission,
+    Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission,
 };
+
+#[kernel(workgroup_size = 64)]
+fn double(lid: u32, input: DynamicRead<u32>, output: ReadWrite<u32>) {
+    output[lid] = input[lid] * 2u32;
+}
 
 fn compute(backend: Backend, backends: Backends) {
     let context = pollster::block_on(GpuContext::open(&GpuRequest {
@@ -37,20 +42,7 @@ fn compute(backend: Backend, backends: Backends) {
         256,
         BufferUsages::COPY_DST | BufferUsages::MAP_READ,
     );
-    let pipeline = context.declare(ComputeProgram::new(
-        "native buffer dispatch",
-        "@group(0) @binding(0) var<storage, read> input: array<u32>;
-@group(0) @binding(1) var<storage, read_write> output: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(local_invocation_index) lane: u32) {
-    output[lane] = input[lane] * 2u;
-}",
-        "main",
-        &[
-            BindingSpec::dynamic_storage(0),
-            BindingSpec::writable_storage(1),
-        ],
-    ));
+    let pipeline = context.declare(double());
     let first = pipeline.bind_group(&[
         Binding {
             index: 0,

@@ -1,12 +1,12 @@
-use std::fmt::Write as _;
-
 macro_rules! kinds {
-    ($($variant:ident = $label:literal;)+) => {
+    ($($variant:ident $symbol:ident = $label:literal;)+) => {
         #[repr(u32)]
         #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
         pub enum Kind {
             $($variant),+
         }
+
+        $(pub const $symbol: u32 = Kind::$variant as u32;)+
 
         impl Kind {
             pub const ALL: &'static [Kind] = &[$(Kind::$variant),+];
@@ -22,9 +22,9 @@ macro_rules! kinds {
                 })
             }
 
-            pub const fn constant(self) -> &'static str {
+            pub const fn symbol(self) -> &'static str {
                 match self {
-                    $(Self::$variant => stringify!($variant)),+
+                    $(Self::$variant => concat!("kind::", stringify!($symbol))),+
                 }
             }
 
@@ -33,39 +33,30 @@ macro_rules! kinds {
                     $(Self::$variant => $label),+
                 }
             }
-
         }
     };
 }
 
 kinds! {
-    Matmul = "matmul";
-    MatmulFold = "matmul_fold";
-    Binary = "binary";
-    Unary = "unary";
-    Partial = "partial";
-    Fill = "fill";
-    Broadcast = "broadcast";
-    SumChunk = "sum_chunk";
-    SumAxis = "sum_axis";
-    Softmax = "softmax";
-    SoftmaxGrad = "softmax_grad";
-    LogSoftmax = "log_softmax";
-    LogSoftmaxGrad = "log_softmax_grad";
-    Argmax = "argmax";
-    Categorical = "categorical";
-    OneHot = "one_hot";
-    Gather = "gather";
-    Scatter = "scatter";
-    Conv2d = "conv2d";
-    Conv2dInputGrad = "conv2d_input_grad";
-    Conv2dWeightGrad = "conv2d_weight_grad";
-}
-
-pub fn declarations() -> String {
-    let mut out = String::new();
-    for kind in Kind::ALL {
-        writeln!(out, "const {}: u32 = {}u;", kind.constant(), kind.code()).unwrap();
-    }
-    out
+    Matmul MATMUL = "matmul";
+    MatmulFold MATMUL_FOLD = "matmul_fold";
+    Binary BINARY = "binary";
+    Unary UNARY = "unary";
+    Partial PARTIAL = "partial";
+    Fill FILL = "fill";
+    Broadcast BROADCAST = "broadcast";
+    SumChunk SUM_CHUNK = "sum_chunk";
+    SumAxis SUM_AXIS = "sum_axis";
+    Softmax SOFTMAX = "softmax";
+    SoftmaxGrad SOFTMAX_GRAD = "softmax_grad";
+    LogSoftmax LOG_SOFTMAX = "log_softmax";
+    LogSoftmaxGrad LOG_SOFTMAX_GRAD = "log_softmax_grad";
+    Argmax ARGMAX = "argmax";
+    Categorical CATEGORICAL = "categorical";
+    OneHot ONE_HOT = "one_hot";
+    Gather GATHER = "gather";
+    Scatter SCATTER = "scatter";
+    Conv2d CONV2D = "conv2d";
+    Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad";
+    Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad";
 }

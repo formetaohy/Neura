@@ -1,11 +1,5 @@
 use bitflags::bitflags;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Backend {
-    Vulkan,
-    Metal,
-    Dx12,
-}
+pub use neura_compiler::Backend;
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

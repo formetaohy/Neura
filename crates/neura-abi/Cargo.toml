@@ -2,15 +2,12 @@
 name = "neura-abi"
 version.workspace = true
 edition.workspace = true
-description = "WGSL device records and numeric codes shared with the host"
+description = "Rust device records and numeric codes shared with the host"
 license.workspace = true
 repository.workspace = true
 
 [lints]
 workspace = true
-
-[build-dependencies]
-naga = { workspace = true }
 
 [dependencies]
 bytemuck = { workspace = true }

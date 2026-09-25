@@ -1,9 +1,9 @@
-use super::{NativeBuffer, NativePipeline, shader};
+use super::{NativeBuffer, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
 };
-use crate::pipeline::{BindingKind, ComputeProgram};
+use crate::pipeline::{BindingKind, ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
 use libloading::Library;
 use std::any::Any;
@@ -705,8 +705,10 @@ impl Pipeline {
 
     pub(crate) fn compile(&self, program: &ComputeProgram) {
         self.resource.compiled.get_or_init(|| {
-            let (hlsl, entry) = shader::hlsl(program);
-            let bytes = dxil(&hlsl, &entry, program.label());
+            let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
+                panic!("D3D12 accepts HLSL compute programs");
+            };
+            let bytes = dxil(&source, &entry, program.label());
             let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: ManuallyDrop::new(Some(self.resource.root.clone())),
                 CS: D3D12_SHADER_BYTECODE {

@@ -34,6 +34,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check device Rust formatting
+        run: rustfmt --edition 2024 --check crates/neura-kernel/device/*.rs crates/neura-shader/device/*.rs
+
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
 

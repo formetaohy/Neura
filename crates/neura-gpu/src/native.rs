@@ -2,10 +2,8 @@
 pub(crate) mod dx12;
 #[cfg(target_os = "macos")]
 pub(crate) mod metal;
-pub(crate) mod shader;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub(crate) mod vulkan;
-mod workgroup;
 
 use crate::capability::{AdapterInfo, Backends, BufferUsages, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};

@@ -1,0 +1,17 @@
+[package]
+name = "neura-compiler"
+version.workspace = true
+edition.workspace = true
+description = "Rust compute frontend, validated device IR and native code generation"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+naga = { workspace = true }
+spirv = { workspace = true }
+neura-abi = { workspace = true }
+neura-ir = { workspace = true }
+neura-macro = { workspace = true }

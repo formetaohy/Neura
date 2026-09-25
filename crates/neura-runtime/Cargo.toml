@@ -21,4 +21,5 @@ neura-program = { workspace = true }
 neura-shader = { workspace = true }
 
 [dev-dependencies]
+neura-compiler = { workspace = true }
 pollster = { workspace = true }

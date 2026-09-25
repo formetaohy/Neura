@@ -204,7 +204,6 @@ dependencies = [
  "rustc-hash",
  "spirv",
  "thiserror",
- "unicode-ident",
 ]
 
 [[package]]
@@ -221,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "neura"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-abi",
  "neura-gpu",
@@ -234,50 +233,72 @@ dependencies = [
 
 [[package]]
 name = "neura-abi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "neura-compiler"
+version = "0.2.0"
+dependencies = [
  "naga",
+ "neura-abi",
+ "neura-ir",
+ "neura-macro",
+ "spirv",
 ]
 
 [[package]]
 name = "neura-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ash",
  "bitflags",
  "bytemuck",
  "libloading",
- "naga",
+ "neura-compiler",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
  "pollster",
- "spirv",
  "windows",
 ]
 
 [[package]]
 name = "neura-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-abi",
  "neura-op",
 ]
 
 [[package]]
+name = "neura-ir"
+version = "0.2.0"
+
+[[package]]
 name = "neura-kernel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-abi",
+ "neura-compiler",
  "neura-op",
- "neura-precision",
  "neura-profile",
 ]
 
 [[package]]
+name = "neura-macro"
+version = "0.2.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "neura-nn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-graph",
  "neura-runtime",
@@ -286,14 +307,16 @@ dependencies = [
 
 [[package]]
 name = "neura-op"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-abi",
+ "neura-ir",
+ "neura-macro",
 ]
 
 [[package]]
 name = "neura-precision"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -302,14 +325,14 @@ dependencies = [
 
 [[package]]
 name = "neura-profile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "neura-abi",
 ]
 
 [[package]]
 name = "neura-program"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "neura-abi",
@@ -321,10 +344,11 @@ dependencies = [
 
 [[package]]
 name = "neura-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "neura-abi",
+ "neura-compiler",
  "neura-gpu",
  "neura-graph",
  "neura-op",
@@ -337,11 +361,11 @@ dependencies = [
 
 [[package]]
 name = "neura-shader"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "naga",
  "neura-abi",
- "neura-gpu",
+ "neura-compiler",
  "neura-kernel",
  "neura-op",
  "neura-precision",

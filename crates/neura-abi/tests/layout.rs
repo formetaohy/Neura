@@ -59,22 +59,27 @@ fn every_task_kind_is_declared_once() {
         );
         assert_eq!(Kind::of(kind.code()), *kind);
         assert!(!kind.name().is_empty());
-        assert!(!kind.constant().is_empty());
+        assert!(!kind.symbol().is_empty());
     }
     let mut names = Kind::ALL.iter().map(|kind| kind.name()).collect::<Vec<_>>();
-    let mut constants = Kind::ALL
+    let mut symbols = Kind::ALL
         .iter()
-        .map(|kind| kind.constant())
+        .map(|kind| kind.symbol())
         .collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
-    constants.sort_unstable();
-    constants.dedup();
+    symbols.sort_unstable();
+    symbols.dedup();
     assert_eq!(names.len(), Kind::ALL.len(), "two kinds share a name");
     assert_eq!(
-        constants.len(),
+        symbols.len(),
         Kind::ALL.len(),
-        "two kinds share a device constant"
+        "two kinds share a Rust constant"
+    );
+    assert_eq!(neura_abi::kind::MATMUL, Kind::Matmul.code());
+    assert_eq!(
+        neura_abi::kind::CONV2D_WEIGHT_GRAD,
+        Kind::Conv2dWeightGrad.code()
     );
     assert_eq!(Kind::Matmul.name(), "matmul");
     assert_eq!(Kind::LogSoftmax.name(), "log_softmax");
@@ -162,29 +167,10 @@ fn every_value_lives_in_one_declared_store() {
             code as u32,
             "the {store:?} store leaves a hole"
         );
-        assert!(!store.constant().is_empty());
     }
-    assert_eq!(Store::Tensors.code(), 0);
-    assert_eq!(Store::Weights.code(), 1);
-    let declarations = neura_abi::store::declarations();
-    for store in Store::ALL {
-        assert!(declarations.contains(&format!(
-            "const {}: u32 = {}u;",
-            store.constant(),
-            store.code(),
-        )));
-    }
-    let mut constants = Store::ALL
-        .iter()
-        .map(|store| store.constant())
-        .collect::<Vec<_>>();
-    constants.sort_unstable();
-    constants.dedup();
-    assert_eq!(
-        constants.len(),
-        Store::ALL.len(),
-        "two stores share a device constant",
-    );
+    assert_eq!(Store::Tensors.code(), neura_abi::store::TENSORS);
+    assert_eq!(Store::Weights.code(), neura_abi::store::WEIGHTS);
+    assert_ne!(neura_abi::store::TENSORS, neura_abi::store::WEIGHTS);
 }
 
 #[test]

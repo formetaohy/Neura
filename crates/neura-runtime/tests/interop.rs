@@ -1,6 +1,14 @@
-use neura_gpu::{Backends, Binding, BindingSpec, ComputeProgram, GpuRequest, Submission};
+use neura_compiler::{ReadWrite, kernel};
+use neura_gpu::{Backends, Binding, GpuRequest, Submission};
 use neura_graph::{Graph, Init, Shape};
 use neura_runtime::{Precision, Runtime, RuntimeRequest};
+
+#[kernel(workgroup_size = 64)]
+fn seed(lid: u32, arena: ReadWrite<f32>) {
+    if lid < 4u32 {
+        arena[lid] = (lid + 1u32) as f32;
+    }
+}
 
 #[test]
 fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
@@ -14,18 +22,7 @@ fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
     let action = graph.mul(observation, graph.fill(Shape::vector(4), 3.0));
     let weights = runtime.weights(&graph, Precision::Single);
     let program = runtime.compile(&graph, &weights);
-    let engine = runtime.context().declare(ComputeProgram::new(
-        "engine observation",
-        "@group(0) @binding(0) var<storage, read_write> arena: array<f32>;
-@compute @workgroup_size(64)
-fn seed(@builtin(local_invocation_index) lane: u32) {
-    if (lane < 4u) {
-        arena[lane] = f32(lane + 1u);
-    }
-}",
-        "seed",
-        &[BindingSpec::writable_storage(0)],
-    ));
+    let engine = runtime.context().declare(seed());
     let group = engine.bind_group(&[Binding {
         index: 0,
         buffer: program.heap().binding(program.span(observation).offset, 16),
@@ -35,6 +32,55 @@ fn seed(@builtin(local_invocation_index) lane: u32) {
     submission.submit(runtime.context().queue());
     runtime.run(&program);
     assert_eq!(runtime.read(&program, action), [3.0, 6.0, 9.0, 12.0]);
+}
+
+fn half_precision_inference(backends: Backends) {
+    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+        gpu: GpuRequest {
+            backends,
+            ..Default::default()
+        },
+        ..Default::default()
+    }))
+    .expect("a native compute device");
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
+    let input = graph.input(Shape::matrix(2, 4));
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph, Precision::Half);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        weight,
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0,
+        ],
+    );
+    runtime.write(&program, input, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, product),
+        [1.0, 4.0, 9.0, 16.0, 5.0, 12.0, 21.0, 32.0]
+    );
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[test]
+fn vulkan_runs_half_precision_rust_kernels() {
+    half_precision_inference(Backends::VULKAN);
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn dx12_runs_half_precision_rust_kernels() {
+    half_precision_inference(Backends::DX12);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn metal_runs_half_precision_rust_kernels() {
+    half_precision_inference(Backends::METAL);
 }
 
 fn training_tape(backends: Backends) {

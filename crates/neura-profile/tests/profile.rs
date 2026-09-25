@@ -82,49 +82,30 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
 fn a_geometry_declares_every_tile_its_profile_offers() {
     for profile in PROFILES {
         let geometry = Geometry::of(*profile);
-        let declarations = geometry.declarations();
+        let (left, right) = geometry.stage_lengths();
         assert_eq!(geometry.workgroup(), profile.workgroup());
         assert_eq!(geometry.tiles(), profile.tiles());
-        assert!(declarations.contains(&format!(
-            "const WORKGROUP_SIZE: u32 = {}u;",
-            profile.workgroup()
-        )));
-        assert!(declarations.contains(&format!(
-            "const MATMUL_LEFT_STAGE: u32 = {}u;",
+        assert_eq!(
+            left,
             2 * profile
                 .tiles()
                 .iter()
                 .map(|tile| tile.left_stage())
                 .max()
-                .unwrap(),
-        )));
-        assert!(declarations.contains(&format!(
-            "const MATMUL_RIGHT_STAGE: u32 = {}u;",
+                .unwrap() as u32
+        );
+        assert_eq!(
+            right,
             2 * profile
                 .tiles()
                 .iter()
                 .map(|tile| tile.right_stage())
                 .max()
-                .unwrap(),
-        )));
+                .unwrap() as u32
+        );
         for (index, tile) in profile.tiles().iter().enumerate() {
             assert_eq!(geometry.geometry(*tile), index as u32);
             assert_eq!(geometry.tile(index as u32), *tile);
-            for (suffix, value) in [
-                ("ROWS", tile.rows()),
-                ("COLUMNS", tile.columns()),
-                ("DEPTH", tile.depth()),
-                ("THREAD_ROWS", tile.thread_rows()),
-                ("THREAD_COLUMNS", tile.thread_columns()),
-                ("REGISTER_ROWS", tile.register_rows()),
-                ("REGISTER_COLUMNS", tile.register_columns()),
-            ] {
-                let declaration = format!("const MATMUL_{suffix}_{index}: u32 = {value}u;");
-                assert!(
-                    declarations.contains(&declaration),
-                    "a program carrying {tile:?} misses {declaration}",
-                );
-            }
         }
         assert!(refuses(|| {
             let _ = geometry.tile(profile.tiles().len() as u32);

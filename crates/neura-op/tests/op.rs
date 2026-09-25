@@ -1,3 +1,4 @@
+use neura_ir::Expression;
 use neura_op::{self as op, OPS, Role};
 
 fn refuses(action: impl FnOnce() + std::panic::UnwindSafe) -> bool {
@@ -13,10 +14,13 @@ fn every_pointwise_op_is_declared_once() {
             "the {} op leaves a hole",
             entry.name
         );
-        assert_eq!(op::of(entry.code), entry);
+        let resolved = op::of(entry.code);
+        assert_eq!(resolved.code, entry.code);
+        assert_eq!(resolved.family, entry.family);
+        assert_eq!(resolved.name, entry.name);
         assert_eq!(op::name(entry.code), entry.name);
         assert_eq!(op::kind(entry.code), entry.family.kind());
-        assert!(!entry.apply.is_empty());
+        assert!(mentions(&entry.apply_expression(), "a"));
         assert_eq!(
             entry.partials.len() as u32,
             entry.family.operands(),
@@ -77,13 +81,13 @@ fn every_partial_reads_exactly_the_roles_it_names() {
                 continue;
             };
             assert!(
-                mentions(formula, "g"),
+                mentions(&formula, "g"),
                 "the {} partial {slot} ignores the gradient it descends from",
                 op.name,
             );
             for role in roles {
                 assert!(
-                    mentions(formula, role.name()),
+                    mentions(&formula, role.name()),
                     "the {} partial {slot} asks for {} it never reads",
                     op.name,
                     role.name(),
@@ -93,8 +97,24 @@ fn every_partial_reads_exactly_the_roles_it_names() {
     }
 }
 
-fn mentions(formula: &str, name: &str) -> bool {
-    formula
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|word| word == name)
+fn mentions(expr: &Expression, name: &str) -> bool {
+    match expr {
+        Expression::Name(value) => value == name,
+        Expression::Field { base, .. }
+        | Expression::Unary { value: base, .. }
+        | Expression::Cast { value: base, .. }
+        | Expression::Reference(base) => mentions(base, name),
+        Expression::Index { base, index }
+        | Expression::Binary {
+            left: base,
+            right: index,
+            ..
+        }
+        | Expression::Repeat {
+            value: base,
+            length: index,
+        } => mentions(base, name) || mentions(index, name),
+        Expression::Call { arguments, .. } => arguments.iter().any(|arg| mentions(arg, name)),
+        Expression::Integer { .. } | Expression::Float(_) | Expression::Bool(_) => false,
+    }
 }

@@ -2,7 +2,7 @@
 name = "neura-shader"
 version.workspace = true
 edition.workspace = true
-description = "Assembly and reflection of the single device program the framework dispatches"
+description = "Specialization and assembly of native Rust device programs"
 license.workspace = true
 repository.workspace = true
 
@@ -10,10 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-naga = { workspace = true }
 neura-abi = { workspace = true }
-neura-op = { workspace = true }
+neura-compiler = { workspace = true }
 neura-profile = { workspace = true }
 neura-precision = { workspace = true }
-neura-gpu = { workspace = true }
 neura-kernel = { workspace = true }
+
+[dev-dependencies]
+naga = { workspace = true }
+neura-op = { workspace = true }

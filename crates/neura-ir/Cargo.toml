@@ -1,0 +1,10 @@
+[package]
+name = "neura-ir"
+version.workspace = true
+edition.workspace = true
+description = "Backend-independent Rust compute intermediate representation"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
