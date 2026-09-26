@@ -1,5 +1,5 @@
 use crate::access::Reads;
-use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
+use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_op as op;
 use neura_profile::{AttentionTile, Geometry, MatmulTile, Profile};
@@ -103,9 +103,10 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
-        match narrow_target(&plan.values, task) {
-            None => schedule_unit(&mut plan, task, profile, spare),
-            Some(element) => schedule_narrow(&mut plan, task, element, profile, spare),
+        if writes_narrow(&plan.values, task) {
+            schedule_narrow(&mut plan, task, profile, spare);
+        } else {
+            schedule_unit(&mut plan, task, profile, spare);
         }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
@@ -132,18 +133,16 @@ fn spare_shared(units: &[TaskInfo], profile: Profile) -> u64 {
     profile.shared_bytes() - declared
 }
 
-fn narrow_target(values: &[ValueInfo], task: &TaskInfo) -> Option<Element> {
-    let element = values[task.out as usize].element;
-    (task.in_place && element.narrow()).then_some(element)
+fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
+    values[task.out as usize].element.narrow()
 }
 
-fn schedule_narrow(
-    plan: &mut Plan,
-    unit: &TaskInfo,
-    element: Element,
-    profile: Profile,
-    spare: u64,
-) {
+fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64) {
+    if let Some((source, steps)) = pointwise_steps(plan, unit) {
+        let tasks = convert(plan, unit, source, steps, profile);
+        plan.tasks.extend(tasks);
+        return;
+    }
     let target = unit.out;
     let image = plan.publish(plan.shape(target));
     if !writes_every_element(unit.kind) {
@@ -155,6 +154,8 @@ fn schedule_narrow(
         copy.slot = 0;
         copy.out = image;
         copy.inputs = [target, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        copy.origin = NO_VALUE;
+        copy.extra = NO_VALUE;
         copy.param = 0.0;
         copy.splits = 1;
         copy.in_place = false;
@@ -163,7 +164,57 @@ fn schedule_narrow(
         plan.tasks.push(copy);
     }
     schedule_unit(plan, &redirected(unit, image), profile, spare);
-    pack(plan, unit, image, element, profile);
+    let tasks = convert(plan, unit, image, Vec::new(), profile);
+    plan.tasks.extend(tasks);
+}
+
+fn pointwise_steps(plan: &Plan, unit: &TaskInfo) -> Option<(u32, Vec<StepRecord>)> {
+    if unit.extra != NO_VALUE || unit.origin != NO_VALUE {
+        return None;
+    }
+    let (source, step) = match unit.kind {
+        Kind::Unary => {
+            let source = unit.inputs[0];
+            if source == NO_VALUE {
+                return None;
+            }
+            (
+                source,
+                StepRecord::of(StepFields {
+                    op: unit.op,
+                    operand: NO_VALUE,
+                    swapped: 0,
+                }),
+            )
+        }
+        Kind::Binary => {
+            let (left, right) = (unit.inputs[0], unit.inputs[1]);
+            if left == NO_VALUE || right == NO_VALUE {
+                return None;
+            }
+            let shape = plan.shape(unit.out);
+            let (source, operand, swapped) = if plan.shape(left) == shape {
+                (left, right, 0)
+            } else if plan.shape(right) == shape {
+                (right, left, 1)
+            } else {
+                (left, right, 0)
+            };
+            (
+                source,
+                StepRecord::of(StepFields {
+                    op: unit.op,
+                    operand,
+                    swapped,
+                }),
+            )
+        }
+        _ => return None,
+    };
+    let mut steps = unit.prelude.clone();
+    steps.push(step);
+    steps.extend(unit.chain.iter().copied());
+    Some((source, steps))
 }
 
 fn redirected(unit: &TaskInfo, image: u32) -> TaskInfo {
@@ -173,37 +224,40 @@ fn redirected(unit: &TaskInfo, image: u32) -> TaskInfo {
 }
 
 fn writes_every_element(kind: Kind) -> bool {
-    match kind {
-        Kind::Binary | Kind::Unary => true,
-        Kind::Scatter | Kind::ScatterWrite => false,
-        other => panic!(
-            "a {} task writes a narrow tensor, and only a pointwise task or a scatter updates a leaf",
-            other.name(),
-        ),
-    }
+    !matches!(kind, Kind::Scatter | Kind::ScatterWrite)
 }
 
-fn pack(plan: &mut Plan, unit: &TaskInfo, image: u32, element: Element, profile: Profile) {
+fn convert(
+    plan: &Plan,
+    unit: &TaskInfo,
+    source: u32,
+    steps: Vec<StepRecord>,
+    profile: Profile,
+) -> Vec<Task> {
     let target = unit.out;
-    let elements = plan.shape(target).elements();
-    for (first, count) in spans(
-        elements,
-        task_elements(elements, device_workgroups(profile)),
-    ) {
-        let mut task = Task::span(unit, first, count, u64::from(count));
-        task.kind = Kind::Pack;
-        task.op = op::NONE;
-        task.geometry = element.code();
-        task.slot = 0;
-        task.out = target;
-        task.inputs = [image, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
-        task.param = 0.0;
-        task.splits = 1;
-        task.in_place = true;
-        task.prelude.clear();
-        task.chain.clear();
-        plan.tasks.push(task);
-    }
+    let element = plan.values[target as usize].element;
+    let words = element.words(u64::from(plan.shape(target).elements()));
+    let words = u32::try_from(words).expect("a tensor of words fits the device word space");
+    let per_task = task_elements(words, device_workgroups(profile));
+    spans(words, per_task)
+        .map(|(first, count)| {
+            let mut task = Task::span(unit, first, count, u64::from(count));
+            task.kind = Kind::Convert;
+            task.op = op::NONE;
+            task.geometry = 0;
+            task.slot = 0;
+            task.out = target;
+            task.extra = NO_VALUE;
+            task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+            task.origin = NO_VALUE;
+            task.param = 0.0;
+            task.splits = 1;
+            task.in_place = true;
+            task.prelude.clear();
+            task.chain = steps.clone();
+            task
+        })
+        .collect()
 }
 
 impl Plan {
@@ -355,7 +409,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
                 ));
             }
         }
-        Kind::Pack => panic!("a pack comes from the narrow tensor its task updates"),
+        Kind::Convert => panic!("a narrow tensor is written by the convert its task schedules"),
     }
 }
 

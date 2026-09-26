@@ -1195,7 +1195,7 @@ fn a_shape_the_device_cannot_address_is_refused_before_it_is_built() {
 }
 
 #[test]
-fn a_narrow_parameter_update_plans_an_image_and_a_pack() {
+fn a_narrow_parameter_update_packs_the_image_the_chain_folded() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::vector(300), Init::Zero, Element::Half);
     graph.mul_into(weight, graph.fill(Shape::vector(300), 2.0));
@@ -1205,29 +1205,134 @@ fn a_narrow_parameter_update_plans_an_image_and_a_pack() {
     assert_eq!(values[weight.id() as usize].element, Element::Half.code());
     assert_eq!(values[weight.id() as usize].store, Store::Weights.code());
 
-    let pack = tape
+    let convert = tape
         .iter()
-        .find(|task| Kind::of(task.kind) == Kind::Pack)
+        .find(|task| Kind::of(task.kind) == Kind::Convert)
         .expect("a half precision parameter packs the image its update computed");
-    assert_eq!(pack.out, weight.id());
-    assert_eq!(pack.first, 0);
-    assert_eq!(pack.count, 300);
-    assert_eq!(pack.geometry, Element::Half.code());
-    let image = values[pack.a as usize];
+    assert_eq!(convert.out, weight.id());
+    assert_eq!(convert.first, 0);
+    assert_eq!(convert.count, 150);
+    assert_eq!(convert.prelude_steps, 0);
+    let image = values[convert.a as usize];
     assert_eq!(image.element, Element::Single.code());
     assert_eq!(image.store, Store::Tensors.code());
     assert_eq!(image.dims, Shape::vector(300).dims());
 
     let writer = tape
         .iter()
-        .find(|task| task.out == pack.a)
-        .expect("the image holds the update the device computed");
-    assert_eq!(Kind::of(writer.kind), Kind::Binary);
-    assert_eq!(writer.a, weight.id());
-    assert_ne!(
-        writer.out, writer.a,
-        "an element of an update reaches a narrow tensor only through its word",
+        .find(|task| task.out == convert.a)
+        .expect("the image holds the product the update computed");
+    assert_eq!(Kind::of(writer.kind), Kind::Fill);
+    assert_eq!(writer.steps, 1);
+    let step = steps(&encoding)[writer.chain as usize];
+    assert_eq!(step.op, op::MUL);
+    assert_eq!(step.operand, weight.id());
+    assert_eq!(step.swapped, 1);
+    assert_eq!(
+        tape.len(),
+        2,
+        "the fill and the convert that packs its product are the whole tape",
     );
+}
+
+#[test]
+fn a_narrow_update_in_place_packs_the_word_it_reads() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(300), Init::Zero, Element::Half);
+    let factor = graph.input(Shape::vector(300), Element::Single);
+    graph.mul_into(weight, factor);
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    assert_eq!(
+        tape.len(),
+        1,
+        "an update in place of a narrow tensor reads and writes the very word its convert packs",
+    );
+    let convert = &tape[0];
+    assert_eq!(Kind::of(convert.kind), Kind::Convert);
+    assert_eq!(convert.a, weight.id());
+    assert_eq!(convert.out, weight.id());
+    assert_eq!(convert.first, 0);
+    assert_eq!(convert.count, 150);
+    assert_eq!(convert.steps, 1);
+    let step = steps(&encoding)[convert.chain as usize];
+    assert_eq!(step.op, op::MUL);
+    assert_eq!(step.operand, factor.id());
+    assert_eq!(step.swapped, 0);
+}
+
+#[test]
+fn a_narrow_product_packs_the_image_it_computed() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(4, 8), Init::Zero, Element::Half);
+    let right = graph.parameter(Shape::matrix(8, 16), Init::Zero, Element::Half);
+    let product = graph.matmul(left, right);
+    assert_eq!(graph.element(product), Element::Half);
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    assert_eq!(
+        values[product.id() as usize].element,
+        Element::Half.code(),
+        "a product of two narrow tensors keeps the numbers its operands carry",
+    );
+    let convert = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Convert)
+        .expect("a narrow product packs the image its tiles wrote");
+    assert_eq!(convert.out, product.id());
+    assert_eq!(convert.first, 0);
+    assert_eq!(convert.count, 32);
+    assert_eq!(convert.prelude_steps, 0);
+    let image = values[convert.a as usize];
+    assert_eq!(image.element, Element::Single.code());
+    assert_eq!(image.dims, Shape::matrix(4, 16).dims());
+    assert_eq!(
+        Shape::of(values[product.id() as usize].dims).elements(),
+        64,
+        "the image holds one number per element of the product",
+    );
+    tape.iter()
+        .find(|task| task.out == convert.a && Kind::of(task.kind) == Kind::Matmul)
+        .expect("the image holds the product the tiles computed");
+}
+
+#[test]
+fn a_cast_declares_the_numbers_a_tensor_carries() {
+    let graph = Graph::new();
+    let wide = graph.input(Shape::vector(6), Element::Single);
+    let narrow = graph.cast(wide, Element::Half);
+    let folded = graph.sum(narrow);
+    assert_eq!(graph.element(narrow), Element::Half);
+    assert_eq!(
+        graph.element(graph.cast(narrow, Element::Half)),
+        Element::Half
+    );
+    assert_eq!(graph.element(graph.add(narrow, narrow)), Element::Half);
+    assert_eq!(graph.element(graph.add(narrow, wide)), Element::Single);
+    assert_eq!(graph.element(graph.relu(narrow)), Element::Half);
+    assert_eq!(graph.element(folded), Element::Single);
+    assert_eq!(
+        graph.cast(narrow, Element::Half),
+        narrow,
+        "a cast that asks for the numbers a tensor already carries adds no task",
+    );
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let convert = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Convert)
+        .expect("a cast to half packs the numbers it narrows");
+    assert_eq!(convert.out, narrow.id());
+    assert_eq!(convert.a, wide.id());
+    assert_eq!(convert.count, 3);
+    assert_eq!(convert.steps, 1);
+    assert_eq!(steps(&encoding)[convert.chain as usize].op, op::IDENTITY);
+    let widened = tape
+        .iter()
+        .find(|task| task.out == folded.id())
+        .expect("a sum reads the narrow tensor it folds");
+    assert_eq!(Kind::of(widened.kind), Kind::SumChunk);
 }
 
 fn narrow_rows_through_an_image(kind: Kind) {
@@ -1243,21 +1348,22 @@ fn narrow_rows_through_an_image(kind: Kind) {
     let encoding = encoding(&graph);
     let tape = tape(&encoding);
     let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
-    let pack = tape
+    let convert = tape
         .iter()
-        .find(|task| Kind::of(task.kind) == Kind::Pack)
+        .find(|task| Kind::of(task.kind) == Kind::Convert)
         .expect("a half precision table packs the rows its task reached");
-    assert_eq!(pack.out, table.id());
-    assert_eq!(values[pack.a as usize].store, Store::Tensors.code());
+    assert_eq!(convert.out, table.id());
+    assert_eq!(convert.count, 4);
+    assert_eq!(values[convert.a as usize].store, Store::Tensors.code());
 
     let rows = tape
         .iter()
         .find(|task| Kind::of(task.kind) == kind)
         .expect("the task reaches the rows of the image");
-    assert_eq!(rows.out, pack.a);
+    assert_eq!(rows.out, convert.a);
     let copy = tape
         .iter()
-        .find(|task| task.out == pack.a && Kind::of(task.kind) == Kind::Unary)
+        .find(|task| task.out == convert.a && Kind::of(task.kind) == Kind::Unary)
         .expect("the image holds the table before the task reaches it");
     assert_eq!(copy.a, table.id());
     assert_eq!(copy.param, 0.0);

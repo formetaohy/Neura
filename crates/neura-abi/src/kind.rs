@@ -37,7 +37,7 @@ pub enum Module {
     Scatter,
     Layout,
     Pool,
-    Pack,
+    Convert,
 }
 
 impl Module {
@@ -53,7 +53,7 @@ impl Module {
         Self::Scatter,
         Self::Layout,
         Self::Pool,
-        Self::Pack,
+        Self::Convert,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -69,7 +69,7 @@ impl Module {
             Self::Scatter => "scatter",
             Self::Layout => "layout",
             Self::Pool => "pool",
-            Self::Pack => "pack",
+            Self::Convert => "convert",
         }
     }
 
@@ -398,12 +398,12 @@ kinds! {
         chain: false,
         origin: false,
     };
-    Pack PACK = "pack" {
-        entry: "run_pack",
-        modules: [Pack],
-        geometry: Strategy,
+    Convert CONVERT = "convert" {
+        entry: "run_convert",
+        modules: [Convert],
+        geometry: None,
         prelude: false,
-        chain: false,
+        chain: true,
         origin: false,
     };
     Conv2d CONV2D = "conv2d" {

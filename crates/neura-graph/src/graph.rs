@@ -206,7 +206,7 @@ impl<'g> Graph<'g> {
     }
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
-        let out = self.fresh(shape, Residency::Derived, false);
+        let out = self.fresh(shape, Element::Single, Residency::Derived, false);
         let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 6]);
         task.param = value;
         self.push(task);
@@ -240,6 +240,7 @@ impl<'g> Graph<'g> {
                 left_dims[2],
                 right_dims[3],
             ]),
+            self.element(left).promote(self.element(right)),
             Residency::Derived,
             self.tracked(&[left, right]),
         );
@@ -325,6 +326,10 @@ impl<'g> Graph<'g> {
             key_shape.dims()[2],
         );
         let tracked = self.tracked(&[query, key, value]);
+        let element = self
+            .element(query)
+            .promote(self.element(key))
+            .promote(self.element(value));
         let out = self.fresh(
             Shape::of([
                 query_shape.dims()[0],
@@ -332,6 +337,7 @@ impl<'g> Graph<'g> {
                 query_shape.dims()[2],
                 value_shape.dims()[3],
             ]),
+            element,
             Residency::Derived,
             tracked,
         );
@@ -342,6 +348,7 @@ impl<'g> Graph<'g> {
                 query_shape.dims()[2],
                 1,
             ]),
+            Element::Single,
             Residency::Derived,
             false,
         );
@@ -410,6 +417,7 @@ impl<'g> Graph<'g> {
                 (padded_rows - filter_dims[2]) / window.stride_rows() + 1,
                 (padded_columns - filter_dims[3]) / window.stride_columns() + 1,
             ]),
+            self.element(input).promote(self.element(filter)),
             Residency::Derived,
             self.tracked(&[input, filter]),
         );
@@ -452,6 +460,7 @@ impl<'g> Graph<'g> {
                 (padded_rows - window.reach_rows()) / window.stride_rows() + 1,
                 (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
             ]),
+            self.element(input),
             Residency::Derived,
             self.tracked(&[input]),
         );
@@ -556,6 +565,14 @@ impl<'g> Graph<'g> {
         self.unary(op::IDENTITY, value)
     }
 
+    pub fn cast(&self, value: Value<'g>, element: Element) -> Value<'g> {
+        let value = self.own(value);
+        if self.element(value) == element {
+            return value;
+        }
+        self.unary_as(op::IDENTITY, value, element)
+    }
+
     pub fn sin(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         self.unary(op::SIN, value)
@@ -624,7 +641,7 @@ impl<'g> Graph<'g> {
         );
         let mut dims = self.shape(source).dims();
         dims[3] = 1;
-        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        let out = self.fresh(Shape::of(dims), Element::Single, Residency::Derived, false);
         self.push(TaskInfo::of(
             kind,
             op::NONE,
@@ -660,7 +677,7 @@ impl<'g> Graph<'g> {
         );
         let mut dims = self.shape(indices).dims();
         dims[3] = classes;
-        let out = self.fresh(Shape::of(dims), Residency::Derived, false);
+        let out = self.fresh(Shape::of(dims), Element::Single, Residency::Derived, false);
         self.push(TaskInfo::of(
             Kind::OneHot,
             op::NONE,
@@ -688,7 +705,12 @@ impl<'g> Graph<'g> {
         );
         let mut dims = self.shape(indices).dims();
         dims[3] = self.shape(table).dims()[3];
-        let out = self.fresh(Shape::of(dims), Residency::Derived, self.tracked(&[table]));
+        let out = self.fresh(
+            Shape::of(dims),
+            self.element(table),
+            Residency::Derived,
+            self.tracked(&[table]),
+        );
         self.push(TaskInfo::of(
             Kind::Gather,
             op::NONE,
@@ -740,7 +762,12 @@ impl<'g> Graph<'g> {
             "a sum walks its operand element by element, and value {} is a view",
             value.id(),
         );
-        let out = self.fresh(Shape::scalar(), Residency::Derived, self.tracked(&[value]));
+        let out = self.fresh(
+            Shape::scalar(),
+            Element::Single,
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
         self.push(TaskInfo::of(
             Kind::SumChunk,
             op::NONE,
@@ -1002,7 +1029,12 @@ impl<'g> Graph<'g> {
                     if !self.tracked(&[operand]) {
                         continue;
                     }
-                    let out = self.fresh(self.shape(operand), Residency::Derived, false);
+                    let out = self.fresh(
+                        self.shape(operand),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
                     let mut grad = TaskInfo::of(kind, op::NONE, out.id(), inputs);
                     grad.origin = task.origin;
                     grad.param = task.param;
@@ -1015,7 +1047,12 @@ impl<'g> Graph<'g> {
                 let input = self.value_of(task.inputs[0]);
                 let filter = self.value_of(task.inputs[1]);
                 if self.tracked(&[input]) {
-                    let out = self.fresh(self.shape(input), Residency::Derived, false);
+                    let out = self.fresh(
+                        self.shape(input),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
                     let mut grad = TaskInfo::of(
                         Kind::Conv2dInputGrad,
                         op::NONE,
@@ -1034,7 +1071,12 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, input, out);
                 }
                 if self.tracked(&[filter]) {
-                    let out = self.fresh(self.shape(filter), Residency::Derived, false);
+                    let out = self.fresh(
+                        self.shape(filter),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
                     let mut grad = TaskInfo::of(
                         Kind::Conv2dWeightGrad,
                         op::NONE,
@@ -1070,7 +1112,12 @@ impl<'g> Graph<'g> {
                     } else {
                         Kind::PoolMean2dInputGrad
                     };
-                    let out = self.fresh(self.shape(input), Residency::Derived, false);
+                    let out = self.fresh(
+                        self.shape(input),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
                     let mut grad = TaskInfo::of(
                         kind,
                         op::NONE,
@@ -1103,7 +1150,7 @@ impl<'g> Graph<'g> {
             | Kind::PoolMax2dInputGrad
             | Kind::PoolMean2dInputGrad
             | Kind::MatmulFold
-            | Kind::Pack
+            | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
@@ -1138,7 +1185,12 @@ impl<'g> Graph<'g> {
         } else {
             NO_VALUE
         };
-        let out = self.fresh(self.shape(gradient), Residency::Derived, false);
+        let out = self.fresh(
+            self.shape(gradient),
+            Element::Single,
+            Residency::Derived,
+            false,
+        );
         let mut partial = TaskInfo::of(
             Kind::Partial,
             task.op,
@@ -1160,7 +1212,12 @@ impl<'g> Graph<'g> {
     ) {
         let source = self.own(source);
         let gradient = self.own(gradient);
-        let out = self.fresh(self.shape(source), Residency::Derived, true);
+        let out = self.fresh(
+            self.shape(source),
+            Element::Single,
+            Residency::Derived,
+            true,
+        );
         self.push(TaskInfo::of(
             kind,
             op::NONE,
@@ -1186,7 +1243,12 @@ impl<'g> Graph<'g> {
             value.id(),
         );
         let shape = self.shape(value);
-        let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
+        let out = self.fresh(
+            shape,
+            self.element(value),
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
         self.push(TaskInfo::of(
             kind,
             op::NONE,
@@ -1200,7 +1262,12 @@ impl<'g> Graph<'g> {
         let left = self.own(left);
         let right = self.own(right);
         let shape = self.shape(left).combined(self.shape(right));
-        let out = self.fresh(shape, Residency::Derived, self.tracked(&[left, right]));
+        let out = self.fresh(
+            shape,
+            self.element(left).promote(self.element(right)),
+            Residency::Derived,
+            self.tracked(&[left, right]),
+        );
         self.push(TaskInfo::of(
             op::kind(op),
             op,
@@ -1218,9 +1285,13 @@ impl<'g> Graph<'g> {
     }
 
     fn unary(&self, op: u32, value: Value<'g>) -> Value<'g> {
+        self.unary_as(op, value, self.element(value))
+    }
+
+    fn unary_as(&self, op: u32, value: Value<'g>, element: Element) -> Value<'g> {
         let value = self.own(value);
         let shape = self.shape(value);
-        let out = self.fresh(shape, Residency::Derived, self.tracked(&[value]));
+        let out = self.fresh(shape, element, Residency::Derived, self.tracked(&[value]));
         self.push(TaskInfo::of(
             op::kind(op),
             op,
@@ -1385,6 +1456,7 @@ impl<'g> Graph<'g> {
         );
         let out = self.fresh(
             shape.reduced(axis),
+            Element::Single,
             Residency::Derived,
             self.tracked(&[value]),
         );
@@ -1407,7 +1479,7 @@ impl<'g> Graph<'g> {
             self.shape(source).dims(),
             shape.dims(),
         );
-        let out = self.fresh(shape, Residency::Derived, false);
+        let out = self.fresh(shape, self.element(source), Residency::Derived, false);
         self.push(TaskInfo::of(
             Kind::Broadcast,
             op::NONE,
@@ -1463,7 +1535,12 @@ impl<'g> Graph<'g> {
                 false,
             );
         }
-        let out = self.fresh(owner_shape, Residency::Derived, false);
+        let out = self.fresh(
+            owner_shape,
+            self.element(contribution),
+            Residency::Derived,
+            false,
+        );
         self.push(TaskInfo::of(
             Kind::Layout,
             op::NONE,
@@ -1560,14 +1637,20 @@ impl<'g> Graph<'g> {
         Value::of(self.instance, id, shape)
     }
 
-    fn fresh(&self, shape: Shape, residency: Residency, tracked: bool) -> Value<'g> {
+    fn fresh(
+        &self,
+        shape: Shape,
+        element: Element,
+        residency: Residency,
+        tracked: bool,
+    ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
             strides: shape.strides(),
             storage: id,
-            element: Element::Single,
+            element,
             residency,
             requires_grad: tracked,
             retained: false,

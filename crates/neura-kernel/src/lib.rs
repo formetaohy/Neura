@@ -5,6 +5,9 @@ mod attention_device;
 mod choice;
 #[path = "../device/conv.rs"]
 mod conv;
+mod convert;
+#[path = "../device/convert.rs"]
+mod convert_device;
 mod element;
 #[path = "../device/layout.rs"]
 mod layout;
@@ -14,9 +17,6 @@ mod matmul_device;
 mod op;
 #[path = "../device/op.rs"]
 mod op_device;
-mod pack;
-#[path = "../device/pack.rs"]
-mod pack_device;
 #[path = "../device/pointwise.rs"]
 mod pointwise;
 #[path = "../device/pool.rs"]
@@ -99,6 +99,6 @@ fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geomet
         Module::Scatter => scatter::define(compiler),
         Module::Layout => layout::define(compiler),
         Module::Pool => pool::define(compiler),
-        Module::Pack => pack::define(compiler, elements),
+        Module::Convert => convert::define(compiler, elements),
     }
 }

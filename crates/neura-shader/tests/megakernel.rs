@@ -329,26 +329,26 @@ fn every_tensor_element_compiles_only_the_loads_it_reads() {
 }
 
 #[test]
-fn a_pack_carries_only_the_elements_it_packs() {
+fn a_convert_carries_only_the_elements_it_packs() {
     let half = selected(
         profiles()[0],
-        &[Kind::Pack],
+        &[Kind::Convert],
         &[Element::Single, Element::Half],
     )
     .program();
     let reachable = functions(&half);
-    assert!(reachable.contains("run_pack"));
-    assert!(reachable.contains("run_pack_half"));
-    assert!(!reachable.contains("run_pack_bfloat16"));
+    assert!(reachable.contains("run_convert"));
+    assert!(reachable.contains("run_convert_half"));
+    assert!(!reachable.contains("run_convert_bfloat16"));
     let both = selected(
         profiles()[0],
-        &[Kind::Pack],
+        &[Kind::Convert],
         &[Element::Half, Element::Bfloat16],
     )
     .program();
     let reachable = functions(&both);
-    assert!(reachable.contains("run_pack_half"));
-    assert!(reachable.contains("run_pack_bfloat16"));
+    assert!(reachable.contains("run_convert_half"));
+    assert!(reachable.contains("run_convert_bfloat16"));
 }
 
 #[test]

@@ -508,21 +508,34 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
     for task in tasks {
         for out in task.writes() {
             let out = &values[out as usize];
-            if task.kind == Kind::Pack {
-                let source = &values[task.inputs[0] as usize];
+            if task.kind == Kind::Convert {
                 assert!(
-                    out.element.narrow() && source.element == Element::Single,
-                    "a pack of {} numbers into a {} tensor reads the {} source {} writes element by element",
-                    source.shape.elements(),
+                    out.element.narrow(),
+                    "a convert writes the {} tensor {} word by word, and a word holds one element",
                     out.element.name(),
-                    source.element.name(),
-                    task.kind.name(),
+                    task.out,
                 );
+                for source in task
+                    .inputs
+                    .iter()
+                    .take(1)
+                    .chain(task.prelude.iter().map(|step| &step.operand))
+                    .chain(task.chain.iter().map(|step| &step.operand))
+                    .filter(|source| **source != NO_VALUE)
+                    .copied()
+                {
+                    assert!(
+                        values[source as usize].shape.fits_within(out.shape),
+                        "a convert reads {:?} through the {:?} it writes",
+                        values[source as usize].shape.dims(),
+                        out.shape.dims(),
+                    );
+                }
                 continue;
             }
             assert!(
                 !out.element.narrow(),
-                "a {} task writes the {} tensor {} element by element, and a narrow tensor is written a word at a time by a pack",
+                "a {} task writes the {} tensor {} element by element, and a narrow tensor is written word by word by a convert",
                 task.kind.name(),
                 out.element.name(),
                 task.out,
@@ -609,7 +622,7 @@ fn reads_every_element_in_place(values: &[ValueInfo], task: &Task, write: u32) -
     let out = &values[write as usize];
     task.reads().all(|value| {
         let value = &values[value as usize];
-        value.shape == out.shape && value.strides == out.strides
+        value.shape == out.shape && value.strides == out.strides && value.element == out.element
     })
 }
 
@@ -639,7 +652,8 @@ fn touch(
 }
 
 fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
-    u64::from(values[storage].shape.elements()) * WORD_BYTES
+    let info = &values[storage];
+    info.element.words(u64::from(info.shape.elements())) * WORD_BYTES
 }
 
 fn info_of(values: &[ValueInfo], value: u32) -> &ValueInfo {

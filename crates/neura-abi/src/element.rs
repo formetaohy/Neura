@@ -54,4 +54,13 @@ impl Element {
     pub const fn narrow(self) -> bool {
         self.elements_per_word() > 1
     }
+
+    pub const fn promote(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Single, _) | (_, Self::Single) => Self::Single,
+            (Self::Half, Self::Half) => Self::Half,
+            (Self::Bfloat16, Self::Bfloat16) => Self::Bfloat16,
+            (Self::Half, Self::Bfloat16) | (Self::Bfloat16, Self::Half) => Self::Single,
+        }
+    }
 }
