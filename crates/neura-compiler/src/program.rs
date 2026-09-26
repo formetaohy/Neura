@@ -2,11 +2,23 @@ use crate::workgroup;
 use naga::back::{hlsl, msl, spv};
 use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
 use naga::{AddressSpace, Module, ShaderStage, StorageAccess};
+use neura_abi::Features;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub const METAL_SIZE_BUFFER_SLOT: u8 = 30;
+
+const SPIRV_WITH_SUBGROUP: (u8, u8) = (1, 3);
+const SPIRV_WITHOUT_SUBGROUP: (u8, u8) = (1, 0);
+
+fn capabilities(features: Features) -> Capabilities {
+    let mut capabilities = Capabilities::SHADER_FLOAT16_IN_FLOAT32;
+    if features.contains(Features::SUBGROUP) {
+        capabilities |= Capabilities::SUBGROUP;
+    }
+    capabilities
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Backend {
@@ -85,6 +97,7 @@ struct Compiled {
     workgroup: u32,
     bindings: Vec<BindingSpec>,
     reflected: Vec<ShaderBinding>,
+    features: Features,
     spirv: Vec<u32>,
 }
 
@@ -162,7 +175,13 @@ pub fn describe(bindings: &[ShaderBinding]) -> String {
 }
 
 impl ComputeProgram {
-    pub fn new(label: &str, module: Module, entry: &str, bindings: &[BindingSpec]) -> Self {
+    pub fn new(
+        label: &str,
+        module: Module,
+        entry: &str,
+        bindings: &[BindingSpec],
+        features: Features,
+    ) -> Self {
         assert!(
             !bindings.is_empty() && bindings.len() <= METAL_SIZE_BUFFER_SLOT as usize,
             "a compute program binds between one and 30 storage buffers"
@@ -199,15 +218,20 @@ impl ComputeProgram {
                 spec.binding
             );
         }
-        let info = Validator::new(
-            ValidationFlags::all(),
-            Capabilities::SHADER_FLOAT16_IN_FLOAT32,
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{label} contains an invalid device program: {error:#?}"));
+        let info = Validator::new(ValidationFlags::all(), capabilities(features))
+            .validate(&module)
+            .unwrap_or_else(|error| {
+                panic!("{label} contains an invalid device program: {error:#?}")
+            });
         crate::uniform::verify(&module, index);
         let mut options = spv::Options {
             fake_missing_bindings: false,
+            capabilities: None,
+            lang_version: if features.contains(Features::SUBGROUP) {
+                SPIRV_WITH_SUBGROUP
+            } else {
+                SPIRV_WITHOUT_SUBGROUP
+            },
             ..Default::default()
         };
         for spec in bindings {
@@ -245,9 +269,14 @@ impl ComputeProgram {
                 workgroup,
                 bindings: bindings.to_vec(),
                 reflected,
+                features,
                 spirv,
             }),
         }
+    }
+
+    pub fn features(&self) -> Features {
+        self.compiled.features
     }
 
     pub fn label(&self) -> &str {

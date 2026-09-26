@@ -1,9 +1,10 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::{Global, ir};
 use naga::{
-    BinaryOperator, Expression, Handle, LocalVariable, MathFunction, ScalarKind, Statement, Type,
-    TypeInner, UnaryOperator,
+    BinaryOperator, CollectiveOperation, Expression, Handle, LocalVariable, MathFunction,
+    ScalarKind, Statement, SubgroupOperation, Type, TypeInner, UnaryOperator,
 };
+use neura_abi::Features;
 
 impl FunctionLower<'_> {
     fn scalar(&self, ty: Handle<Type>) -> ScalarKind {
@@ -518,6 +519,18 @@ impl FunctionLower<'_> {
             "workgroup_barrier" | "storage_barrier" | "atomic_store" => {
                 panic!("a device synchronization or atomic store cannot yield a value")
             }
+            "subgroup_add" | "subgroup_max" => {
+                let op = if name == "subgroup_add" {
+                    SubgroupOperation::Add
+                } else {
+                    SubgroupOperation::Max
+                };
+                self.subgroup_collective(op, args)
+            }
+            "subgroup_size" => {
+                assert!(args.is_empty(), "a subgroup size takes no argument");
+                self.subgroup_lanes()
+            }
             _ => {
                 let function = self.compiler.lower_function(name);
                 let (parameters, result) = {
@@ -551,5 +564,78 @@ impl FunctionLower<'_> {
                 value
             }
         }
+    }
+
+    fn interrupt(&mut self, expression: Expression, ty: Handle<Type>) -> Typed {
+        Typed {
+            expr: self
+                .function
+                .expressions
+                .append(expression, naga::Span::UNDEFINED),
+            ty,
+        }
+    }
+
+    fn subgroup_collective(&mut self, op: SubgroupOperation, args: &[ir::Expression]) -> Typed {
+        self.compiler.require(Features::SUBGROUP);
+        assert_eq!(args.len(), 1, "a subgroup collective takes one value");
+        let argument = self.value(&args[0]);
+        assert!(
+            self.scalar(argument.ty) == ScalarKind::Float,
+            "a subgroup collective folds a float value"
+        );
+        let result = self.interrupt(
+            Expression::SubgroupOperationResult { ty: argument.ty },
+            argument.ty,
+        );
+        self.push(Statement::SubgroupCollectiveOperation {
+            op,
+            collective_op: CollectiveOperation::Reduce,
+            argument: argument.expr,
+            result: result.expr,
+        });
+        result
+    }
+
+    fn subgroup_lanes(&mut self) -> Typed {
+        self.compiler.require(Features::SUBGROUP);
+        let ty = self.compiler.ty("u32");
+        let ballot = self.interrupt(Expression::SubgroupBallotResult, ty);
+        self.push(Statement::SubgroupBallot {
+            result: ballot.expr,
+            predicate: None,
+        });
+        let mut lanes = None::<Typed>;
+        for index in 0..4u32 {
+            let word = self.emit(
+                Expression::AccessIndex {
+                    base: ballot.expr,
+                    index,
+                },
+                ty,
+            );
+            let counted = self.emit(
+                Expression::Math {
+                    fun: MathFunction::CountOneBits,
+                    arg: word.expr,
+                    arg1: None,
+                    arg2: None,
+                    arg3: None,
+                },
+                ty,
+            );
+            lanes = Some(match lanes {
+                None => counted,
+                Some(previous) => self.emit(
+                    Expression::Binary {
+                        op: BinaryOperator::Add,
+                        left: previous.expr,
+                        right: counted.expr,
+                    },
+                    ty,
+                ),
+            });
+        }
+        lanes.expect("a device ballot spans four words")
     }
 }

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
+neura-abi = { workspace = true }
 neura-compiler = { workspace = true }
 
 [dev-dependencies]

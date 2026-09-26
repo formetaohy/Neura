@@ -5,7 +5,7 @@ use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Plan, Tapes};
 use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
-    BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
+    BufferUsages, Device, Features, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
     SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
@@ -100,6 +100,10 @@ impl Runtime {
             tapes: Tapes::new(),
             context,
         }
+    }
+
+    pub fn features(&self) -> Features {
+        self.context.features()
     }
 
     pub fn device_tapes(&self) -> usize {
@@ -298,9 +302,12 @@ impl Runtime {
             encoding.tiles(),
             encoding.attention(),
         );
-        let kernel = self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
-            Megakernel::assemble(&kinds, &elements, geometry)
-        });
+        let features = self.context.features();
+        let kernel = self
+            .tapes
+            .kernel(&kinds, &elements, geometry.clone(), features, || {
+                Megakernel::assemble(&kinds, &elements, geometry, features)
+            });
         Plan {
             signature,
             encoding,

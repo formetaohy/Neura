@@ -1,4 +1,5 @@
 use naga::Statement;
+use neura_compiler::abi::Features;
 use neura_compiler::{BindingSpec, Compiler, ComputeProgram};
 
 mod unrolled {
@@ -87,6 +88,28 @@ mod divergent_call {
     }
 }
 
+mod lanes {
+    #[neura_compiler::module]
+    mod source {
+        #[neura_compiler::kernel]
+        fn main(lid: u32) {
+            output[lid] = subgroup_add(output[lid]);
+        }
+    }
+}
+
+mod lanes_inside_a_divergence {
+    #[neura_compiler::module]
+    mod source {
+        #[neura_compiler::kernel]
+        fn main(lid: u32, group: Uvec3) {
+            if group.x == lid {
+                output[lid] = subgroup_max(output[lid]);
+            }
+        }
+    }
+}
+
 mod uniform_call {
     #[neura_compiler::module]
     mod source {
@@ -168,14 +191,14 @@ mod unbound {
 }
 
 fn compiled_u32(label: &str, define: fn(&mut Compiler)) -> ComputeProgram {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new(Features::empty());
     compiler.storage_array("output", "u32", BindingSpec::writable_storage(0));
     define(&mut compiler);
     compiler.finish(label, "main", 64)
 }
 
 fn compiled_f32(label: &str, define: fn(&mut Compiler)) -> ComputeProgram {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new(Features::empty());
     compiler.storage_array("output", "f32", BindingSpec::writable_storage(0));
     define(&mut compiler);
     compiler.finish(label, "main", 64)
@@ -247,6 +270,40 @@ fn rust_boolean_short_circuit_keeps_device_side_effects_in_its_branch() {
 }
 
 #[test]
+#[should_panic(expected = "a device program reaches for subgroup")]
+fn a_device_without_lanes_refuses_a_subgroup_collective() {
+    compiled_f32("lanes", lanes::define);
+}
+
+#[test]
+#[should_panic(expected = "a subgroup collective is reached by different invocations")]
+fn a_subgroup_collective_cannot_hide_inside_a_divergence() {
+    let mut compiler = Compiler::new(Features::all());
+    compiler.storage_array("output", "f32", BindingSpec::writable_storage(0));
+    lanes_inside_a_divergence::define(&mut compiler);
+    compiler.finish("divergent lanes", "main", 64);
+}
+
+#[test]
+fn a_subgroup_collective_declares_the_feature_it_reaches_for() {
+    let mut compiler = Compiler::new(Features::all());
+    compiler.storage_array("output", "f32", BindingSpec::writable_storage(0));
+    lanes::define(&mut compiler);
+    let program = compiler.finish("lanes", "main", 64);
+    assert_eq!(program.features(), Features::SUBGROUP);
+    assert_eq!(program.spirv()[1], 0x0001_0300);
+    let collective = program.module().entry_points[0]
+        .function
+        .body
+        .iter()
+        .any(|statement| matches!(statement, Statement::SubgroupCollectiveOperation { .. }));
+    assert!(
+        collective,
+        "a Rust device call reaches a subgroup collective"
+    );
+}
+
+#[test]
 #[should_panic(expected = "a workgroup barrier is reached by different invocations")]
 fn a_nonuniform_workgroup_barrier_is_rejected() {
     compiled_u32("divergent barrier", divergent::define);
@@ -279,7 +336,7 @@ fn divergent_loop_counts_cannot_hide_a_barrier() {
 #[test]
 #[should_panic(expected = "invalid device program")]
 fn a_readonly_binding_cannot_be_written() {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new(Features::empty());
     compiler.storage_array("input", "u32", BindingSpec::storage(0));
     readonly::define(&mut compiler);
     compiler.finish("readonly output", "main", 64);

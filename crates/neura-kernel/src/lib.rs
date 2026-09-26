@@ -21,8 +21,9 @@ mod op_device;
 mod pointwise;
 #[path = "../device/pool.rs"]
 mod pool;
-#[path = "../device/reduce.rs"]
 mod reduce;
+#[path = "../device/reduce.rs"]
+mod reduce_device;
 #[path = "../device/scatter.rs"]
 mod scatter;
 #[path = "../device/select.rs"]
@@ -30,11 +31,17 @@ mod select;
 #[path = "../device/softmax.rs"]
 mod softmax;
 
-use neura_abi::{Element, Kind, Module};
+use neura_abi::{Element, Features, Kind, Module};
 use neura_compiler::{Compiler, ir};
 use neura_profile::Geometry;
 
-pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geometry: &Geometry) {
+pub fn define(
+    compiler: &mut Compiler,
+    kinds: &[Kind],
+    elements: &[Element],
+    geometry: &Geometry,
+    features: Features,
+) {
     let declared = geometry.declared_shared_bytes(kinds);
     assert!(
         declared <= geometry.shared_bytes(),
@@ -45,7 +52,7 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
     substrate(compiler, elements);
     for module in Module::ALL {
         if kinds.iter().any(|kind| kind.carries(*module)) {
-            install(compiler, *module, elements, geometry);
+            install(compiler, *module, elements, geometry, features);
         }
     }
     for kind in Kind::ALL {
@@ -75,7 +82,13 @@ fn substrate(compiler: &mut Compiler, elements: &[Element]) {
     op::define(compiler);
 }
 
-fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geometry: &Geometry) {
+fn install(
+    compiler: &mut Compiler,
+    module: Module,
+    elements: &[Element],
+    geometry: &Geometry,
+    features: Features,
+) {
     match module {
         Module::Matmul => matmul_device::define(compiler),
         Module::MatmulTiles => {
@@ -87,7 +100,7 @@ fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geomet
         Module::Attention => attention::define(compiler, geometry),
         Module::Reduce => {
             compiler.workgroup("reduction_scratch", "f32", geometry.workgroup());
-            reduce::define(compiler);
+            reduce::define(compiler, features);
         }
         Module::Softmax => softmax::define(compiler),
         Module::Choice => {

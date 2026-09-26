@@ -1,5 +1,5 @@
 use crate::buffer::{BufferBinding, GpuBuffer};
-use crate::capability::BufferUsages;
+use crate::capability::{BufferUsages, Features};
 use crate::context::Device;
 use crate::native::{NativeGroup, NativePipeline};
 pub use neura_compiler::{
@@ -44,6 +44,12 @@ impl PipelineHandle {
         assert!(
             program.bindings().len() as u32 <= device.limits().max_storage_buffers_per_shader_stage
         );
+        assert!(
+            device.features().contains(program.features()),
+            "a device program reaches for {}, and this device offers {}",
+            program.features(),
+            device.features(),
+        );
         let native = device.native().create_pipeline(&program);
         Self {
             slot: Arc::new(Slot {
@@ -56,6 +62,10 @@ impl PipelineHandle {
 
     pub fn label(&self) -> &str {
         self.slot.program.label()
+    }
+
+    pub fn features(&self) -> Features {
+        self.slot.program.features()
     }
 
     pub fn bind_group(&self, entries: &[Binding<'_>]) -> BindGroup {

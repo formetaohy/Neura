@@ -10,4 +10,5 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+bitflags = { workspace = true }
 bytemuck = { workspace = true }

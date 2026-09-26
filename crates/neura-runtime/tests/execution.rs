@@ -1,8 +1,10 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{Features, Runtime, RuntimeRequest};
 
+#[path = "support/backend.rs"]
+mod backend;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/softmax.rs"]
@@ -10,6 +12,7 @@ mod softmax;
 #[path = "support/mod.rs"]
 mod support;
 
+use backend::{backends, open_with};
 use reference::{matmul_reference, random};
 use softmax::{log_softmax_reference, softmax_reference};
 use support::{assert_close, open};
@@ -208,6 +211,43 @@ fn a_row_fold_sums_every_row_of_every_plane() {
         .collect::<Vec<_>>();
     assert_eq!(expected.len(), 30);
     assert_close(&runtime.read(&program, sums), &expected, 1e-4);
+}
+
+#[test]
+fn every_backend_a_machine_offers_folds_a_row_the_same_way() {
+    let rows = 9u32;
+    let columns = 401u32;
+    let graph = Graph::new();
+    let data = graph.parameter(
+        Shape::of([1, 1, rows, columns]),
+        Init::Zero,
+        Element::Single,
+    );
+    let sums = graph.sum_rows(data);
+    let values = vec![1.0f32; (rows * columns) as usize];
+    for backends in backends() {
+        let runtime = open_with(backends);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        assert!(
+            runtime.features().contains(program.features()),
+            "a device that offers {} runs a device program of {}",
+            runtime.features(),
+            program.features(),
+        );
+        assert_eq!(
+            program.features().contains(Features::SUBGROUP),
+            runtime.features().contains(Features::SUBGROUP),
+            "a row of {columns} over {backends:?} folds through the lanes its device offers",
+        );
+        runtime.write(&program, data, &values);
+        runtime.run(&program);
+        assert_close(
+            &runtime.read(&program, sums),
+            &vec![columns as f32; rows as usize],
+            0.0,
+        );
+    }
 }
 
 #[test]

@@ -1,4 +1,5 @@
 pub mod element;
+pub mod feature;
 pub mod kind;
 mod placement;
 mod record;
@@ -7,6 +8,7 @@ pub mod store;
 pub mod strategy;
 
 pub use element::Element;
+pub use feature::Features;
 pub use kind::{Geometry, KINDS, Kind, KindInfo, Module, Scratch};
 pub use placement::Placement;
 pub use record::{

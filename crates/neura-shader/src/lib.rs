@@ -1,7 +1,9 @@
 #[path = "../device/core.rs"]
 mod core;
 
-use neura_abi::{Element, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal, store, strategy};
+use neura_abi::{
+    Element, Features, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal, store, strategy,
+};
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
 use neura_profile::Geometry;
 
@@ -99,7 +101,12 @@ pub struct Megakernel {
 }
 
 impl Megakernel {
-    pub fn assemble(kinds: &[Kind], elements: &[Element], geometry: Geometry) -> Self {
+    pub fn assemble(
+        kinds: &[Kind],
+        elements: &[Element],
+        geometry: Geometry,
+        features: Features,
+    ) -> Self {
         assert!(
             !kinds.is_empty(),
             "a device program with no task has nothing to run"
@@ -108,7 +115,7 @@ impl Megakernel {
             !elements.is_empty(),
             "a device program with no tensor has nothing to address"
         );
-        let mut compiler = Compiler::new();
+        let mut compiler = Compiler::new(features);
         for record in RECORDS {
             compiler.record(*record);
         }
@@ -153,7 +160,7 @@ impl Megakernel {
             }
         }
         core::define(&mut compiler);
-        neura_kernel::define(&mut compiler, kinds, elements, &geometry);
+        neura_kernel::define(&mut compiler, kinds, elements, &geometry, features);
         let enabled = kinds
             .iter()
             .map(|kind| kind.symbol().to_owned())

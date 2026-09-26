@@ -1,6 +1,6 @@
 #[neura_compiler::module]
 mod source {
-    fn workgroup_sum(lid: u32, start: f32) -> f32 {
+    fn workgroup_sum_tree(lid: u32, start: f32) -> f32 {
         reduction_scratch[lid] = start;
         workgroup_barrier();
         let mut stride = WORKGROUP_SIZE / 2u32;
@@ -19,7 +19,7 @@ mod source {
         return total;
     }
 
-    fn workgroup_max(lid: u32, start: f32) -> f32 {
+    fn workgroup_max_tree(lid: u32, start: f32) -> f32 {
         reduction_scratch[lid] = start;
         workgroup_barrier();
         let mut stride = WORKGROUP_SIZE / 2u32;
@@ -37,6 +37,50 @@ mod source {
         let total = reduction_scratch[0u32];
         workgroup_barrier();
         return total;
+    }
+
+    fn workgroup_sum_warp(lid: u32, start: f32) -> f32 {
+        let lanes = subgroup_size();
+        let carried = subgroup_add(start);
+        reduction_scratch[lid] = select(0.0, carried, lid % lanes == 0u32);
+        workgroup_barrier();
+        let mut folded = 0.0;
+        if lid < lanes {
+            let mut collected = 0.0;
+            for index in stride(lid, WORKGROUP_SIZE, lanes) {
+                collected = collected + reduction_scratch[index];
+            }
+            folded = collected;
+        }
+        let total = subgroup_add(folded);
+        workgroup_barrier();
+        if lid == 0u32 {
+            reduction_scratch[0u32] = total;
+        }
+        workgroup_barrier();
+        return reduction_scratch[0u32];
+    }
+
+    fn workgroup_max_warp(lid: u32, start: f32) -> f32 {
+        let lanes = subgroup_size();
+        let carried = subgroup_max(start);
+        reduction_scratch[lid] = select(-3.4028235e38, carried, lid % lanes == 0u32);
+        workgroup_barrier();
+        let mut folded = -3.4028235e38;
+        if lid < lanes {
+            let mut collected = -3.4028235e38;
+            for index in stride(lid, WORKGROUP_SIZE, lanes) {
+                collected = max(collected, reduction_scratch[index]);
+            }
+            folded = collected;
+        }
+        let total = subgroup_max(folded);
+        workgroup_barrier();
+        if lid == 0u32 {
+            reduction_scratch[0u32] = total;
+        }
+        workgroup_barrier();
+        return reduction_scratch[0u32];
     }
 
     fn run_sum_chunk(task: Task, lid: u32) {

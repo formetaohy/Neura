@@ -4,7 +4,7 @@ use super::{
 };
 use crate::buffer::GpuBuffer;
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
 };
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
@@ -202,6 +202,23 @@ fn identity(props: &vk::PhysicalDeviceProperties) -> AdapterId {
     }
 }
 
+fn features(instance: &Instance, physical: vk::PhysicalDevice) -> Features {
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
+    unsafe {
+        instance.get_physical_device_properties2(physical, &mut properties);
+    }
+    let operations = vk::SubgroupFeatureFlags::ARITHMETIC | vk::SubgroupFeatureFlags::BALLOT;
+    if subgroup.supported_operations.contains(operations)
+        && subgroup
+            .supported_stages
+            .contains(vk::ShaderStageFlags::COMPUTE)
+    {
+        return Features::SUBGROUP;
+    }
+    Features::empty()
+}
+
 fn describe(props: &vk::PhysicalDeviceProperties, device_type: DeviceType) -> AdapterInfo {
     AdapterInfo {
         name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -228,7 +245,7 @@ fn complete_enumeration<T>(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
             complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
@@ -303,19 +320,20 @@ impl Device {
                 let ty = device_type(props.device_type);
                 let memory = unsafe { owner.raw.get_physical_device_memory_properties(*physical) };
                 let limits = limits(&props, &memory);
-                Some((*physical, props, family, ty, limits, memory))
+                let features = features(&owner.raw, *physical);
+                Some((*physical, props, family, ty, limits, memory, features))
             })
             .collect::<Vec<_>>();
         let offered = candidates
             .iter()
-            .map(|(_, props, _, ty, _, _)| describe(props, *ty))
+            .map(|(_, props, _, ty, _, _, _)| describe(props, *ty))
             .collect::<Vec<_>>();
         match policy {
             AdapterPolicy::Identity(wanted) => {
-                candidates.retain(|(_, props, _, _, _, _)| identity(props) == wanted)
+                candidates.retain(|(_, props, _, _, _, _, _)| identity(props) == wanted)
             }
             AdapterPolicy::Power(preference) => {
-                candidates.sort_by_key(|(_, _, _, ty, limits, _)| {
+                candidates.sort_by_key(|(_, _, _, ty, limits, _, _)| {
                     Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
                 });
             }
@@ -336,7 +354,7 @@ impl Device {
             });
         }
         let mut failures = Vec::new();
-        for (physical, props, family, ty, limits, memory) in candidates {
+        for (physical, props, family, ty, limits, memory, features) in candidates {
             let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
@@ -405,6 +423,7 @@ impl Device {
                 }),
                 adapter_info,
                 limits,
+                features,
             ));
         }
         Err(DeviceFailure::reason(if failures.is_empty() {

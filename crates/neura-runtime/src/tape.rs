@@ -1,5 +1,5 @@
 use crate::pool::{Pool, Recycled};
-use neura_abi::{Element, Kind, StepRecord};
+use neura_abi::{Element, Features, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
 use neura_graph::GraphStamp;
 use neura_profile::Geometry;
@@ -94,6 +94,7 @@ struct KernelIdentity {
     kinds: Vec<Kind>,
     elements: Vec<Element>,
     geometry: Geometry,
+    features: Features,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -192,12 +193,14 @@ impl Tapes {
         kinds: &[Kind],
         elements: &[Element],
         geometry: Geometry,
+        features: Features,
         assemble: impl FnOnce() -> Megakernel,
     ) -> Arc<Megakernel> {
         let identity = KernelIdentity {
             kinds: kinds.to_vec(),
             elements: elements.to_vec(),
             geometry,
+            features,
         };
         let mut kernels = self
             .kernels

@@ -12,7 +12,7 @@ use naga::{
     AddressSpace, ArraySize, GlobalVariable, Handle, MemoryDecorations, Module, Scalar,
     StorageAccess, StructMember, Type, TypeInner, VectorSize,
 };
-use neura_abi::{FieldType, RecordLayout};
+use neura_abi::{Features, FieldType, RecordLayout};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroU32;
 
@@ -38,16 +38,12 @@ pub struct Compiler {
     globals: HashMap<String, Global>,
     constants: HashMap<String, u32>,
     bindings: Vec<BindingSpec>,
-}
-
-impl Default for Compiler {
-    fn default() -> Self {
-        Self::new()
-    }
+    features: Features,
+    required: Features,
 }
 
 impl Compiler {
-    pub fn new() -> Self {
+    pub fn new(features: Features) -> Self {
         let mut compiler = Self {
             module: Module::default(),
             types: HashMap::new(),
@@ -57,6 +53,8 @@ impl Compiler {
             globals: HashMap::new(),
             constants: HashMap::new(),
             bindings: Vec::new(),
+            features,
+            required: Features::empty(),
         };
         for (name, inner) in [
             ("u32", TypeInner::Scalar(Scalar::U32)),
@@ -235,6 +233,15 @@ impl Compiler {
         );
     }
 
+    pub fn require(&mut self, feature: Features) {
+        assert!(
+            self.features.contains(feature),
+            "a device program reaches for {feature}, and this device offers {}",
+            self.features,
+        );
+        self.required |= feature;
+    }
+
     pub fn workgroup_bytes(&self) -> u64 {
         self.globals
             .values()
@@ -354,7 +361,7 @@ impl Compiler {
             task_payload: None,
             incoming_ray_payload: None,
         });
-        ComputeProgram::new(label, self.module, entry, &self.bindings)
+        ComputeProgram::new(label, self.module, entry, &self.bindings, self.required)
     }
 
     fn lower_function(&mut self, name: &str) -> Handle<naga::Function> {

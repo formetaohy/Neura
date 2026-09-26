@@ -235,6 +235,7 @@ dependencies = [
 name = "neura-abi"
 version = "0.2.0"
 dependencies = [
+ "bitflags",
  "bytemuck",
 ]
 
@@ -257,6 +258,7 @@ dependencies = [
  "bitflags",
  "bytemuck",
  "libloading",
+ "neura-abi",
  "neura-compiler",
  "objc2",
  "objc2-foundation",

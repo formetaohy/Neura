@@ -1,5 +1,7 @@
 use crate::buffer::GpuBuffer;
-use crate::capability::{AdapterId, AdapterInfo, AdapterPolicy, Backends, Limits, PowerPreference};
+use crate::capability::{
+    AdapterId, AdapterInfo, AdapterPolicy, Backends, Features, Limits, PowerPreference,
+};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
 use crate::pipeline::{ComputeProgram, PipelineHandle};
@@ -84,6 +86,7 @@ pub(crate) struct DeviceState {
     pub(crate) native: NativeDevice,
     pub(crate) info: AdapterInfo,
     pub(crate) limits: Limits,
+    pub(crate) features: Features,
 }
 
 #[derive(Clone)]
@@ -93,7 +96,7 @@ pub struct Device {
 
 impl Device {
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        let (native, info, limits) = native::open(request)?;
+        let (native, info, limits, features) = native::open(request)?;
         if !limits.supports(&Limits::BASELINE) {
             return Err(GpuUnavailable::UnsupportedLimits { info, limits });
         }
@@ -107,6 +110,7 @@ impl Device {
                 native,
                 info,
                 limits,
+                features,
             }),
         })
     }
@@ -117,6 +121,10 @@ impl Device {
 
     pub fn limits(&self) -> &Limits {
         &self.state.limits
+    }
+
+    pub fn features(&self) -> Features {
+        self.state.features
     }
 
     pub(crate) fn native(&self) -> &NativeDevice {
@@ -228,6 +236,10 @@ impl GpuContext {
 
     pub fn limits(&self) -> &Limits {
         self.device.limits()
+    }
+
+    pub fn features(&self) -> Features {
+        self.device.features()
     }
 
     pub fn binding_alignment(&self) -> u64 {
