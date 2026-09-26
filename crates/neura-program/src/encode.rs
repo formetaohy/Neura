@@ -106,7 +106,6 @@ pub struct Encoding {
     profile: Profile,
     kinds: Vec<Kind>,
     elements: Vec<Element>,
-    tiles: Vec<MatmulTile>,
     tasks: Vec<u8>,
     values: Vec<u8>,
     bounds: Vec<u8>,
@@ -124,35 +123,19 @@ pub struct Encoding {
 }
 
 impl Encoding {
-    pub fn of(
-        graph: &Graph<'_>,
-        alignment: u64,
-        profile: Profile,
-        carried: Vec<MatmulTile>,
-    ) -> Self {
-        Self::plan(&graph.snapshot(), profile, alignment, carried)
+    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile) -> Self {
+        Self::plan(&graph.snapshot(), profile, alignment)
     }
 
-    fn plan(
-        state: &GraphSnapshot,
-        profile: Profile,
-        alignment: u64,
-        carried: Vec<MatmulTile>,
-    ) -> Self {
+    fn plan(state: &GraphSnapshot, profile: Profile, alignment: u64) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(state.values(), &fuse::fuse(state), profile, carried);
+        let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
-        let tiles = &plan.tiles;
-        for tile in tiles {
-            assert!(
-                profile.tiles().contains(tile),
-                "a tape walks a matmul tile of {tile:?} the profile it compiles for never offers",
-            );
-        }
+        let tiles = profile.tiles();
 
         let kinds = carried_kinds(tasks);
         let elements = carried_elements(values);
@@ -198,7 +181,7 @@ impl Encoding {
                 Kind::Matmul => {
                     assert!(
                         (task.geometry as usize) < tiles.len(),
-                        "a product names geometry {} beyond the {} tiles its tape carries",
+                        "a product names geometry {} beyond the {} tiles its profile carries",
                         task.geometry,
                         tiles.len(),
                     );
@@ -326,7 +309,6 @@ impl Encoding {
             profile,
             kinds,
             elements,
-            tiles: tiles.clone(),
             tasks: tape,
             values: records,
             bounds,
@@ -349,7 +331,7 @@ impl Encoding {
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        &self.tiles
+        self.profile.tiles()
     }
 
     pub fn kinds(&self) -> &[Kind] {
@@ -374,7 +356,7 @@ impl Encoding {
             .iter()
             .enumerate()
             .filter(|(_, count)| **count > 0)
-            .map(|(index, _)| (index as u32, self.tiles[index]))
+            .map(|(index, _)| (index as u32, self.tiles()[index]))
     }
 
     pub fn tasks(&self) -> &[u8] {
@@ -481,7 +463,10 @@ fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
     Kind::ALL
         .iter()
         .copied()
-        .filter(|kind| tasks.iter().any(|task| task.kind == *kind))
+        .filter(|kind| {
+            tasks.iter().any(|task| task.kind == *kind)
+                || (*kind == Kind::MatmulFold && tasks.iter().any(|task| task.kind == Kind::Matmul))
+        })
         .collect()
 }
 

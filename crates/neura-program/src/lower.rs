@@ -82,16 +82,11 @@ pub(crate) struct Plan {
     pub(crate) tiles: Vec<MatmulTile>,
 }
 
-pub(crate) fn lower(
-    values: &[ValueInfo],
-    units: &[TaskInfo],
-    profile: Profile,
-    carried: Vec<MatmulTile>,
-) -> Plan {
+pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
-        tiles: carried,
+        tiles: profile.tiles().to_vec(),
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
@@ -179,14 +174,15 @@ impl Plan {
         self.values[value as usize].shape
     }
 
-    fn geometry(&mut self, tile: MatmulTile) -> u32 {
-        match self.tiles.iter().position(|candidate| *candidate == tile) {
-            Some(index) => index as u32,
-            None => {
-                self.tiles.push(tile);
-                (self.tiles.len() - 1) as u32
-            }
-        }
+    fn geometry(&self, tile: MatmulTile) -> u32 {
+        self.tiles
+            .iter()
+            .position(|candidate| *candidate == tile)
+            .unwrap_or_else(|| {
+                panic!("a plan walks a matmul tile of {tile:?} its profile offers no geometry for")
+            })
+            .try_into()
+            .expect("a profile carries fewer tiles than a device word holds")
     }
 
     fn publish(&mut self, shape: Shape) -> u32 {

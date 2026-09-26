@@ -136,17 +136,17 @@ impl Budget {
 }
 
 pub const MAX_TILES: usize = 32;
+const PLAINEST_BLOCKING: (u32, u32) = (1, 1);
 const WORKGROUP_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
-const BLOCKINGS: [(u32, u32); 9] = [
-    (1, 1),
-    (1, 2),
-    (2, 1),
+const BLOCKINGS: [(u32, u32); 8] = [
+    (4, 4),
+    (2, 4),
+    (4, 2),
     (2, 2),
     (1, 4),
     (4, 1),
-    (2, 4),
-    (4, 2),
-    (4, 4),
+    (1, 2),
+    (2, 1),
 ];
 const GRID_ASPECT: u32 = 4;
 const DEPTH: u32 = 8;
@@ -215,7 +215,14 @@ impl Profile {
             let mut left_stage = 0u64;
             let mut right_stage = 0u64;
             for (rows, columns) in grids(workgroup) {
-                for (register_rows, register_columns) in BLOCKINGS {
+                for (register_rows, register_columns) in blockings(
+                    rows,
+                    columns,
+                    left_stage,
+                    right_stage,
+                    workgroup,
+                    budget.shared_bytes(),
+                ) {
                     let tile = MatmulTile::new(
                         rows * register_rows,
                         columns * register_columns,
@@ -223,12 +230,6 @@ impl Profile {
                         rows,
                         columns,
                     );
-                    let staged = 2
-                        * (left_stage.max(tile.left_stage()) + right_stage.max(tile.right_stage()))
-                        * WORD_BYTES;
-                    if staged + REDUCTION_SCRATCH * u64::from(workgroup) > budget.shared_bytes() {
-                        continue;
-                    }
                     left_stage = left_stage.max(tile.left_stage());
                     right_stage = right_stage.max(tile.right_stage());
                     tiles.push(tile);
@@ -264,6 +265,53 @@ impl Profile {
     pub const fn fits(self, threads: u32, shared_bytes: u64) -> bool {
         self.workgroup <= threads && self.shared_bytes <= shared_bytes
     }
+}
+
+fn blockings(
+    rows: u32,
+    columns: u32,
+    left_stage: u64,
+    right_stage: u64,
+    workgroup: u32,
+    shared_bytes: u64,
+) -> [(u32, u32); 2] {
+    [
+        PLAINEST_BLOCKING,
+        widest(
+            rows,
+            columns,
+            left_stage,
+            right_stage,
+            workgroup,
+            shared_bytes,
+        ),
+    ]
+}
+
+fn widest(
+    rows: u32,
+    columns: u32,
+    left_stage: u64,
+    right_stage: u64,
+    workgroup: u32,
+    shared_bytes: u64,
+) -> (u32, u32) {
+    for (register_rows, register_columns) in BLOCKINGS {
+        let tile = MatmulTile::new(
+            rows * register_rows,
+            columns * register_columns,
+            DEPTH,
+            rows,
+            columns,
+        );
+        let staged = 2
+            * (left_stage.max(tile.left_stage()) + right_stage.max(tile.right_stage()))
+            * WORD_BYTES;
+        if staged + REDUCTION_SCRATCH * u64::from(workgroup) <= shared_bytes {
+            return (register_rows, register_columns);
+        }
+    }
+    PLAINEST_BLOCKING
 }
 
 fn grids(workgroup: u32) -> Vec<(u32, u32)> {

@@ -472,12 +472,12 @@ fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
 }
 
 #[test]
-fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
+fn a_device_program_carries_every_tile_of_its_profile_whatever_the_batch() {
     let runtime = open();
-    let mut declared: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
-    let mut programs = Vec::new();
+    let mut menus: Vec<Vec<neura_profile::MatmulTile>> = Vec::new();
     let mut results = Vec::new();
-    for batch in [8u32, 64, 8] {
+    let mut programs = Vec::new();
+    for batch in [8u32, 64, 8, 17, 512] {
         let graph = Graph::new();
         let weight = graph.parameter(
             Shape::matrix(5, 3),
@@ -491,13 +491,18 @@ fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
         let out = graph.softmax(graph.matmul(data, weight));
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        if !declared.contains(&program.tiles().to_vec()) {
-            declared.push(program.tiles().to_vec());
+        if !menus.contains(&program.tiles().to_vec()) {
+            menus.push(program.tiles().to_vec());
         }
         assert_eq!(
+            program.tiles(),
+            program.profile().tiles(),
+            "a device program carries the whole menu of the profile it compiles for",
+        );
+        assert_eq!(
             runtime.declared_kernels(),
-            declared.len(),
-            "a device program is assembled once per geometry its tapes carry",
+            menus.len(),
+            "a device program is assembled once per menu, not once per shape",
         );
         let data_values = random(batch * 5, batch);
         runtime.write(&program, data, &data_values);
@@ -508,21 +513,21 @@ fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
     assert_eq!(results[0].len(), 8 * 3);
     assert_eq!(results[1].len(), 64 * 3);
     assert_eq!(
-        declared.len(),
-        2,
-        "two shapes that walk two tiles declare two programs",
+        menus.len(),
+        1,
+        "every batch of one model walks the menu of one device program",
     );
     assert_eq!(
-        runtime.declared_kernels(),
-        2,
-        "a shape a carried geometry covers declares no third program",
+        runtime.assembled_kernels(),
+        1,
+        "a shape never assembles a second device program",
     );
     for (index, (program, out)) in programs.iter().enumerate() {
         runtime.run(program);
         assert_eq!(
             &runtime.read(program, *out),
             &results[index],
-            "a geometry that grew keeps the programs it carried before",
+            "a program keeps the results of the shape it was written for",
         );
     }
 }
@@ -978,6 +983,24 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
         runtime.run(&program);
         assert_close(&runtime.read(&program, out), &expected, 1e-4);
     }
+}
+
+#[test]
+fn a_product_that_splits_its_depth_keeps_the_menu_of_one_program() {
+    let runtime = open();
+    for depth in [8u32, 4096] {
+        let graph = Graph::new();
+        let left = graph.parameter(Shape::matrix(8, depth), Init::Zero, Element::Single);
+        let right = graph.parameter(Shape::matrix(depth, 32), Init::Zero, Element::Single);
+        graph.retain(graph.matmul(left, right));
+        let weights = runtime.weights(&graph);
+        runtime.compile(&graph, &weights);
+    }
+    assert_eq!(
+        runtime.assembled_kernels(),
+        1,
+        "a product that folds its depth walks the program its shape without a fold walks",
+    );
 }
 
 #[test]

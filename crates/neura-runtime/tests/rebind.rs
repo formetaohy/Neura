@@ -184,22 +184,22 @@ fn tuning_leaves_the_parameter_store_untouched() {
 }
 
 #[test]
-fn one_device_geometry_serves_every_batch_that_walks_its_tiles() {
+fn one_device_program_serves_every_batch_of_one_model() {
     let runtime = open();
     assert_eq!(runtime.assembled_kernels(), 0);
-    let mut tiles: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
+    let mut menus: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
     for samples in [8, 32, 96, 128, 8, 32] {
         let graph = Graph::new();
         let model = trained(&graph, samples, 5);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        if !tiles.contains(&program.tiles().to_vec()) {
-            tiles.push(program.tiles().to_vec());
+        if !menus.contains(&program.tiles().to_vec()) {
+            menus.push(program.tiles().to_vec());
         }
         assert_eq!(
             runtime.assembled_kernels(),
-            tiles.len(),
-            "a device program is assembled once per geometry its tapes carry",
+            menus.len(),
+            "a batch never assembles a device program of its own",
         );
         let (observations, targets) = batch(samples, samples);
         runtime.write(&program, model.observations, &observations);
@@ -207,8 +207,9 @@ fn one_device_geometry_serves_every_batch_that_walks_its_tiles() {
         runtime.run(&program);
         assert!(runtime.read(&program, model.loss)[0].is_finite());
     }
-    assert!(
-        tiles.len() > 1 && tiles.len() < 5,
-        "five batches walk between two and four geometries of one model",
+    assert_eq!(
+        menus.len(),
+        1,
+        "every batch of one model walks the menu of one device program",
     );
 }

@@ -27,7 +27,7 @@ fn encoding(graph: &Graph) -> Encoding {
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    Encoding::of(graph, ALIGNMENT, profile, Vec::new())
+    Encoding::of(graph, ALIGNMENT, profile)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -338,8 +338,8 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
     );
     assert_eq!(
         encoding.tiles(),
-        [balanced_tile],
-        "a program carries the tiles its products name and no other",
+        wide().tiles(),
+        "a plan carries every tile of the profile it compiles for",
     );
     assert_eq!(
         encoding.matmul_geometries(),
