@@ -12,6 +12,10 @@ use crate::submission::{Command, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) const FRAMES_IN_FLIGHT: usize = 4;
+pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const STAGING_BYTES: u64 = 256 << 10;
+
 pub(crate) enum DeviceFailure {
     Missing { offered: Vec<AdapterInfo> },
     Unavailable { reason: String },
@@ -200,6 +204,17 @@ impl NativeDevice {
             Self::Dx12(device) => device.submit(writes, commands),
             #[cfg(target_os = "macos")]
             Self::Metal(device) => device.submit(writes, commands),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> usize {
+        match self {
+            Self::Vulkan(device) => device.frames(),
+            #[cfg(target_os = "windows")]
+            Self::Dx12(device) => device.frames(),
+            #[cfg(target_os = "macos")]
+            Self::Metal(device) => device.frames(),
         }
     }
 

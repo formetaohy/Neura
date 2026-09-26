@@ -1,4 +1,6 @@
-use super::{DeviceFailure, NativeBuffer, NativePipeline};
+use super::{
+    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
+};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
@@ -16,7 +18,6 @@ use objc2_metal::{
 };
 use std::any::Any;
 use std::cmp::Reverse;
-use std::collections::VecDeque;
 use std::mem::size_of;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -24,19 +25,64 @@ use std::time::{Duration, Instant};
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct InFlight {
+struct Frame {
     index: u64,
-    command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    _resources: Vec<Arc<dyn Any + Send + Sync>>,
+    command: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    staging: Arc<BufferResource>,
+    cursor: u64,
+    resources: Vec<Arc<dyn Any + Send + Sync>>,
 }
 
-unsafe impl Send for InFlight {}
+unsafe impl Send for Frame {}
+
+impl Frame {
+    fn new(device: &Device) -> Self {
+        Self {
+            index: 0,
+            command: None,
+            staging: device.allocate(STAGING_BYTES, true),
+            cursor: 0,
+            resources: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self) {
+        self.cursor = 0;
+        self.resources.clear();
+    }
+
+    fn stage(&mut self, device: &Device, bytes: &[u8]) -> (Arc<BufferResource>, u64) {
+        let size = bytes.len() as u64;
+        let (staging, offset) = if size <= STAGING_BYTES - self.cursor {
+            let offset = self.cursor;
+            self.cursor += size;
+            (self.staging.clone(), offset)
+        } else {
+            let staging = device.allocate(size, true);
+            self.resources.push(staging.clone());
+            (staging, 0)
+        };
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                staging
+                    .raw
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset as usize),
+                bytes.len(),
+            );
+        }
+        (staging, offset)
+    }
+}
 
 #[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
-    in_flight: VecDeque<InFlight>,
+    frames: Vec<Frame>,
 }
 
 pub(crate) struct Device {
@@ -206,34 +252,34 @@ impl Device {
         if writes.is_empty() && commands.is_empty() {
             return state.next;
         }
+        let slot = self.acquire(&mut state);
+        state.next = state
+            .next
+            .checked_add(1)
+            .expect("compute submission indices fit in u64");
+        let index = state.next;
+        let frame = &mut state.frames[slot];
+        frame.begin();
+        frame.index = index;
         let command = self
             .queue
             .commandBuffer()
             .expect("a Metal compute command buffer exists");
-        let mut resources: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
         for write in writes {
-            let upload = self.allocate(write.bytes.len() as u64, true);
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    write.bytes.as_ptr(),
-                    upload.raw.contents().as_ptr().cast::<u8>(),
-                    write.bytes.len(),
-                );
-            }
+            let (upload, offset) = frame.stage(self, &write.bytes);
             let target = native_buffer(&write.buffer);
             let blit = self.blit(&command);
             unsafe {
                 blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
                     &upload.raw,
-                    0,
+                    offset as usize,
                     &target.raw,
                     write.offset as usize,
                     write.bytes.len(),
                 );
             }
             blit.endEncoding();
-            resources.push(upload);
-            resources.push(target.clone());
+            frame.resources.push(target.clone());
         }
         for operation in commands {
             match operation {
@@ -257,8 +303,8 @@ impl Device {
                         );
                     }
                     blit.endEncoding();
-                    resources.push(source.clone());
-                    resources.push(target.clone());
+                    frame.resources.push(source.clone());
+                    frame.resources.push(target.clone());
                 }
                 Command::Clear {
                     buffer: target,
@@ -276,7 +322,7 @@ impl Device {
                         0,
                     );
                     blit.endEncoding();
-                    resources.push(target.clone());
+                    frame.resources.push(target.clone());
                 }
                 Command::Dispatch {
                     pipeline: handle,
@@ -313,7 +359,7 @@ impl Device {
                                 index,
                             )
                         };
-                        resources.push(target.clone());
+                        frame.resources.push(target.clone());
                     }
                     let sizes = pipeline
                         .sizes
@@ -347,65 +393,99 @@ impl Device {
                         },
                     );
                     compute.endEncoding();
-                    resources.push(pipeline.clone());
+                    frame.resources.push(pipeline.clone());
                 }
             }
         }
         command.commit();
-        state.next = state
-            .next
-            .checked_add(1)
-            .expect("compute submission indices fit in u64");
-        let index = state.next;
-        state.in_flight.push_back(InFlight {
-            index,
-            command,
-            _resources: resources,
-        });
+        frame.command = Some(command);
         index
     }
 
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the Metal compute queue is never poisoned")
+            .frames
+            .len()
+    }
+
+    fn acquire(&self, state: &mut QueueState) -> usize {
+        if let Some(slot) = state
+            .frames
+            .iter()
+            .position(|frame| frame.index <= state.completed)
+        {
+            return slot;
+        }
+        if state.frames.len() < FRAMES_IN_FLIGHT {
+            state.frames.push(Frame::new(self));
+            return state.frames.len() - 1;
+        }
+        let slot = state
+            .frames
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, frame)| frame.index)
+            .map(|(slot, _)| slot)
+            .expect("a queue that holds a frame recycles one");
+        let index = state.frames[slot].index;
+        self.await_completion(state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        slot
+    }
+
     fn retire(&self, state: &mut QueueState) -> Result<(), String> {
-        while let Some(front) = state.in_flight.front() {
-            match front.command.status() {
+        for frame in &state.frames {
+            if frame.index <= state.completed {
+                continue;
+            }
+            let Some(command) = &frame.command else {
+                state.completed = frame.index;
+                continue;
+            };
+            match command.status() {
                 MTLCommandBufferStatus::Completed => {
-                    state.completed = state
-                        .in_flight
-                        .pop_front()
-                        .expect("a completed Metal command exists")
-                        .index;
+                    state.completed = state.completed.max(frame.index);
                 }
                 MTLCommandBufferStatus::Error => {
-                    return Err(format!("Metal compute failed: {:?}", front.command.error()));
+                    return Err(format!("Metal compute failed: {:?}", command.error()));
                 }
-                _ => break,
+                _ => {}
             }
         }
         Ok(())
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
-        self.await_completion(index, timeout)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the Metal compute queue is never poisoned");
+        self.await_completion(&mut state, index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(
+        &self,
+        state: &mut QueueState,
+        index: u64,
+        timeout: Duration,
+    ) -> Result<(), String> {
         if index > state.next {
             return Err("waiting on an unsubmitted Metal command".to_owned());
         }
+        self.retire(state)?;
         if index <= state.completed {
             return Ok(());
         }
-        if !state.in_flight.iter().any(|item| item.index == index) {
+        if !state.frames.iter().any(|frame| frame.index == index) {
             return Err("an unfinished Metal command is in flight".to_owned());
         }
         let started = Instant::now();
         loop {
-            self.retire(&mut state)?;
+            self.retire(state)?;
             if state.completed >= index {
                 return Ok(());
             }
@@ -417,12 +497,12 @@ impl Device {
     }
 
     fn release(&self) {
-        let index = self
+        let mut state = self
             .state
             .lock()
-            .expect("the Metal compute queue is never poisoned")
-            .next;
-        let _ = self.await_completion(index, RELEASE_TIMEOUT);
+            .expect("the Metal compute queue is never poisoned");
+        let index = state.next;
+        let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

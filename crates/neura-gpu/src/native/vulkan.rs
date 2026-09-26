@@ -1,4 +1,7 @@
-use super::{DeviceFailure, NativeBuffer, NativeGroup, NativePipeline};
+use super::{
+    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
+    STAGING_BYTES,
+};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
@@ -8,7 +11,6 @@ use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
 use std::any::Any;
 use std::cmp::Reverse;
-use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -26,18 +28,90 @@ impl Drop for InstanceOwner {
     }
 }
 
-struct InFlight {
+struct Frame {
     index: u64,
     command: vk::CommandBuffer,
     fence: vk::Fence,
-    _resources: Vec<Arc<dyn Any + Send + Sync>>,
+    staging: Arc<BufferResource>,
+    cursor: u64,
+    resources: Vec<Arc<dyn Any + Send + Sync>>,
+}
+
+impl Frame {
+    fn new(device: &Device) -> Self {
+        let command = unsafe {
+            device.raw.allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(device.pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count(1),
+            )
+        }
+        .unwrap_or_else(|error| panic!("allocating a Vulkan compute command buffer: {error:?}"))[0];
+        let fence = unsafe {
+            device
+                .raw
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+        }
+        .unwrap_or_else(|error| panic!("creating a Vulkan completion fence: {error:?}"));
+        Self {
+            index: 0,
+            command,
+            fence,
+            staging: device.allocate(STAGING_BYTES, vk::BufferUsageFlags::TRANSFER_SRC, true),
+            cursor: 0,
+            resources: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, raw: &ash::Device) {
+        unsafe { raw.reset_command_buffer(self.command, vk::CommandBufferResetFlags::empty()) }
+            .unwrap_or_else(|error| panic!("recycling a Vulkan compute command buffer: {error:?}"));
+        unsafe { raw.reset_fences(&[self.fence]) }
+            .unwrap_or_else(|error| panic!("recycling a Vulkan completion fence: {error:?}"));
+        unsafe { raw.begin_command_buffer(self.command, &vk::CommandBufferBeginInfo::default()) }
+            .unwrap_or_else(|error| panic!("starting a Vulkan compute submission: {error:?}"));
+        self.cursor = 0;
+        self.resources.clear();
+    }
+
+    fn stage(&mut self, device: &Device, bytes: &[u8]) -> (vk::Buffer, u64) {
+        let size = bytes.len() as u64;
+        let (staging, offset) = if size <= STAGING_BYTES - self.cursor {
+            let offset = self.cursor;
+            self.cursor += size;
+            (self.staging.clone(), offset)
+        } else {
+            let staging = device.allocate(size, vk::BufferUsageFlags::TRANSFER_SRC, true);
+            self.resources.push(staging.clone());
+            (staging, 0)
+        };
+        let mapped = unsafe {
+            device.raw.map_memory(
+                staging.memory,
+                0,
+                offset + size,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a Vulkan upload: {error:?}"));
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                mapped.cast::<u8>().add(offset as usize),
+                bytes.len(),
+            );
+            device.raw.unmap_memory(staging.memory);
+        }
+        (staging.handle, offset)
+    }
 }
 
 #[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
-    in_flight: VecDeque<InFlight>,
+    frames: Vec<Frame>,
 }
 
 pub(crate) struct Device {
@@ -560,62 +634,32 @@ impl Device {
         if writes.is_empty() && commands.is_empty() {
             return state.next;
         }
-        let command = unsafe {
-            self.raw.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(self.pool)
-                    .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(1),
-            )
-        }
-        .unwrap_or_else(|error| panic!("allocating a Vulkan compute command buffer: {error:?}"))[0];
-        unsafe {
-            self.raw.begin_command_buffer(
-                command,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )
-        }
-        .unwrap_or_else(|error| panic!("starting a Vulkan compute submission: {error:?}"));
-        let mut resources: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
+        let slot = self.acquire(&mut state);
+        state.next = state
+            .next
+            .checked_add(1)
+            .expect("compute submission indices fit in u64");
+        let index = state.next;
+        let frame = &mut state.frames[slot];
+        frame.begin(&self.raw);
+        frame.index = index;
+        let command = frame.command;
         for write in writes {
-            let staging = self.allocate(
-                write.bytes.len() as u64,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                true,
-            );
-            let mapped = unsafe {
-                self.raw.map_memory(
-                    staging.memory,
-                    0,
-                    write.bytes.len() as u64,
-                    vk::MemoryMapFlags::empty(),
-                )
-            }
-            .unwrap_or_else(|error| panic!("mapping a Vulkan upload: {error:?}"));
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    write.bytes.as_ptr(),
-                    mapped.cast::<u8>(),
-                    write.bytes.len(),
-                );
-                self.raw.unmap_memory(staging.memory);
-            }
+            let (staging, offset) = frame.stage(self, &write.bytes);
             self.barrier(command);
             let region = [vk::BufferCopy::default()
-                .src_offset(0)
+                .src_offset(offset)
                 .dst_offset(write.offset)
                 .size(write.bytes.len() as u64)];
             unsafe {
                 self.raw.cmd_copy_buffer(
                     command,
-                    staging.handle,
+                    staging,
                     native_buffer(&write.buffer).handle,
                     &region,
                 )
             };
-            resources.push(staging);
-            resources.push(native_buffer(&write.buffer).clone());
+            frame.resources.push(native_buffer(&write.buffer).clone());
         }
         for operation in commands {
             self.barrier(command);
@@ -639,8 +683,8 @@ impl Device {
                             &region,
                         )
                     };
-                    resources.push(buffer(source).clone());
-                    resources.push(buffer(target).clone());
+                    frame.resources.push(buffer(source).clone());
+                    frame.resources.push(buffer(target).clone());
                 }
                 Command::Clear {
                     buffer: target,
@@ -651,7 +695,7 @@ impl Device {
                         self.raw
                             .cmd_fill_buffer(command, buffer(target).handle, *offset, *bytes, 0)
                     };
-                    resources.push(buffer(target).clone());
+                    frame.resources.push(buffer(target).clone());
                 }
                 Command::Dispatch {
                     pipeline: handle,
@@ -682,73 +726,94 @@ impl Device {
                         self.raw
                             .cmd_dispatch(command, groups[0], groups[1], groups[2]);
                     }
-                    resources.push(compiled.clone());
-                    resources.push(group.clone());
+                    frame.resources.push(compiled.clone());
+                    frame.resources.push(group.clone());
                 }
             }
         }
         unsafe { self.raw.end_command_buffer(command) }
             .unwrap_or_else(|error| panic!("closing a Vulkan compute submission: {error:?}"));
-        let fence = unsafe { self.raw.create_fence(&vk::FenceCreateInfo::default(), None) }
-            .unwrap_or_else(|error| panic!("creating a Vulkan completion fence: {error:?}"));
         let buffers = [command];
         let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
-        unsafe { self.raw.queue_submit(self.queue, &submits, fence) }
+        unsafe { self.raw.queue_submit(self.queue, &submits, frame.fence) }
             .unwrap_or_else(|error| panic!("submitting Vulkan compute work: {error:?}"));
-        state.next = state
-            .next
-            .checked_add(1)
-            .expect("compute submission indices fit in u64");
-        let index = state.next;
-        state.in_flight.push_back(InFlight {
-            index,
-            command,
-            fence,
-            _resources: resources,
-        });
         index
     }
 
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the Vulkan queue is never poisoned")
+            .frames
+            .len()
+    }
+
+    fn acquire(&self, state: &mut QueueState) -> usize {
+        if let Some(slot) = state
+            .frames
+            .iter()
+            .position(|frame| frame.index <= state.completed)
+        {
+            return slot;
+        }
+        if state.frames.len() < FRAMES_IN_FLIGHT {
+            state.frames.push(Frame::new(self));
+            return state.frames.len() - 1;
+        }
+        let slot = state
+            .frames
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, frame)| frame.index)
+            .map(|(slot, _)| slot)
+            .expect("a queue that holds a frame recycles one");
+        let index = state.frames[slot].index;
+        self.await_completion(state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        slot
+    }
+
     fn retire(&self, state: &mut QueueState) {
-        while let Some(front) = state.in_flight.front() {
-            if !unsafe { self.raw.get_fence_status(front.fence) }
-                .unwrap_or_else(|error| panic!("checking Vulkan compute completion: {error:?}"))
-            {
-                break;
+        for frame in &state.frames {
+            if frame.index > state.completed {
+                let signaled =
+                    unsafe { self.raw.get_fence_status(frame.fence) }.unwrap_or_else(|error| {
+                        panic!("checking Vulkan compute completion: {error:?}")
+                    });
+                if signaled {
+                    state.completed = state.completed.max(frame.index);
+                }
             }
-            let finished = state
-                .in_flight
-                .pop_front()
-                .expect("a completed fence was queued");
-            unsafe {
-                self.raw
-                    .free_command_buffers(self.pool, &[finished.command]);
-                self.raw.destroy_fence(finished.fence, None);
-            }
-            state.completed = finished.index;
         }
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
-        self.await_completion(index, timeout)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the Vulkan queue is never poisoned");
+        self.await_completion(&mut state, index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(
+        &self,
+        state: &mut QueueState,
+        index: u64,
+        timeout: Duration,
+    ) -> Result<(), String> {
         if index > state.next {
             return Err("waiting on an unsubmitted Vulkan command".to_owned());
         }
+        self.retire(state);
         if index <= state.completed {
             return Ok(());
         }
         let fence = state
-            .in_flight
+            .frames
             .iter()
-            .find(|item| item.index == index)
+            .find(|frame| frame.index == index)
             .expect("an unfinished submission owns a fence")
             .fence;
         unsafe {
@@ -759,7 +824,7 @@ impl Device {
             )
         }
         .map_err(|error| format!("waiting for Vulkan compute work: {error:?}"))?;
-        self.retire(&mut state);
+        self.retire(state);
         if state.completed < index {
             return Err("Vulkan compute did not complete".to_owned());
         }
@@ -767,12 +832,23 @@ impl Device {
     }
 
     fn release(&self) {
-        let index = self
+        let mut state = self
             .state
             .lock()
-            .expect("the Vulkan queue is never poisoned")
-            .next;
-        let _ = self.await_completion(index, RELEASE_TIMEOUT);
+            .expect("the Vulkan queue is never poisoned");
+        let index = state.next;
+        let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
+    }
+
+    fn discard(&mut self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the Vulkan queue is never poisoned");
+        let frames = std::mem::take(&mut state.frames);
+        for frame in frames {
+            unsafe { self.raw.destroy_fence(frame.fence, None) };
+        }
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
@@ -904,6 +980,7 @@ impl Drop for BufferResource {
 impl Drop for Device {
     fn drop(&mut self) {
         self.release();
+        self.discard();
         unsafe {
             self.raw.destroy_command_pool(self.pool, None);
             self.raw.destroy_device(None);

@@ -1,4 +1,6 @@
-use super::{DeviceFailure, NativeBuffer, NativePipeline};
+use super::{
+    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
+};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
@@ -9,7 +11,6 @@ use crate::submission::{Command, Write};
 use libloading::Library;
 use std::any::Any;
 use std::cmp::Reverse;
-use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
 use std::ptr;
@@ -41,18 +42,89 @@ impl Drop for CompletionEvent {
     }
 }
 
-struct InFlight {
+struct Frame {
     index: u64,
-    _allocator: ID3D12CommandAllocator,
-    _list: ID3D12GraphicsCommandList,
-    _resources: Vec<Arc<dyn Any + Send + Sync>>,
+    allocator: ID3D12CommandAllocator,
+    list: ID3D12GraphicsCommandList,
+    staging: Arc<BufferResource>,
+    cursor: u64,
+    resources: Vec<Arc<dyn Any + Send + Sync>>,
+}
+
+impl Frame {
+    fn new(device: &ID3D12Device) -> Self {
+        let allocator = unsafe { device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE) }
+            .unwrap_or_else(|error| {
+                panic!("allocating a D3D12 compute command allocator: {error}")
+            });
+        let list: ID3D12GraphicsCommandList = unsafe {
+            device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &allocator, None)
+        }
+        .unwrap_or_else(|error| panic!("creating a D3D12 compute command list: {error}"));
+        unsafe { list.Close() }
+            .unwrap_or_else(|error| panic!("closing a D3D12 compute command list: {error}"));
+        Self {
+            index: 0,
+            allocator,
+            list,
+            staging: allocate(device, STAGING_BYTES, D3D12_HEAP_TYPE_UPLOAD, false),
+            cursor: 0,
+            resources: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self) {
+        unsafe { self.allocator.Reset() }
+            .unwrap_or_else(|error| panic!("recycling a D3D12 compute command allocator: {error}"));
+        unsafe { self.list.Reset(&self.allocator, None) }
+            .unwrap_or_else(|error| panic!("recycling a D3D12 compute command list: {error}"));
+        self.cursor = 0;
+        self.resources.clear();
+    }
+
+    fn stage(&mut self, device: &ID3D12Device, bytes: &[u8]) -> (ID3D12Resource, u64) {
+        let size = bytes.len() as u64;
+        let (upload, offset) = if size <= STAGING_BYTES - self.cursor {
+            let offset = self.cursor;
+            self.cursor += size;
+            (self.staging.clone(), offset)
+        } else {
+            let upload = allocate(device, size, D3D12_HEAP_TYPE_UPLOAD, false);
+            self.resources.push(upload.clone());
+            (upload, 0)
+        };
+        let mut mapped = ptr::null_mut();
+        unsafe {
+            upload.raw.Map(
+                0,
+                Some(&D3D12_RANGE { Begin: 0, End: 0 }),
+                Some(&raw mut mapped),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a D3D12 upload: {error}"));
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                mapped.cast::<u8>().add(offset as usize),
+                bytes.len(),
+            );
+            upload.raw.Unmap(
+                0,
+                Some(&D3D12_RANGE {
+                    Begin: offset as usize,
+                    End: (offset + size) as usize,
+                }),
+            );
+        }
+        (upload.raw.clone(), offset)
+    }
 }
 
 #[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
-    in_flight: VecDeque<InFlight>,
+    frames: Vec<Frame>,
 }
 
 pub(crate) struct Device {
@@ -489,60 +561,30 @@ impl Device {
         if writes.is_empty() && commands.is_empty() {
             return state.next;
         }
-        let allocator: ID3D12CommandAllocator = unsafe {
-            self.raw
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE)
-        }
-        .unwrap_or_else(|error| panic!("allocating a D3D12 compute command list: {error}"));
-        let list: ID3D12GraphicsCommandList = unsafe {
-            self.raw
-                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, &allocator, None)
-        }
-        .unwrap_or_else(|error| panic!("creating a D3D12 compute command list: {error}"));
-        let mut resources: Vec<Arc<dyn Any + Send + Sync>> = Vec::new();
+        let slot = self.acquire(&mut state);
+        state.next = state
+            .next
+            .checked_add(1)
+            .expect("compute submission indices fit in u64");
+        let index = state.next;
+        let frame = &mut state.frames[slot];
+        frame.begin();
+        frame.index = index;
+        let list = frame.list.clone();
         for write in writes {
-            let upload = allocate(
-                &self.raw,
-                write.bytes.len() as u64,
-                D3D12_HEAP_TYPE_UPLOAD,
-                false,
-            );
-            let mut mapped = ptr::null_mut();
-            unsafe {
-                upload.raw.Map(
-                    0,
-                    Some(&D3D12_RANGE { Begin: 0, End: 0 }),
-                    Some(&raw mut mapped),
-                )
-            }
-            .unwrap_or_else(|error| panic!("mapping a D3D12 upload: {error}"));
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    write.bytes.as_ptr(),
-                    mapped.cast::<u8>(),
-                    write.bytes.len(),
-                );
-                upload.raw.Unmap(
-                    0,
-                    Some(&D3D12_RANGE {
-                        Begin: 0,
-                        End: write.bytes.len(),
-                    }),
-                );
-            }
+            let (upload, offset) = frame.stage(&self.raw, &write.bytes);
             let target = native_buffer(&write.buffer);
-            self.transition(&list, target, D3D12_RESOURCE_STATE_COPY_DEST);
+            self.transition(&frame.list, target, D3D12_RESOURCE_STATE_COPY_DEST);
             unsafe {
-                list.CopyBufferRegion(
+                frame.list.CopyBufferRegion(
                     &target.raw,
                     write.offset,
-                    &upload.raw,
-                    0,
+                    &upload,
+                    offset,
                     write.bytes.len() as u64,
                 )
             };
-            resources.push(upload);
-            resources.push(target.clone());
+            frame.resources.push(target.clone());
         }
         for operation in commands {
             match operation {
@@ -566,8 +608,8 @@ impl Device {
                             *bytes,
                         )
                     };
-                    resources.push(source.clone());
-                    resources.push(target.clone());
+                    frame.resources.push(source.clone());
+                    frame.resources.push(target.clone());
                 }
                 Command::Clear {
                     buffer: target,
@@ -590,7 +632,7 @@ impl Device {
                         };
                         written += chunk;
                     }
-                    resources.push(target.clone());
+                    frame.resources.push(target.clone());
                 }
                 Command::Dispatch {
                     pipeline: handle,
@@ -632,11 +674,11 @@ impl Device {
                                 list.SetComputeRootShaderResourceView(index as u32, address);
                             }
                         }
-                        resources.push(target.clone());
+                        frame.resources.push(target.clone());
                     }
                     unsafe { list.Dispatch(groups[0], groups[1], groups[2]) };
                     self.uav_barrier(&list);
-                    resources.push(pipeline.clone());
+                    frame.resources.push(pipeline.clone());
                 }
             }
         }
@@ -646,20 +688,43 @@ impl Device {
             .cast()
             .expect("a compute command list is a D3D12 command list");
         unsafe { self.queue.ExecuteCommandLists(&[Some(command)]) };
-        state.next = state
-            .next
-            .checked_add(1)
-            .expect("compute submission indices fit in u64");
-        unsafe { self.queue.Signal(&self.fence, state.next) }
+        unsafe { self.queue.Signal(&self.fence, index) }
             .unwrap_or_else(|error| panic!("signaling D3D12 compute completion: {error}"));
-        let index = state.next;
-        state.in_flight.push_back(InFlight {
-            index,
-            _allocator: allocator,
-            _list: list,
-            _resources: resources,
-        });
         index
+    }
+
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> usize {
+        self.state
+            .lock()
+            .expect("the D3D12 compute queue is never poisoned")
+            .frames
+            .len()
+    }
+
+    fn acquire(&self, state: &mut QueueState) -> usize {
+        if let Some(slot) = state
+            .frames
+            .iter()
+            .position(|frame| frame.index <= state.completed)
+        {
+            return slot;
+        }
+        if state.frames.len() < FRAMES_IN_FLIGHT {
+            state.frames.push(Frame::new(&self.raw));
+            return state.frames.len() - 1;
+        }
+        let slot = state
+            .frames
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, frame)| frame.index)
+            .map(|(slot, _)| slot)
+            .expect("a queue that holds a frame recycles one");
+        let index = state.frames[slot].index;
+        self.await_completion(state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        slot
     }
 
     fn retire(&self, state: &mut QueueState) {
@@ -670,33 +735,28 @@ impl Device {
             }
             panic!("D3D12 compute fence failed");
         }
-        while state
-            .in_flight
-            .front()
-            .is_some_and(|item| item.index <= completed)
-        {
-            state.completed = state
-                .in_flight
-                .pop_front()
-                .expect("a finished command was queued")
-                .index;
-        }
+        state.completed = state.completed.max(completed.min(state.next));
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
-        self.await_completion(index, timeout)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the D3D12 compute queue is never poisoned");
+        self.await_completion(&mut state, index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(
+        &self,
+        state: &mut QueueState,
+        index: u64,
+        timeout: Duration,
+    ) -> Result<(), String> {
         if index > state.next {
             return Err("waiting on an unsubmitted D3D12 command".to_owned());
         }
-        self.retire(&mut state);
+        self.retire(state);
         if index <= state.completed {
             return Ok(());
         }
@@ -714,7 +774,7 @@ impl Device {
             ));
         }
         self.device_error()?;
-        self.retire(&mut state);
+        self.retire(state);
         if state.completed < index {
             return Err("D3D12 compute did not complete".to_owned());
         }
@@ -722,12 +782,12 @@ impl Device {
     }
 
     fn release(&self) {
-        let index = self
+        let mut state = self
             .state
             .lock()
-            .expect("the D3D12 compute queue is never poisoned")
-            .next;
-        let _ = self.await_completion(index, RELEASE_TIMEOUT);
+            .expect("the D3D12 compute queue is never poisoned");
+        let index = state.next;
+        let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

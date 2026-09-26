@@ -1,5 +1,7 @@
+use crate::native::FRAMES_IN_FLIGHT;
 use crate::{
     Backends, BufferUsages, Device, DeviceType, GpuBuffer, GpuRequest, PowerPreference, Queue,
+    Submission,
 };
 use std::sync::Arc;
 
@@ -30,6 +32,45 @@ fn pending_uploads_do_not_keep_a_device_alive() {
     release(Backends::DX12);
     #[cfg(target_os = "macos")]
     release(Backends::METAL);
+}
+
+fn recycling(backends: Backends) {
+    let device = Device::open(&GpuRequest {
+        backends,
+        ..Default::default()
+    })
+    .expect("a native compute device");
+    let queue = Queue::of(&device);
+    let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    let first = GpuBuffer::new(&device, "a recycled target", 16, usage);
+    let second = GpuBuffer::new(&device, "another recycled target", 16, usage);
+    for round in 0..(FRAMES_IN_FLIGHT * 3) {
+        first.write(&queue, &[round as u8, 1, 2, 3]);
+        second.write(&queue, &[4, 5, 6, round as u8]);
+        let mut submission = Submission::new(&device, "frame recycling");
+        submission.clear(&second, 0, 16);
+        submission.submit(&queue);
+        assert!(
+            device.native().frames() <= FRAMES_IN_FLIGHT,
+            "a queue records no more than {FRAMES_IN_FLIGHT} frames at once",
+        );
+    }
+    queue.drain();
+    assert!(
+        device.native().frames() <= FRAMES_IN_FLIGHT,
+        "a queue of {} submissions records no frame of its own for each of them",
+        FRAMES_IN_FLIGHT * 3,
+    );
+}
+
+#[test]
+fn a_queue_recycles_the_frames_of_its_submissions() {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    recycling(Backends::VULKAN);
+    #[cfg(target_os = "windows")]
+    recycling(Backends::DX12);
+    #[cfg(target_os = "macos")]
+    recycling(Backends::METAL);
 }
 
 #[test]

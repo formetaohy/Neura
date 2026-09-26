@@ -200,3 +200,44 @@ fn a_shape_the_carried_geometry_covers_assembles_no_device_program() {
         );
     }
 }
+
+#[test]
+fn many_runs_in_flight_keep_the_data_of_every_program() {
+    let runtime = open();
+    let shapes = [8u32, 16, 32];
+    let mut sensors = Vec::new();
+    let mut expected = Vec::new();
+    for (index, samples) in shapes.iter().enumerate() {
+        let graph = Graph::new();
+        let sensor = sensor(&runtime, &graph, *samples);
+        let input = random(*samples * 4, index as u32 + 1);
+        let weight = random(8, index as u32 + 7);
+        runtime.write(&sensor.program, sensor.input, &input);
+        runtime.write(&sensor.program, sensor.weight, &weight);
+        expected.push(matmul_reference(&input, &weight, *samples, 4, 2));
+        sensors.push((sensor, *samples));
+    }
+    for _ in 0..24 {
+        for (sensor, _) in &sensors {
+            runtime.run(&sensor.program);
+        }
+    }
+    for (index, (sensor, _)) in sensors.iter().enumerate() {
+        assert_close(
+            &runtime.read(&sensor.program, sensor.out),
+            &expected[index],
+            1e-4,
+        );
+    }
+    let (sensor, samples) = &sensors[0];
+    let input = random(samples * 4, 11);
+    let weight = random(8, 13);
+    runtime.write(&sensor.program, sensor.input, &input);
+    runtime.write(&sensor.program, sensor.weight, &weight);
+    runtime.run(&sensor.program);
+    assert_close(
+        &runtime.read(&sensor.program, sensor.out),
+        &matmul_reference(&input, &weight, *samples, 4, 2),
+        1e-4,
+    );
+}
