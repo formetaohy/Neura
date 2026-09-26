@@ -1,7 +1,7 @@
 use crate::init::Init;
 use crate::shape::Shape;
 use crate::window::Window;
-use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepRecord};
+use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_op as op;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -82,6 +82,7 @@ pub struct ValueInfo {
     pub shape: Shape,
     pub strides: [u32; 4],
     pub storage: u32,
+    pub element: Element,
     pub residency: Residency,
     pub requires_grad: bool,
     pub retained: bool,
@@ -95,6 +96,7 @@ impl ValueInfo {
             shape,
             strides: shape.strides(),
             storage: id,
+            element: Element::Single,
             residency: Residency::Derived,
             requires_grad: false,
             retained: false,
@@ -162,16 +164,16 @@ impl<'g> Graph<'g> {
         }
     }
 
-    pub fn input(&self, shape: Shape) -> Value<'g> {
-        self.hold(shape, Residency::Input, None)
+    pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
+        self.hold(shape, Residency::Input, element, None)
     }
 
-    pub fn resident(&self, shape: Shape) -> Value<'g> {
-        self.hold(shape, Residency::Resident, None)
+    pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
+        self.hold(shape, Residency::Resident, element, None)
     }
 
-    pub fn parameter(&self, shape: Shape, init: Init) -> Value<'g> {
-        self.hold(shape, Residency::Parameter, Some(init))
+    pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
+        self.hold(shape, Residency::Parameter, element, Some(init))
     }
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
@@ -501,16 +503,16 @@ impl<'g> Graph<'g> {
 
     pub fn transpose(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        let (strides, storage, tracked) = {
+        let (strides, storage, element, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.strides, info.storage, info.requires_grad)
+            (info.strides, info.storage, info.element, info.requires_grad)
         };
         let mut strides = strides;
         strides.swap(2, 3);
         let mut dims = value.shape().dims();
         dims.swap(2, 3);
-        self.alias(Shape::of(dims), strides, storage, tracked)
+        self.alias(Shape::of(dims), strides, storage, element, tracked)
     }
 
     pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
@@ -543,6 +545,11 @@ impl<'g> Graph<'g> {
     pub fn shape(&self, value: Value<'g>) -> Shape {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].shape
+    }
+
+    pub fn element(&self, value: Value<'g>) -> Element {
+        let value = self.own(value);
+        self.state.borrow().values[value.id() as usize].element
     }
 
     pub fn value_count(&self) -> usize {
@@ -707,6 +714,7 @@ impl<'g> Graph<'g> {
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
             | Kind::MatmulFold
+            | Kind::Pack
             | Kind::Scatter => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
@@ -1066,13 +1074,20 @@ impl<'g> Graph<'g> {
         self.state.borrow().tasks[index].clone()
     }
 
-    fn hold(&self, shape: Shape, residency: Residency, seed: Option<Init>) -> Value<'g> {
+    fn hold(
+        &self,
+        shape: Shape,
+        residency: Residency,
+        element: Element,
+        seed: Option<Init>,
+    ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
             strides: shape.strides(),
             storage: id,
+            element,
             residency,
             requires_grad: residency == Residency::Parameter,
             retained: false,
@@ -1089,6 +1104,7 @@ impl<'g> Graph<'g> {
             shape,
             strides: shape.strides(),
             storage: id,
+            element: Element::Single,
             residency,
             requires_grad: tracked,
             retained: false,
@@ -1098,13 +1114,21 @@ impl<'g> Graph<'g> {
         Value::of(self.instance, id, shape)
     }
 
-    fn alias(&self, shape: Shape, strides: [u32; 4], storage: u32, tracked: bool) -> Value<'g> {
+    fn alias(
+        &self,
+        shape: Shape,
+        strides: [u32; 4],
+        storage: u32,
+        element: Element,
+        tracked: bool,
+    ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
             strides,
             storage,
+            element,
             residency: Residency::View,
             requires_grad: tracked,
             retained: false,

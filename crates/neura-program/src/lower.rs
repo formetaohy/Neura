@@ -1,6 +1,7 @@
 use crate::access::Reads;
-use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
+use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
+use neura_op as op;
 use neura_profile::{MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
@@ -91,12 +92,81 @@ pub(crate) fn lower(
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
-        schedule_unit(&mut plan, task, profile);
+        match narrow_target(&plan.values, task) {
+            None => schedule_unit(&mut plan, task, profile),
+            Some(element) => schedule_narrow(&mut plan, task, element, profile),
+        }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
         }
     }
     plan
+}
+
+fn narrow_target(values: &[ValueInfo], task: &TaskInfo) -> Option<Element> {
+    let element = values[task.out as usize].element;
+    (task.in_place && element.narrow()).then_some(element)
+}
+
+fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: Profile) {
+    let target = unit.out;
+    let image = plan.publish(plan.shape(target));
+    if !writes_every_element(unit.kind) {
+        let elements = plan.shape(target).elements();
+        let mut copy = Task::span(unit, 0, elements, u64::from(elements));
+        copy.kind = Kind::Unary;
+        copy.op = op::IDENTITY;
+        copy.geometry = 0;
+        copy.slot = 0;
+        copy.out = image;
+        copy.inputs = [target, NO_VALUE, NO_VALUE];
+        copy.param = 0.0;
+        copy.splits = 1;
+        copy.in_place = false;
+        copy.chain.clear();
+        plan.tasks.push(copy);
+    }
+    schedule_unit(plan, &redirected(unit, image), profile);
+    pack(plan, unit, image, element, profile);
+}
+
+fn redirected(unit: &TaskInfo, image: u32) -> TaskInfo {
+    let mut redirected = unit.clone();
+    redirected.out = image;
+    redirected
+}
+
+fn writes_every_element(kind: Kind) -> bool {
+    match kind {
+        Kind::Binary | Kind::Unary => true,
+        Kind::Scatter => false,
+        other => panic!(
+            "a {} task writes a narrow tensor, and only a pointwise task or a scatter updates a leaf",
+            other.name(),
+        ),
+    }
+}
+
+fn pack(plan: &mut Plan, unit: &TaskInfo, image: u32, element: Element, profile: Profile) {
+    let target = unit.out;
+    let elements = plan.shape(target).elements();
+    for (first, count) in spans(
+        elements,
+        task_elements(elements, device_workgroups(profile)),
+    ) {
+        let mut task = Task::span(unit, first, count, u64::from(count));
+        task.kind = Kind::Pack;
+        task.op = op::NONE;
+        task.geometry = element.code();
+        task.slot = 0;
+        task.out = target;
+        task.inputs = [image, NO_VALUE, NO_VALUE];
+        task.param = 0.0;
+        task.splits = 1;
+        task.in_place = true;
+        task.chain.clear();
+        plan.tasks.push(task);
+    }
 }
 
 impl Plan {
@@ -188,6 +258,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                 ));
             }
         }
+        Kind::Pack => panic!("a pack comes from the narrow tensor its task updates"),
     }
 }
 

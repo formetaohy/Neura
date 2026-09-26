@@ -434,6 +434,46 @@ impl FunctionLower<'_> {
                     ty,
                 )
             }
+            "bitcast_f32" => {
+                assert_eq!(args.len(), 1);
+                let source = self.value_with_hint(&args[0], Some(self.compiler.ty("u32")));
+                let ty = self.compiler.ty("f32");
+                self.emit(
+                    Expression::As {
+                        expr: source.expr,
+                        kind: ScalarKind::Float,
+                        convert: None,
+                    },
+                    ty,
+                )
+            }
+            "pack2x16float" => {
+                assert_eq!(args.len(), 2);
+                let ty = self.compiler.ty("f32");
+                let components = args
+                    .iter()
+                    .map(|arg| self.value_with_hint(arg, Some(ty)).expr)
+                    .collect();
+                let pair = self.compiler.ty("fvec2");
+                let packed = self.emit(
+                    Expression::Compose {
+                        ty: pair,
+                        components,
+                    },
+                    pair,
+                );
+                let ty = self.compiler.ty("u32");
+                self.emit(
+                    Expression::Math {
+                        fun: MathFunction::Pack2x16float,
+                        arg: packed.expr,
+                        arg1: None,
+                        arg2: None,
+                        arg3: None,
+                    },
+                    ty,
+                )
+            }
             "f32" | "i32" | "u32" => {
                 assert_eq!(args.len(), 1);
                 let source = self.value(&args[0]);

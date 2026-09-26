@@ -40,21 +40,43 @@ mod source {
         );
     }
 
-    fn publish(value: Value, offset: u32, data: f32) {
-        heap[base_of(value) + value.base + offset] = data;
+    fn word_of(value: Value, word: u32) -> u32 {
+        return base_of(value) + value.base + word;
     }
 
-    fn fetch_single(value: Value, offset: u32) -> f32 {
-        return heap[base_of(value) + value.base + offset];
+    fn publish(value: Value, at: u32, data: f32) {
+        heap[word_of(value, at)] = data;
     }
 
-    fn fetch_half(value: Value, offset: u32) -> f32 {
-        if value.store == store::WEIGHTS {
-            let element = value.base + offset;
-            let pair = unpack2x16float(bitcast_u32(heap[placement.weights + (element >> 1u32)]));
-            return select(pair.x, pair.y, (element & 1u32) == 1u32);
+    fn publish_word(value: Value, word: u32, packed: u32) {
+        heap[word_of(value, word)] = bitcast_f32(packed);
+    }
+
+    fn fetch_single(value: Value, at: u32) -> f32 {
+        return heap[word_of(value, at)];
+    }
+
+    fn fetch_half(value: Value, at: u32) -> f32 {
+        let pair = unpack2x16float(bitcast_u32(heap[word_of(value, at >> 1u32)]));
+        return select(pair.x, pair.y, (at & 1u32) == 1u32);
+    }
+
+    fn fetch_bfloat16(value: Value, at: u32) -> f32 {
+        let word = bitcast_u32(heap[word_of(value, at >> 1u32)]);
+        return select(
+            bitcast_f32(word << 16u32),
+            bitcast_f32(word & 0xffff0000u32),
+            (at & 1u32) == 1u32,
+        );
+    }
+
+    fn fetch_by_element(value: Value, at: u32) -> f32 {
+        match value.element {
+            _ => {
+                refuse(refusal::ELEMENT, value.element);
+                return 0.0;
+            }
         }
-        return heap[placement.tensors + value.base + offset];
     }
 
     fn run_task(index: u32, lid: u32) {
@@ -78,6 +100,7 @@ mod source {
             kind::ONE_HOT => run_one_hot(task, lid),
             kind::GATHER => run_gather(task, lid),
             kind::SCATTER => run_scatter(task, lid),
+            kind::PACK => run_pack(task, lid),
             kind::CONV2D => run_conv2d(task, lid),
             kind::CONV2D_INPUT_GRAD => run_conv2d_input_grad(task, lid),
             kind::CONV2D_WEIGHT_GRAD => run_conv2d_weight_grad(task, lid),

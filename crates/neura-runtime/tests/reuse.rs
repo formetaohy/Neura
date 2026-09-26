@@ -1,5 +1,6 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{Precision, Runtime};
+use neura_runtime::Runtime;
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -17,17 +18,18 @@ struct Sensor<'g> {
 }
 
 fn sensor<'g>(runtime: &'g Runtime, graph: &Graph<'g>, samples: u32) -> Sensor<'g> {
-    let input = graph.input(Shape::matrix(samples, 4));
+    let input = graph.input(Shape::matrix(samples, 4), Element::Single);
     let weight = graph.parameter(
         Shape::matrix(4, 2),
         Init::Uniform {
             low: 0.25,
             high: 0.75,
         },
+        Element::Single,
     );
     let out = graph.matmul(input, weight);
     graph.retain(out);
-    let weights = runtime.weights(graph, Precision::Single);
+    let weights = runtime.weights(graph);
     let program = runtime.compile(graph, &weights);
     Sensor {
         program,
@@ -157,12 +159,13 @@ fn a_shape_the_carried_geometry_covers_assembles_no_device_program() {
             low: 0.25,
             high: 0.75,
         },
+        Element::Single,
     );
-    let small = both.input(Shape::matrix(8, 4));
-    let large = both.input(Shape::matrix(64, 4));
+    let small = both.input(Shape::matrix(8, 4), Element::Single);
+    let large = both.input(Shape::matrix(64, 4), Element::Single);
     both.retain(both.matmul(small, shared));
     both.retain(both.matmul(large, shared));
-    let weights = runtime.weights(&both, Precision::Single);
+    let weights = runtime.weights(&both);
     runtime.compile(&both, &weights);
     let assembled = runtime.assembled_kernels();
     let programs = runtime.declared_kernels();
@@ -172,11 +175,11 @@ fn a_shape_the_carried_geometry_covers_assembles_no_device_program() {
     );
     for samples in [8u32, 64] {
         let graph = Graph::new();
-        let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero);
-        let input = graph.input(Shape::matrix(samples, 4));
+        let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Single);
+        let input = graph.input(Shape::matrix(samples, 4), Element::Single);
         let out = graph.matmul(input, weight);
         graph.retain(out);
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         assert_eq!(
             runtime.assembled_kernels(),

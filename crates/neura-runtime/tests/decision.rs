@@ -1,5 +1,5 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::Precision;
 
 #[path = "support/decision.rs"]
 mod decision;
@@ -32,10 +32,10 @@ fn every_row_picks_the_largest_element_it_holds() {
     let rows = 257;
     let classes = 100;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
     let action = graph.argmax(logits);
     graph.retain(action);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let data = tied(rows * classes, 7);
     let expected = argmax_reference(&data, rows, classes);
     for profile in runtime.profiles() {
@@ -57,10 +57,10 @@ fn a_row_wider_than_the_workgroup_folds_with_it() {
     let rows = 5;
     let classes = 1000;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
     let action = graph.argmax(logits);
     graph.retain(action);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let mut data = tied(rows * classes, 21);
     data[3 * classes as usize + 501] = 100.0;
@@ -76,10 +76,10 @@ fn a_row_wider_than_the_workgroup_folds_with_it() {
 fn a_row_of_one_class_picks_that_class() {
     let runtime = open();
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(9, 1));
+    let logits = graph.input(Shape::matrix(9, 1), Element::Single);
     let action = graph.argmax(logits);
     graph.retain(action);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, logits, &tied(9, 3));
     runtime.run(&program);
@@ -92,13 +92,13 @@ fn an_action_carries_the_index_of_its_row() {
     let rows = 128;
     let classes = 64;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
     let action = graph.argmax(logits);
     let mask = graph.one_hot(action, classes);
     let picked = graph.gather(logits, action);
     graph.retain(mask);
     graph.retain(picked);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let data = tied(rows * classes, 33);
     runtime.write(&program, logits, &data);
@@ -125,10 +125,10 @@ fn an_index_list_lights_the_class_it_names() {
     let rows = 6;
     let classes = 4;
     let graph = Graph::new();
-    let indices = graph.input(Shape::matrix(rows, 1));
+    let indices = graph.input(Shape::matrix(rows, 1), Element::Single);
     let mask = graph.one_hot(indices, classes);
     graph.retain(mask);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let index_data = vec![0.0, 3.0, 1.0, 3.0, 2.0, 0.0];
     runtime.write(&program, indices, &index_data);
@@ -147,11 +147,11 @@ fn a_gather_copies_the_rows_its_index_list_names() {
     let width = 3;
     let picks = 7;
     let graph = Graph::new();
-    let table = graph.input(Shape::matrix(rows, width));
-    let indices = graph.input(Shape::matrix(picks, 1));
+    let table = graph.input(Shape::matrix(rows, width), Element::Single);
+    let indices = graph.input(Shape::matrix(picks, 1), Element::Single);
     let picked = graph.gather(table, indices);
     graph.retain(picked);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let table_data = random(rows * width, 5);
     let index_data = vec![4.0, 0.0, 4.0, 2.0, 1.0, 0.0, 3.0];
@@ -172,11 +172,11 @@ fn a_gather_walks_a_table_of_every_rank() {
     let rows = table_dims.iter().product::<u32>() / table_dims[3];
     let width = table_dims[3];
     let graph = Graph::new();
-    let table = graph.input(Shape::of(table_dims));
-    let indices = graph.input(Shape::matrix(3, 1));
+    let table = graph.input(Shape::of(table_dims), Element::Single);
+    let indices = graph.input(Shape::matrix(3, 1), Element::Single);
     let picked = graph.gather(table, indices);
     graph.retain(picked);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let table_data = random(rows * width, 23);
     let index_data = vec![11.0, 0.0, 7.0];
@@ -194,10 +194,10 @@ fn a_gather_walks_a_table_of_every_rank() {
 fn an_index_outside_its_table_stops_the_read() {
     let runtime = open();
     let graph = Graph::new();
-    let indices = graph.input(Shape::matrix(3, 1));
+    let indices = graph.input(Shape::matrix(3, 1), Element::Single);
     let mask = graph.one_hot(indices, 4);
     graph.retain(mask);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     for index in [4.0, -1.0, 1.5] {
         runtime.write(&program, indices, &[0.0, index, 2.0]);
@@ -217,11 +217,11 @@ fn a_categorical_draw_follows_the_logits_it_was_handed() {
     let rows = 512;
     let classes = 4;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
-    let seed = graph.input(Shape::scalar());
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
     let draw = graph.categorical(logits, seed);
     graph.retain(draw);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let probabilities = [0.5f32, 0.25, 0.125, 0.125];
     let logit_data = (0..rows)
@@ -262,11 +262,11 @@ fn a_draw_picks_the_largest_logit_its_seeded_noise_hands_it() {
     let rows = 512;
     let classes = 2;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
-    let seed = graph.input(Shape::scalar());
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
     let draw = graph.categorical(logits, seed);
     graph.retain(draw);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let logit_data = (0..rows).flat_map(|_| [0.0f32, 0.4]).collect::<Vec<_>>();
     runtime.write(&program, logits, &logit_data);
@@ -295,11 +295,11 @@ fn a_seeded_draw_rides_every_profile_the_same_way() {
     let rows = 64;
     let classes = 100;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
-    let seed = graph.input(Shape::scalar());
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
     let draw = graph.categorical(logits, seed);
     graph.retain(draw);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let data = tied(rows * classes, 9);
     let mut drawn = Vec::new();
     for profile in runtime.profiles() {
@@ -323,11 +323,11 @@ fn a_dominated_class_leaves_every_draw_to_its_winner() {
     let rows = 64;
     let classes = 3;
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, classes));
-    let seed = graph.input(Shape::scalar());
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
     let draw = graph.categorical(logits, seed);
     graph.retain(draw);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let logit_data = (0..rows)
         .flat_map(|_| [40.0f32, 0.0, 0.0])
@@ -345,15 +345,15 @@ fn a_table_learns_through_the_one_hot_product_of_its_index_list() {
     let width = 3;
     let picks = 5;
     let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(classes, width), Init::Zero);
-    let indices = graph.input(Shape::matrix(picks, 1));
+    let table = graph.parameter(Shape::matrix(classes, width), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::matrix(picks, 1), Element::Single);
     let picked = graph.matmul(graph.one_hot(indices, classes), table);
     let loss = graph.sum(picked);
     let gradients = graph.backward(loss);
     let table_gradient = gradients.of(table);
     graph.retain(picked);
     graph.retain(table_gradient);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let table_data = random(classes * width, 17);
     let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
@@ -380,15 +380,15 @@ fn a_gather_walks_its_gradient_back_into_the_table_it_reads() {
     let width = 3;
     let picks = 5;
     let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(classes, width), Init::Zero);
-    let indices = graph.input(Shape::matrix(picks, 1));
+    let table = graph.parameter(Shape::matrix(classes, width), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::matrix(picks, 1), Element::Single);
     let picked = graph.gather(table, indices);
     let loss = graph.sum(picked);
     let gradients = graph.backward(loss);
     let table_gradient = gradients.of(table);
     graph.retain(picked);
     graph.retain(table_gradient);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let table_data = random(classes * width, 17);
     let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
@@ -415,11 +415,11 @@ fn a_scatter_accumulates_updates_into_the_rows_it_names() {
     let width = 3;
     let picks = 5;
     let graph = Graph::new();
-    let table = graph.resident(Shape::matrix(classes, width));
-    let indices = graph.input(Shape::matrix(picks, 1));
-    let updates = graph.input(Shape::matrix(picks, width));
+    let table = graph.resident(Shape::matrix(classes, width), Element::Single);
+    let indices = graph.input(Shape::matrix(picks, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(picks, width), Element::Single);
     graph.scatter_into(table, indices, updates);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let table_data = random(classes * width, 19);
     let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
@@ -442,13 +442,17 @@ fn a_policy_picks_its_action_on_the_device() {
     let observations = 3;
     let actions = 4;
     let graph = Graph::new();
-    let observed = graph.input(Shape::matrix(samples, observations));
-    let weight = graph.parameter(Shape::matrix(observations, actions), Init::Zero);
-    let bias = graph.parameter(Shape::vector(actions), Init::Zero);
+    let observed = graph.input(Shape::matrix(samples, observations), Element::Single);
+    let weight = graph.parameter(
+        Shape::matrix(observations, actions),
+        Init::Zero,
+        Element::Single,
+    );
+    let bias = graph.parameter(Shape::vector(actions), Init::Zero, Element::Single);
     let logits = graph.add(graph.matmul(observed, weight), bias);
     let action = graph.argmax(logits);
     graph.retain(action);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let observation_data = random(samples * observations, 41);
     let weight_data = random(observations * actions, 43);

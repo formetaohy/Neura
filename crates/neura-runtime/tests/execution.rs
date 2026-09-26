@@ -1,6 +1,7 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
-use neura_runtime::{Precision, Runtime, RuntimeRequest};
+use neura_runtime::{Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -20,10 +21,10 @@ fn refuses(action: impl FnOnce()) -> bool {
 #[test]
 fn independent_tasks_collapse_into_one_dispatch() {
     let graph = Graph::new();
-    let wide = graph.parameter(Shape::vector(65_536), Init::Zero);
+    let wide = graph.parameter(Shape::vector(65_536), Init::Zero, Element::Single);
     let activated = graph.relu(wide);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(
         program.task_count(),
@@ -40,11 +41,11 @@ fn independent_tasks_collapse_into_one_dispatch() {
 #[test]
 fn a_matmul_matches_a_cpu_reference() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(7, 5), Init::Zero);
-    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero);
+    let left = graph.parameter(Shape::matrix(7, 5), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_data = random(35, 11);
     let right_data = random(45, 29);
@@ -62,11 +63,11 @@ fn a_matmul_matches_a_cpu_reference() {
 #[test]
 fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(4, 512), Init::Zero);
-    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero);
+    let left = graph.parameter(Shape::matrix(4, 512), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert!(
         program
@@ -95,13 +96,13 @@ fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
 #[test]
 fn a_split_product_keeps_its_epilogue_and_its_planes() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([2, 1, 4, 512]), Init::Zero);
-    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero);
-    let bias = graph.parameter(Shape::vector(8), Init::Zero);
+    let left = graph.parameter(Shape::of([2, 1, 4, 512]), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(512, 8), Init::Zero, Element::Single);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let out = graph.relu(graph.add(graph.matmul(left, right), bias));
     assert_eq!(out.shape(), Shape::of([2, 1, 4, 8]));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_data = random(2 * 4 * 512, 47);
     let right_data = random(512 * 8, 53);
@@ -132,12 +133,12 @@ fn a_split_product_keeps_its_epilogue_and_its_planes() {
 #[test]
 fn a_product_pairs_the_batch_its_operands_share() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([2, 1, 3, 4]), Init::Zero);
-    let right = graph.parameter(Shape::of([1, 3, 4, 2]), Init::Zero);
+    let left = graph.parameter(Shape::of([2, 1, 3, 4]), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::of([1, 3, 4, 2]), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     assert_eq!(out.shape(), Shape::of([2, 3, 3, 2]));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_data = random(24, 11);
     let right_data = random(24, 29);
@@ -164,12 +165,12 @@ fn a_product_pairs_the_batch_its_operands_share() {
 #[test]
 fn a_product_spreads_one_operand_over_every_plane() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([2, 3, 7, 5]), Init::Zero);
-    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero);
+    let left = graph.parameter(Shape::of([2, 3, 7, 5]), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(5, 9), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     assert_eq!(out.shape(), Shape::of([2, 3, 7, 9]));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_data = random(2 * 3 * 7 * 5, 31);
     let right_data = random(45, 37);
@@ -192,11 +193,11 @@ fn a_product_spreads_one_operand_over_every_plane() {
 #[test]
 fn a_row_fold_sums_every_row_of_every_plane() {
     let graph = Graph::new();
-    let data = graph.parameter(Shape::of([2, 3, 5, 7]), Init::Zero);
+    let data = graph.parameter(Shape::of([2, 3, 5, 7]), Init::Zero, Element::Single);
     let sums = graph.sum_rows(data);
     assert_eq!(sums.shape(), Shape::of([2, 3, 5, 1]));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let values = random(2 * 3 * 5 * 7, 17);
     runtime.write(&program, data, &values);
@@ -212,11 +213,11 @@ fn a_row_fold_sums_every_row_of_every_plane() {
 #[test]
 fn a_row_fold_walks_a_view_through_its_strides() {
     let graph = Graph::new();
-    let matrix = graph.parameter(Shape::matrix(7, 3), Init::Zero);
+    let matrix = graph.parameter(Shape::matrix(7, 3), Init::Zero, Element::Single);
     let sums = graph.sum_rows(graph.transpose(matrix));
     assert_eq!(sums.shape(), Shape::matrix(3, 1));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let values = random(21, 23);
     runtime.write(&program, matrix, &values);
@@ -233,10 +234,22 @@ fn a_masked_attention_block_rides_one_tape() {
     let tokens = 3u32;
     let width = 2u32;
     let graph = Graph::new();
-    let queries = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
-    let keys = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
-    let values = graph.parameter(Shape::of([heads as u32, 1, tokens, width]), Init::Zero);
-    let mask = graph.parameter(Shape::matrix(tokens, tokens), Init::Zero);
+    let queries = graph.parameter(
+        Shape::of([heads as u32, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
+    let keys = graph.parameter(
+        Shape::of([heads as u32, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
+    let values = graph.parameter(
+        Shape::of([heads as u32, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
+    let mask = graph.parameter(Shape::matrix(tokens, tokens), Init::Zero, Element::Single);
     let scores = graph.mul(
         graph.matmul(queries, graph.transpose(keys)),
         graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
@@ -246,7 +259,7 @@ fn a_masked_attention_block_rides_one_tape() {
     assert_eq!(out.shape(), Shape::of([heads as u32, 1, tokens, width]));
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let elements = heads * tokens as usize * width as usize;
     let data = random(elements as u32 * 3, 41);
@@ -304,13 +317,13 @@ fn a_masked_attention_block_rides_one_tape() {
 #[test]
 fn a_bias_broadcasts_over_every_row() {
     let graph = Graph::new();
-    let data = graph.input(Shape::matrix(4, 8));
-    let bias = graph.parameter(Shape::vector(8), Init::Zero);
-    let scale = graph.parameter(Shape::scalar(), Init::Zero);
+    let data = graph.input(Shape::matrix(4, 8), Element::Single);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let scale = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
     let shifted = graph.add(data, bias);
     let scaled = graph.mul(shifted, scale);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let data_values = random(32, 7);
     let bias_values = random(8, 13);
@@ -330,10 +343,10 @@ fn a_bias_broadcasts_over_every_row() {
 #[test]
 fn a_softmax_row_sums_to_one() {
     let graph = Graph::new();
-    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
+    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero, Element::Single);
     let probabilities = graph.softmax(logits);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let logits_values = random(54, 3);
     runtime.write(&program, logits, &logits_values);
@@ -348,14 +361,14 @@ fn a_softmax_row_sums_to_one() {
 #[test]
 fn the_loss_gradient_of_a_matmul_is_the_column_sum_of_its_operand() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(4, 3), Init::Zero);
-    let right = graph.parameter(Shape::matrix(3, 5), Init::Zero);
+    let left = graph.parameter(Shape::matrix(4, 3), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(3, 5), Init::Zero, Element::Single);
     let loss = graph.sum(graph.matmul(left, right));
     let grads = graph.backward(loss);
     graph.retain(grads.of(left));
     graph.retain(grads.of(right));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_data = random(12, 5);
     let right_data = random(15, 17);
@@ -394,12 +407,12 @@ fn the_loss_gradient_of_a_matmul_is_the_column_sum_of_its_operand() {
 #[test]
 fn a_bias_gradient_folds_every_row_it_was_added_to() {
     let graph = Graph::new();
-    let data = graph.input(Shape::matrix(5, 4));
-    let bias = graph.parameter(Shape::vector(4), Init::Zero);
+    let data = graph.input(Shape::matrix(5, 4), Element::Single);
+    let bias = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.add(data, bias));
     let grads = graph.backward(loss);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &random(20, 23));
     runtime.run(&program);
@@ -409,11 +422,11 @@ fn a_bias_gradient_folds_every_row_it_was_added_to() {
 #[test]
 fn a_rectifier_gradient_keeps_the_sign_of_its_input() {
     let graph = Graph::new();
-    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let data = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(data));
     let grads = graph.backward(loss);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let values = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 3.0];
     runtime.write(&program, data, &values);
@@ -428,11 +441,11 @@ fn a_rectifier_gradient_keeps_the_sign_of_its_input() {
 #[test]
 fn the_loss_gradient_of_a_softmax_row_vanishes() {
     let graph = Graph::new();
-    let logits = graph.parameter(Shape::matrix(4, 6), Init::Zero);
+    let logits = graph.parameter(Shape::matrix(4, 6), Init::Zero, Element::Single);
     let loss = graph.sum(graph.softmax(logits));
     let grads = graph.backward(loss);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, logits, &random(24, 31));
     runtime.run(&program);
@@ -443,11 +456,11 @@ fn the_loss_gradient_of_a_softmax_row_vanishes() {
 #[test]
 fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let root = graph.sqrt(data);
     let reciprocal = graph.recip(root);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 4.0, 9.0, 16.0]);
     runtime.run(&program);
@@ -472,10 +485,11 @@ fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
                 low: -0.5,
                 high: 0.5,
             },
+            Element::Single,
         );
-        let data = graph.input(Shape::matrix(batch, 5));
+        let data = graph.input(Shape::matrix(batch, 5), Element::Single);
         let out = graph.softmax(graph.matmul(data, weight));
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         if !declared.contains(&program.tiles().to_vec()) {
             declared.push(program.tiles().to_vec());
@@ -516,11 +530,11 @@ fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
 #[test]
 fn an_update_in_place_replays_on_every_run() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let update = graph.fill(Shape::vector(4), 0.25);
     graph.add_into(weight, update);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, weight, &[1.0; 4]);
     runtime.run(&program);
@@ -532,8 +546,8 @@ fn an_update_in_place_replays_on_every_run() {
 #[test]
 fn a_write_lands_after_every_write_it_follows() {
     let graph = Graph::new();
-    let state = graph.resident(Shape::vector(4));
-    let data = graph.input(Shape::vector(4));
+    let state = graph.resident(Shape::vector(4), Element::Single);
+    let data = graph.input(Shape::vector(4), Element::Single);
     let mut deep = graph.relu(data);
     for _ in 0..5 {
         deep = graph.relu(deep);
@@ -545,7 +559,7 @@ fn a_write_lands_after_every_write_it_follows() {
     graph.retain(state);
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0; 4]);
     runtime.run(&program);
@@ -556,7 +570,7 @@ fn a_write_lands_after_every_write_it_follows() {
 #[test]
 fn a_chain_of_updates_rides_one_dispatch() {
     let graph = Graph::new();
-    let source = graph.input(Shape::vector(2048));
+    let source = graph.input(Shape::vector(2048), Element::Single);
     let mut value = source;
     let half = graph.fill(Shape::vector(2048), 0.5);
     for _ in 1..16 {
@@ -565,7 +579,7 @@ fn a_chain_of_updates_rides_one_dispatch() {
     let out = graph.relu(value);
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(
         program.dispatch_count(),
@@ -587,9 +601,10 @@ fn a_tape_runs_a_whole_training_step_in_one_submission() {
             low: -0.5,
             high: 0.5,
         },
+        Element::Single,
     );
-    let bias = graph.parameter(Shape::vector(3), Init::Zero);
-    let data = graph.input(Shape::matrix(6, 4));
+    let bias = graph.parameter(Shape::vector(3), Init::Zero, Element::Single);
+    let data = graph.input(Shape::matrix(6, 4), Element::Single);
     let hidden = graph.relu(graph.add(graph.matmul(data, weight), bias));
     let loss = graph.sum(hidden);
     let grads = graph.backward(loss);
@@ -599,7 +614,7 @@ fn a_tape_runs_a_whole_training_step_in_one_submission() {
     graph.add_into(weight, weight_step);
     graph.add_into(bias, bias_step);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &random(24, 41));
     runtime.run(&program);
@@ -624,12 +639,12 @@ fn a_tape_runs_a_whole_training_step_in_one_submission() {
 #[test]
 fn reading_two_tensors_costs_one_submission() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let doubled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     let shifted = graph.add(doubled, graph.fill(Shape::vector(4), 1.0));
     graph.retain(doubled);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -641,11 +656,11 @@ fn reading_two_tensors_costs_one_submission() {
 #[test]
 fn a_readout_holds_the_run_it_was_pulled_from() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let doubled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     graph.retain(doubled);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -667,11 +682,11 @@ fn a_readout_holds_the_run_it_was_pulled_from() {
 #[test]
 fn a_pull_without_a_collect_runs_out_of_readbacks() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let out = graph.mul(data, graph.fill(Shape::vector(4), 1.0));
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let mut pulled = Vec::new();
     for slot in 0..runtime.readback_slots() {
@@ -695,9 +710,9 @@ fn a_pull_without_a_collect_runs_out_of_readbacks() {
 #[test]
 fn a_graph_without_tasks_is_refused_by_the_runtime() {
     let graph = Graph::new();
-    graph.input(Shape::vector(4));
+    graph.input(Shape::vector(4), Element::Single);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime.compile(&graph, &weights)
     }));
@@ -710,14 +725,14 @@ fn a_graph_without_tasks_is_refused_by_the_runtime() {
 #[test]
 fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4096));
+    let data = graph.input(Shape::vector(4096), Element::Single);
     let out = graph.mul(data, graph.fill(Shape::vector(4096), 1.0));
     let runtime = pollster::block_on(Runtime::open(neura_runtime::RuntimeRequest {
         readback_bytes: 256,
         ..Default::default()
     }))
     .expect("a device with a small staging buffer");
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let outcome =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.read(&program, out)));
@@ -730,11 +745,11 @@ fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
 #[test]
 fn a_reclaimed_temporary_is_refused_and_a_retained_one_reads_back() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let scaled = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     let squared = graph.mul(scaled, scaled);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -755,8 +770,8 @@ fn a_reclaimed_temporary_is_refused_and_a_retained_one_reads_back() {
 #[test]
 fn a_retained_gradient_reads_back_after_the_step_that_consumed_it() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0));
-    let data = graph.input(Shape::vector(4));
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0), Element::Single);
+    let data = graph.input(Shape::vector(4), Element::Single);
     let loss = graph.sum(graph.mul(data, weight));
     let grads = graph.backward(loss);
     let gradient = grads.of(weight);
@@ -764,7 +779,7 @@ fn a_retained_gradient_reads_back_after_the_step_that_consumed_it() {
     let step = graph.mul(gradient, graph.fill(Shape::vector(4), -0.5));
     graph.add_into(weight, step);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -784,10 +799,10 @@ fn a_retained_gradient_reads_back_after_the_step_that_consumed_it() {
 #[test]
 fn a_parameter_read_before_any_run_holds_its_seed() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Constant(2.5));
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(2.5), Element::Single);
     let out: Value = graph.relu(weight);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_close(&runtime.read(&program, weight), &[2.5; 4], 1e-6);
     runtime.run(&program);
@@ -797,10 +812,10 @@ fn a_parameter_read_before_any_run_holds_its_seed() {
 #[test]
 fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(1024));
+    let data = graph.input(Shape::vector(1024), Element::Single);
     let out = graph.relu(graph.mul(data, data));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &[2.0; 1024]);
     runtime.run(&program);
@@ -820,16 +835,16 @@ fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
 fn two_programs_of_one_model_share_their_weights_and_hold_their_own_arena() {
     let runtime = open();
     let first = Graph::new();
-    let weight = first.parameter(Shape::vector(4), Init::Constant(2.5));
+    let weight = first.parameter(Shape::vector(4), Init::Constant(2.5), Element::Single);
     let scaled = first.mul(weight, first.fill(Shape::vector(4), 3.0));
-    let weights = runtime.weights(&first, Precision::Single);
+    let weights = runtime.weights(&first);
     let a = runtime.compile(&first, &weights);
     runtime.run(&a);
     assert_close(&runtime.read(&a, scaled), &[7.5; 4], 1e-6);
 
     let second = Graph::new();
-    let shared = second.parameter(Shape::vector(4), Init::Constant(2.5));
-    let data = second.input(Shape::vector(16));
+    let shared = second.parameter(Shape::vector(4), Init::Constant(2.5), Element::Single);
+    let data = second.input(Shape::vector(16), Element::Single);
     let doubled = second.mul(data, second.fill(Shape::vector(16), 2.0));
     let b = runtime.compile(&second, &weights);
     runtime.write(&b, data, &[1.0; 16]);
@@ -867,10 +882,10 @@ fn two_programs_of_one_model_share_their_weights_and_hold_their_own_arena() {
 #[test]
 fn a_fresh_program_holds_zeros_until_the_host_writes() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let out = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.run(&program);
     assert_close(&runtime.read(&program, out), &[0.0; 4], 1e-6);
@@ -883,8 +898,8 @@ fn a_fresh_program_holds_zeros_until_the_host_writes() {
 fn every_profile_the_device_offers_runs_the_same_matmul() {
     let runtime = open();
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(37, 19), Init::Zero);
-    let right = graph.parameter(Shape::matrix(19, 43), Init::Zero);
+    let left = graph.parameter(Shape::matrix(37, 19), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(19, 43), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let transposed = graph.matmul(graph.transpose(right), graph.transpose(left));
     let left_data = random(37 * 19, 11);
@@ -904,7 +919,7 @@ fn every_profile_the_device_offers_runs_the_same_matmul() {
     }
     let expected_transposed = matmul_reference(&transposed_right, &transposed_left, 43, 19, 37);
     for profile in runtime.profiles() {
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile_with(&graph, &weights, profile);
         assert_eq!(program.profile(), profile);
         runtime.write(&program, left, &left_data);
@@ -928,10 +943,18 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
         let tile = tiles[index];
         let profile = neura_profile::Profile::of(&tiles[index..index + 1]);
         let graph = Graph::new();
-        let left = graph.parameter(Shape::matrix(tile.rows(), tile.depth()), Init::Zero);
-        let right = graph.parameter(Shape::matrix(tile.depth(), tile.columns()), Init::Zero);
+        let left = graph.parameter(
+            Shape::matrix(tile.rows(), tile.depth()),
+            Init::Zero,
+            Element::Single,
+        );
+        let right = graph.parameter(
+            Shape::matrix(tile.depth(), tile.columns()),
+            Init::Zero,
+            Element::Single,
+        );
         let out = graph.matmul(left, right);
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile_with(&graph, &weights, profile);
         assert_eq!(program.tiles(), &[tile]);
         assert_eq!(
@@ -978,10 +1001,10 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
         "the baseline pool must drop a profile the wide pool keeps",
     );
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
-    let data = graph.input(Shape::matrix(8, 4));
+    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
+    let data = graph.input(Shape::matrix(8, 4), Element::Single);
     let out = graph.matmul(data, weight);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(program.profile(), *profiles.last().expect("a profile"));
     assert!(
@@ -1001,13 +1024,13 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
 fn tuning_measures_every_profile_the_device_offers() {
     let runtime = open();
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero);
-    let right = graph.parameter(Shape::matrix(32, 64), Init::Zero);
+    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(32, 64), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let left_data = random(64 * 32, 3);
     let right_data = random(32 * 64, 7);
     let expected = matmul_reference(&left_data, &right_data, 64, 32, 64);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.tune(&graph, &weights);
     assert!(
         runtime.profiles().contains(&program.profile()),
@@ -1027,15 +1050,15 @@ fn tuning_measures_every_profile_the_device_offers() {
 #[test]
 fn an_operand_folded_into_a_subtraction_keeps_its_side() {
     let graph = Graph::new();
-    let left = graph.input(Shape::vector(4));
-    let right = graph.input(Shape::vector(4));
-    let bias = graph.input(Shape::vector(4));
+    let left = graph.input(Shape::vector(4), Element::Single);
+    let right = graph.input(Shape::vector(4), Element::Single);
+    let bias = graph.input(Shape::vector(4), Element::Single);
     let difference = graph.sub(bias, graph.mul(left, right));
     let quotient = graph.div(bias, graph.mul(left, right));
     graph.retain(difference);
     graph.retain(quotient);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(
         program.task_count(),
@@ -1061,10 +1084,10 @@ fn an_operand_folded_into_a_subtraction_keeps_its_side() {
 #[test]
 fn a_log_softmax_row_holds_its_log_probabilities() {
     let graph = Graph::new();
-    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero);
+    let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero, Element::Single);
     let log_probabilities = graph.log_softmax(logits);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let logits_values = random(54, 3);
     runtime.write(&program, logits, &logits_values);
@@ -1085,9 +1108,9 @@ fn a_log_softmax_rides_the_shape_of_its_rows() {
     let mut widths = Vec::new();
     for columns in [4u32, 64] {
         let graph = Graph::new();
-        let logits = graph.parameter(Shape::matrix(3, columns), Init::Zero);
+        let logits = graph.parameter(Shape::matrix(3, columns), Init::Zero, Element::Single);
         let out = graph.log_softmax(logits);
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let data = random(3 * columns, columns);
         runtime.write(&program, logits, &data);
@@ -1107,11 +1130,11 @@ fn a_log_softmax_rides_the_shape_of_its_rows() {
 fn a_view_reads_back_through_the_strides_it_was_transposed_to() {
     let runtime = open();
     let graph = Graph::new();
-    let data = graph.input(Shape::matrix(3, 5));
-    let table = graph.parameter(Shape::matrix(5, 3), Init::Zero);
+    let data = graph.input(Shape::matrix(3, 5), Element::Single);
+    let table = graph.parameter(Shape::matrix(5, 3), Init::Zero, Element::Single);
     let shifted = graph.add(data, graph.transpose(table));
     graph.retain(shifted);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let data_values = random(15, 5);
     let table_values = random(15, 11);
@@ -1136,11 +1159,11 @@ fn a_tensor_of_every_rank_reads_the_row_it_broadcasts() {
         let shape = Shape::of(&dims);
         let elements = dims.iter().product::<u32>();
         let columns = *dims.last().expect("a last axis");
-        let data = graph.input(shape);
-        let bias = graph.parameter(Shape::vector(columns), Init::Zero);
+        let data = graph.input(shape, Element::Single);
+        let bias = graph.parameter(Shape::vector(columns), Init::Zero, Element::Single);
         let shifted = graph.add(data, bias);
         graph.retain(shifted);
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let data_values = random(elements, elements);
         let bias_values = random(columns, columns + 7);
@@ -1159,15 +1182,15 @@ fn a_tensor_of_every_rank_reads_the_row_it_broadcasts() {
 #[test]
 fn a_task_reads_a_leaf_before_the_task_that_rewrites_it() {
     let graph = Graph::new();
-    let state = graph.resident(Shape::vector(4));
-    let bias = graph.input(Shape::vector(4));
+    let state = graph.resident(Shape::vector(4), Element::Single);
+    let bias = graph.input(Shape::vector(4), Element::Single);
     let read = graph.mul(state, bias);
     let patch = graph.fill(Shape::vector(4), 7.0);
     graph.copy_into(state, patch);
     let out = graph.relu(read);
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, bias, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -1178,15 +1201,15 @@ fn a_task_reads_a_leaf_before_the_task_that_rewrites_it() {
 #[test]
 fn a_task_reads_a_parameter_before_the_task_that_updates_it() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Constant(0.5));
-    let bias = graph.input(Shape::vector(4));
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(0.5), Element::Single);
+    let bias = graph.input(Shape::vector(4), Element::Single);
     let read = graph.mul(weight, bias);
     let step = graph.fill(Shape::vector(4), 1.0);
     graph.add_into(weight, step);
     let out = graph.relu(read);
     graph.retain(out);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, bias, &[1.0, 2.0, 3.0, 4.0]);
     runtime.run(&program);
@@ -1197,8 +1220,8 @@ fn a_task_reads_a_parameter_before_the_task_that_updates_it() {
 #[test]
 fn a_storage_a_view_reads_keeps_the_task_that_writes_it() {
     let graph = Graph::new();
-    let left = graph.input(Shape::matrix(2, 3));
-    let right = graph.input(Shape::matrix(2, 3));
+    let left = graph.input(Shape::matrix(2, 3), Element::Single);
+    let right = graph.input(Shape::matrix(2, 3), Element::Single);
     let product = graph.mul(left, right);
     let flipped = graph.transpose(product);
     let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
@@ -1206,7 +1229,7 @@ fn a_storage_a_view_reads_keeps_the_task_that_writes_it() {
     graph.retain(doubled);
     graph.retain(columns);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let left_values = random(6, 3);
     let right_values = random(6, 5);

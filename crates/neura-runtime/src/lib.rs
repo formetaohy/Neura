@@ -7,7 +7,6 @@ mod tape;
 
 pub use checkpoint::Checkpoint;
 pub use neura_abi::Placement;
-pub use neura_precision::Precision;
 pub use neura_profile::{Budget, MatmulTile, Profile};
 pub use neura_program::Span;
 pub use program::{Program, Weights};

@@ -1,6 +1,6 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_op::{self as op, OPS};
-use neura_runtime::Precision;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -153,11 +153,11 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
     for probe in &table {
         let definition = op::of(probe.op);
         let graph = Graph::new();
-        let left = graph.parameter(Shape::vector(ELEMENTS), Init::Zero);
-        let right = graph.parameter(Shape::vector(ELEMENTS), Init::Zero);
+        let left = graph.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);
+        let right = graph.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);
         let out = (probe.build)(&graph, left, right);
         graph.retain(out);
-        let store = runtime.weights(&graph, Precision::Single);
+        let store = runtime.weights(&graph);
         let program = runtime.compile(&graph, &store);
         let (first, second) = (observations(), others());
         runtime.write(&program, left, &first);
@@ -171,9 +171,9 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
         assert_close(&runtime.read(&program, out), &expected, 1e-4);
 
         let gradient = Graph::new();
-        let left = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero);
-        let right = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero);
-        let scales = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero);
+        let left = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);
+        let right = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);
+        let scales = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);
         let out = (probe.build)(&gradient, left, right);
         let loss = gradient.sum(gradient.mul(out, scales));
         let gradients = gradient.backward(loss);
@@ -182,7 +182,7 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
         if binary {
             gradient.retain(gradients.of(right));
         }
-        let store = runtime.weights(&gradient, Precision::Single);
+        let store = runtime.weights(&gradient);
         let program = runtime.compile(&gradient, &store);
         let scale = weights();
         runtime.write(&program, left, &first);

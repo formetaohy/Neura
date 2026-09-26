@@ -1,5 +1,5 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Window};
-use neura_runtime::Precision;
 
 #[path = "support/convolution.rs"]
 mod convolution;
@@ -22,16 +22,16 @@ fn samples(count: u32, seed: u32) -> Vec<f32> {
 fn a_convolution_walks_the_window_it_is_handed() {
     let runtime = open();
     let graph = Graph::new();
-    let input = graph.input(Shape::of([2, 3, 6, 6]));
-    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero);
-    let bias = graph.parameter(Shape::of([1, 4, 1, 1]), Init::Zero);
+    let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+    let bias = graph.parameter(Shape::of([1, 4, 1, 1]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [2, 2], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     let (rows, columns, channels) = (3usize, 3usize, 4usize);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 3, 3]));
     let activated = graph.relu(graph.add(convolved, bias));
     graph.retain(activated);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let input_values = samples(216, 5);
     let filter_values = samples(108, 11);
@@ -52,13 +52,13 @@ fn a_convolution_walks_the_window_it_is_handed() {
 fn a_convolution_leaves_the_row_its_window_never_reaches() {
     let runtime = open();
     let graph = Graph::new();
-    let input = graph.input(Shape::of([3, 2, 7, 6]));
-    let filter = graph.parameter(Shape::of([3, 2, 3, 2]), Init::Zero);
+    let input = graph.input(Shape::of([3, 2, 7, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 2, 3, 2]), Init::Zero, Element::Single);
     let window = Window::new([3, 2], [3, 3], [0, 0]);
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([3, 3, 2, 2]));
     graph.retain(convolved);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let input_values = samples(252, 23);
     let filter_values = samples(36, 29);
@@ -73,9 +73,9 @@ fn a_convolution_leaves_the_row_its_window_never_reaches() {
 fn two_windows_ride_one_tape() {
     let runtime = open();
     let graph = Graph::new();
-    let input = graph.input(Shape::of([2, 3, 8, 8]));
-    let narrow = graph.parameter(Shape::of([2, 3, 3, 3]), Init::Zero);
-    let wide = graph.parameter(Shape::of([2, 3, 5, 5]), Init::Zero);
+    let input = graph.input(Shape::of([2, 3, 8, 8]), Element::Single);
+    let narrow = graph.parameter(Shape::of([2, 3, 3, 3]), Init::Zero, Element::Single);
+    let wide = graph.parameter(Shape::of([2, 3, 5, 5]), Init::Zero, Element::Single);
     let sliding = Window::sliding([3, 3]);
     let padded = Window::new([5, 5], [1, 1], [1, 1]);
     let first = graph.conv2d(input, narrow, sliding);
@@ -84,7 +84,7 @@ fn two_windows_ride_one_tape() {
     assert_eq!(second.shape(), Shape::of([2, 2, 6, 6]));
     let combined = graph.add(first, second);
     graph.retain(combined);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(runtime.declared_kernels(), 1);
     let input_values = samples(384, 31);

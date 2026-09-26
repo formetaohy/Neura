@@ -1,7 +1,6 @@
-use neura_abi::{Kind, Placement, StepRecord, Store, TaskRecord, WORD_BYTES};
+use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_op as op;
-use neura_precision::Precision;
 use neura_profile::{Budget, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
@@ -28,7 +27,7 @@ fn encoding(graph: &Graph) -> Encoding {
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    Encoding::of(graph, ALIGNMENT, profile, Precision::Single, Vec::new())
+    Encoding::of(graph, ALIGNMENT, profile, Vec::new())
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -118,7 +117,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 #[test]
 fn a_chain_of_rectifiers_fuses_into_one_task() {
     let graph = Graph::new();
-    let mut value = graph.parameter(Shape::vector(4), Init::Zero);
+    let mut value = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     for _ in 0..4 {
         value = graph.relu(value);
     }
@@ -133,9 +132,9 @@ fn a_chain_of_rectifiers_fuses_into_one_task() {
 #[test]
 fn a_dense_layer_fuses_its_epilogue_into_the_product() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
-    let bias = graph.parameter(Shape::vector(8), Init::Zero);
-    let data = graph.input(Shape::matrix(3, 4));
+    let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero, Element::Single);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let data = graph.input(Shape::matrix(3, 4), Element::Single);
     let activated = graph.relu(graph.add(graph.matmul(data, weight), bias));
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
@@ -157,7 +156,7 @@ fn a_dense_layer_fuses_its_epilogue_into_the_product() {
 #[test]
 fn a_value_two_tasks_read_stays_on_the_tape() {
     let graph = Graph::new();
-    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let data = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let squared = graph.mul(data, data);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
@@ -169,8 +168,8 @@ fn a_value_two_tasks_read_stays_on_the_tape() {
 #[test]
 fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::vector(64), Init::Zero);
-    let right = graph.parameter(Shape::vector(64), Init::Zero);
+    let left = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let product = graph.mul(left, right);
     let negated = graph.neg(product);
     let squared = graph.mul(product, product);
@@ -192,7 +191,7 @@ fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
 #[test]
 fn a_value_one_task_reads_hands_its_storage_to_that_task() {
     let graph = Graph::new();
-    let data = graph.parameter(Shape::vector(64), Init::Zero);
+    let data = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let scaled = graph.mul(data, graph.fill(Shape::vector(64), 2.0));
     let squared = graph.mul(scaled, scaled);
     let encoding = encoding(&graph);
@@ -206,7 +205,7 @@ fn a_value_one_task_reads_hands_its_storage_to_that_task() {
 #[test]
 fn a_retained_value_is_never_folded_away() {
     let graph = Graph::new();
-    let data = graph.parameter(Shape::vector(8), Init::Zero);
+    let data = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let doubled = graph.mul(data, graph.fill(Shape::vector(8), 2.0));
     graph.retain(doubled);
     let activated = graph.relu(doubled);
@@ -224,8 +223,8 @@ fn a_retained_value_is_never_folded_away() {
 #[test]
 fn independent_tasks_share_a_dispatch() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::vector(64), Init::Zero);
-    let right = graph.parameter(Shape::vector(64), Init::Zero);
+    let left = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let sum = graph.add(left, right);
     let product = graph.mul(left, right);
     graph.retain(sum);
@@ -243,7 +242,7 @@ fn independent_tasks_share_a_dispatch() {
 #[test]
 fn a_chain_of_temporaries_holds_one_tensor() {
     let graph = Graph::new();
-    let mut value = graph.parameter(Shape::vector(256), Init::Zero);
+    let mut value = graph.parameter(Shape::vector(256), Init::Zero, Element::Single);
     for _ in 0..16 {
         value = graph.relu(value);
     }
@@ -255,9 +254,7 @@ fn a_chain_of_temporaries_holds_one_tensor() {
         "the arena holds only the value the fused chain produces",
     );
     assert_eq!(
-        Layout::of(&graph, ALIGNMENT, Precision::Single)
-            .weights()
-            .words(),
+        Layout::of(&graph, ALIGNMENT).weights().words(),
         256,
         "the parameter lives in the weight store, not in the arena",
     );
@@ -266,10 +263,10 @@ fn a_chain_of_temporaries_holds_one_tensor() {
 #[test]
 fn a_plan_sizes_its_own_arena() {
     let small = Graph::new();
-    let parameter = small.parameter(Shape::vector(256), Init::Zero);
+    let parameter = small.parameter(Shape::vector(256), Init::Zero, Element::Single);
     small.relu(parameter);
     let large = Graph::new();
-    let parameter = large.parameter(Shape::vector(4096), Init::Zero);
+    let parameter = large.parameter(Shape::vector(4096), Init::Zero, Element::Single);
     large.relu(parameter);
     let small = encoding(&small);
     let large = encoding(&large);
@@ -284,8 +281,8 @@ fn a_plan_sizes_its_own_arena() {
 #[test]
 fn a_matmul_needs_a_shared_depth() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero);
-    let right = graph.parameter(Shape::matrix(2, 4), Init::Zero);
+    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(2, 4), Init::Zero, Element::Single);
     assert!(
         refuses(|| {
             let _ = graph.matmul(left, right);
@@ -297,8 +294,8 @@ fn a_matmul_needs_a_shared_depth() {
 #[test]
 fn elementwise_operands_must_meet() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero);
-    let right = graph.parameter(Shape::matrix(2, 4), Init::Zero);
+    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(2, 4), Init::Zero, Element::Single);
     assert!(
         refuses(|| {
             let _ = graph.add(left, right);
@@ -310,9 +307,9 @@ fn elementwise_operands_must_meet() {
 #[test]
 fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
     let graph = Graph::new();
-    let tall = graph.parameter(Shape::matrix(1024, 32), Init::Zero);
-    let weight = graph.parameter(Shape::matrix(32, 64), Init::Zero);
-    let blocked = graph.parameter(Shape::matrix(32, 48), Init::Zero);
+    let tall = graph.parameter(Shape::matrix(1024, 32), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(32, 64), Init::Zero, Element::Single);
+    let blocked = graph.parameter(Shape::matrix(32, 48), Init::Zero, Element::Single);
     let balanced = graph.matmul(tall, weight);
     let ragged = graph.matmul(tall, blocked);
     graph.retain(balanced);
@@ -368,8 +365,8 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
 #[test]
 fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
     let graph = Graph::new();
-    let narrow = graph.parameter(Shape::matrix(8, 4096), Init::Zero);
-    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero);
+    let narrow = graph.parameter(Shape::matrix(8, 4096), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero, Element::Single);
     let out = graph.matmul(narrow, weight);
     graph.retain(out);
     let encoding = encoding_with(&graph, wide());
@@ -426,9 +423,9 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
 #[test]
 fn a_split_product_hands_its_epilogue_to_the_fold() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero);
-    let bias = graph.parameter(Shape::vector(32), Init::Zero);
-    let data = graph.input(Shape::matrix(8, 4096));
+    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero, Element::Single);
+    let bias = graph.parameter(Shape::vector(32), Init::Zero, Element::Single);
+    let data = graph.input(Shape::matrix(8, 4096), Element::Single);
     let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
     graph.retain(out);
     let encoding = encoding_with(&graph, wide());
@@ -462,7 +459,7 @@ fn a_split_product_hands_its_epilogue_to_the_fold() {
 fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
     for (elements, tasks) in [(32u32, 1u32), (4096, 2), (65536, 32), (1 << 20, 512)] {
         let graph = Graph::new();
-        let data = graph.input(Shape::vector(elements));
+        let data = graph.input(Shape::vector(elements), Element::Single);
         graph.relu(data);
         let encoding = encoding(&graph);
         assert_eq!(
@@ -477,9 +474,9 @@ fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
 fn every_profile_plans_the_same_values() {
     for profile in every_profile() {
         let graph = Graph::new();
-        let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
-        let bias = graph.parameter(Shape::vector(8), Init::Zero);
-        let data = graph.input(Shape::matrix(2, 4));
+        let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero, Element::Single);
+        let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+        let data = graph.input(Shape::matrix(2, 4), Element::Single);
         let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
         let encoding = encoding_with(&graph, profile);
         assert_eq!(
@@ -494,9 +491,9 @@ fn every_profile_plans_the_same_values() {
 #[test]
 fn a_backward_pass_reaches_every_parameter() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero);
-    let bias = graph.parameter(Shape::vector(8), Init::Zero);
-    let input = graph.input(Shape::matrix(16, 4));
+    let weight = graph.parameter(Shape::matrix(4, 8), Init::Zero, Element::Single);
+    let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let input = graph.input(Shape::matrix(16, 4), Element::Single);
     let dense = graph.matmul(input, weight);
     let shifted = graph.add(dense, bias);
     let activated = graph.relu(shifted);
@@ -532,8 +529,8 @@ fn a_backward_pass_reaches_every_parameter() {
 #[test]
 fn a_broadcast_product_folds_its_gradient_back_to_the_shape_of_its_operand() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([4, 1, 3, 2]), Init::Zero);
-    let right = graph.parameter(Shape::of([1, 5, 2, 3]), Init::Zero);
+    let left = graph.parameter(Shape::of([4, 1, 3, 2]), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::of([1, 5, 2, 3]), Init::Zero, Element::Single);
     let product = graph.matmul(left, right);
     assert_eq!(product.shape(), Shape::of([4, 5, 3, 3]));
     let grads = graph.backward(graph.sum(product));
@@ -556,7 +553,7 @@ fn a_broadcast_product_folds_its_gradient_back_to_the_shape_of_its_operand() {
 #[test]
 fn a_reduction_folds_through_as_many_levels_as_it_takes() {
     let graph = Graph::new();
-    let wide = graph.parameter(Shape::vector(1 << 21), Init::Zero);
+    let wide = graph.parameter(Shape::vector(1 << 21), Init::Zero, Element::Single);
     let loss = graph.sum(wide);
     let encoding = encoding(&graph);
     let reductions = kinds(&encoding)
@@ -582,8 +579,8 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
 #[test]
 fn a_parameter_updated_in_place_feeds_the_tasks_that_follow() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(8), Init::Zero);
-    let input = graph.input(Shape::vector(8));
+    let weight = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let input = graph.input(Shape::vector(8), Element::Single);
     let loss = graph.sum(graph.mul(input, weight));
     let grads = graph.backward(loss);
     let scaled = graph.mul(grads.of(weight), graph.fill(Shape::scalar(), -0.1));
@@ -606,8 +603,8 @@ fn a_parameter_updated_in_place_feeds_the_tasks_that_follow() {
 #[test]
 fn an_update_in_place_follows_every_reader_of_the_value_it_replaces() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(8), Init::Zero);
-    let input = graph.input(Shape::vector(8));
+    let weight = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let input = graph.input(Shape::vector(8), Element::Single);
     let read = graph.mul(input, weight);
     let loss = graph.sum(read);
     let grads = graph.backward(loss);
@@ -632,7 +629,7 @@ fn an_update_in_place_follows_every_reader_of_the_value_it_replaces() {
 #[test]
 fn a_graph_updated_in_place_is_refused_a_later_backward() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(weight));
     graph.add_into(weight, graph.fill(Shape::vector(4), 0.5));
     assert!(
@@ -646,7 +643,7 @@ fn a_graph_updated_in_place_is_refused_a_later_backward() {
 #[test]
 fn a_view_shares_the_storage_of_its_source() {
     let graph = Graph::new();
-    let matrix = graph.parameter(Shape::matrix(8, 4), Init::Zero);
+    let matrix = graph.parameter(Shape::matrix(8, 4), Init::Zero, Element::Single);
     let transposed = graph.transpose(matrix);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
     let encoding = encoding(&graph);
@@ -668,6 +665,7 @@ fn a_softmax_row_keeps_its_shape_and_gradient() {
             low: -1.0,
             high: 1.0,
         },
+        Element::Single,
     );
     let probabilities = graph.softmax(logits);
     assert_eq!(probabilities.shape(), Shape::matrix(16, 8));
@@ -678,7 +676,7 @@ fn a_softmax_row_keeps_its_shape_and_gradient() {
 #[test]
 fn a_graph_is_differentiated_once() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(weight));
     graph.backward(loss);
     assert!(
@@ -692,7 +690,7 @@ fn a_graph_is_differentiated_once() {
 #[test]
 fn a_loss_that_derives_from_no_parameter_is_refused() {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4));
+    let data = graph.input(Shape::vector(4), Element::Single);
     let loss = graph.sum(graph.relu(data));
     assert!(
         refuses(|| {
@@ -711,15 +709,16 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
             low: -0.5,
             high: 0.5,
         },
+        Element::Single,
     );
-    let input = graph.input(Shape::matrix(2, 4));
+    let input = graph.input(Shape::matrix(2, 4), Element::Single);
     let out = graph.softmax(graph.matmul(input, weight));
     graph.backward(graph.sum(out));
     let encoding = encoding(&graph);
     assert!(encoding.value_count() as usize >= graph.value_count());
     assert!(encoding.arena_bytes() > 0);
     assert!(encoding.work() > 0);
-    let layout = Layout::of(&graph, ALIGNMENT, Precision::Single);
+    let layout = Layout::of(&graph, ALIGNMENT);
     let seed = layout
         .seeds()
         .iter()
@@ -741,7 +740,7 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
 #[test]
 fn a_non_scalar_loss_is_refused() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     assert!(
         refuses(|| {
             let _ = graph.backward(weight);
@@ -754,8 +753,8 @@ fn a_non_scalar_loss_is_refused() {
 fn every_tensor_a_plan_names_lies_inside_its_region() {
     for profile in every_profile() {
         let graph = Graph::new();
-        let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero);
-        let data = graph.input(Shape::matrix(2, 8));
+        let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero, Element::Single);
+        let data = graph.input(Shape::matrix(2, 8), Element::Single);
         let out = graph.softmax(graph.add(
             graph.matmul(data, weight),
             graph.fill(Shape::vector(4), 1.0),
@@ -764,7 +763,7 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
         let encoding = encoding_with(&graph, profile);
-        let layout = Layout::of(&graph, ALIGNMENT, Precision::Single);
+        let layout = Layout::of(&graph, ALIGNMENT);
         for value in [weight, data, out, grads.of(weight)] {
             let span = encoding.span(value, PLACEMENT);
             let bytes = u64::from(span.elements) * WORD_BYTES;
@@ -793,9 +792,9 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
 #[test]
 fn a_folded_operand_remembers_which_side_of_its_consumer_it_took() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::vector(4), Init::Zero);
-    let right = graph.parameter(Shape::vector(4), Init::Zero);
-    let bias = graph.input(Shape::vector(4));
+    let left = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
+    let bias = graph.input(Shape::vector(4), Element::Single);
     let difference = graph.sub(bias, graph.mul(left, right));
     let quotient = graph.div(graph.mul(right, left), bias);
     graph.retain(difference);
@@ -825,8 +824,8 @@ fn a_folded_operand_remembers_which_side_of_its_consumer_it_took() {
 #[test]
 fn a_partial_reads_back_the_result_its_formula_names() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
-    let scale = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
+    let scale = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let activated = graph.tanh(weight);
     let scaled = graph.mul(activated, scale);
     let loss = graph.sum(scaled);
@@ -857,8 +856,8 @@ fn a_partial_reads_back_the_result_its_formula_names() {
 #[test]
 fn a_partial_reads_back_the_operands_its_formula_names() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
-    let other = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
+    let other = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let magnitude = graph.abs(weight);
     let scaled = graph.mul(magnitude, other);
     let loss = graph.sum(scaled);
@@ -903,9 +902,9 @@ fn a_partial_reads_back_the_operands_its_formula_names() {
 #[test]
 fn a_write_takes_its_turn_after_every_write_it_follows() {
     let graph = Graph::new();
-    let state = graph.resident(Shape::vector(4));
+    let state = graph.resident(Shape::vector(4), Element::Single);
     let deep = {
-        let mut value = graph.relu(graph.input(Shape::vector(4)));
+        let mut value = graph.relu(graph.input(Shape::vector(4), Element::Single));
         for _ in 0..5 {
             value = graph.relu(value);
         }
@@ -936,7 +935,7 @@ fn a_write_takes_its_turn_after_every_write_it_follows() {
 #[test]
 fn a_chain_of_single_task_levels_rides_one_segment() {
     let graph = Graph::new();
-    let mut value = graph.input(Shape::vector(64));
+    let mut value = graph.input(Shape::vector(64), Element::Single);
     for _ in 1..8 {
         value = graph.relu(graph.mul(value, value));
     }
@@ -964,8 +963,8 @@ fn a_chain_of_single_task_levels_rides_one_segment() {
 #[test]
 fn a_fold_reads_a_leaf_no_later_than_the_task_it_lands_behind() {
     let graph = Graph::new();
-    let state = graph.resident(Shape::vector(4));
-    let bias = graph.parameter(Shape::vector(4), Init::Zero);
+    let state = graph.resident(Shape::vector(4), Element::Single);
+    let bias = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let read = graph.mul(state, bias);
     let patch = graph.fill(Shape::vector(4), 7.0);
     graph.copy_into(state, patch);
@@ -985,8 +984,8 @@ fn a_fold_reads_a_leaf_no_later_than_the_task_it_lands_behind() {
 #[test]
 fn a_fold_reaches_past_a_task_the_chain_does_not_read() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::vector(8), Init::Zero);
-    let right = graph.parameter(Shape::vector(8), Init::Zero);
+    let left = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let product = graph.mul(left, right);
     let filler = graph.fill(Shape::vector(8), 1.0);
     let out = graph.add(product, filler);
@@ -1006,8 +1005,8 @@ fn a_fold_reaches_past_a_task_the_chain_does_not_read() {
 #[test]
 fn a_fold_keeps_the_storage_a_view_reads_written() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero);
-    let right = graph.parameter(Shape::matrix(2, 3), Init::Zero);
+    let left = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
     let product = graph.mul(left, right);
     let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
     let rows = graph.sum_rows(graph.transpose(product));
@@ -1025,8 +1024,8 @@ fn a_fold_keeps_the_storage_a_view_reads_written() {
 #[test]
 fn an_update_in_place_reads_the_tensor_it_writes_through_its_own_layout() {
     let graph = Graph::new();
-    let table = graph.resident(Shape::matrix(4, 4));
-    let patch = graph.parameter(Shape::matrix(4, 4), Init::Zero);
+    let table = graph.resident(Shape::matrix(4, 4), Element::Single);
+    let patch = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
     graph.add_into(table, patch);
     assert!(
         refuses(|| {
@@ -1060,4 +1059,71 @@ fn a_shape_the_device_cannot_address_is_refused_before_it_is_built() {
         let _ = Shape::of([1, 1, 1, 1, 1]);
     }));
     assert_eq!(Shape::of([3, 4, 5]).reduced(2).elements(), 15);
+}
+
+#[test]
+fn a_narrow_parameter_update_plans_an_image_and_a_pack() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(300), Init::Zero, Element::Half);
+    graph.mul_into(weight, graph.fill(Shape::vector(300), 2.0));
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    assert_eq!(values[weight.id() as usize].element, Element::Half.code());
+    assert_eq!(values[weight.id() as usize].store, Store::Weights.code());
+
+    let pack = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Pack)
+        .expect("a half precision parameter packs the image its update computed");
+    assert_eq!(pack.out, weight.id());
+    assert_eq!(pack.first, 0);
+    assert_eq!(pack.count, 300);
+    assert_eq!(pack.geometry, Element::Half.code());
+    let image = values[pack.a as usize];
+    assert_eq!(image.element, Element::Single.code());
+    assert_eq!(image.store, Store::Tensors.code());
+    assert_eq!(image.dims, Shape::vector(300).dims());
+
+    let writer = tape
+        .iter()
+        .find(|task| task.out == pack.a)
+        .expect("the image holds the update the device computed");
+    assert_eq!(Kind::of(writer.kind), Kind::Binary);
+    assert_eq!(writer.a, weight.id());
+    assert_ne!(
+        writer.out, writer.a,
+        "an element of an update reaches a narrow tensor only through its word",
+    );
+}
+
+#[test]
+fn a_narrow_parameter_scatters_through_an_image() {
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Half);
+    let indices = graph.input(Shape::matrix(3, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(3, 2), Element::Single);
+    graph.scatter_into(table, indices, updates);
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    let pack = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Pack)
+        .expect("a half precision table packs the rows its scatter added");
+    assert_eq!(pack.out, table.id());
+    assert_eq!(values[pack.a as usize].store, Store::Tensors.code());
+
+    let scatter = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Scatter)
+        .expect("the scatter adds its rows into the image");
+    assert_eq!(scatter.out, pack.a);
+    let copy = tape
+        .iter()
+        .find(|task| task.out == pack.a && Kind::of(task.kind) == Kind::Unary)
+        .expect("the image holds the table before the scatter reaches it");
+    assert_eq!(copy.a, table.id());
+    assert_eq!(copy.param, 0.0);
+    assert_eq!(copy.op, op::IDENTITY);
 }

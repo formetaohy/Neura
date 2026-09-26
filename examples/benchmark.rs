@@ -1,6 +1,6 @@
 use neura::{
-    Adam, Graph, Init, MatmulTile, Mlp, Precision, Profile, Program, Runtime, RuntimeRequest,
-    Shape, mse_loss,
+    Adam, Element, Graph, Init, MatmulTile, Mlp, Profile, Program, Runtime, RuntimeRequest, Shape,
+    mse_loss,
 };
 use std::time::Instant;
 
@@ -80,9 +80,9 @@ fn measured(label: String, program: &Program, timing: Timing) -> Measured {
 
 fn wide(runtime: &Runtime, elements: u32) -> Measured {
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(elements));
+    let data = graph.input(Shape::vector(elements), Element::Single);
     graph.relu(graph.mul(data, data));
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, data, &vec![0.5; elements as usize]);
     runtime.run(&program);
@@ -103,16 +103,17 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
             low: -0.2,
             high: 0.2,
         },
+        Element::Single,
     );
-    let observations = graph.input(Shape::matrix(samples, widths[0]));
+    let observations = graph.input(Shape::matrix(samples, widths[0]), Element::Single);
     let outputs = *widths.last().expect("a width");
-    let targets = graph.input(Shape::matrix(samples, outputs));
+    let targets = graph.input(Shape::matrix(samples, outputs), Element::Single);
     let loss = mse_loss(&graph, model.forward(&graph, observations), targets);
     let gradients = graph.backward(loss);
     let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
@@ -138,11 +139,12 @@ fn act(runtime: &Runtime, widths: &[u32], agents: u32) -> Measured {
             low: -0.2,
             high: 0.2,
         },
+        Element::Single,
     );
-    let observations = graph.input(Shape::matrix(agents, widths[0]));
+    let observations = graph.input(Shape::matrix(agents, widths[0]), Element::Single);
     let actions = graph.argmax(model.forward(&graph, observations));
     graph.retain(actions);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
@@ -161,11 +163,11 @@ fn act(runtime: &Runtime, widths: &[u32], agents: u32) -> Measured {
 fn products(runtime: &Runtime, shapes: &[(u32, u32, u32)]) -> Measured {
     let graph = Graph::new();
     for (rows, depth, columns) in shapes {
-        let left = graph.parameter(Shape::matrix(*rows, *depth), Init::Zero);
-        let right = graph.parameter(Shape::matrix(*depth, *columns), Init::Zero);
+        let left = graph.parameter(Shape::matrix(*rows, *depth), Init::Zero, Element::Single);
+        let right = graph.parameter(Shape::matrix(*depth, *columns), Init::Zero, Element::Single);
         graph.retain(graph.matmul(left, right));
     }
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.run(&program);
     let timing = time(runtime, &program, 16);
@@ -232,10 +234,18 @@ fn main() {
     );
     for profile in runtime.profiles() {
         let graph = Graph::new();
-        let left = graph.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
-        let right = graph.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
+        let left = graph.parameter(
+            Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH),
+            Init::Zero,
+            Element::Single,
+        );
+        let right = graph.parameter(
+            Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS),
+            Init::Zero,
+            Element::Single,
+        );
         graph.retain(graph.matmul(left, right));
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile_with(&graph, &weights, profile);
         runtime.run(&program);
         let timing = time(&runtime, &program, 16);
@@ -251,10 +261,18 @@ fn main() {
         );
     }
     let search = Graph::new();
-    let left = search.parameter(Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH), Init::Zero);
-    let right = search.parameter(Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS), Init::Zero);
+    let left = search.parameter(
+        Shape::matrix(PRODUCT_ROWS, PRODUCT_DEPTH),
+        Init::Zero,
+        Element::Single,
+    );
+    let right = search.parameter(
+        Shape::matrix(PRODUCT_DEPTH, PRODUCT_COLUMNS),
+        Init::Zero,
+        Element::Single,
+    );
     search.retain(search.matmul(left, right));
-    let weights = runtime.weights(&search, Precision::Single);
+    let weights = runtime.weights(&search);
     let tuned = runtime.tune(&search, &weights);
     println!(
         "the device measured every profile it offers and kept {}",

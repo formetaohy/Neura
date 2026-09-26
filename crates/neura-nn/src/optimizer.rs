@@ -1,3 +1,4 @@
+use neura_abi::Element;
 use neura_graph::{Gradients, Graph, Init, Shape, Value};
 
 pub struct Sgd<'g> {
@@ -80,8 +81,8 @@ impl<'g> Adam<'g> {
         );
         let moments = Moments {
             parameter,
-            mean: graph.parameter(graph.shape(parameter), Init::Zero),
-            variance: graph.parameter(graph.shape(parameter), Init::Zero),
+            mean: graph.parameter(graph.shape(parameter), Init::Zero, Element::Single),
+            variance: graph.parameter(graph.shape(parameter), Init::Zero, Element::Single),
         };
         self.moments.push(moments);
         moments

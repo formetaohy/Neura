@@ -1,8 +1,7 @@
 use naga::{AddressSpace, Expression, MathFunction, Statement, SwitchValue, TypeInner};
-use neura_abi::{Kind, RECORDS};
+use neura_abi::{Element, Kind, RECORDS};
 use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
-use neura_precision::Precision;
 use neura_profile::{Budget, Geometry, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
@@ -22,19 +21,19 @@ fn all(profile: usize) -> &'static Megakernel {
             .map(|profile| {
                 Megakernel::assemble(
                     Kind::ALL,
+                    Element::ALL,
                     Geometry::of(profile.workgroup(), profile.tiles()),
-                    Precision::Single,
                 )
             })
             .collect()
     })[profile]
 }
 
-fn selected(profile: Profile, kinds: &[Kind], precision: Precision) -> Megakernel {
+fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Megakernel {
     Megakernel::assemble(
         kinds,
+        elements,
         Geometry::of(profile.workgroup(), profile.tiles()),
-        precision,
     )
 }
 
@@ -82,8 +81,8 @@ fn rust_source_compiles_into_three_native_shader_formats() {
 }
 
 #[test]
-fn half_precision_compiles_every_task_for_every_native_backend() {
-    let program = selected(profiles()[0], Kind::ALL, Precision::Half).program();
+fn every_element_compiles_every_task_for_every_native_backend() {
+    let program = selected(profiles()[0], Kind::ALL, Element::ALL).program();
     assert!(matches!(
         program.translate(Backend::Vulkan),
         ShaderTranslation::Spirv(_)
@@ -135,7 +134,7 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
 
 #[test]
 fn specialization_includes_only_reachable_rust_functions() {
-    let kernel = selected(profiles()[0], &[Kind::Fill], Precision::Single);
+    let kernel = selected(profiles()[0], &[Kind::Fill], &[Element::Single]);
     let program = kernel.program();
     let reachable = functions(&program);
     assert!(reachable.contains("run_fill"));
@@ -169,7 +168,7 @@ fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
     let program = selected(
         profiles()[0],
         &[Kind::Fill, Kind::Binary],
-        Precision::Single,
+        &[Element::Single],
     )
     .program();
     let function = program
@@ -201,7 +200,7 @@ fn the_rust_operation_dispatcher_contains_every_declared_code() {
     let program = selected(
         profiles()[0],
         &[Kind::Binary, Kind::Partial],
-        Precision::Single,
+        &[Element::Single],
     )
     .program();
     let function = program
@@ -234,9 +233,14 @@ fn the_rust_operation_dispatcher_contains_every_declared_code() {
 }
 
 #[test]
-fn single_and_half_precision_compile_distinct_device_loads() {
-    let single = selected(profiles()[0], &[Kind::Unary], Precision::Single).program();
-    let half = selected(profiles()[0], &[Kind::Unary], Precision::Half).program();
+fn every_tensor_element_compiles_only_the_loads_it_reads() {
+    let single = selected(profiles()[0], &[Kind::Unary], &[Element::Single]).program();
+    let half = selected(
+        profiles()[0],
+        &[Kind::Unary],
+        &[Element::Single, Element::Half],
+    )
+    .program();
     assert_ne!(single, half);
     assert!(
         !single
@@ -265,6 +269,30 @@ fn single_and_half_precision_compile_distinct_device_loads() {
                 }
             ))
     );
+    assert!(!functions(&half).contains("fetch_bfloat16"));
+}
+
+#[test]
+fn a_pack_carries_only_the_elements_it_packs() {
+    let half = selected(
+        profiles()[0],
+        &[Kind::Pack],
+        &[Element::Single, Element::Half],
+    )
+    .program();
+    let reachable = functions(&half);
+    assert!(reachable.contains("run_pack"));
+    assert!(reachable.contains("run_pack_half"));
+    assert!(!reachable.contains("run_pack_bfloat16"));
+    let both = selected(
+        profiles()[0],
+        &[Kind::Pack],
+        &[Element::Half, Element::Bfloat16],
+    )
+    .program();
+    let reachable = functions(&both);
+    assert!(reachable.contains("run_pack_half"));
+    assert!(reachable.contains("run_pack_bfloat16"));
 }
 
 #[test]
@@ -310,8 +338,8 @@ fn workgroup_allocation_fits_the_advertised_profile() {
 
 #[test]
 fn the_same_rust_specialization_produces_the_same_device_program() {
-    let first = selected(profiles()[0], &[Kind::Fill], Precision::Single).program();
-    let second = selected(profiles()[0], &[Kind::Fill], Precision::Single).program();
+    let first = selected(profiles()[0], &[Kind::Fill], &[Element::Single]).program();
+    let second = selected(profiles()[0], &[Kind::Fill], &[Element::Single]).program();
     assert_eq!(first, second);
     assert_eq!(first.spirv(), second.spirv());
 }

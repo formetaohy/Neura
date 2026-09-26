@@ -1,3 +1,4 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value, Window};
 
 pub struct Linear<'g> {
@@ -6,14 +7,14 @@ pub struct Linear<'g> {
 }
 
 impl<'g> Linear<'g> {
-    pub fn new(graph: &Graph<'g>, inputs: u32, outputs: u32, init: Init) -> Self {
+    pub fn new(graph: &Graph<'g>, inputs: u32, outputs: u32, init: Init, element: Element) -> Self {
         assert!(
             inputs > 0 && outputs > 0,
             "a dense layer of {inputs} by {outputs} carries no weight",
         );
         Self {
-            weight: graph.parameter(Shape::matrix(inputs, outputs), init),
-            bias: graph.parameter(Shape::vector(outputs), Init::Zero),
+            weight: graph.parameter(Shape::matrix(inputs, outputs), init, element),
+            bias: graph.parameter(Shape::vector(outputs), Init::Zero, element),
         }
     }
 
@@ -41,7 +42,13 @@ pub struct Conv2d<'g> {
 }
 
 impl<'g> Conv2d<'g> {
-    pub fn new(graph: &Graph<'g>, channels: [u32; 2], window: Window, init: Init) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        channels: [u32; 2],
+        window: Window,
+        init: Init,
+        element: Element,
+    ) -> Self {
         let [inputs, outputs] = channels;
         assert!(
             inputs > 0 && outputs > 0,
@@ -51,8 +58,9 @@ impl<'g> Conv2d<'g> {
             filter: graph.parameter(
                 Shape::of([outputs, inputs, window.reach_rows(), window.reach_columns()]),
                 init,
+                element,
             ),
-            bias: graph.parameter(Shape::of([1, outputs, 1, 1]), Init::Zero),
+            bias: graph.parameter(Shape::of([1, outputs, 1, 1]), Init::Zero, element),
             window,
         }
     }
@@ -83,7 +91,7 @@ pub struct LayerNorm<'g> {
 }
 
 impl<'g> LayerNorm<'g> {
-    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32) -> Self {
+    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32, element: Element) -> Self {
         assert!(
             columns > 0,
             "a layer of {columns} columns normalizes nothing"
@@ -91,8 +99,8 @@ impl<'g> LayerNorm<'g> {
         assert!(floor > 0.0, "a floor of {floor} divides by zero");
         Self {
             columns,
-            scale: graph.parameter(Shape::vector(columns), init),
-            shift: graph.parameter(Shape::vector(columns), Init::Zero),
+            scale: graph.parameter(Shape::vector(columns), init, element),
+            shift: graph.parameter(Shape::vector(columns), Init::Zero, element),
             share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
             floor: graph.fill(Shape::scalar(), floor),
         }
@@ -132,13 +140,13 @@ pub struct Embedding<'g> {
 }
 
 impl<'g> Embedding<'g> {
-    pub fn new(graph: &Graph<'g>, rows: u32, width: u32, init: Init) -> Self {
+    pub fn new(graph: &Graph<'g>, rows: u32, width: u32, init: Init, element: Element) -> Self {
         assert!(
             rows > 0 && width > 0,
             "an embedding of {rows} rows of {width} numbers holds nothing",
         );
         Self {
-            table: graph.parameter(Shape::matrix(rows, width), init),
+            table: graph.parameter(Shape::matrix(rows, width), init, element),
         }
     }
 
@@ -160,14 +168,14 @@ pub struct Mlp<'g> {
 }
 
 impl<'g> Mlp<'g> {
-    pub fn new(graph: &Graph<'g>, widths: &[u32], init: Init) -> Self {
+    pub fn new(graph: &Graph<'g>, widths: &[u32], init: Init, element: Element) -> Self {
         assert!(
             widths.len() >= 2,
             "a multilayer perceptron spans at least two widths",
         );
         let layers = widths
             .windows(2)
-            .map(|pair| Linear::new(graph, pair[0], pair[1], init))
+            .map(|pair| Linear::new(graph, pair[0], pair[1], init, element))
             .collect();
         Self { layers }
     }

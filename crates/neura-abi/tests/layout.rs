@@ -1,8 +1,7 @@
 use bytemuck::Zeroable;
-use neura_abi::Kind;
 use neura_abi::{
-    BoundsRecord, PlacementRecord, SegmentRecord, StepFields, StepRecord, Store, TaskFields,
-    TaskRecord, ValueFields, ValueRecord,
+    BoundsRecord, Element, Kind, PlacementRecord, SegmentRecord, StepFields, StepRecord, Store,
+    TaskFields, TaskRecord, ValueFields, ValueRecord,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -94,6 +93,7 @@ fn a_record_declares_what_the_device_reads() {
     let value = ValueRecord::of(ValueFields {
         base: 6,
         store: Store::Weights.code(),
+        element: Element::Half.code(),
         dims: [1, 2, 3, 4],
         strides: [12, 6, 2, 1],
     });
@@ -103,6 +103,10 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(
         u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
         Store::Weights.code()
+    );
+    assert_eq!(
+        u32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
+        Element::Half.code()
     );
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 1);
     assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);

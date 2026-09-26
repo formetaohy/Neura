@@ -127,6 +127,9 @@ impl<'a> Fold<'a> {
         {
             return None;
         }
+        if self.values[tail.out as usize].element.narrow() {
+            return None;
+        }
         if self.values[head.out as usize].shape != self.values[tail.out as usize].shape {
             return None;
         }

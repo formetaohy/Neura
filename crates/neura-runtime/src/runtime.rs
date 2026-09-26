@@ -3,14 +3,14 @@ use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
-use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Store, WORD_BYTES};
+use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
     SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
 use neura_op as op;
-use neura_precision::Precision;
+use neura_precision::{pack, unpack};
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
 use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
@@ -30,14 +30,12 @@ const ENTROPY_SEED: u32 = 0x9e37_79b9;
 struct GeometryKey {
     kinds: Vec<Kind>,
     profile: Profile,
-    precision: Precision,
 }
 
 pub struct Readout<'r> {
     brand: PhantomData<&'r ()>,
     slot: usize,
     submission: SubmissionIndex,
-    precision: Precision,
     spans: Vec<(Span, u64, u64)>,
     total: u64,
     refusal: u64,
@@ -145,21 +143,16 @@ impl Runtime {
             .expect("the device offers no workgroup the framework can schedule")
     }
 
-    pub fn weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
+    pub fn weights(&self, graph: &Graph) -> Weights<'_> {
         self.context.assert_alive();
-        let (weights, layout) = self.parameter_store(graph, precision);
+        let (weights, layout) = self.parameter_store(graph);
         self.seed(&layout, &weights);
         weights
     }
 
-    pub fn load(
-        &self,
-        graph: &Graph,
-        checkpoint: &Checkpoint,
-        precision: Precision,
-    ) -> Weights<'_> {
+    pub fn load(&self, graph: &Graph, checkpoint: &Checkpoint) -> Weights<'_> {
         self.context.assert_alive();
-        let (weights, layout) = self.parameter_store(graph, precision);
+        let (weights, layout) = self.parameter_store(graph);
         self.pour(&layout, &weights, checkpoint);
         weights
     }
@@ -205,10 +198,10 @@ impl Runtime {
         Checkpoint::of(weights.region(), payload)
     }
 
-    fn parameter_store(&self, graph: &Graph, precision: Precision) -> (Weights<'_>, Layout) {
-        let layout = Layout::of(graph, self.alignment, precision);
+    fn parameter_store(&self, graph: &Graph) -> (Weights<'_>, Layout) {
+        let layout = Layout::of(graph, self.alignment);
         let store = self.heap.allocate(layout.weights().words());
-        let weights = Weights::new(store, layout.weights().clone(), precision);
+        let weights = Weights::new(store, layout.weights().clone());
         (weights, layout)
     }
 
@@ -222,7 +215,7 @@ impl Runtime {
             self.heap.buffer().write_at(
                 queue,
                 layout.weight_bytes(placement, seed.address()),
-                &weights.precision().pack(&values),
+                &pack(seed.element(), &values),
             );
         }
     }
@@ -236,7 +229,7 @@ impl Runtime {
 
     pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
         self.context.assert_alive();
-        let layout = Layout::of(graph, self.alignment, weights.precision());
+        let layout = Layout::of(graph, self.alignment);
         assert_eq!(
             layout.weights(),
             weights.region(),
@@ -270,7 +263,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let encoding = self.carry(graph, profile, weights.precision());
+        let encoding = self.carry(graph, profile);
         assert!(
             encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
@@ -281,21 +274,13 @@ impl Runtime {
             encoding.weights().tensors(),
             weights.tensors(),
         );
-        assert!(
-            !(weights.precision().half() && encoding.updates_weights()),
-            "a {:?} weight store carries no in-place parameter update; a model that trains holds its weights in {:?}",
-            weights.precision(),
-            Precision::Single,
-        );
-        let signature = tape::signature(&encoding, profile, weights.precision(), self.alignment);
+        let signature = tape::signature(&encoding, profile, self.alignment);
         let kinds = encoding.kinds().to_vec();
+        let elements = encoding.elements().to_vec();
         let geometry = Geometry::of(profile.workgroup(), encoding.tiles());
-        let precision = weights.precision();
-        let kernel = self
-            .tapes
-            .kernel(kinds.as_slice(), geometry.clone(), precision, || {
-                Megakernel::assemble(&kinds, geometry, precision)
-            });
+        let kernel = self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
+            Megakernel::assemble(&kinds, &elements, geometry)
+        });
         let tape = self.tapes.of(signature, |signature| {
             DeviceTape::build(&self.context, &self.pool, encoding, kernel, signature)
         });
@@ -306,8 +291,8 @@ impl Runtime {
         Program::of(&self.context, tape, tensors, weights.clone())
     }
 
-    fn carry(&self, graph: &Graph, profile: Profile, precision: Precision) -> Encoding {
-        let first = Encoding::of(graph, self.alignment, profile, precision, Vec::new());
+    fn carry(&self, graph: &Graph, profile: Profile) -> Encoding {
+        let first = Encoding::of(graph, self.alignment, profile, Vec::new());
         let mut geometries = self
             .geometries
             .lock()
@@ -316,7 +301,6 @@ impl Runtime {
             .entry(GeometryKey {
                 kinds: first.kinds().to_vec(),
                 profile,
-                precision,
             })
             .or_default();
         if carried.as_slice() == first.tiles() {
@@ -327,21 +311,13 @@ impl Runtime {
                 carried.push(*tile);
             }
         }
-        let encoding = Encoding::of(
-            graph,
-            self.alignment,
-            profile,
-            precision,
-            std::mem::take(carried),
-        );
+        let encoding = Encoding::of(graph, self.alignment, profile, std::mem::take(carried));
         *carried = encoding.tiles().to_vec();
         encoding
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
-        let scratch = graph
-            .updates_weights()
-            .then(|| self.scratch_weights(graph, weights.precision()));
+        let scratch = graph.updates_weights().then(|| self.scratch_weights(graph));
         let mut measured = self.profiles().into_iter().map(|profile| {
             let measuring = scratch.as_ref().unwrap_or(weights);
             (
@@ -361,9 +337,9 @@ impl Runtime {
         self.compile_with(graph, weights, fastest)
     }
 
-    fn scratch_weights(&self, graph: &Graph, precision: Precision) -> Weights<'_> {
+    fn scratch_weights(&self, graph: &Graph) -> Weights<'_> {
         self.context.assert_alive();
-        let (scratch, layout) = self.parameter_store(graph, precision);
+        let (scratch, layout) = self.parameter_store(graph);
         self.seed(&layout, &scratch);
         scratch
     }
@@ -419,10 +395,7 @@ impl Runtime {
             data.len(),
             span.elements,
         );
-        let bytes = match span.store {
-            Store::Weights => program.weights.precision().pack(data),
-            Store::Tensors => bytemuck::cast_slice(data).to_vec(),
-        };
+        let bytes = pack(span.element, data);
         program
             .heap()
             .write_at(self.context.queue(), span.offset, &bytes);
@@ -452,12 +425,7 @@ impl Runtime {
                 value.id(),
             );
         }
-        let precision = program.weights.precision();
-        let total = spans
-            .iter()
-            .map(|span| span_bytes(*span, precision))
-            .sum::<u64>()
-            + WORD_BYTES;
+        let total = spans.iter().map(|span| span_bytes(*span)).sum::<u64>() + WORD_BYTES;
         assert!(
             total <= self.readback.capacity(),
             "pulling {total} bytes outruns the {} byte readback of this runtime",
@@ -470,7 +438,7 @@ impl Runtime {
         let mut collected = Vec::with_capacity(spans.len());
         let mut at = 0;
         for span in &spans {
-            let bytes = span_bytes(*span, precision);
+            let bytes = span_bytes(*span);
             submission.copy(program.heap(), span.offset, staging, at, bytes);
             collected.push((*span, at, bytes));
             at += bytes;
@@ -481,7 +449,6 @@ impl Runtime {
             brand: PhantomData,
             slot,
             submission,
-            precision,
             spans: collected,
             total,
             refusal: at,
@@ -508,9 +475,9 @@ impl Runtime {
             .iter()
             .map(|(span, offset, length)| {
                 let start = *offset as usize;
-                decode(
-                    *span,
-                    readout.precision,
+                unpack(
+                    span.element,
+                    span.elements as usize,
                     &bytes[start..start + *length as usize],
                 )
             })
@@ -549,23 +516,16 @@ impl Runtime {
     }
 }
 
-fn span_bytes(span: Span, precision: Precision) -> u64 {
-    match span.store {
-        Store::Tensors => u64::from(span.elements) * WORD_BYTES,
-        Store::Weights => precision.words(u64::from(span.elements)) * WORD_BYTES,
-    }
-}
-
-fn decode(span: Span, precision: Precision, bytes: &[u8]) -> Vec<f32> {
-    match span.store {
-        Store::Tensors => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-        Store::Weights => precision.unpack(span.elements as usize, bytes),
-    }
+fn span_bytes(span: Span) -> u64 {
+    span.element.words(u64::from(span.elements)) * WORD_BYTES
 }
 
 fn refusal_message(word: u32) -> String {
     let refused = word >> 16;
     let code = (word & 0xffff) - 1;
+    if refused == neura_abi::REFUSAL_ELEMENT {
+        return format!("the device refused element {code} of a tensor");
+    }
     if refused >= Kind::COUNT {
         return format!("the device refused kind {refused} with code {code}");
     }
@@ -590,7 +550,8 @@ fn refusal_message(word: u32) -> String {
         | Kind::Argmax
         | Kind::Categorical
         | Kind::SumAxis
-        | Kind::Conv2dWeightGrad => {
+        | Kind::Conv2dWeightGrad
+        | Kind::Pack => {
             format!(
                 "the device refused geometry {code} of the {} task",
                 kind.name(),

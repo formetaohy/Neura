@@ -1,16 +1,14 @@
-use neura_abi::WORD_BYTES;
-use neura_precision::Precision;
+use neura_abi::{Element, WORD_BYTES};
 use neura_program::Region;
 
 const MAGIC: [u8; 4] = *b"NRCP";
-const VERSION: u32 = 1;
-const HEADER_BYTES: usize = 24;
-const ENTRY_BYTES: usize = 4;
+const VERSION: u32 = 2;
+const HEADER_BYTES: usize = 20;
+const ENTRY_BYTES: usize = 8;
 
 pub struct Checkpoint {
     bytes: Vec<u8>,
-    precision: Precision,
-    entries: Vec<u32>,
+    entries: Vec<(u32, Element)>,
     payload: usize,
 }
 
@@ -26,24 +24,26 @@ impl Checkpoint {
         let entries = region
             .entries()
             .iter()
-            .map(|(_, elements)| {
-                u32::try_from(*elements).expect("a tensor fits a u32 element count")
+            .map(|entry| {
+                (
+                    u32::try_from(entry.elements).expect("a tensor fits a u32 element count"),
+                    entry.element,
+                )
             })
             .collect::<Vec<_>>();
         let payload_at = HEADER_BYTES + entries.len() * ENTRY_BYTES;
         let mut bytes = Vec::with_capacity(payload_at + region.bytes() as usize);
         bytes.extend_from_slice(&MAGIC);
         bytes.extend_from_slice(&VERSION.to_le_bytes());
-        bytes.extend_from_slice(&region.precision().code().to_le_bytes());
         bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&region.words().to_le_bytes());
-        for elements in &entries {
+        for (elements, element) in &entries {
             bytes.extend_from_slice(&elements.to_le_bytes());
+            bytes.extend_from_slice(&element.code().to_le_bytes());
         }
         bytes.extend_from_slice(&payload);
         Self {
             bytes,
-            precision: region.precision(),
             entries,
             payload: payload_at,
         }
@@ -67,17 +67,9 @@ impl Checkpoint {
             version, VERSION,
             "a checkpoint of format version {version} predates or postdates format version {VERSION}",
         );
-        let code = u32::from_le_bytes(bytes[8..12].try_into().expect("a precision word"));
-        let precision = match code {
-            0 => Precision::Single,
-            1 => Precision::Half,
-            _ => {
-                panic!("a checkpoint carries the precision code {code}, and no device stores by it")
-            }
-        };
         let tensors =
-            u32::from_le_bytes(bytes[12..16].try_into().expect("a tensor count word")) as usize;
-        let words = u64::from_le_bytes(bytes[16..24].try_into().expect("a word count"));
+            u32::from_le_bytes(bytes[8..12].try_into().expect("a tensor count word")) as usize;
+        let words = u64::from_le_bytes(bytes[12..20].try_into().expect("a word count"));
         let payload = HEADER_BYTES + tensors * ENTRY_BYTES;
         assert!(
             bytes.len() >= payload,
@@ -88,16 +80,22 @@ impl Checkpoint {
             .as_chunks::<ENTRY_BYTES>()
             .0
             .iter()
-            .map(|word| u32::from_le_bytes(*word))
+            .map(|entry| {
+                (
+                    u32::from_le_bytes(entry[..4].try_into().expect("an element count")),
+                    Element::of(u32::from_le_bytes(
+                        entry[4..].try_into().expect("an element code"),
+                    )),
+                )
+            })
             .collect::<Vec<_>>();
-        let elements = entries
+        let packed = entries
             .iter()
-            .map(|elements| u64::from(*elements))
+            .map(|(elements, element)| element.words(u64::from(*elements)))
             .sum::<u64>();
         assert!(
-            elements <= precision.elements_per_word() * words,
-            "a checkpoint of {words} words spans {elements} elements where its store packs at most {}",
-            precision.elements_per_word() * words,
+            packed <= words,
+            "a checkpoint of {words} words carries {packed} words of tensors",
         );
         assert_eq!(
             (bytes.len() - payload) as u64,
@@ -107,7 +105,6 @@ impl Checkpoint {
         );
         Self {
             bytes: bytes.to_vec(),
-            precision,
             entries,
             payload,
         }
@@ -117,12 +114,22 @@ impl Checkpoint {
         &self.bytes
     }
 
-    pub fn precision(&self) -> Precision {
-        self.precision
-    }
-
     pub fn tensors(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn elements(&self, tensor: usize) -> u32 {
+        self.entries
+            .get(tensor)
+            .unwrap_or_else(|| panic!("this checkpoint holds {} tensors", self.entries.len()))
+            .0
+    }
+
+    pub fn element(&self, tensor: usize) -> Element {
+        self.entries
+            .get(tensor)
+            .unwrap_or_else(|| panic!("this checkpoint holds {} tensors", self.entries.len()))
+            .1
     }
 
     pub(crate) fn payload(&self) -> &[u8] {
@@ -131,27 +138,21 @@ impl Checkpoint {
 
     pub(crate) fn matches(&self, region: &Region) {
         assert_eq!(
-            self.precision,
-            region.precision(),
-            "a checkpoint of a {:?} store pours into a {:?} region",
-            self.precision,
-            region.precision(),
-        );
-        assert_eq!(
             self.entries.len(),
             region.tensors(),
             "a checkpoint of {} tensors pours into a region of {} tensors; a store loads only a checkpoint of the very same parameters in the very same order",
             self.entries.len(),
             region.tensors(),
         );
-        for (index, (checkpoint, (_, elements))) in
+        for (index, ((checkpoint, element), entry)) in
             self.entries.iter().zip(region.entries()).enumerate()
         {
-            assert_eq!(
-                u64::from(*checkpoint),
-                *elements,
-                "tensor {index} of the checkpoint holds {} elements where the region holds {elements}",
-                checkpoint,
+            assert!(
+                u64::from(*checkpoint) == entry.elements && *element == entry.element,
+                "tensor {index} of the checkpoint holds {checkpoint} {} elements where the region holds {} {}",
+                element.name(),
+                entry.elements,
+                entry.element.name(),
             );
         }
         assert_eq!(

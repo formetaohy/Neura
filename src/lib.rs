@@ -1,4 +1,4 @@
-pub use neura_abi::Store;
+pub use neura_abi::{Element, Store};
 pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, Device, GpuRequest, GpuUnavailable,
     PowerPreference, Queue,
@@ -10,6 +10,6 @@ pub use neura_nn::{
 };
 pub use neura_program::{Layout, Region, Seed};
 pub use neura_runtime::{
-    Budget, Checkpoint, MatmulTile, Placement, Precision, Profile, Program, Readout, Runtime,
-    RuntimeRequest, Span, Weights,
+    Budget, Checkpoint, MatmulTile, Placement, Profile, Program, Readout, Runtime, RuntimeRequest,
+    Span, Weights,
 };

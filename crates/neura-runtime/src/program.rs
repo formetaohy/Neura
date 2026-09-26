@@ -6,7 +6,6 @@ use neura_abi::{
 };
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::Value;
-use neura_precision::Precision;
 use neura_profile::{MatmulTile, Profile};
 use neura_program::{Region, Span};
 use neura_shader::{BOUNDS, HEAP, PLACEMENT, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
@@ -18,16 +17,14 @@ use std::sync::Arc;
 pub struct Weights<'r> {
     store: Allocation,
     region: Region,
-    precision: Precision,
     brand: PhantomData<&'r ()>,
 }
 
 impl<'r> Weights<'r> {
-    pub(crate) fn new(store: Allocation, region: Region, precision: Precision) -> Self {
+    pub(crate) fn new(store: Allocation, region: Region) -> Self {
         Self {
             store,
             region,
-            precision,
             brand: PhantomData,
         }
     }
@@ -46,10 +43,6 @@ impl<'r> Weights<'r> {
 
     pub fn tensors(&self) -> usize {
         self.region.tensors()
-    }
-
-    pub fn precision(&self) -> Precision {
-        self.precision
     }
 
     pub(crate) fn region(&self) -> &Region {

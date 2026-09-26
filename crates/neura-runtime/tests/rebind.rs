@@ -1,5 +1,5 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::Precision;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -15,14 +15,15 @@ struct Model<'g> {
 }
 
 fn trained<'g>(graph: &Graph<'g>, samples: u32, hidden: u32) -> Model<'g> {
-    let observations = graph.input(Shape::matrix(samples, 4));
-    let targets = graph.input(Shape::matrix(samples, 2));
+    let observations = graph.input(Shape::matrix(samples, 4), Element::Single);
+    let targets = graph.input(Shape::matrix(samples, 2), Element::Single);
     let first = graph.parameter(
         Shape::matrix(4, hidden),
         Init::Uniform {
             low: -0.25,
             high: 0.25,
         },
+        Element::Single,
     );
     let second = graph.parameter(
         Shape::matrix(hidden, 2),
@@ -30,6 +31,7 @@ fn trained<'g>(graph: &Graph<'g>, samples: u32, hidden: u32) -> Model<'g> {
             low: -0.25,
             high: 0.25,
         },
+        Element::Single,
     );
     let prediction = graph.matmul(graph.relu(graph.matmul(observations, first)), second);
     graph.retain(prediction);
@@ -100,7 +102,7 @@ fn a_rebound_store_carries_its_training_across_graphs() {
     let runtime = open();
     let graph = Graph::new();
     let model = trained(&graph, 16, 5);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let (small_observations, small_targets) = batch(16, 3);
     runtime.write(&program, model.observations, &small_observations);
@@ -147,7 +149,7 @@ fn rebind_rejects_a_foreign_parameter_region() {
     let runtime = open();
     let graph = Graph::new();
     let _model = trained(&graph, 16, 5);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let foreign = Graph::new();
     let _model = trained(&foreign, 16, 6);
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -161,7 +163,7 @@ fn tuning_leaves_the_parameter_store_untouched() {
     let runtime = open();
     let graph = Graph::new();
     let model = trained(&graph, 8, 5);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let (observations, targets) = batch(8, 5);
     runtime.write(&program, model.observations, &observations);
@@ -189,7 +191,7 @@ fn one_device_geometry_serves_every_batch_that_walks_its_tiles() {
     for samples in [8, 32, 96, 128, 8, 32] {
         let graph = Graph::new();
         let model = trained(&graph, samples, 5);
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         if !tiles.contains(&program.tiles().to_vec()) {
             tiles.push(program.tiles().to_vec());

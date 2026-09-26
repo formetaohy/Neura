@@ -5,11 +5,10 @@ use crate::lower;
 use crate::lower::Task;
 use crate::schedule::{self, Dispatch};
 use neura_abi::{
-    BoundsFields, BoundsRecord, Kind, Placement, SegmentRecord, StepRecord, Store, TaskFields,
-    TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    BoundsFields, BoundsRecord, Element, Kind, Placement, SegmentRecord, StepRecord, Store,
+    TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
-use neura_precision::Precision;
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 
@@ -18,6 +17,7 @@ pub struct Span {
     pub store: Store,
     pub offset: u64,
     pub elements: u32,
+    pub element: Element,
 }
 
 struct Block {
@@ -99,11 +99,13 @@ struct Placed {
     store: Store,
     address: u64,
     elements: u32,
+    element: Element,
 }
 
 pub struct Encoding {
     profile: Profile,
     kinds: Vec<Kind>,
+    elements: Vec<Element>,
     tiles: Vec<MatmulTile>,
     tasks: Vec<u8>,
     values: Vec<u8>,
@@ -126,17 +128,15 @@ impl Encoding {
         graph: &Graph<'_>,
         alignment: u64,
         profile: Profile,
-        precision: Precision,
         carried: Vec<MatmulTile>,
     ) -> Self {
-        Self::plan(&graph.snapshot(), profile, alignment, precision, carried)
+        Self::plan(&graph.snapshot(), profile, alignment, carried)
     }
 
     fn plan(
         state: &GraphSnapshot,
         profile: Profile,
         alignment: u64,
-        precision: Precision,
         carried: Vec<MatmulTile>,
     ) -> Self {
         assert!(
@@ -155,7 +155,9 @@ impl Encoding {
         }
 
         let kinds = carried_kinds(tasks);
-        let layout = Layout::of_values(values, precision, alignment);
+        let elements = carried_elements(values);
+        let layout = Layout::of_values(values, alignment);
+        assert_writes_match_their_element(values, tasks);
         assert_writers_precede_readers(values, tasks);
         assert_units_keep_their_order(tasks);
         let schedule = schedule::Schedule::of(values, tasks);
@@ -178,6 +180,7 @@ impl Encoding {
                     panic!("value {id} lies at {address}, beyond the device address space")
                 }),
                 store: layout.store(values, id as u32).code(),
+                element: layout.element(values, id as u32).code(),
                 dims: info.shape.dims(),
                 strides: info.strides,
             });
@@ -202,9 +205,11 @@ impl Encoding {
                     geometries[task.geometry as usize] += 1;
                     task.geometry
                 }
-                Kind::Argmax | Kind::Categorical | Kind::SumAxis | Kind::Conv2dWeightGrad => {
-                    task.geometry
-                }
+                Kind::Argmax
+                | Kind::Categorical
+                | Kind::SumAxis
+                | Kind::Conv2dWeightGrad
+                | Kind::Pack => task.geometry,
                 Kind::Binary
                 | Kind::Unary
                 | Kind::Partial
@@ -301,12 +306,14 @@ impl Encoding {
                 store: layout.store(values, id as u32),
                 address: layout.address(values, &offsets, id as u32),
                 elements: info.shape.elements(),
+                element: layout.element(values, id as u32),
             });
         }
 
         Self {
             profile,
             kinds,
+            elements,
             tiles: tiles.clone(),
             tasks: tape,
             values: records,
@@ -335,6 +342,10 @@ impl Encoding {
 
     pub fn kinds(&self) -> &[Kind] {
         &self.kinds
+    }
+
+    pub fn elements(&self) -> &[Element] {
+        &self.elements
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
@@ -391,13 +402,14 @@ impl Encoding {
                 )
             });
         let offset = match placed.store {
-            Store::Weights => self.layout.weight_bytes(placement, placed.address),
+            Store::Weights => (placement.weights() + placed.address) * WORD_BYTES,
             Store::Tensors => (placement.tensors() + placed.address) * WORD_BYTES,
         };
         Span {
             store: placed.store,
             offset,
             elements: placed.elements,
+            element: placed.element,
         }
     }
 
@@ -459,6 +471,39 @@ fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
         .copied()
         .filter(|kind| tasks.iter().any(|task| task.kind == *kind))
         .collect()
+}
+
+fn carried_elements(values: &[ValueInfo]) -> Vec<Element> {
+    Element::ALL
+        .iter()
+        .copied()
+        .filter(|element| values.iter().any(|info| info.element == *element))
+        .collect()
+}
+
+fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
+    for task in tasks {
+        let out = &values[task.out as usize];
+        if task.kind == Kind::Pack {
+            let source = &values[task.inputs[0] as usize];
+            assert!(
+                out.element.narrow() && source.element == Element::Single,
+                "a pack of {} numbers into a {} tensor reads the {} source {} writes element by element",
+                source.shape.elements(),
+                out.element.name(),
+                source.element.name(),
+                task.kind.name(),
+            );
+            continue;
+        }
+        assert!(
+            !out.element.narrow(),
+            "a {} task writes the {} tensor {} element by element, and a narrow tensor is written a word at a time by a pack",
+            task.kind.name(),
+            out.element.name(),
+            task.out,
+        );
+    }
 }
 
 fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {

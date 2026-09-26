@@ -1,7 +1,6 @@
 use crate::pool::{Pool, Recycled};
-use neura_abi::{Kind, StepRecord};
+use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
-use neura_precision::Precision;
 use neura_profile::Geometry;
 use neura_program::Encoding;
 use neura_shader::Megakernel;
@@ -91,8 +90,8 @@ impl DeviceTape {
 #[derive(PartialEq, Eq, Hash)]
 struct KernelIdentity {
     kinds: Vec<Kind>,
+    elements: Vec<Element>,
     geometry: Geometry,
-    precision: Precision,
 }
 
 pub(crate) struct Tapes {
@@ -118,14 +117,14 @@ impl Tapes {
     pub(crate) fn kernel(
         &self,
         kinds: &[Kind],
+        elements: &[Element],
         geometry: Geometry,
-        precision: Precision,
         assemble: impl FnOnce() -> Megakernel,
     ) -> Arc<Megakernel> {
         let identity = KernelIdentity {
             kinds: kinds.to_vec(),
+            elements: elements.to_vec(),
             geometry,
-            precision,
         };
         let mut kernels = self
             .kernels
@@ -174,7 +173,6 @@ impl Tapes {
 pub(crate) fn signature(
     encoding: &Encoding,
     profile: neura_profile::Profile,
-    precision: Precision,
     alignment: u64,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -187,7 +185,6 @@ pub(crate) fn signature(
         bytes.extend(tile.thread_rows().to_le_bytes());
         bytes.extend(tile.thread_columns().to_le_bytes());
     }
-    bytes.extend((precision as u32).to_le_bytes());
     bytes.extend(alignment.to_le_bytes());
     bytes.extend(encoding.tasks());
     bytes.extend(encoding.values());

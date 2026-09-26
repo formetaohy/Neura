@@ -2,7 +2,7 @@
 name = "neura-precision"
 version.workspace = true
 edition.workspace = true
-description = "Tensor storage precision and host packing"
+description = "Host packing of tensors into their declared element format"
 license.workspace = true
 repository.workspace = true
 

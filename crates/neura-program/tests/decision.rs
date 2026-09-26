@@ -1,6 +1,5 @@
-use neura_abi::{Kind, Placement, TaskRecord, ValueRecord, strategy};
+use neura_abi::{Element, Kind, Placement, TaskRecord, ValueRecord, strategy};
 use neura_graph::{Graph, Init, Shape, Value, Window};
-use neura_precision::Precision;
 use neura_profile::{Budget, Profile};
 
 fn narrow() -> Profile {
@@ -17,7 +16,7 @@ const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    Encoding::of(graph, ALIGNMENT, profile, Precision::Single, Vec::new())
+    Encoding::of(graph, ALIGNMENT, profile, Vec::new())
 }
 
 fn refuses(action: impl FnOnce()) -> bool {
@@ -54,9 +53,9 @@ fn values_of(encoding: &Encoding) -> Vec<ValueRecord> {
 #[test]
 fn a_row_folds_in_the_strategy_its_length_asks_for() {
     let graph = Graph::new();
-    let short = graph.argmax(graph.input(Shape::matrix(4, 8)));
-    let middle = graph.argmax(graph.input(Shape::matrix(333, 200)));
-    let long = graph.argmax(graph.input(Shape::matrix(2, 4096)));
+    let short = graph.argmax(graph.input(Shape::matrix(4, 8), Element::Single));
+    let middle = graph.argmax(graph.input(Shape::matrix(333, 200), Element::Single));
+    let long = graph.argmax(graph.input(Shape::matrix(2, 4096), Element::Single));
     graph.retain(short);
     graph.retain(middle);
     graph.retain(long);
@@ -101,9 +100,9 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
 #[test]
 fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
     let graph = Graph::new();
-    let short = graph.sum_rows(graph.input(Shape::matrix(64, 8)));
-    let long = graph.sum_rows(graph.input(Shape::matrix(2, 200)));
-    let view = graph.sum_rows(graph.transpose(graph.input(Shape::matrix(200, 2))));
+    let short = graph.sum_rows(graph.input(Shape::matrix(64, 8), Element::Single));
+    let long = graph.sum_rows(graph.input(Shape::matrix(2, 200), Element::Single));
+    let view = graph.sum_rows(graph.transpose(graph.input(Shape::matrix(200, 2), Element::Single)));
     graph.retain(short);
     graph.retain(long);
     graph.retain(view);
@@ -151,12 +150,15 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
 #[test]
 fn a_product_hands_the_device_a_tile_for_every_plane() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([2, 3, 64, 16]), Init::Zero);
-    let right = graph.parameter(Shape::of([2, 3, 16, 32]), Init::Zero);
+    let left = graph.parameter(Shape::of([2, 3, 64, 16]), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::of([2, 3, 16, 32]), Init::Zero, Element::Single);
     let batched = graph.matmul(left, right);
-    let shared = graph.matmul(left, graph.parameter(Shape::matrix(16, 32), Init::Zero));
+    let shared = graph.matmul(
+        left,
+        graph.parameter(Shape::matrix(16, 32), Init::Zero, Element::Single),
+    );
     let spread = graph.matmul(
-        graph.parameter(Shape::of([2, 1, 64, 16]), Init::Zero),
+        graph.parameter(Shape::of([2, 1, 64, 16]), Init::Zero, Element::Single),
         right,
     );
     graph.retain(batched);
@@ -202,15 +204,21 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
 #[test]
 fn a_product_refuses_batches_that_do_not_meet() {
     let graph = Graph::new();
-    let left = graph.parameter(Shape::of([2, 1, 4, 3]), Init::Zero);
+    let left = graph.parameter(Shape::of([2, 1, 4, 3]), Init::Zero, Element::Single);
     assert!(refuses(|| {
-        let _ = graph.matmul(left, graph.parameter(Shape::of([3, 1, 3, 5]), Init::Zero));
+        let _ = graph.matmul(
+            left,
+            graph.parameter(Shape::of([3, 1, 3, 5]), Init::Zero, Element::Single),
+        );
     }));
     assert!(refuses(|| {
-        let _ = graph.matmul(left, graph.parameter(Shape::of([2, 1, 4, 5]), Init::Zero));
+        let _ = graph.matmul(
+            left,
+            graph.parameter(Shape::of([2, 1, 4, 5]), Init::Zero, Element::Single),
+        );
     }));
     assert!(refuses(|| {
-        let _ = graph.sum_rows(graph.parameter(Shape::matrix(4, 1), Init::Zero));
+        let _ = graph.sum_rows(graph.parameter(Shape::matrix(4, 1), Init::Zero, Element::Single));
     }));
 }
 
@@ -218,8 +226,8 @@ fn a_product_refuses_batches_that_do_not_meet() {
 fn a_choice_covers_every_row_once() {
     let rows = 1000u32;
     let graph = Graph::new();
-    let seed = graph.input(Shape::scalar());
-    let action = graph.categorical(graph.input(Shape::matrix(rows, 16)), seed);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let action = graph.categorical(graph.input(Shape::matrix(rows, 16), Element::Single), seed);
     graph.retain(action);
     let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, action);
@@ -239,7 +247,7 @@ fn a_choice_covers_every_row_once() {
 #[test]
 fn an_index_list_carries_one_index_per_row() {
     let graph = Graph::new();
-    let indices = graph.input(Shape::matrix(6, 1));
+    let indices = graph.input(Shape::matrix(6, 1), Element::Single);
     let mask = graph.one_hot(indices, 4);
     graph.retain(mask);
     let encoding = encoding_with(&graph, wide());
@@ -254,8 +262,8 @@ fn an_index_list_carries_one_index_per_row() {
 #[test]
 fn a_gather_copies_the_rows_of_the_table_it_names() {
     let graph = Graph::new();
-    let table = graph.input(Shape::matrix(5, 3));
-    let indices = graph.input(Shape::matrix(7, 1));
+    let table = graph.input(Shape::matrix(5, 3), Element::Single);
+    let indices = graph.input(Shape::matrix(7, 1), Element::Single);
     let picked = graph.gather(table, indices);
     graph.retain(picked);
     let encoding = encoding_with(&graph, wide());
@@ -271,8 +279,8 @@ fn a_gather_copies_the_rows_of_the_table_it_names() {
 #[test]
 fn a_convolution_hands_the_device_the_window_it_walks() {
     let graph = Graph::new();
-    let input = graph.input(Shape::of([2, 3, 64, 64]));
-    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero);
+    let input = graph.input(Shape::of([2, 3, 64, 64]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [2, 2], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 32, 32]));
@@ -305,8 +313,8 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
 #[test]
 fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
     let graph = Graph::new();
-    let input = graph.parameter(Shape::of([1, 16, 8, 8]), Init::Zero);
-    let filter = graph.parameter(Shape::of([16, 16, 3, 3]), Init::Zero);
+    let input = graph.parameter(Shape::of([1, 16, 8, 8]), Init::Zero, Element::Single);
+    let filter = graph.parameter(Shape::of([16, 16, 3, 3]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [1, 1], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     let gradients = graph.backward(graph.sum(convolved));
@@ -352,22 +360,22 @@ fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
 #[test]
 fn a_convolution_stops_the_graph_it_cannot_walk() {
     let graph = Graph::new();
-    let input = graph.input(Shape::of([2, 3, 6, 6]));
-    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero);
+    let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     assert!(refuses(|| {
         let _ = graph.conv2d(input, filter, Window::sliding([5, 5]));
     }));
     assert!(refuses(|| {
         let _ = graph.conv2d(
             input,
-            graph.parameter(Shape::of([4, 2, 3, 3]), Init::Zero),
+            graph.parameter(Shape::of([4, 2, 3, 3]), Init::Zero, Element::Single),
             Window::sliding([3, 3]),
         );
     }));
     assert!(refuses(|| {
         let _ = graph.conv2d(
-            graph.input(Shape::of([2, 3, 2, 2])),
-            graph.parameter(Shape::of([4, 3, 5, 5]), Init::Zero),
+            graph.input(Shape::of([2, 3, 2, 2]), Element::Single),
+            graph.parameter(Shape::of([4, 3, 5, 5]), Init::Zero, Element::Single),
             Window::new([5, 5], [1, 1], [1, 1]),
         );
     }));
@@ -376,15 +384,15 @@ fn a_convolution_stops_the_graph_it_cannot_walk() {
 #[test]
 fn a_choice_stops_the_graph_it_cannot_fold() {
     let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(4, 4), Init::Zero);
-    let indices = graph.input(Shape::matrix(2, 1));
+    let table = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::matrix(2, 1), Element::Single);
     assert!(refuses(|| {
         let _ = graph.argmax(graph.transpose(table));
     }));
     assert!(refuses(|| {
         let _ = graph.gather(
-            graph.input(Shape::matrix(4, 4)),
-            graph.input(Shape::matrix(2, 2)),
+            graph.input(Shape::matrix(4, 4), Element::Single),
+            graph.input(Shape::matrix(2, 2), Element::Single),
         );
     }));
     assert!(refuses(|| {
@@ -394,22 +402,25 @@ fn a_choice_stops_the_graph_it_cannot_fold() {
         let _ = graph.one_hot(graph.transpose(table), 2);
     }));
     assert!(refuses(|| {
-        let _ = graph.categorical(graph.input(Shape::vector(4)), graph.input(Shape::vector(2)));
+        let _ = graph.categorical(
+            graph.input(Shape::vector(4), Element::Single),
+            graph.input(Shape::vector(2), Element::Single),
+        );
     }));
 }
 
 #[test]
 fn an_index_carries_no_gradient_of_its_own() {
     let index_graph = Graph::new();
-    let indices = index_graph.input(Shape::matrix(2, 1));
+    let indices = index_graph.input(Shape::matrix(2, 1), Element::Single);
     let drawn = index_graph.argmax(indices);
     assert!(refuses(|| {
         let _ = index_graph.backward(drawn);
     }));
 
     let table_graph = Graph::new();
-    let table = table_graph.parameter(Shape::matrix(4, 3), Init::Zero);
-    let indices = table_graph.input(Shape::matrix(2, 1));
+    let table = table_graph.parameter(Shape::matrix(4, 3), Init::Zero, Element::Single);
+    let indices = table_graph.input(Shape::matrix(2, 1), Element::Single);
     let picked = table_graph.matmul(table_graph.one_hot(indices, 4), table);
     let gradients = table_graph.backward(table_graph.sum(picked));
     assert_eq!(gradients.of(table).shape(), Shape::matrix(4, 3));
@@ -418,8 +429,8 @@ fn an_index_carries_no_gradient_of_its_own() {
 #[test]
 fn a_gather_walks_its_gradient_back_into_the_table_it_reads() {
     let graph = Graph::new();
-    let table = graph.parameter(Shape::matrix(4, 3), Init::Zero);
-    let indices = graph.input(Shape::matrix(2, 1));
+    let table = graph.parameter(Shape::matrix(4, 3), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::matrix(2, 1), Element::Single);
     let picked = graph.gather(table, indices);
     let gradients = graph.backward(graph.sum(picked));
     assert_eq!(gradients.of(table).shape(), Shape::matrix(4, 3));
@@ -428,9 +439,9 @@ fn a_gather_walks_its_gradient_back_into_the_table_it_reads() {
 #[test]
 fn a_scatter_adds_updates_into_the_leaf_it_names() {
     let graph = Graph::new();
-    let table = graph.resident(Shape::matrix(4, 3));
-    let indices = graph.input(Shape::matrix(2, 1));
-    let updates = graph.input(Shape::matrix(2, 3));
+    let table = graph.resident(Shape::matrix(4, 3), Element::Single);
+    let indices = graph.input(Shape::matrix(2, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(2, 3), Element::Single);
     graph.scatter_into(table, indices, updates);
     let encoding = encoding_with(&graph, narrow());
     assert_eq!(encoding.task_count(), 1);
@@ -440,11 +451,11 @@ fn a_scatter_adds_updates_into_the_leaf_it_names() {
 #[test]
 fn a_scatter_stops_at_every_tensor_it_cannot_update() {
     let graph = Graph::new();
-    let table = graph.resident(Shape::matrix(4, 3));
+    let table = graph.resident(Shape::matrix(4, 3), Element::Single);
     let derived = graph.mul(table, table);
-    let indices = graph.input(Shape::matrix(2, 1));
-    let updates = graph.input(Shape::matrix(2, 3));
-    let wide = graph.input(Shape::matrix(2, 4));
+    let indices = graph.input(Shape::matrix(2, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(2, 3), Element::Single);
+    let wide = graph.input(Shape::matrix(2, 4), Element::Single);
     assert!(refuses(|| {
         graph.scatter_into(derived, indices, updates);
     }));

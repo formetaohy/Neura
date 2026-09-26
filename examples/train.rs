@@ -1,4 +1,4 @@
-use neura::{Adam, Graph, Init, Mlp, Precision, Runtime, RuntimeRequest, Shape, mse_loss};
+use neura::{Adam, Element, Graph, Init, Mlp, Runtime, RuntimeRequest, Shape, mse_loss};
 use std::time::Instant;
 
 fn session(samples: u32) -> (Vec<f32>, Vec<f32>) {
@@ -27,10 +27,11 @@ fn main() {
             low: -0.25,
             high: 0.25,
         },
+        Element::Single,
     );
     let samples = 256;
-    let observations = graph.input(Shape::matrix(samples, 4));
-    let targets = graph.input(Shape::matrix(samples, 2));
+    let observations = graph.input(Shape::matrix(samples, 4), Element::Single);
+    let targets = graph.input(Shape::matrix(samples, 2), Element::Single);
     let prediction = model.forward(&graph, observations);
     graph.retain(prediction);
     let loss = mse_loss(&graph, prediction, targets);
@@ -38,7 +39,7 @@ fn main() {
     let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let (observation_data, target_data) = session(samples);
     runtime.write(&program, observations, &observation_data);

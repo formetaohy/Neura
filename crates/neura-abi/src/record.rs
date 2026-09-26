@@ -95,19 +95,21 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
 });
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod)]
 pub struct ValueRecord {
     pub base: u32,
     pub store: u32,
-    padding: [u8; 8],
+    pub element: u32,
+    padding: [u8; 4],
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct ValueFields {
     pub base: u32,
     pub store: u32,
+    pub element: u32,
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
@@ -117,7 +119,8 @@ impl ValueRecord {
         Self {
             base: fields.base,
             store: fields.store,
-            padding: [0; 8],
+            element: fields.element,
+            padding: [0; 4],
             dims: fields.dims,
             strides: fields.strides,
         }
@@ -142,6 +145,11 @@ pub const VALUE: RecordLayout = RecordLayout {
         FieldLayout {
             name: "store",
             offset: std::mem::offset_of!(ValueRecord, store) as u32,
+            ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "element",
+            offset: std::mem::offset_of!(ValueRecord, element) as u32,
             ty: FieldType::U32,
         },
         FieldLayout {

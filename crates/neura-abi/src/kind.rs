@@ -56,6 +56,7 @@ kinds! {
     OneHot ONE_HOT = "one_hot";
     Gather GATHER = "gather";
     Scatter SCATTER = "scatter";
+    Pack PACK = "pack";
     Conv2d CONV2D = "conv2d";
     Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad";
     Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad";

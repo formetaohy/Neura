@@ -1,6 +1,7 @@
+use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Window};
 use neura_nn::{Adam, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
-use neura_runtime::{Precision, Runtime, RuntimeRequest};
+use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
@@ -34,16 +35,17 @@ fn a_multilayer_perceptron_learns_a_nonlinear_surface() {
             low: -0.4,
             high: 0.4,
         },
+        Element::Single,
     );
-    let inputs = graph.input(Shape::matrix(64, 2));
-    let targets = graph.input(Shape::matrix(64, 1));
+    let inputs = graph.input(Shape::matrix(64, 2), Element::Single);
+    let targets = graph.input(Shape::matrix(64, 1), Element::Single);
     let prediction = model.forward(&graph, inputs);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
     let mut optimizer = Adam::new(&graph, 0.02, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let (inputs_data, targets_data) = surface(64);
     runtime.write(&program, inputs, &inputs_data);
@@ -77,14 +79,15 @@ fn descent_lowers_the_loss_of_a_single_layer() {
             low: -0.3,
             high: 0.3,
         },
+        Element::Single,
     );
-    let inputs = graph.input(Shape::matrix(16, 3));
-    let targets = graph.input(Shape::matrix(16, 1));
+    let inputs = graph.input(Shape::matrix(16, 3), Element::Single);
+    let targets = graph.input(Shape::matrix(16, 1), Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.05);
     optimizer.step(&graph, &gradients, &layer.parameters());
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let inputs_data = (0..48)
         .map(|index| index as f32 * 0.02 - 0.5)
@@ -115,16 +118,17 @@ fn a_batch_of_sequences_trains_one_dense_layer() {
             low: -0.4,
             high: 0.4,
         },
+        Element::Single,
     );
-    let observations = graph.input(Shape::of([8, 5, 4]));
-    let targets = graph.input(Shape::of([8, 5, 2]));
+    let observations = graph.input(Shape::of([8, 5, 4]), Element::Single);
+    let targets = graph.input(Shape::of([8, 5, 2]), Element::Single);
     let prediction = layer.forward(&graph, observations);
     assert_eq!(prediction.shape(), Shape::of([8, 5, 2]));
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.05);
     optimizer.step(&graph, &gradients, &layer.parameters());
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,
@@ -158,14 +162,15 @@ fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
             low: -0.2,
             high: 0.2,
         },
+        Element::Single,
     );
-    let inputs = graph.input(Shape::of([1, 1, 6, 6]));
-    let targets = graph.input(Shape::of([1, 1, 4, 4]));
+    let inputs = graph.input(Shape::of([1, 1, 6, 6]), Element::Single);
+    let targets = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
     let loss = mse_loss(&graph, conv.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.1);
     optimizer.step(&graph, &gradients, &conv.parameters());
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let pattern = (0..36)
         .map(|index| (index as f32 * 0.21).sin())
@@ -188,8 +193,8 @@ fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
 #[test]
 fn a_step_over_a_parameter_without_a_gradient_stops_the_graph() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero);
-    let other = graph.parameter(Shape::matrix(4, 4), Init::Zero);
+    let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
+    let other = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(weight));
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.1);
@@ -205,7 +210,7 @@ fn a_step_over_a_parameter_without_a_gradient_stops_the_graph() {
 #[test]
 fn moments_track_each_parameter_once() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
     let mut optimizer = Adam::new(&graph, 0.1, 0.9, 0.999, 1e-8);
     optimizer.track(&graph, weight);
     assert_eq!(optimizer.moments().len(), 1);
@@ -255,9 +260,10 @@ fn a_network_learns_the_action_it_was_shown() {
             low: -0.5,
             high: 0.5,
         },
+        Element::Single,
     );
-    let observations = graph.input(Shape::matrix(24, 2));
-    let targets = graph.input(Shape::matrix(24, 3));
+    let observations = graph.input(Shape::matrix(24, 2), Element::Single);
+    let targets = graph.input(Shape::matrix(24, 3), Element::Single);
     let logits = model.forward(&graph, observations);
     graph.retain(logits);
     let loss = cross_entropy(&graph, logits, targets);
@@ -265,7 +271,7 @@ fn a_network_learns_the_action_it_was_shown() {
     let mut optimizer = Adam::new(&graph, 0.05, 0.9, 0.999, 1e-8);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let (observation_data, target_data) = actions(24);
     runtime.write(&program, observations, &observation_data);
@@ -311,11 +317,12 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
             low: -0.3,
             high: 0.3,
         },
+        Element::Single,
     );
     let samples = 5;
     let classes = 4;
-    let observations = graph.input(Shape::matrix(samples, 3));
-    let advantage = graph.input(Shape::matrix(samples, 1));
+    let observations = graph.input(Shape::matrix(samples, 3), Element::Single);
+    let advantage = graph.input(Shape::matrix(samples, 1), Element::Single);
     let logits = layer.forward(&graph, observations);
     let action = graph.argmax(logits);
     let loss = policy_loss(&graph, logits, action, advantage);
@@ -324,7 +331,7 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
     let gradients = graph.backward(loss);
     let optimizer = Sgd::new(&graph, 0.05);
     optimizer.step(&graph, &gradients, &layer.parameters());
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(
         &program,

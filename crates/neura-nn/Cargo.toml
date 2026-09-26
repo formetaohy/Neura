@@ -10,6 +10,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+neura-abi = { workspace = true }
 neura-graph = { workspace = true }
 
 [dev-dependencies]

@@ -300,6 +300,7 @@ dependencies = [
 name = "neura-nn"
 version = "0.2.0"
 dependencies = [
+ "neura-abi",
  "neura-graph",
  "neura-runtime",
  "pollster",
@@ -338,7 +339,6 @@ dependencies = [
  "neura-abi",
  "neura-graph",
  "neura-op",
- "neura-precision",
  "neura-profile",
 ]
 
@@ -368,7 +368,6 @@ dependencies = [
  "neura-compiler",
  "neura-kernel",
  "neura-op",
- "neura-precision",
  "neura-profile",
 ]
 

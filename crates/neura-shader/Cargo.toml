@@ -13,7 +13,6 @@ workspace = true
 neura-abi = { workspace = true }
 neura-compiler = { workspace = true }
 neura-profile = { workspace = true }
-neura-precision = { workspace = true }
 neura-kernel = { workspace = true }
 
 [dev-dependencies]

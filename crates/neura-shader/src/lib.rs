@@ -1,9 +1,8 @@
 #[path = "../device/core.rs"]
 mod core;
 
-use neura_abi::{Kind, NO_VALUE, RECORDS, store, strategy};
+use neura_abi::{Element, Kind, NO_VALUE, RECORDS, REFUSAL_ELEMENT, store, strategy};
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
-use neura_precision::Precision;
 use neura_profile::Geometry;
 
 pub use core::ENTRY;
@@ -100,10 +99,14 @@ pub struct Megakernel {
 }
 
 impl Megakernel {
-    pub fn assemble(kinds: &[Kind], geometry: Geometry, weights: Precision) -> Self {
+    pub fn assemble(kinds: &[Kind], elements: &[Element], geometry: Geometry) -> Self {
         assert!(
             !kinds.is_empty(),
             "a device program with no task has nothing to run"
+        );
+        assert!(
+            !elements.is_empty(),
+            "a device program with no tensor has nothing to address"
         );
         let mut compiler = Compiler::new();
         for record in RECORDS {
@@ -111,8 +114,12 @@ impl Megakernel {
         }
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
         compiler.constant("NO_VALUE", NO_VALUE);
+        compiler.constant("refusal::ELEMENT", REFUSAL_ELEMENT);
         compiler.constant("store::TENSORS", store::TENSORS);
         compiler.constant("store::WEIGHTS", store::WEIGHTS);
+        for element in Element::ALL {
+            compiler.constant(element.symbol(), element.code());
+        }
         for (name, value) in [
             ("strategy::THREAD_ROW", strategy::THREAD_ROW),
             ("strategy::WORKGROUP_ROW", strategy::WORKGROUP_ROW),
@@ -138,14 +145,7 @@ impl Megakernel {
             }
         }
         core::define(&mut compiler);
-        compiler.select(
-            match weights {
-                Precision::Single => "fetch_single",
-                Precision::Half => "fetch_half",
-            },
-            "fetch",
-        );
-        neura_kernel::define(&mut compiler, kinds, &geometry);
+        neura_kernel::define(&mut compiler, kinds, elements, &geometry);
         let enabled = kinds
             .iter()
             .map(|kind| kind.symbol().to_owned())

@@ -13,8 +13,5 @@ workspace = true
 bytemuck = { workspace = true }
 neura-abi = { workspace = true }
 neura-profile = { workspace = true }
-neura-precision = { workspace = true }
 neura-graph = { workspace = true }
-
-[dev-dependencies]
 neura-op = { workspace = true }

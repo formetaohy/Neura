@@ -1,4 +1,4 @@
-use neura_abi::Store;
+use neura_abi::{Element, Store};
 use neura_gpu::{BufferUsages, GpuBuffer, Submission};
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
@@ -7,7 +7,7 @@ fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE)[0]
 }
 use neura_program::Encoding;
-use neura_runtime::{Precision, Runtime, RuntimeRequest};
+use neura_runtime::{Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -29,8 +29,9 @@ fn linear<'g>(graph: &Graph<'g>, inputs: u32, outputs: u32) -> (Value<'g>, Value
                 low: -0.5,
                 high: 0.5,
             },
+            Element::Single,
         ),
-        graph.parameter(Shape::vector(outputs), Init::Zero),
+        graph.parameter(Shape::vector(outputs), Init::Zero, Element::Single),
     )
 }
 
@@ -39,15 +40,15 @@ fn one_store_serves_every_shape_of_one_model() {
     let runtime = open();
     let narrow = Graph::new();
     let (weight, bias) = linear(&narrow, 4, 8);
-    let data = narrow.input(Shape::matrix(2, 4));
+    let data = narrow.input(Shape::matrix(2, 4), Element::Single);
     let out = narrow.relu(narrow.add(narrow.matmul(data, weight), bias));
     narrow.retain(out);
-    let weights = runtime.weights(&narrow, Precision::Single);
+    let weights = runtime.weights(&narrow);
     let small = runtime.compile(&narrow, &weights);
 
     let wide = Graph::new();
     let (shared_weight, shared_bias) = linear(&wide, 4, 8);
-    let rows = wide.input(Shape::matrix(64, 4));
+    let rows = wide.input(Shape::matrix(64, 4), Element::Single);
     let spread = wide.relu(wide.add(wide.matmul(rows, shared_weight), shared_bias));
     let big = runtime.compile(&wide, &weights);
 
@@ -87,10 +88,10 @@ fn one_store_serves_every_shape_of_one_model() {
 fn a_plan_keeps_its_weights_out_of_the_arena() {
     let graph = Graph::new();
     let (weight, bias) = linear(&graph, 256, 256);
-    let data = graph.input(Shape::matrix(1, 256));
+    let data = graph.input(Shape::matrix(1, 256), Element::Single);
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = Encoding::of(&graph, 256, narrow(), Precision::Single, Vec::new());
+    let encoding = Encoding::of(&graph, 256, narrow(), Vec::new());
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() >= 2 * 256 * 4,
@@ -106,36 +107,55 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
 }
 
 #[test]
-fn half_precision_weights_halve_the_store() {
+fn a_narrow_parameter_halves_its_store() {
     let runtime = open();
-    let graph = Graph::new();
-    let weight = graph.parameter(
+    let single = Graph::new();
+    let weight = single.parameter(
         Shape::matrix(8, 16),
         Init::Uniform {
             low: -0.5,
             high: 0.5,
         },
+        Element::Single,
     );
-    let data = graph.input(Shape::matrix(4, 8));
-    let out = graph.matmul(data, weight);
-    graph.retain(out);
-    let single = runtime.weights(&graph, Precision::Single);
-    let half = runtime.weights(&graph, Precision::Half);
-    assert_eq!(half.precision(), Precision::Half);
-    assert_eq!(half.tensors(), single.tensors());
+    let data = single.input(Shape::matrix(4, 8), Element::Single);
+    single.retain(single.matmul(data, weight));
+
+    let narrow = Graph::new();
+    let half_weight = narrow.parameter(
+        Shape::matrix(8, 16),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Half,
+    );
+    let half_data = narrow.input(Shape::matrix(4, 8), Element::Single);
+    let out = narrow.matmul(half_data, half_weight);
+    narrow.retain(out);
+
+    let wide_store = runtime.weights(&single);
+    let narrow_store = runtime.weights(&narrow);
+    assert_eq!(narrow_store.tensors(), wide_store.tensors());
     assert_eq!(
-        half.bytes() * 2,
-        single.bytes(),
-        "a single half precision tensor holds half the bytes of its single precision twin",
+        narrow_store.bytes() * 2,
+        wide_store.bytes(),
+        "a half precision tensor holds half the bytes of its single precision twin",
     );
 
-    let program = runtime.compile(&graph, &half);
+    let program = runtime.compile(&narrow, &narrow_store);
+    let wide = runtime.compile(&single, &wide_store);
+    assert_close(
+        &runtime.read(&program, half_weight),
+        &runtime.read(&wide, weight),
+        1e-3,
+    );
     let data_values = random(32, 3);
     let weight_values = random(128, 17);
-    runtime.write(&program, data, &data_values);
-    runtime.write(&program, weight, &weight_values);
+    runtime.write(&program, half_data, &data_values);
+    runtime.write(&program, half_weight, &weight_values);
     runtime.run(&program);
-    assert_close(&runtime.read(&program, weight), &weight_values, 1e-3);
+    assert_close(&runtime.read(&program, half_weight), &weight_values, 1e-3);
     assert_close(
         &runtime.read(&program, out),
         &matmul_reference(&data_values, &weight_values, 4, 8, 16),
@@ -144,26 +164,82 @@ fn half_precision_weights_halve_the_store() {
 }
 
 #[test]
-fn a_half_weight_store_carries_no_parameter_update() {
+fn a_narrow_input_and_parameter_meet_in_one_product() {
+    let runtime = open();
     let graph = Graph::new();
-    let (weight, _) = linear(&graph, 4, 4);
-    let data = graph.input(Shape::matrix(2, 4));
-    let loss = graph.sum(graph.matmul(data, weight));
+    let weight = graph.parameter(Shape::matrix(8, 16), Init::Zero, Element::Half);
+    let data = graph.input(Shape::matrix(4, 8), Element::Bfloat16);
+    let out = graph.matmul(data, weight);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let data_values = random(32, 3);
+    let weight_values = random(128, 17);
+    runtime.write(&program, data, &data_values);
+    runtime.write(&program, weight, &weight_values);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, data), &data_values, 1e-2);
+    assert_close(
+        &runtime.read(&program, out),
+        &matmul_reference(&data_values, &weight_values, 4, 8, 16),
+        1e-1,
+    );
+}
+
+#[test]
+fn a_narrow_parameter_updates_in_place() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Half);
+    let data = graph.input(Shape::vector(4), Element::Single);
+    let loss = graph.sum(graph.mul(data, weight));
     let gradients = graph.backward(loss);
-    let rate = graph.fill(Shape::scalar(), -0.1);
+    let rate = graph.fill(Shape::scalar(), -0.5);
     let step = graph.mul(gradients.of(weight), rate);
     graph.add_into(weight, step);
-    let runtime = open();
-    let single = runtime.weights(&graph, Precision::Single);
-    let program = runtime.compile(&graph, &single);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
     assert!(program.updates_weights());
-    let half = runtime.weights(&graph, Precision::Half);
-    assert!(
-        refuses(|| {
-            let _ = runtime.compile(&graph, &half);
-        }),
-        "a half precision store accepted an in-place parameter update",
+    let initial = [0.0, 0.25, -0.5, 0.75];
+    runtime.write(&program, weight, &initial);
+    runtime.write(&program, data, &[1.0, 1.0, 1.0, 1.0]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, weight),
+        [
+            initial[0] - 0.5,
+            initial[1] - 0.5,
+            initial[2] - 0.5,
+            initial[3] - 0.5,
+        ],
+        "a half precision parameter steps in place over its own storage",
     );
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, weight),
+        [
+            initial[0] - 1.0,
+            initial[1] - 1.0,
+            initial[2] - 1.0,
+            initial[3] - 1.0,
+        ],
+        "every run of a tape packs the step it computed over its own storage",
+    );
+}
+
+#[test]
+fn a_narrow_parameter_keeps_an_odd_tensor() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(3), Init::Zero, Element::Bfloat16);
+    graph.mul_into(weight, graph.fill(Shape::vector(3), -2.0));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = [0.25, -0.5, 1.75];
+    runtime.write(&program, weight, &values);
+    assert_close(&runtime.read(&program, weight), &values, 1e-2);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, weight), &[-0.5, 1.0, -3.5], 1e-2);
 }
 
 #[test]
@@ -173,7 +249,7 @@ fn a_store_serves_no_model_it_was_not_built_for() {
     let other = Graph::new();
     let (_, _) = linear(&other, 4, 8);
     let runtime = open();
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     assert!(
         refuses(|| {
             let _ = runtime.compile(&other, &weights);
@@ -186,12 +262,12 @@ fn a_store_serves_no_model_it_was_not_built_for() {
 fn a_resident_tensor_survives_every_run() {
     let runtime = open();
     let graph = Graph::new();
-    let state = graph.resident(Shape::vector(4));
-    let step = graph.input(Shape::vector(4));
-    let readout = graph.resident(Shape::vector(4));
+    let state = graph.resident(Shape::vector(4), Element::Single);
+    let step = graph.input(Shape::vector(4), Element::Single);
+    let readout = graph.resident(Shape::vector(4), Element::Single);
     graph.add_into(state, step);
     graph.copy_into(readout, state);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(program.span(state).store, Store::Tensors);
     assert_eq!(program.span(readout).store, Store::Tensors);
@@ -222,11 +298,11 @@ fn the_engine_writes_a_resident_tensor_without_the_host() {
     }))
     .expect("device");
     let graph = Graph::new();
-    let observation = graph.resident(Shape::vector(4));
-    let scale = graph.parameter(Shape::scalar(), Init::Constant(3.0));
+    let observation = graph.resident(Shape::vector(4), Element::Single);
+    let scale = graph.parameter(Shape::scalar(), Init::Constant(3.0), Element::Single);
     let action = graph.mul(observation, scale);
     graph.retain(action);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
 
     let device = runtime.context().device();
@@ -265,9 +341,9 @@ fn a_program_wider_than_the_heap_is_refused() {
     }))
     .expect("device");
     let graph = Graph::new();
-    let data = graph.input(Shape::vector(4096));
+    let data = graph.input(Shape::vector(4096), Element::Single);
     graph.relu(data);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     assert!(
         refuses(|| {
             let _ = runtime.compile(&graph, &weights);
@@ -286,10 +362,10 @@ fn a_dropped_program_returns_its_tensors_to_the_heap() {
     .expect("device");
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 256, 256);
-    let data = graph.input(Shape::matrix(64, 256));
+    let data = graph.input(Shape::matrix(64, 256), Element::Single);
     let out = graph.relu(graph.matmul(data, weight));
     graph.retain(out);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let first = runtime.compile(&graph, &weights);
     let span = first.span(out);
     runtime.write(&first, data, &random(64 * 256, 41));
@@ -319,7 +395,7 @@ fn a_dropped_store_returns_its_words_to_the_heap() {
     let (weight, _) = linear(&graph, 96, 96);
     assert_eq!(weight.shape(), Shape::matrix(96, 96));
     for _ in 0..8 {
-        let weights = runtime.weights(&graph, Precision::Single);
+        let weights = runtime.weights(&graph);
         assert_eq!(weights.tensors(), 2);
         assert!(
             weights.bytes() < runtime.heap_bytes(),
@@ -328,7 +404,7 @@ fn a_dropped_store_returns_its_words_to_the_heap() {
             runtime.heap_bytes(),
         );
     }
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     assert_eq!(weights.tensors(), 2);
 }
 
@@ -342,17 +418,17 @@ fn a_program_keeps_the_store_it_was_built_with() {
     .expect("device");
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 64, 64);
-    let data = graph.input(Shape::matrix(2, 64));
+    let data = graph.input(Shape::matrix(2, 64), Element::Single);
     let out = graph.matmul(data, weight);
     graph.retain(out);
-    let weights = runtime.weights(&graph, Precision::Single);
+    let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     drop(weights);
     runtime.write(&program, data, &random(128, 5));
     runtime.run(&program);
     assert_eq!(runtime.read(&program, out).len(), 128);
     drop(program);
-    let rebuilt = runtime.weights(&graph, Precision::Single);
+    let rebuilt = runtime.weights(&graph);
     assert_eq!(rebuilt.tensors(), 2);
 }
 
@@ -361,11 +437,11 @@ fn two_stores_of_one_model_hold_their_own_words() {
     let runtime = open();
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 32, 32);
-    let data = graph.input(Shape::matrix(2, 32));
+    let data = graph.input(Shape::matrix(2, 32), Element::Single);
     let out = graph.matmul(data, weight);
     graph.retain(out);
-    let first = runtime.weights(&graph, Precision::Single);
-    let second = runtime.weights(&graph, Precision::Single);
+    let first = runtime.weights(&graph);
+    let second = runtime.weights(&graph);
     assert_ne!(
         first.offset(),
         second.offset(),
@@ -388,10 +464,10 @@ fn one_device_program_serves_every_store_of_its_model() {
     let runtime = open();
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 32, 32);
-    let data = graph.input(Shape::matrix(2, 32));
+    let data = graph.input(Shape::matrix(2, 32), Element::Single);
     graph.retain(graph.matmul(data, weight));
-    let first = runtime.weights(&graph, Precision::Half);
-    let second = runtime.weights(&graph, Precision::Half);
+    let first = runtime.weights(&graph);
+    let second = runtime.weights(&graph);
     assert_ne!(first.offset(), second.offset());
     runtime.compile(&graph, &first);
     runtime.compile(&graph, &second);
@@ -403,30 +479,14 @@ fn one_device_program_serves_every_store_of_its_model() {
 }
 
 #[test]
-fn a_half_store_keeps_an_odd_tensor() {
-    let runtime = open();
-    let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(3), Init::Zero);
-    let scaled = graph.mul(weight, graph.fill(Shape::vector(3), 2.0));
-    graph.retain(scaled);
-    let half = runtime.weights(&graph, Precision::Half);
-    let program = runtime.compile(&graph, &half);
-    let values = [0.25, -0.5, 1.75];
-    runtime.write(&program, weight, &values);
-    runtime.run(&program);
-    assert_close(&runtime.read(&program, weight), &values, 1e-3);
-    assert_close(&runtime.read(&program, scaled), &[0.5, -1.0, 3.5], 1e-3);
-}
-
-#[test]
 fn a_store_of_another_runtime_is_refused() {
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 4, 4);
-    let data = graph.input(Shape::matrix(2, 4));
+    let data = graph.input(Shape::matrix(2, 4), Element::Single);
     graph.retain(graph.matmul(data, weight));
     let first = open();
     let second = open();
-    let weights = first.weights(&graph, Precision::Single);
+    let weights = first.weights(&graph);
     assert!(
         refuses(|| {
             let _ = second.compile(&graph, &weights);
