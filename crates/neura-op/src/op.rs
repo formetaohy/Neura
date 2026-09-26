@@ -151,6 +151,12 @@ ops! {
     Unary NEG = "neg" apply (-a) partials [([] => -g)];
     Unary ABS = "abs" apply (abs(a)) partials [([x] => select(-g, g, x > 0.0))];
     Unary IDENTITY = "identity" apply (a) partials [(direct)];
+    Unary SIN = "sin" apply (sin(a)) partials [([x] => g * cos(x))];
+    Unary COS = "cos" apply (cos(a)) partials [([x] => -g * sin(x))];
+    Binary POW = "pow" apply (pow(a, b)) partials [([x, o] => g * o * pow(x, o - 1.0)), ([x, o] => g * pow(o, x) * log(o))];
+    Unary FLOOR = "floor" apply (floor(a)) partials [([] => g * 0.0)];
+    Unary GELU = "gelu" apply (gelu(a)) partials [([x] => g * gelu_grad(x))];
+    Unary SILU = "silu" apply (a * sigmoid(a)) partials [([x] => g * sigmoid(x) * (1.0 + x * (1.0 - sigmoid(x))))];
 }
 
 pub fn of(code: u32) -> &'static Op {

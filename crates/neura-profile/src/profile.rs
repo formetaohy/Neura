@@ -1,4 +1,4 @@
-use neura_abi::WORD_BYTES;
+use neura_abi::{Kind, Scratch, WORD_BYTES};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct AttentionTile {
@@ -503,5 +503,21 @@ impl Geometry {
                 .try_into()
                 .expect("a right tile fits in device memory"),
         )
+    }
+
+    pub fn scratch_bytes(&self, scratch: Scratch) -> u64 {
+        match scratch {
+            Scratch::Staging => self.staging_bytes(),
+            Scratch::Reduction | Scratch::Choice => WORD_BYTES * u64::from(self.workgroup),
+            Scratch::Attention => self.attention_stage_bytes(),
+        }
+    }
+
+    pub fn declared_shared_bytes(&self, kinds: &[Kind]) -> u64 {
+        Scratch::ALL
+            .iter()
+            .filter(|scratch| kinds.iter().any(|kind| kind.stages(**scratch)))
+            .map(|scratch| self.scratch_bytes(*scratch))
+            .sum()
     }
 }

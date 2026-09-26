@@ -4,6 +4,18 @@ mod source {
         return 1.0 / (1.0 + exp(-x));
     }
 
+    fn gelu(x: f32) -> f32 {
+        let inner = 0.7978845608 * (x + 0.044715 * x * x * x);
+        return 0.5 * x * (1.0 + tanh(inner));
+    }
+
+    fn gelu_grad(x: f32) -> f32 {
+        let inner = 0.7978845608 * (x + 0.044715 * x * x * x);
+        let slope = tanh(inner);
+        return 0.5 * (1.0 + slope)
+            + 0.5 * x * (1.0 - slope * slope) * 0.7978845608 * (1.0 + 3.0 * 0.044715 * x * x);
+    }
+
     fn chain_operand(step: Step, at: uvec4) -> f32 {
         if step.operand == NO_VALUE {
             return 0.0;

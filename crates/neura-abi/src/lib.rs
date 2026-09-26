@@ -6,7 +6,7 @@ pub mod store;
 pub mod strategy;
 
 pub use element::Element;
-pub use kind::Kind;
+pub use kind::{Geometry, KINDS, Kind, KindInfo, Module, Refusal, Scratch};
 pub use placement::Placement;
 pub use record::{
     BoundsFields, BoundsRecord, FieldLayout, FieldType, PlacementFields, PlacementRecord, RECORDS,

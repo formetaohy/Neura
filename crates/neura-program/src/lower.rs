@@ -2,7 +2,7 @@ use crate::access::Reads;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_op as op;
-use neura_profile::{AttentionTile, MatmulTile, Profile};
+use neura_profile::{AttentionTile, Geometry, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -91,6 +91,7 @@ pub(crate) struct Plan {
 }
 
 pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
+    let spare = spare_shared(units, profile);
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
@@ -100,8 +101,8 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
         match narrow_target(&plan.values, task) {
-            None => schedule_unit(&mut plan, task, profile, spare_shared(units, profile)),
-            Some(element) => schedule_narrow(&mut plan, task, element, profile),
+            None => schedule_unit(&mut plan, task, profile, spare),
+            Some(element) => schedule_narrow(&mut plan, task, element, profile, spare),
         }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
@@ -111,29 +112,18 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
 }
 
 fn spare_shared(units: &[TaskInfo], profile: Profile) -> u64 {
-    let carries = |kinds: &[Kind]| units.iter().any(|unit| kinds.contains(&unit.kind));
-    let mut declared = 0u64;
-    if carries(&[Kind::Matmul]) {
-        declared += profile.staging_bytes();
-    }
-    if carries(&[
-        Kind::SumChunk,
-        Kind::SumAxis,
-        Kind::Softmax,
-        Kind::SoftmaxGrad,
-        Kind::LogSoftmax,
-        Kind::LogSoftmaxGrad,
-        Kind::Argmax,
-        Kind::Categorical,
-    ]) {
-        declared += neura_abi::WORD_BYTES * u64::from(profile.workgroup());
-    }
-    if carries(&[Kind::Argmax, Kind::Categorical]) {
-        declared += neura_abi::WORD_BYTES * u64::from(profile.workgroup());
-    }
+    let kinds = units.iter().map(|unit| unit.kind).collect::<Vec<Kind>>();
+    let geometry = Geometry::of(
+        profile.workgroup(),
+        profile.shared_bytes(),
+        profile.tiles(),
+        &[],
+    );
+    let declared = geometry.declared_shared_bytes(&kinds);
     assert!(
         declared <= profile.shared_bytes(),
-        "a profile declares {declared} bytes of workgroup scratch beyond the {} it offers",
+        "a plan of {} kinds reserves {declared} bytes of workgroup scratch beyond the {} its profile offers",
+        kinds.len(),
         profile.shared_bytes(),
     );
     profile.shared_bytes() - declared
@@ -144,7 +134,13 @@ fn narrow_target(values: &[ValueInfo], task: &TaskInfo) -> Option<Element> {
     (task.in_place && element.narrow()).then_some(element)
 }
 
-fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: Profile) {
+fn schedule_narrow(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    element: Element,
+    profile: Profile,
+    spare: u64,
+) {
     let target = unit.out;
     let image = plan.publish(plan.shape(target));
     if !writes_every_element(unit.kind) {
@@ -163,12 +159,7 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: 
         copy.chain.clear();
         plan.tasks.push(copy);
     }
-    schedule_unit(
-        plan,
-        &redirected(unit, image),
-        profile,
-        spare_shared(std::slice::from_ref(unit), profile),
-    );
+    schedule_unit(plan, &redirected(unit, image), profile, spare);
     pack(plan, unit, image, element, profile);
 }
 

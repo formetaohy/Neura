@@ -520,6 +520,37 @@ impl<'g> Graph<'g> {
         self.unary(op::IDENTITY, value)
     }
 
+    pub fn sin(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        self.unary(op::SIN, value)
+    }
+
+    pub fn cos(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        self.unary(op::COS, value)
+    }
+
+    pub fn floor(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        self.unary(op::FLOOR, value)
+    }
+
+    pub fn gelu(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        self.unary(op::GELU, value)
+    }
+
+    pub fn silu(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        self.unary(op::SILU, value)
+    }
+
+    pub fn pow(&self, base: Value<'g>, exponent: Value<'g>) -> Value<'g> {
+        let base = self.own(base);
+        let exponent = self.own(exponent);
+        self.elementwise(op::POW, base, exponent)
+    }
+
     pub fn softmax(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         self.rows(Kind::Softmax, value)

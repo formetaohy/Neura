@@ -135,6 +135,59 @@ fn probes() -> Vec<Probe> {
             apply: |a, _b| a,
             partial: |_a, _b| (1.0, 0.0),
         },
+        Probe {
+            op: op::SIN,
+            build: |graph, left, _right| graph.sin(left),
+            apply: |a, _b| a.sin(),
+            partial: |a, _b| (a.cos(), 0.0),
+        },
+        Probe {
+            op: op::COS,
+            build: |graph, left, _right| graph.cos(left),
+            apply: |a, _b| a.cos(),
+            partial: |a, _b| (-a.sin(), 0.0),
+        },
+        Probe {
+            op: op::POW,
+            build: |graph, left, right| graph.pow(left, right),
+            apply: |a, b| a.powf(b),
+            partial: |a, b| (b * a.powf(b - 1.0), a.powf(b) * a.ln()),
+        },
+        Probe {
+            op: op::FLOOR,
+            build: |graph, left, _right| graph.floor(left),
+            apply: |a, _b| a.floor(),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::GELU,
+            build: |graph, left, _right| graph.gelu(left),
+            apply: |a, _b| 0.5 * a * (1.0 + (0.797_884_6 * (a + 0.044715 * a * a * a)).tanh()),
+            partial: |a, _b| {
+                let slope = (0.797_884_6 * (a + 0.044715 * a * a * a)).tanh();
+                (
+                    0.5 * (1.0 + slope)
+                        + 0.5
+                            * a
+                            * (1.0 - slope * slope)
+                            * 0.797_884_6
+                            * (1.0 + 3.0 * 0.044715 * a * a),
+                    0.0,
+                )
+            },
+        },
+        Probe {
+            op: op::SILU,
+            build: |graph, left, _right| graph.silu(left),
+            apply: |a, _b| {
+                let s = 1.0 / (1.0 + (-a).exp());
+                a * s
+            },
+            partial: |a, _b| {
+                let s = 1.0 / (1.0 + (-a).exp());
+                (s * (1.0 + a * (1.0 - s)), 0.0)
+            },
+        },
     ]
 }
 

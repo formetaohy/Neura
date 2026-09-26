@@ -3,7 +3,7 @@ use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Tapes};
-use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, WORD_BYTES};
+use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
     SubmissionIndex,
@@ -501,56 +501,26 @@ fn refusal_message(word: u32) -> String {
         return format!("the device refused kind {refused} with code {code}");
     }
     let kind = Kind::of(refused);
-    match kind {
-        Kind::Binary | Kind::Unary => format!(
+    match kind.refusal() {
+        Refusal::Op => format!(
             "the device refused the {} op of the {} task",
             op::name(code),
             kind.name(),
         ),
-        Kind::Partial => format!(
+        Refusal::Partial => format!(
             "the device refused the partial of the {} op over operand {} of the {} task",
             op::name(code / 2),
             code % 2,
             kind.name(),
         ),
-        Kind::OneHot | Kind::Gather | Kind::Scatter => format!(
+        Refusal::Index => format!(
             "the device refused an index outside the rows of the {} task",
             kind.name(),
         ),
-        Kind::Matmul
-        | Kind::Argmax
-        | Kind::Categorical
-        | Kind::SumAxis
-        | Kind::Conv2dWeightGrad
-        | Kind::Pack => {
-            format!(
-                "the device refused geometry {code} of the {} task",
-                kind.name(),
-            )
-        }
-        Kind::Attention
-        | Kind::AttentionQueryGrad
-        | Kind::AttentionKeyGrad
-        | Kind::AttentionValueGrad => format!(
+        Refusal::Geometry => format!(
             "the device refused geometry {code} of the {} task",
             kind.name(),
         ),
-        Kind::Fill
-        | Kind::Broadcast
-        | Kind::Layout
-        | Kind::SumChunk
-        | Kind::MatmulFold
-        | Kind::Softmax
-        | Kind::SoftmaxGrad
-        | Kind::LogSoftmax
-        | Kind::LogSoftmaxGrad
-        | Kind::Conv2d
-        | Kind::Conv2dInputGrad
-        | Kind::PoolMax2d
-        | Kind::PoolMax2dInputGrad
-        | Kind::PoolMean2d
-        | Kind::PoolMean2dInputGrad => {
-            format!("the device refused code {code} of the {} task", kind.name())
-        }
+        Refusal::Code => format!("the device refused code {code} of the {} task", kind.name()),
     }
 }

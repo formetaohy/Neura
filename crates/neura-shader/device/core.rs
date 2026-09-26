@@ -79,40 +79,8 @@ mod source {
         }
     }
 
-    fn run_task(index: u32, lid: u32) {
-        let task = tasks[index];
+    fn run_task(task: Task, lid: u32) {
         match task.kind {
-            kind::MATMUL => run_matmul(task, lid),
-            kind::MATMUL_FOLD => run_matmul_fold(task, lid),
-            kind::ATTENTION => run_attention(task, lid),
-            kind::ATTENTION_QUERY_GRAD => run_attention_query_grad(task, lid),
-            kind::ATTENTION_KEY_GRAD => run_attention_key_grad(task, lid),
-            kind::ATTENTION_VALUE_GRAD => run_attention_value_grad(task, lid),
-            kind::BINARY => run_binary(task, lid),
-            kind::UNARY => run_unary(task, lid),
-            kind::PARTIAL => run_partial(task, lid),
-            kind::FILL => run_fill(task, lid),
-            kind::BROADCAST => run_broadcast(task, lid),
-            kind::LAYOUT => run_layout(task, lid),
-            kind::SUM_CHUNK => run_sum_chunk(task, lid),
-            kind::SUM_AXIS => run_sum_axis(task, lid),
-            kind::SOFTMAX => run_softmax(task, lid),
-            kind::SOFTMAX_GRAD => run_softmax_grad(task, lid),
-            kind::LOG_SOFTMAX => run_log_softmax(task, lid),
-            kind::LOG_SOFTMAX_GRAD => run_log_softmax_grad(task, lid),
-            kind::ARGMAX => run_argmax(task, lid),
-            kind::CATEGORICAL => run_categorical(task, lid),
-            kind::ONE_HOT => run_one_hot(task, lid),
-            kind::GATHER => run_gather(task, lid),
-            kind::SCATTER => run_scatter(task, lid),
-            kind::PACK => run_pack(task, lid),
-            kind::CONV2D => run_conv2d(task, lid),
-            kind::CONV2D_INPUT_GRAD => run_conv2d_input_grad(task, lid),
-            kind::CONV2D_WEIGHT_GRAD => run_conv2d_weight_grad(task, lid),
-            kind::POOL_MAX2D => run_pool2d(task, lid),
-            kind::POOL_MAX2D_INPUT_GRAD => run_pool2d_input_grad(task, lid),
-            kind::POOL_MEAN2D => run_pool2d(task, lid),
-            kind::POOL_MEAN2D_INPUT_GRAD => run_pool2d_input_grad(task, lid),
             _ => refuse(task.kind, 0u32),
         }
     }
@@ -121,7 +89,7 @@ mod source {
     fn main(lid: u32, group: uvec3) {
         let segment = segments[bounds.first_segment + group.x];
         for index in stride(segment.first, segment.first + segment.count, 1u32) {
-            run_task(index, lid);
+            run_task(tasks[index], lid);
             storage_barrier();
         }
     }

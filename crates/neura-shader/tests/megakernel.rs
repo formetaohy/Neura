@@ -206,6 +206,52 @@ fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
 }
 
 #[test]
+fn every_declared_kind_reaches_the_device_body_it_names() {
+    let program = selected(profiles()[0], Kind::ALL, Element::ALL).program();
+    let reachable = functions(&program);
+    for kind in Kind::ALL {
+        assert!(
+            reachable.contains(kind.entry()),
+            "the {} kind names a device body {} that no module installs",
+            kind.name(),
+            kind.entry(),
+        );
+    }
+    let cases = program
+        .module()
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_deref() == Some("run_task"))
+        .expect("the Rust task dispatcher was compiled")
+        .1
+        .body
+        .iter()
+        .find_map(|statement| {
+            if let Statement::Switch { cases, .. } = statement {
+                Some(cases)
+            } else {
+                None
+            }
+        })
+        .expect("a task dispatcher branches over kinds");
+    let dispatched = cases
+        .iter()
+        .filter_map(|case| match case.value {
+            SwitchValue::U32(code) => Some(code),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(dispatched.len(), Kind::COUNT as usize);
+    for kind in Kind::ALL {
+        assert!(
+            dispatched.contains(&kind.code()),
+            "the task dispatcher carries no arm for the {} kind",
+            kind.name(),
+        );
+    }
+}
+
+#[test]
 fn the_rust_operation_dispatcher_contains_every_declared_code() {
     let program = selected(
         profiles()[0],

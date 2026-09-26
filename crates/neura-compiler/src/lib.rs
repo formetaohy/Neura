@@ -235,6 +235,19 @@ impl Compiler {
         );
     }
 
+    pub fn workgroup_bytes(&self) -> u64 {
+        self.globals
+            .values()
+            .filter(|global| {
+                matches!(
+                    self.module.global_variables[global.handle].space,
+                    AddressSpace::WorkGroup
+                )
+            })
+            .map(|global| u64::from(self.size(global.ty)))
+            .sum()
+    }
+
     pub fn constant(&mut self, name: &str, value: u32) {
         assert!(
             self.constants.insert(name.to_owned(), value).is_none(),
@@ -275,7 +288,11 @@ impl Compiler {
             !cases.iter().any(|present| present.pattern == arm.pattern),
             "device dispatcher {name} has a duplicate case"
         );
-        cases.push(arm);
+        let fallback = cases
+            .iter()
+            .position(|present| matches!(present.pattern, ir::Pattern::Default))
+            .unwrap_or(cases.len());
+        cases.insert(fallback, arm);
     }
 
     pub fn retain_cases(&mut self, name: &str, cases: &[String]) {

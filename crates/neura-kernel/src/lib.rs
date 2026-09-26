@@ -30,142 +30,75 @@ mod select;
 #[path = "../device/softmax.rs"]
 mod softmax;
 
-use neura_abi::{Element, Kind};
-use neura_compiler::Compiler;
+use neura_abi::{Element, Kind, Module};
+use neura_compiler::{Compiler, ir};
 use neura_profile::Geometry;
 
-pub fn declared_shared_bytes(kinds: &[Kind], geometry: &Geometry) -> u64 {
-    let reductions = [
-        Kind::SumChunk,
-        Kind::SumAxis,
-        Kind::Softmax,
-        Kind::SoftmaxGrad,
-        Kind::LogSoftmax,
-        Kind::LogSoftmaxGrad,
-        Kind::Argmax,
-        Kind::Categorical,
-    ];
-    let choices = [Kind::Argmax, Kind::Categorical];
-    let attention = [
-        Kind::Attention,
-        Kind::AttentionQueryGrad,
-        Kind::AttentionKeyGrad,
-        Kind::AttentionValueGrad,
-    ];
-    let mut bytes = 0;
-    if kinds.contains(&Kind::Matmul) {
-        bytes += geometry.staging_bytes();
-    }
-    if kinds.iter().any(|kind| reductions.contains(kind)) {
-        bytes += neura_abi::WORD_BYTES * u64::from(geometry.workgroup());
-    }
-    if kinds.iter().any(|kind| choices.contains(kind)) {
-        bytes += neura_abi::WORD_BYTES * u64::from(geometry.workgroup());
-    }
-    if kinds.iter().any(|kind| attention.contains(kind)) {
-        bytes += geometry.attention_stage_bytes();
-    }
-    bytes
-}
-
 pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geometry: &Geometry) {
+    let declared = geometry.declared_shared_bytes(kinds);
     assert!(
-        declared_shared_bytes(kinds, geometry) <= geometry.shared_bytes(),
-        "a device program of {} kinds declares {} bytes of workgroup scratch beyond the {} its profile offers",
+        declared <= geometry.shared_bytes(),
+        "a device program of {} kinds declares {declared} bytes of workgroup scratch beyond the {} its profile offers",
         kinds.len(),
-        declared_shared_bytes(kinds, geometry),
         geometry.shared_bytes(),
     );
+    substrate(compiler, elements);
+    for module in Module::ALL {
+        if kinds.iter().any(|kind| kind.carries(*module)) {
+            install(compiler, *module, elements, geometry);
+        }
+    }
+    for kind in Kind::ALL {
+        compiler.insert_case(
+            "run_task",
+            ir::Arm {
+                pattern: ir::Pattern::Constant(kind.symbol().to_owned()),
+                body: vec![ir::Statement::Expression(ir::Expression::call(
+                    kind.entry(),
+                    vec![ir::Expression::name("task"), ir::Expression::name("lid")],
+                ))],
+            },
+        );
+    }
+    assert!(
+        compiler.workgroup_bytes() <= geometry.shared_bytes(),
+        "a device program of {} kinds declares {} bytes of workgroup scratch beyond the {} its profile offers",
+        kinds.len(),
+        compiler.workgroup_bytes(),
+        geometry.shared_bytes(),
+    );
+}
+
+fn substrate(compiler: &mut Compiler, elements: &[Element]) {
     element::define(compiler, elements);
     pointwise::define(compiler);
     op::define(compiler);
-    if kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            Kind::Attention
-                | Kind::AttentionQueryGrad
-                | Kind::AttentionKeyGrad
-                | Kind::AttentionValueGrad
-        )
-    }) {
-        attention::define(compiler, geometry);
-    }
-    if kinds
-        .iter()
-        .any(|kind| matches!(kind, Kind::Matmul | Kind::MatmulFold))
-    {
-        matmul_device::define(compiler);
-    }
-    if kinds.contains(&Kind::Matmul) {
-        let (left, right) = geometry.stage_lengths();
-        compiler.workgroup("matmul_left", "f32", left);
-        compiler.workgroup("matmul_right", "f32", right);
-        matmul::specialize(compiler, geometry);
-    }
-    let reduction = kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            Kind::SumChunk
-                | Kind::SumAxis
-                | Kind::Softmax
-                | Kind::SoftmaxGrad
-                | Kind::LogSoftmax
-                | Kind::LogSoftmaxGrad
-                | Kind::Argmax
-                | Kind::Categorical
-        )
-    });
-    if reduction {
-        compiler.workgroup("reduction_scratch", "f32", geometry.workgroup());
-        reduce::define(compiler);
-    }
-    if kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
-        )
-    }) {
-        softmax::define(compiler);
-    }
-    if kinds
-        .iter()
-        .any(|kind| matches!(kind, Kind::Argmax | Kind::Categorical))
-    {
-        compiler.workgroup("choice_index", "u32", geometry.workgroup());
-        choice::define(compiler);
-    }
-    if kinds
-        .iter()
-        .any(|kind| matches!(kind, Kind::OneHot | Kind::Gather))
-    {
-        select::define(compiler);
-    }
-    if kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            Kind::Conv2d | Kind::Conv2dInputGrad | Kind::Conv2dWeightGrad
-        )
-    }) {
-        conv::define(compiler);
-    }
-    if kinds.contains(&Kind::Scatter) {
-        scatter::define(compiler);
-    }
-    if kinds.contains(&Kind::Layout) {
-        layout::define(compiler);
-    }
-    if kinds.iter().any(|kind| {
-        matches!(
-            kind,
-            Kind::PoolMax2d
-                | Kind::PoolMean2d
-                | Kind::PoolMax2dInputGrad
-                | Kind::PoolMean2dInputGrad
-        )
-    }) {
-        pool::define(compiler);
-    }
-    if kinds.contains(&Kind::Pack) {
-        pack::define(compiler, elements);
+}
+
+fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geometry: &Geometry) {
+    match module {
+        Module::Matmul => matmul_device::define(compiler),
+        Module::MatmulTiles => {
+            let (left, right) = geometry.stage_lengths();
+            compiler.workgroup("matmul_left", "f32", left);
+            compiler.workgroup("matmul_right", "f32", right);
+            matmul::specialize(compiler, geometry);
+        }
+        Module::Attention => attention::define(compiler, geometry),
+        Module::Reduce => {
+            compiler.workgroup("reduction_scratch", "f32", geometry.workgroup());
+            reduce::define(compiler);
+        }
+        Module::Softmax => softmax::define(compiler),
+        Module::Choice => {
+            compiler.workgroup("choice_index", "u32", geometry.workgroup());
+            choice::define(compiler);
+        }
+        Module::Select => select::define(compiler),
+        Module::Conv => conv::define(compiler),
+        Module::Scatter => scatter::define(compiler),
+        Module::Layout => layout::define(compiler),
+        Module::Pool => pool::define(compiler),
+        Module::Pack => pack::define(compiler, elements),
     }
 }

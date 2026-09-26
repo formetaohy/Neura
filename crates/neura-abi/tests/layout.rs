@@ -1,7 +1,7 @@
 use bytemuck::Zeroable;
 use neura_abi::{
-    BoundsRecord, Element, Kind, PlacementRecord, SegmentRecord, StepFields, StepRecord, Store,
-    TaskFields, TaskRecord, ValueFields, ValueRecord,
+    BoundsRecord, Element, Kind, PlacementRecord, Scratch, SegmentRecord, StepFields, StepRecord,
+    Store, TaskFields, TaskRecord, ValueFields, ValueRecord,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -97,6 +97,42 @@ fn every_task_kind_is_declared_once() {
     assert!(refuses(|| {
         let _ = Kind::of(Kind::COUNT);
     }));
+}
+
+#[test]
+fn every_task_kind_declares_the_device_code_it_runs() {
+    for kind in Kind::ALL {
+        let info = kind.info();
+        assert_eq!(info.kind, *kind);
+        assert_eq!(kind.name(), info.name);
+        assert!(
+            info.entry.starts_with("run_"),
+            "the {} kind names its device body {}",
+            kind.name(),
+            info.entry,
+        );
+        let mut modules = info.modules.to_vec();
+        let declared = modules.len();
+        modules.sort_unstable_by_key(|module| module.name());
+        modules.dedup();
+        assert_eq!(
+            modules.len(),
+            declared,
+            "the {} kind installs the same device module twice",
+            kind.name(),
+        );
+        for scratch in Scratch::ALL {
+            assert_eq!(
+                kind.stages(*scratch),
+                info.modules
+                    .iter()
+                    .any(|module| module.scratch().contains(scratch)),
+                "the {} kind stages {} outside the device modules it installs",
+                kind.name(),
+                scratch.name(),
+            );
+        }
+    }
 }
 
 #[test]

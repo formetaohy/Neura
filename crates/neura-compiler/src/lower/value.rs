@@ -502,7 +502,8 @@ impl FunctionLower<'_> {
                     self.compiler.ty("fvec2"),
                 )
             }
-            "max" | "min" | "abs" | "sqrt" | "exp" | "log" | "tanh" | "trunc" => {
+            "max" | "min" | "abs" | "sqrt" | "exp" | "log" | "tanh" | "trunc" | "sin" | "cos"
+            | "pow" | "floor" => {
                 let fun = match name {
                     "max" => MathFunction::Max,
                     "min" => MathFunction::Min,
@@ -512,11 +513,19 @@ impl FunctionLower<'_> {
                     "log" => MathFunction::Log,
                     "tanh" => MathFunction::Tanh,
                     "trunc" => MathFunction::Trunc,
+                    "sin" => MathFunction::Sin,
+                    "cos" => MathFunction::Cos,
+                    "pow" => MathFunction::Pow,
+                    "floor" => MathFunction::Floor,
                     _ => unreachable!(),
                 };
                 assert_eq!(
                     args.len(),
-                    if matches!(name, "max" | "min") { 2 } else { 1 }
+                    if matches!(name, "max" | "min" | "pow") {
+                        2
+                    } else {
+                        1
+                    }
                 );
                 let first = self.value(&args[0]);
                 let second = args

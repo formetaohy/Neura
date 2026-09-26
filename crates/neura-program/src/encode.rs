@@ -5,8 +5,8 @@ use crate::lower;
 use crate::lower::Task;
 use crate::schedule::{self, Dispatch};
 use neura_abi::{
-    BoundsFields, BoundsRecord, Element, Kind, Placement, SegmentRecord, StepRecord, Store,
-    TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    BoundsFields, BoundsRecord, Element, Geometry, Kind, Placement, SegmentRecord, StepRecord,
+    Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -179,11 +179,8 @@ impl Encoding {
         let mut work = 0;
         for index in order {
             let task = &tasks[*index as usize];
-            let geometry = match task.kind {
-                Kind::Attention
-                | Kind::AttentionQueryGrad
-                | Kind::AttentionKeyGrad
-                | Kind::AttentionValueGrad => {
+            let geometry = match task.kind.geometry() {
+                Geometry::Attention => {
                     assert!(
                         (task.geometry as usize) < tiles.attention.len(),
                         "an attention names geometry {} beyond the {} tiles its plan carries",
@@ -192,7 +189,7 @@ impl Encoding {
                     );
                     task.geometry
                 }
-                Kind::Matmul => {
+                Geometry::Product => {
                     assert!(
                         (task.geometry as usize) < matmul_tiles.len(),
                         "a product names geometry {} beyond the {} tiles its profile carries",
@@ -202,37 +199,18 @@ impl Encoding {
                     geometries[task.geometry as usize] += 1;
                     task.geometry
                 }
-                Kind::Argmax
-                | Kind::Categorical
-                | Kind::SumAxis
-                | Kind::Conv2dWeightGrad
-                | Kind::Pack => task.geometry,
-                Kind::Binary
-                | Kind::Unary
-                | Kind::Partial
-                | Kind::Fill
-                | Kind::Broadcast
-                | Kind::Layout
-                | Kind::SumChunk
-                | Kind::Softmax
-                | Kind::SoftmaxGrad
-                | Kind::LogSoftmax
-                | Kind::LogSoftmaxGrad
-                | Kind::OneHot
-                | Kind::Gather
-                | Kind::Scatter
-                | Kind::Conv2d
-                | Kind::Conv2dInputGrad
-                | Kind::PoolMax2d
-                | Kind::PoolMax2dInputGrad
-                | Kind::PoolMean2d
-                | Kind::PoolMean2dInputGrad
-                | Kind::MatmulFold => 0,
+                Geometry::Strategy => task.geometry,
+                Geometry::None => {
+                    assert_eq!(
+                        task.geometry,
+                        0,
+                        "a {} task carries geometry {} where its vocabulary declares none",
+                        task.kind.name(),
+                        task.geometry,
+                    );
+                    0
+                }
             };
-            assert!(
-                task.kind != Kind::SumChunk || task.chain.is_empty(),
-                "a reduction task writes one slot per task and carries no chain",
-            );
             assert!(
                 task.chain.is_empty() || task.kind.takes_chain(),
                 "a {} task carries a chain no device body of it reads",
