@@ -29,6 +29,7 @@ pub(crate) struct Task {
     pub(crate) splits: u32,
     pub(crate) work: u64,
     pub(crate) in_place: bool,
+    pub(crate) prelude: Vec<StepRecord>,
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) unit: u32,
 }
@@ -46,6 +47,7 @@ impl Reads for Task {
         self.inputs
             .iter()
             .copied()
+            .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
             .filter(|value| *value != NO_VALUE)
     }
@@ -67,6 +69,7 @@ impl Task {
             splits: 1,
             work,
             in_place: unit.in_place,
+            prelude: unit.prelude.clone(),
             chain: unit.chain.clone(),
             unit: 0,
         }
@@ -123,6 +126,7 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: 
         copy.param = 0.0;
         copy.splits = 1;
         copy.in_place = false;
+        copy.prelude.clear();
         copy.chain.clear();
         plan.tasks.push(copy);
     }
@@ -164,6 +168,7 @@ fn pack(plan: &mut Plan, unit: &TaskInfo, image: u32, element: Element, profile:
         task.param = 0.0;
         task.splits = 1;
         task.in_place = true;
+        task.prelude.clear();
         task.chain.clear();
         plan.tasks.push(task);
     }
@@ -333,6 +338,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
                 task.out = partials;
                 task.slot = split;
                 task.splits = splits;
+                task.prelude.clear();
                 task.chain.clear();
                 task.in_place = false;
             }
@@ -351,6 +357,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         task.kind = Kind::MatmulFold;
         task.inputs = [partials, NO_VALUE, NO_VALUE];
         task.splits = splits;
+        task.prelude.clear();
         plan.tasks.push(task);
     }
 }
@@ -411,9 +418,13 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
     loop {
         let elements = plan.shape(source).elements();
         let per_reduction = reduction_elements(elements, target);
+        let opens = source == unit.inputs[0];
         if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
             task.inputs = [source, NO_VALUE, NO_VALUE];
+            if !opens {
+                task.prelude.clear();
+            }
             plan.tasks.push(task);
             return;
         }
@@ -422,6 +433,9 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         for (slot, (first, count)) in spans(elements, per_reduction).enumerate() {
             let mut task = Task::span(unit, first, count, u64::from(count));
             task.inputs = [source, NO_VALUE, NO_VALUE];
+            if !opens {
+                task.prelude.clear();
+            }
             task.slot = slot as u32;
             task.out = partials;
             plan.tasks.push(task);

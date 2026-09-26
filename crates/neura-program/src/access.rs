@@ -20,6 +20,7 @@ impl Reads for TaskInfo {
         self.inputs
             .iter()
             .copied()
+            .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
             .filter(|value| *value != NO_VALUE)
     }

@@ -28,6 +28,38 @@ mod source {
         return result;
     }
 
+    fn opened(task: Task, at: uvec4, carried: f32) -> f32 {
+        let mut result = carried;
+        for step in stride(0u32, task.prelude_steps, 1u32) {
+            let record = steps[task.prelude + step];
+            let operand = chain_operand(record, at);
+            let swapped = record.swapped == 1u32;
+            result = op_apply(
+                task.kind,
+                record.op,
+                select(result, operand, swapped),
+                select(operand, result, swapped),
+            );
+        }
+        return result;
+    }
+
+    fn read_frame(task: Task, source: Value, at: uvec4) -> f32 {
+        let carried = fetch(source, read_address(at, source.strides));
+        if task.prelude_steps == 0u32 {
+            return carried;
+        }
+        return opened(task, at, carried);
+    }
+
+    fn read_flat(task: Task, source: Value, index: u32) -> f32 {
+        if task.prelude_steps == 0u32 {
+            return fetch(source, index);
+        }
+        let at = coordinates(index, source.dims);
+        return opened(task, at, fetch(source, read_address(at, source.strides)));
+    }
+
     fn run_binary(task: Task, lid: u32) {
         let left = values[task.a];
         let right = values[task.b];

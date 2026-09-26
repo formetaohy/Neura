@@ -86,6 +86,8 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     b: u32 => U32,
     c: u32 => U32,
     param: f32 => F32,
+    prelude: u32 => U32,
+    prelude_steps: u32 => U32,
     chain: u32 => U32,
     steps: u32 => U32,
     stride_rows: u32 => U32,

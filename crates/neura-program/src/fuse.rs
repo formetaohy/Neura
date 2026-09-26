@@ -72,22 +72,172 @@ impl<'a> Fold<'a> {
     }
 
     fn absorb(&mut self, value: u32) {
-        if pinned(self.values, value) {
+        let mut carried = value;
+        loop {
+            if pinned(self.values, carried) {
+                return;
+            }
+            let Some(producer) = self.producers[carried as usize] else {
+                return;
+            };
+            let uses = &self.reads[carried as usize];
+            if uses.len() != 1 {
+                return;
+            }
+            let use_ = uses[0];
+            if use_.slot == CHAIN_SLOT {
+                return;
+            }
+            let consumer = use_.task;
+            let opens = self.tasks[consumer]
+                .as_ref()
+                .is_some_and(|tail| tail.kind.takes_prelude());
+            if opens {
+                if use_.slot != 0 {
+                    return;
+                }
+                match self.prepend(producer, consumer) {
+                    Some(source) => carried = source,
+                    None => return,
+                }
+                continue;
+            }
+            if use_.slot > 1 {
+                return;
+            }
+            self.absorb_on_the_way_out(producer, consumer, use_.slot, carried);
             return;
         }
-        let Some(producer) = self.producers[value as usize] else {
-            return;
+    }
+
+    fn prepend(&mut self, producer: usize, consumer: usize) -> Option<u32> {
+        let head = self.tasks[producer].as_ref()?.clone();
+        let tail = self.tasks[consumer].as_ref()?;
+        if head.in_place || tail.in_place || !head.prelude.is_empty() {
+            return None;
+        }
+        let shape = self.values[head.out as usize].shape;
+        let (source, step) = match head.kind {
+            Kind::Unary => {
+                let source = head.inputs[0];
+                if source == NO_VALUE {
+                    return None;
+                }
+                (
+                    source,
+                    StepRecord::of(StepFields {
+                        op: head.op,
+                        operand: NO_VALUE,
+                        swapped: 0,
+                    }),
+                )
+            }
+            Kind::Binary => {
+                let (left, right) = (head.inputs[0], head.inputs[1]);
+                if left == NO_VALUE || right == NO_VALUE {
+                    return None;
+                }
+                if self.values[left as usize].shape == shape {
+                    (
+                        left,
+                        StepRecord::of(StepFields {
+                            op: head.op,
+                            operand: right,
+                            swapped: 0,
+                        }),
+                    )
+                } else if self.values[right as usize].shape == shape {
+                    (
+                        right,
+                        StepRecord::of(StepFields {
+                            op: head.op,
+                            operand: left,
+                            swapped: 1,
+                        }),
+                    )
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
         };
-        let uses = &self.reads[value as usize];
-        if uses.len() != 1 {
-            return;
+        let retired = access::storage(self.values, head.out);
+        if self.readers[retired as usize] != 1 {
+            return None;
         }
-        let use_ = uses[0];
-        if use_.slot == CHAIN_SLOT || use_.slot > 1 {
-            return;
+        if tail
+            .inputs
+            .iter()
+            .skip(1)
+            .copied()
+            .filter(|operand| *operand != NO_VALUE)
+            .chain(tail.chain.iter().map(|step| step.operand))
+            .any(|operand| access::storage(self.values, operand) == retired)
+        {
+            return None;
         }
-        let consumer = use_.task;
-        let Some((fused, step)) = self.merge(producer, consumer, use_.slot) else {
+        let (from, to) = (self.times[producer], self.times[consumer]);
+        for storage in Access::of(self.values, &head).reads() {
+            if *storage == retired {
+                return None;
+            }
+            if self.write_times[*storage as usize]
+                .iter()
+                .any(|write| *write > from && *write < to)
+            {
+                return None;
+            }
+        }
+        let mut tail = self.tasks[consumer]
+            .take()
+            .expect("a consumer is live while its prelude grows");
+        for operand in head.inputs {
+            if operand != NO_VALUE {
+                drop_use(&mut self.reads, operand, producer);
+            }
+        }
+        for step in &head.chain {
+            if step.operand != NO_VALUE {
+                drop_use(&mut self.reads, step.operand, producer);
+            }
+        }
+        tail.prelude = head
+            .prelude
+            .iter()
+            .copied()
+            .chain(std::iter::once(step))
+            .chain(head.chain.iter().copied())
+            .chain(tail.prelude.iter().copied())
+            .collect();
+        tail.inputs[0] = source;
+        self.reads[source as usize].push(Use {
+            task: consumer,
+            slot: 0,
+        });
+        if step.operand != NO_VALUE {
+            self.reads[step.operand as usize].push(Use {
+                task: consumer,
+                slot: CHAIN_SLOT,
+            });
+        }
+        for step in &head.chain {
+            if step.operand != NO_VALUE {
+                self.reads[step.operand as usize].push(Use {
+                    task: consumer,
+                    slot: CHAIN_SLOT,
+                });
+            }
+        }
+        self.tasks[consumer] = Some(tail);
+        self.tasks[producer] = None;
+        self.readers[retired as usize] -= 1;
+        self.reads[head.out as usize].clear();
+        self.producers[head.out as usize] = None;
+        Some(source)
+    }
+
+    fn absorb_on_the_way_out(&mut self, producer: usize, consumer: usize, slot: u32, value: u32) {
+        let Some((fused, step)) = self.merge(producer, consumer, slot) else {
             return;
         };
         let retired = {

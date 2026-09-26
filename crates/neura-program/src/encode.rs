@@ -232,9 +232,22 @@ impl Encoding {
                 "a reduction task writes one slot per task and carries no chain",
             );
             assert!(
+                task.prelude.is_empty() || task.kind.takes_prelude(),
+                "a {} task opens with a prelude no device body of it reads",
+                task.kind.name(),
+            );
+            assert!(
                 task.kind != Kind::Matmul || task.splits == 1 || task.chain.is_empty(),
                 "a product split across the depth hands its chain to the fold",
             );
+            let prelude = (steps.len() / size_of::<StepRecord>()) as u32;
+            for step in &task.prelude {
+                steps.extend_from_slice(bytemuck::bytes_of(step));
+            }
+            let chain = (steps.len() / size_of::<StepRecord>()) as u32;
+            for step in &task.chain {
+                steps.extend_from_slice(bytemuck::bytes_of(step));
+            }
             let record = TaskRecord::of(TaskFields {
                 kind: task.kind.code(),
                 op: task.op,
@@ -248,16 +261,15 @@ impl Encoding {
                 b: task.inputs[1],
                 c: task.inputs[2],
                 param: task.param,
-                chain: (steps.len() / size_of::<StepRecord>()) as u32,
+                prelude,
+                prelude_steps: task.prelude.len() as u32,
+                chain,
                 steps: task.chain.len() as u32,
                 stride_rows: task.window.stride_rows(),
                 stride_columns: task.window.stride_columns(),
                 pad_rows: task.window.pad_rows(),
                 pad_columns: task.window.pad_columns(),
             });
-            for step in &task.chain {
-                steps.extend_from_slice(bytemuck::bytes_of(step));
-            }
             if task.in_place && store_of(info_of(values, task.out).residency) == Store::Weights {
                 updates_weights = true;
             }

@@ -44,7 +44,7 @@ mod source {
         let output = values[task.out];
         let mut local = 0.0;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            local = local + fetch(source, index);
+            local = local + read_flat(task, source, index);
         }
         let total = workgroup_sum(lid, local);
         if lid == 0u32 {
@@ -52,18 +52,18 @@ mod source {
         }
     }
 
-    fn sum_row_with_workgroup(lid: u32, source: Value, row: u32, columns: u32) -> f32 {
+    fn sum_row_with_workgroup(task: Task, lid: u32, source: Value, row: u32, columns: u32) -> f32 {
         let mut local = 0.0;
         for column in stride(lid, columns, WORKGROUP_SIZE) {
-            local = local + fetch(source, row * columns + column);
+            local = local + read_flat(task, source, row * columns + column);
         }
         return workgroup_sum(lid, local);
     }
 
-    fn sum_row_with_thread(source: Value, row: u32, columns: u32) -> f32 {
+    fn sum_row_with_thread(task: Task, source: Value, row: u32, columns: u32) -> f32 {
         let mut local = 0.0;
         for column in stride(0u32, columns, 1u32) {
-            local = local + fetch(source, row * columns + column);
+            local = local + read_flat(task, source, row * columns + column);
         }
         return local;
     }
@@ -71,7 +71,7 @@ mod source {
     fn sum_rows_with_workgroup(task: Task, lid: u32, source: Value, columns: u32) {
         let output = values[task.out];
         for row in stride(task.first, task.first + task.count, 1u32) {
-            let total = sum_row_with_workgroup(lid, source, row, columns);
+            let total = sum_row_with_workgroup(task, lid, source, row, columns);
             if lid == 0u32 {
                 publish(
                     output,
@@ -92,7 +92,7 @@ mod source {
                 chained(
                     task,
                     coordinates(row, output.dims),
-                    sum_row_with_thread(source, row, columns),
+                    sum_row_with_thread(task, source, row, columns),
                 ),
             );
         }
@@ -110,7 +110,7 @@ mod source {
             let at = coordinates(index, output.dims);
             let mut total = 0.0;
             for fold in stride(0u32, folds, 1u32) {
-                total = total + fetch(source, read_address(at + step * fold, source.strides));
+                total = total + read_frame(task, source, at + step * fold);
             }
             publish(output, index, chained(task, at, total));
         }

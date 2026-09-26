@@ -53,6 +53,7 @@ mod source {
     }
 
     fn fold_row_by_workgroup(
+        task: Task,
         lid: u32,
         source: Value,
         row: u32,
@@ -64,7 +65,7 @@ mod source {
         let mut local_index = 0u32;
         for column in stride(lid, columns, WORKGROUP_SIZE) {
             let weight = choice_weight(
-                fetch(source, row * columns + column),
+                read_flat(task, source, row * columns + column),
                 seed,
                 row * columns + column,
                 noised,
@@ -77,12 +78,19 @@ mod source {
         return workgroup_choice(lid, local, local_index);
     }
 
-    fn fold_row_by_thread(source: Value, row: u32, columns: u32, seed: u32, noised: bool) -> u32 {
+    fn fold_row_by_thread(
+        task: Task,
+        source: Value,
+        row: u32,
+        columns: u32,
+        seed: u32,
+        noised: bool,
+    ) -> u32 {
         let mut local = -3.4028235e38;
         let mut local_index = 0u32;
         for column in stride(0u32, columns, 1u32) {
             let weight = choice_weight(
-                fetch(source, row * columns + column),
+                read_flat(task, source, row * columns + column),
                 seed,
                 row * columns + column,
                 noised,
@@ -99,7 +107,7 @@ mod source {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first, task.first + task.count, 1u32) {
-            let chosen = fold_row_by_workgroup(lid, source, row, columns, seed, noised);
+            let chosen = fold_row_by_workgroup(task, lid, source, row, columns, seed, noised);
             if lid == 0u32 {
                 publish(
                     output,
@@ -121,7 +129,7 @@ mod source {
                 chained(
                     task,
                     coordinates(row, output.dims),
-                    f32(fold_row_by_thread(source, row, columns, seed, noised)),
+                    f32(fold_row_by_thread(task, source, row, columns, seed, noised)),
                 ),
             );
         }

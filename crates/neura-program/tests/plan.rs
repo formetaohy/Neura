@@ -606,6 +606,7 @@ fn an_update_in_place_follows_every_reader_of_the_value_it_replaces() {
     let weight = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let input = graph.input(Shape::vector(8), Element::Single);
     let read = graph.mul(input, weight);
+    graph.retain(read);
     let loss = graph.sum(read);
     let grads = graph.backward(loss);
     graph.add_into(weight, grads.of(weight));
@@ -1000,6 +1001,116 @@ fn a_fold_reaches_past_a_task_the_chain_does_not_read() {
     let tape = tape(&encoding);
     assert_eq!(tape[1].out, out.id());
     assert_eq!(tape[1].steps, 1);
+}
+
+#[test]
+fn a_reduction_opens_the_chain_it_would_have_materialized() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(1, 8), Element::Single);
+    let squared = graph.mul(data, data);
+    let rows = graph.sum_rows(squared);
+    graph.retain(rows);
+    let encoding = encoding(&graph);
+    assert_eq!(kinds(&encoding), vec![Kind::SumAxis]);
+    let tape = tape(&encoding);
+    assert_eq!(
+        tape[0].prelude_steps, 1,
+        "the fold of the reduction opens the product it would have read",
+    );
+    assert_eq!(tape[0].a, data.id(), "the reduction reads the operand");
+    assert_eq!(tape[0].out, rows.id(), "the reduction writes its own row");
+    assert_eq!(writers(&encoding, squared.id()), Vec::<usize>::new());
+    let opened = steps(&encoding)[tape[0].prelude as usize];
+    assert_eq!(opened.op, op::MUL);
+    assert_eq!(opened.operand, data.id());
+    assert_eq!(opened.swapped, 0);
+}
+
+#[test]
+fn a_pinned_product_keeps_the_task_that_writes_it() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(1, 8), Element::Single);
+    let squared = graph.mul(data, data);
+    graph.retain(squared);
+    graph.retain(graph.sum_rows(squared));
+    let encoding = encoding(&graph);
+    assert_eq!(kinds(&encoding), vec![Kind::Binary, Kind::SumAxis]);
+    assert!(
+        tape(&encoding).iter().all(|task| task.prelude_steps == 0),
+        "a reduction opens no tensor another task still reads",
+    );
+    assert_eq!(writers(&encoding, squared.id()).len(), 1);
+}
+
+#[test]
+fn a_task_that_reads_its_source_more_than_once_keeps_it_materialized() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(1, 8), Element::Single);
+    let logits = graph.exp(data);
+    graph.retain(graph.softmax(logits));
+    let encoding = encoding(&graph);
+    assert_eq!(kinds(&encoding), vec![Kind::Unary, Kind::Softmax]);
+    assert!(
+        tape(&encoding).iter().all(|task| task.prelude_steps == 0),
+        "a row a task walks three times holds the task that wrote it",
+    );
+    assert_eq!(writers(&encoding, logits.id()).len(), 1);
+}
+
+#[test]
+fn a_reduction_that_opens_a_chain_also_carries_its_epilogue() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(1, 8), Element::Single);
+    let squared = graph.mul(data, data);
+    graph.retain(graph.relu(graph.sum_rows(squared)));
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    assert_eq!(encoding.task_count(), 1);
+    assert_eq!(tape[0].prelude_steps, 1);
+    assert_eq!(tape[0].steps, 1);
+    let steps = steps(&encoding);
+    assert_eq!(steps[tape[0].prelude as usize].op, op::MUL);
+    assert_eq!(steps[tape[0].chain as usize].op, op::RELU);
+    assert_ne!(
+        tape[0].prelude, tape[0].chain,
+        "the chain a task opens stands beside the chain it closes",
+    );
+}
+
+#[test]
+fn a_product_two_reductions_read_keeps_the_task_that_writes_it() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(8), Element::Single);
+    let squared = graph.mul(data, data);
+    graph.retain(graph.sum(squared));
+    graph.retain(graph.sum_rows(squared));
+    let encoding = encoding(&graph);
+    assert_eq!(
+        kinds(&encoding),
+        vec![Kind::Binary, Kind::SumChunk, Kind::SumAxis],
+    );
+    assert!(
+        tape(&encoding).iter().all(|task| task.prelude_steps == 0),
+        "a reduction opens only a tensor no other task reads",
+    );
+}
+
+#[test]
+fn an_opened_reduction_hands_its_arena_back_to_the_product() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(4, 256), Element::Single);
+    graph.retain(graph.sum_rows(graph.mul(data, data)));
+    let opened = encoding(&graph);
+    let pinned = Graph::new();
+    let data = pinned.input(Shape::matrix(4, 256), Element::Single);
+    let squared = pinned.mul(data, data);
+    pinned.retain(squared);
+    pinned.retain(pinned.sum_rows(squared));
+    assert_eq!(opened.task_count(), 4);
+    assert!(
+        opened.arena_bytes() < encoding(&pinned).arena_bytes(),
+        "the product a reduction opens holds no tensor of its own",
+    );
 }
 
 #[test]

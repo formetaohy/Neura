@@ -61,3 +61,12 @@ kinds! {
     Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad";
     Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad";
 }
+
+impl Kind {
+    pub const fn takes_prelude(self) -> bool {
+        matches!(
+            self,
+            Self::SumChunk | Self::SumAxis | Self::Argmax | Self::Categorical
+        )
+    }
+}

@@ -57,6 +57,7 @@ pub struct TaskInfo {
     pub param: f32,
     pub window: Window,
     pub in_place: bool,
+    pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
 
@@ -71,6 +72,7 @@ impl TaskInfo {
             param: 0.0,
             window: Window::sliding([1, 1]),
             in_place: false,
+            prelude: Vec::new(),
             chain: Vec::new(),
         }
     }
