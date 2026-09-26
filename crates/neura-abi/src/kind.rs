@@ -93,15 +93,6 @@ pub enum Geometry {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Refusal {
-    Code,
-    Op,
-    Partial,
-    Index,
-    Geometry,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct KindInfo {
     pub kind: Kind,
     pub symbol: &'static str,
@@ -109,9 +100,9 @@ pub struct KindInfo {
     pub entry: &'static str,
     pub modules: &'static [Module],
     pub geometry: Geometry,
-    pub refusal: Refusal,
     pub prelude: bool,
     pub chain: bool,
+    pub origin: bool,
 }
 
 impl KindInfo {
@@ -132,9 +123,9 @@ macro_rules! kinds {
             entry: $entry:literal,
             modules: [$($module:ident),* $(,)?],
             geometry: $geometry:ident,
-            refusal: $refusal:ident,
             prelude: $prelude:literal,
-            chain: $chain:literal $(,)?
+            chain: $chain:literal,
+            origin: $origin:literal $(,)?
         }
     );+ $(;)?) => {
         #[repr(u32)]
@@ -187,16 +178,16 @@ macro_rules! kinds {
                 self.info().geometry
             }
 
-            pub fn refusal(self) -> Refusal {
-                self.info().refusal
-            }
-
             pub fn takes_prelude(self) -> bool {
                 self.info().prelude
             }
 
             pub fn takes_chain(self) -> bool {
                 self.info().chain
+            }
+
+            pub fn reads_origin(self) -> bool {
+                self.info().origin
             }
         }
 
@@ -207,9 +198,9 @@ macro_rules! kinds {
             entry: $entry,
             modules: &[$(Module::$module),*],
             geometry: Geometry::$geometry,
-            refusal: Refusal::$refusal,
             prelude: $prelude,
             chain: $chain,
+            origin: $origin,
         }),+];
     };
 }
@@ -219,248 +210,256 @@ kinds! {
         entry: "run_matmul",
         modules: [Matmul, MatmulTiles],
         geometry: Product,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: false,
     };
     MatmulFold MATMUL_FOLD = "matmul_fold" {
         entry: "run_matmul_fold",
         modules: [Matmul],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Attention ATTENTION = "attention" {
         entry: "run_attention",
         modules: [Attention],
         geometry: Attention,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: true,
     };
     AttentionQueryGrad ATTENTION_QUERY_GRAD = "attention_query_grad" {
         entry: "run_attention_query_grad",
         modules: [Attention],
         geometry: Attention,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: true,
     };
     AttentionKeyGrad ATTENTION_KEY_GRAD = "attention_key_grad" {
         entry: "run_attention_key_grad",
         modules: [Attention],
         geometry: Attention,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: true,
     };
     AttentionValueGrad ATTENTION_VALUE_GRAD = "attention_value_grad" {
         entry: "run_attention_value_grad",
         modules: [Attention],
         geometry: Attention,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: true,
     };
     Binary BINARY = "binary" {
         entry: "run_binary",
         modules: [],
         geometry: None,
-        refusal: Op,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Unary UNARY = "unary" {
         entry: "run_unary",
         modules: [],
         geometry: None,
-        refusal: Op,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Partial PARTIAL = "partial" {
         entry: "run_partial",
         modules: [],
         geometry: None,
-        refusal: Partial,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Fill FILL = "fill" {
         entry: "run_fill",
         modules: [],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Broadcast BROADCAST = "broadcast" {
         entry: "run_broadcast",
         modules: [],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Layout LAYOUT = "layout" {
         entry: "run_layout",
         modules: [Layout],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: false,
+        origin: false,
     };
     SumChunk SUM_CHUNK = "sum_chunk" {
         entry: "run_sum_chunk",
         modules: [Reduce],
         geometry: None,
-        refusal: Code,
         prelude: true,
         chain: false,
+        origin: false,
     };
     SumAxis SUM_AXIS = "sum_axis" {
         entry: "run_sum_axis",
         modules: [Reduce],
         geometry: Strategy,
-        refusal: Geometry,
         prelude: true,
         chain: true,
+        origin: false,
     };
     Softmax SOFTMAX = "softmax" {
         entry: "run_softmax",
         modules: [Reduce, Softmax],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     SoftmaxGrad SOFTMAX_GRAD = "softmax_grad" {
         entry: "run_softmax_grad",
         modules: [Reduce, Softmax],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     LogSoftmax LOG_SOFTMAX = "log_softmax" {
         entry: "run_log_softmax",
         modules: [Reduce, Softmax],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     LogSoftmaxGrad LOG_SOFTMAX_GRAD = "log_softmax_grad" {
         entry: "run_log_softmax_grad",
         modules: [Reduce, Softmax],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Argmax ARGMAX = "argmax" {
         entry: "run_argmax",
         modules: [Reduce, Choice],
         geometry: Strategy,
-        refusal: Geometry,
         prelude: true,
         chain: true,
+        origin: false,
     };
     Categorical CATEGORICAL = "categorical" {
         entry: "run_categorical",
         modules: [Reduce, Choice],
         geometry: Strategy,
-        refusal: Geometry,
         prelude: true,
         chain: true,
+        origin: false,
     };
     OneHot ONE_HOT = "one_hot" {
         entry: "run_one_hot",
         modules: [Select],
         geometry: None,
-        refusal: Index,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Gather GATHER = "gather" {
         entry: "run_gather",
         modules: [Select],
         geometry: None,
-        refusal: Index,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Scatter SCATTER = "scatter" {
         entry: "run_scatter",
         modules: [Scatter],
         geometry: None,
-        refusal: Index,
         prelude: false,
         chain: false,
+        origin: false,
+    };
+    ScatterWrite SCATTER_WRITE = "scatter_write" {
+        entry: "run_scatter_write",
+        modules: [Scatter],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
     };
     Pack PACK = "pack" {
         entry: "run_pack",
         modules: [Pack],
         geometry: Strategy,
-        refusal: Geometry,
         prelude: false,
         chain: false,
+        origin: false,
     };
     Conv2d CONV2D = "conv2d" {
         entry: "run_conv2d",
         modules: [Conv],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad" {
         entry: "run_conv2d_input_grad",
         modules: [Conv],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad" {
         entry: "run_conv2d_weight_grad",
         modules: [Conv],
         geometry: Strategy,
-        refusal: Geometry,
         prelude: false,
         chain: true,
+        origin: false,
     };
     PoolMax2d POOL_MAX2D = "pool_max2d" {
         entry: "run_pool2d",
         modules: [Pool],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     PoolMax2dInputGrad POOL_MAX2D_INPUT_GRAD = "pool_max2d_input_grad" {
         entry: "run_pool2d_input_grad",
         modules: [Pool],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     PoolMean2d POOL_MEAN2D = "pool_mean2d" {
         entry: "run_pool2d",
         modules: [Pool],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
     PoolMean2dInputGrad POOL_MEAN2D_INPUT_GRAD = "pool_mean2d_input_grad" {
         entry: "run_pool2d_input_grad",
         modules: [Pool],
         geometry: None,
-        refusal: Code,
         prelude: false,
         chain: true,
+        origin: false,
     };
 }

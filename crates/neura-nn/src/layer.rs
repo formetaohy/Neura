@@ -184,7 +184,7 @@ pub struct MultiHeadAttention<'g> {
     key_bias: Value<'g>,
     value_bias: Value<'g>,
     output_bias: Value<'g>,
-    options: AttentionOptions,
+    options: AttentionOptions<'g>,
 }
 
 impl<'g> MultiHeadAttention<'g> {
@@ -194,7 +194,7 @@ impl<'g> MultiHeadAttention<'g> {
         width: u32,
         init: Init,
         element: Element,
-        options: AttentionOptions,
+        options: AttentionOptions<'g>,
     ) -> Self {
         assert!(
             heads > 0 && width > 0,

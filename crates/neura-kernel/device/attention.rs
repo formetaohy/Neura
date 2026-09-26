@@ -1,23 +1,39 @@
 #[neura_compiler::module]
 mod source {
-    fn visible(at: u32, tokens: u32, row: u32, causal: bool) -> bool {
-        if at >= tokens {
+    fn visible(at: u32, keys: u32, position: u32, causal: bool) -> bool {
+        if at >= keys {
             return false;
         }
-        if causal && at > row {
+        if causal && at > position {
             return false;
         }
         return true;
     }
 
-    fn attended(at: u32, tokens: u32, column: u32, causal: bool) -> bool {
+    fn attended(at: u32, tokens: u32, column: u32, origin: u32, causal: bool) -> bool {
         if at >= tokens {
             return false;
         }
-        if causal && at < column {
-            return false;
+        if !causal {
+            return true;
         }
-        return true;
+        return at + origin >= column;
+    }
+
+    fn block_origin(task: Task, plane: uvec4, keys: u32, tokens: u32) -> u32 {
+        if task.origin == NO_VALUE {
+            return 0u32;
+        }
+        if keys < tokens {
+            refuse(task.kind, refusal::ORIGIN, 0u32);
+            return 0u32;
+        }
+        let cursor = values[task.origin];
+        let raw = fetch(
+            cursor,
+            read_address(uvec4(plane.x, plane.y, 0u32, 0u32), cursor.strides),
+        );
+        return whole_index(raw, keys - tokens + 1u32, task.kind, refusal::ORIGIN);
     }
 
     fn template_stage_attention(
@@ -74,11 +90,14 @@ mod source {
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
+        let origin = block_origin(task, plane, keys, tokens);
+        let position = origin + row;
+        let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
             blocks,
             (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-            causal,
+            reached,
         );
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
@@ -109,7 +128,7 @@ mod source {
                     weights[column] = select(
                         -3.4028235e38,
                         score * task.param,
-                        visible(at, keys, row, causal),
+                        visible(at, keys, position, causal),
                     );
                     block_largest = max(block_largest, weights[column]);
                 }
@@ -179,11 +198,14 @@ mod source {
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
+        let origin = block_origin(task, plane, keys, tokens);
+        let position = origin + row;
+        let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
             blocks,
             (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-            causal,
+            reached,
         );
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
         let mut gradients = scalar_array(0.0, ATTN_WIDTH);
@@ -226,7 +248,7 @@ mod source {
                     let weight = select(
                         0.0,
                         exp(score * task.param - normalizer),
-                        visible(at, keys, row, causal),
+                        visible(at, keys, position, causal),
                     );
                     let mut weighted = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
@@ -278,8 +300,9 @@ mod source {
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
+        let origin = block_origin(task, plane, keys, tokens);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let first = select(0u32, plane.z / ATTN_KEYS, causal);
+        let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
         let mut values_row = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
@@ -310,7 +333,7 @@ mod source {
                         0.0,
                         exp(score * task.param
                             - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                        attended(at, tokens, column, causal),
+                        attended(at, tokens, column, origin, causal),
                     );
                     let mut weighted = 0.0;
                     let mut row_dot = 0.0;
@@ -357,6 +380,7 @@ mod source {
         let statistic = values[task.f];
         let output = values[task.out];
         let tokens = query.dims.z;
+        let keys = key.dims.z;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
         let key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -366,8 +390,9 @@ mod source {
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
+        let origin = block_origin(task, plane, keys, tokens);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let first = select(0u32, plane.z / ATTN_KEYS, causal);
+        let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
         if inside {
@@ -393,7 +418,7 @@ mod source {
                         0.0,
                         exp(score * task.param
                             - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                        attended(at, tokens, column, causal),
+                        attended(at, tokens, column, origin, causal),
                     );
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                         accumulated[depth] = accumulated[depth]
@@ -420,25 +445,25 @@ mod source {
 
     fn run_attention(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::ATTENTION, task.geometry),
+            _ => refuse(kind::ATTENTION, refusal::GEOMETRY, task.geometry),
         }
     }
 
     fn run_attention_query_grad(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::ATTENTION_QUERY_GRAD, task.geometry),
+            _ => refuse(kind::ATTENTION_QUERY_GRAD, refusal::GEOMETRY, task.geometry),
         }
     }
 
     fn run_attention_key_grad(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::ATTENTION_KEY_GRAD, task.geometry),
+            _ => refuse(kind::ATTENTION_KEY_GRAD, refusal::GEOMETRY, task.geometry),
         }
     }
 
     fn run_attention_value_grad(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::ATTENTION_VALUE_GRAD, task.geometry),
+            _ => refuse(kind::ATTENTION_VALUE_GRAD, refusal::GEOMETRY, task.geometry),
         }
     }
 }

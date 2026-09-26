@@ -1,7 +1,7 @@
 #[path = "../device/core.rs"]
 mod core;
 
-use neura_abi::{Element, Kind, NO_VALUE, RECORDS, REFUSAL_ELEMENT, store, strategy};
+use neura_abi::{Element, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal, store, strategy};
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
 use neura_profile::Geometry;
 
@@ -114,7 +114,15 @@ impl Megakernel {
         }
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
         compiler.constant("NO_VALUE", NO_VALUE);
-        compiler.constant("refusal::ELEMENT", REFUSAL_ELEMENT);
+        compiler.constant("refusal::TENSOR", TENSOR);
+        compiler.constant("refusal::KIND_BITS", refusal::KIND_BITS);
+        compiler.constant("refusal::CODE_BITS", refusal::CODE_BITS);
+        for refusal in Refusal::ALL {
+            compiler.constant(
+                &format!("refusal::{}", refusal.name().to_uppercase()),
+                refusal.code(),
+            );
+        }
         compiler.constant("store::TENSORS", store::TENSORS);
         compiler.constant("store::WEIGHTS", store::WEIGHTS);
         for element in Element::ALL {

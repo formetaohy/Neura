@@ -6,6 +6,7 @@ pub struct Shapes {
     pub keys: u32,
     pub width: u32,
     pub causal: bool,
+    pub origin: u32,
     pub scale: f32,
 }
 
@@ -14,7 +15,7 @@ fn planes(shapes: Shapes) -> usize {
 }
 
 fn masked(shapes: Shapes, row: usize, column: usize) -> bool {
-    if shapes.causal && column > row {
+    if shapes.causal && column > shapes.origin as usize + row {
         return false;
     }
     true

@@ -517,16 +517,18 @@ fn span_bytes(span: Span) -> u64 {
 }
 
 fn refusal_message(word: u32) -> String {
-    let refused = word >> 16;
-    let code = (word & 0xffff) - 1;
-    if refused == neura_abi::REFUSAL_ELEMENT {
+    let (subject, category, code) = Refusal::read(word);
+    if category == Refusal::Element {
         return format!("the device refused element {code} of a tensor");
     }
-    if refused >= Kind::COUNT {
-        return format!("the device refused kind {refused} with code {code}");
+    if subject >= Kind::COUNT {
+        return format!(
+            "the device refused {} {code} of kind {subject}",
+            category.name(),
+        );
     }
-    let kind = Kind::of(refused);
-    match kind.refusal() {
+    let kind = Kind::of(subject);
+    match category {
         Refusal::Op => format!(
             "the device refused the {} op of the {} task",
             op::name(code),
@@ -539,13 +541,18 @@ fn refusal_message(word: u32) -> String {
             kind.name(),
         ),
         Refusal::Index => format!(
-            "the device refused an index outside the rows of the {} task",
+            "the device refused an index outside the rows the {} task names",
             kind.name(),
         ),
         Refusal::Geometry => format!(
             "the device refused geometry {code} of the {} task",
             kind.name(),
         ),
-        Refusal::Code => format!("the device refused code {code} of the {} task", kind.name()),
+        Refusal::Origin => format!(
+            "the device refused a query origin the {} task has no keys to place",
+            kind.name(),
+        ),
+        Refusal::Task => format!("this device program carries no {} task", kind.name()),
+        Refusal::Element => unreachable!("an element refusal carries no kind"),
     }
 }

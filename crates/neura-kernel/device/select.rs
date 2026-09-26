@@ -7,7 +7,7 @@ mod source {
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let row = index / classes;
             let column = index % classes;
-            let chosen = whole_index(fetch(indices, row), classes, kind::ONE_HOT);
+            let chosen = whole_index(fetch(indices, row), classes, kind::ONE_HOT, refusal::INDEX);
             publish(
                 output,
                 index,
@@ -29,7 +29,7 @@ mod source {
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let row = index / width;
             let column = index % width;
-            let chosen = whole_index(fetch(indices, row), rows, kind::GATHER);
+            let chosen = whole_index(fetch(indices, row), rows, kind::GATHER, refusal::INDEX);
             publish(
                 output,
                 index,

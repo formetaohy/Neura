@@ -44,6 +44,17 @@ pub fn scatter_reference(table: &[f32], indices: &[f32], updates: &[f32], width:
     out
 }
 
+pub fn write_reference(table: &[f32], indices: &[f32], updates: &[f32], width: u32) -> Vec<f32> {
+    let mut out = table.to_vec();
+    for (row, index) in indices.iter().enumerate() {
+        let chosen = *index as usize * width as usize;
+        for (column, value) in out[chosen..chosen + width as usize].iter_mut().enumerate() {
+            *value = updates[row * width as usize + column];
+        }
+    }
+    out
+}
+
 pub fn gumbel_reference(seed: u32, index: u32) -> f32 {
     let mut hash = seed ^ index.wrapping_mul(0x9e37_79b9);
     hash ^= hash >> 16;

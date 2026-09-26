@@ -177,7 +177,7 @@ mod source {
         match task.geometry {
             strategy::WEIGHT_CHUNK => run_conv2d_weight_chunk(task, lid),
             strategy::WEIGHT_FOLD => run_conv2d_weight_fold(task, lid),
-            _ => refuse(kind::CONV2D_WEIGHT_GRAD, task.geometry),
+            _ => refuse(kind::CONV2D_WEIGHT_GRAD, refusal::GEOMETRY, task.geometry),
         }
     }
 }

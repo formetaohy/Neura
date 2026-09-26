@@ -165,7 +165,7 @@ mod source {
 
     fn run_matmul(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::MATMUL, task.geometry),
+            _ => refuse(kind::MATMUL, refusal::GEOMETRY, task.geometry),
         }
     }
 }

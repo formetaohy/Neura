@@ -103,6 +103,7 @@ fn readers(encoding: &Encoding, value: u32) -> Vec<usize> {
             task.a == value
                 || task.b == value
                 || task.c == value
+                || task.origin == value
                 || (task.chain..task.chain + task.steps)
                     .any(|step| steps[step as usize].operand == value)
         })
@@ -1229,33 +1230,110 @@ fn a_narrow_parameter_update_plans_an_image_and_a_pack() {
     );
 }
 
-#[test]
-fn a_narrow_parameter_scatters_through_an_image() {
+fn narrow_rows_through_an_image(kind: Kind) {
     let graph = Graph::new();
     let table = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Half);
     let indices = graph.input(Shape::matrix(3, 1), Element::Single);
     let updates = graph.input(Shape::matrix(3, 2), Element::Single);
-    graph.scatter_into(table, indices, updates);
+    match kind {
+        Kind::Scatter => graph.scatter_into(table, indices, updates),
+        Kind::ScatterWrite => graph.write_into(table, indices, updates),
+        other => panic!("a {} task reaches no row of a table", other.name()),
+    }
     let encoding = encoding(&graph);
     let tape = tape(&encoding);
     let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
     let pack = tape
         .iter()
         .find(|task| Kind::of(task.kind) == Kind::Pack)
-        .expect("a half precision table packs the rows its scatter added");
+        .expect("a half precision table packs the rows its task reached");
     assert_eq!(pack.out, table.id());
     assert_eq!(values[pack.a as usize].store, Store::Tensors.code());
 
-    let scatter = tape
+    let rows = tape
         .iter()
-        .find(|task| Kind::of(task.kind) == Kind::Scatter)
-        .expect("the scatter adds its rows into the image");
-    assert_eq!(scatter.out, pack.a);
+        .find(|task| Kind::of(task.kind) == kind)
+        .expect("the task reaches the rows of the image");
+    assert_eq!(rows.out, pack.a);
     let copy = tape
         .iter()
         .find(|task| task.out == pack.a && Kind::of(task.kind) == Kind::Unary)
-        .expect("the image holds the table before the scatter reaches it");
+        .expect("the image holds the table before the task reaches it");
     assert_eq!(copy.a, table.id());
     assert_eq!(copy.param, 0.0);
     assert_eq!(copy.op, op::IDENTITY);
+}
+
+#[test]
+fn a_narrow_parameter_reaches_the_rows_it_names_through_an_image() {
+    narrow_rows_through_an_image(Kind::Scatter);
+    narrow_rows_through_an_image(Kind::ScatterWrite);
+}
+
+#[test]
+fn a_cursor_stays_on_the_tape_the_block_it_starts_from_reads_it() {
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([1, 1, 4, 4]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([1, 1, 4, 4]), Init::Zero, Element::Single);
+    let cursor = graph.fill(Shape::scalar(), 2.0);
+    let out = graph.attention(
+        queries,
+        keys,
+        keys,
+        neura_graph::AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: Some(cursor),
+        },
+    );
+    graph.retain(out);
+    let encoding = encoding(&graph);
+    let written = writers(&encoding, cursor.id());
+    assert_eq!(
+        written.len(),
+        1,
+        "a cursor is a tensor the task that walks a block reads, not a chain it folds away",
+    );
+    let attended = readers(&encoding, cursor.id());
+    let attention = attended
+        .iter()
+        .copied()
+        .find(|task| Kind::of(tape(&encoding)[*task].kind) == Kind::Attention)
+        .expect("the attention reads the cursor it starts from");
+    assert!(
+        follows(&encoding, written[0], attention),
+        "the task that writes the cursor runs before the block that starts from it",
+    );
+    assert_eq!(tape(&encoding)[attention].origin, cursor.id());
+}
+
+#[test]
+fn a_cursor_holds_one_position_per_plane() {
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([2, 1, 4, 4]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([2, 1, 4, 4]), Init::Zero, Element::Single);
+    let positions = |dims: [u32; 4]| graph.fill(Shape::of(dims), 1.0);
+    let options = |origin| neura_graph::AttentionOptions {
+        scale: 0.5,
+        causal: true,
+        origin,
+    };
+    let _ = graph.attention(queries, keys, keys, options(None));
+    let _ = graph.attention(queries, keys, keys, options(Some(positions([1, 1, 1, 1]))));
+    let _ = graph.attention(queries, keys, keys, options(Some(positions([2, 1, 1, 1]))));
+    assert!(refuses(|| {
+        let _ = graph.attention(queries, keys, keys, options(Some(positions([3, 1, 1, 1]))));
+    }));
+    assert!(refuses(|| {
+        let _ = graph.attention(queries, keys, keys, options(Some(positions([1, 1, 4, 1]))));
+    }));
+    assert!(refuses(|| {
+        let brief = graph.parameter(Shape::of([2, 1, 2, 4]), Init::Zero, Element::Single);
+        let _ = graph.attention(
+            queries,
+            brief,
+            brief,
+            options(Some(positions([1, 1, 1, 1]))),
+        );
+    }));
 }

@@ -5,8 +5,8 @@ use crate::lower;
 use crate::lower::Task;
 use crate::schedule::{self, Dispatch};
 use neura_abi::{
-    BoundsFields, BoundsRecord, Element, Geometry, Kind, Placement, SegmentRecord, StepRecord,
-    Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    BoundsFields, BoundsRecord, Element, Geometry, Kind, NO_VALUE, Placement, SegmentRecord,
+    StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -225,6 +225,11 @@ impl Encoding {
                 task.kind != Kind::Matmul || task.splits == 1 || task.chain.is_empty(),
                 "a product split across the depth hands its chain to the fold",
             );
+            assert!(
+                task.origin == NO_VALUE || task.kind.reads_origin(),
+                "a {} task carries a cursor no device body of it reads",
+                task.kind.name(),
+            );
             let prelude = (steps.len() / size_of::<StepRecord>()) as u32;
             for step in &task.prelude {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
@@ -243,6 +248,7 @@ impl Encoding {
                 splits: task.splits,
                 out: task.out,
                 extra: task.extra,
+                origin: task.origin,
                 a: task.inputs[0],
                 b: task.inputs[1],
                 c: task.inputs[2],

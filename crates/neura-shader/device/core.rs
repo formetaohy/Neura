@@ -1,7 +1,10 @@
 #[neura_compiler::module]
 mod source {
-    fn refuse(kind: u32, code: u32) {
-        atomic_store(&refusal[0u32], (kind << 16u32) | (code + 1u32));
+    fn refuse(subject: u32, category: u32, code: u32) {
+        atomic_store(
+            &refusal[0u32],
+            (subject << refusal::KIND_BITS) | (category << refusal::CODE_BITS) | (code + 1u32),
+        );
     }
 
     fn coordinates(flat: u32, dims: uvec4) -> uvec4 {
@@ -24,9 +27,9 @@ mod source {
         );
     }
 
-    fn whole_index(value: f32, rows: u32, kind: u32) -> u32 {
+    fn whole_index(value: f32, rows: u32, subject: u32, category: u32) -> u32 {
         if trunc(value) != value || !(value >= 0.0) || !(value < f32(rows)) {
-            refuse(kind, 0u32);
+            refuse(subject, category, 0u32);
             return 0u32;
         }
         return u32(value);
@@ -73,7 +76,7 @@ mod source {
     fn fetch_by_element(value: Value, at: u32) -> f32 {
         match value.element {
             _ => {
-                refuse(refusal::ELEMENT, value.element);
+                refuse(refusal::TENSOR, refusal::ELEMENT, value.element);
                 return 0.0;
             }
         }
@@ -81,7 +84,7 @@ mod source {
 
     fn run_task(task: Task, lid: u32) {
         match task.kind {
-            _ => refuse(task.kind, 0u32),
+            _ => refuse(task.kind, refusal::TASK, 0u32),
         }
     }
 

@@ -50,6 +50,12 @@ impl<'a> Fold<'a> {
                     });
                 }
             }
+            if task.origin != NO_VALUE {
+                fold.reads[task.origin as usize].push(Use {
+                    task: index,
+                    slot: CHAIN_SLOT,
+                });
+            }
             for storage in Access::of(values, task).reads() {
                 fold.readers[*storage as usize] += 1;
             }

@@ -53,6 +53,7 @@ fn graph_of(
         AttentionOptions {
             scale: shapes.scale,
             causal: shapes.causal,
+            origin: None,
         },
     );
     graph.retain(out);
@@ -128,6 +129,7 @@ fn shapes(causal: bool) -> Shapes {
         keys: 5,
         width: 4,
         causal,
+        origin: 0,
         scale: 0.5,
     }
 }
@@ -148,6 +150,7 @@ fn an_attention_reads_queries_and_keys_of_different_lengths() {
             keys: 7,
             width: 3,
             causal: false,
+            origin: 0,
             scale: 0.25,
         },
         1e-5,
@@ -163,6 +166,7 @@ fn an_attention_wider_than_one_task_walks_every_row_of_its_block() {
         keys: 300,
         width: 2,
         causal: true,
+        origin: 0,
         scale: 0.5,
     };
     let runtime = open();
@@ -195,6 +199,7 @@ fn a_fused_attention_holds_no_score_matrix_of_its_own() {
             keys: tokens,
             width: 32,
             causal: true,
+            origin: 0,
             scale: 0.176_776_69,
         };
         let (graph, queries, keys, values, out) = graph_of(shapes);
@@ -233,6 +238,7 @@ fn an_attention_carries_the_log_sum_of_every_row_it_weights() {
         keys: 4,
         width: 2,
         causal: true,
+        origin: 0,
         scale: 0.5,
     };
     let (graph, queries, keys, values, _) = graph_of(shapes);
@@ -270,6 +276,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             AttentionOptions {
                 scale: 0.5,
                 causal: true,
+                origin: None,
             },
         );
     }));
@@ -281,6 +288,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             AttentionOptions {
                 scale: 0.0,
                 causal: false,
+                origin: None,
             },
         );
     }));
@@ -293,6 +301,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             AttentionOptions {
                 scale: 0.5,
                 causal: false,
+                origin: None,
             },
         );
     }));
@@ -313,6 +322,7 @@ fn a_fused_attention_leaves_no_room_for_a_score_it_cannot_carry() {
         AttentionOptions {
             scale: 0.5,
             causal: false,
+            origin: None,
         },
     );
     graph.retain(out);
@@ -366,6 +376,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
         AttentionOptions {
             scale: 1.0 / (width as f32).sqrt(),
             causal: true,
+            origin: None,
         },
     );
     let loss = graph.sum(out);
@@ -398,6 +409,7 @@ fn every_profile_the_device_offers_runs_the_same_attention() {
         keys: 7,
         width: 3,
         causal: true,
+        origin: 0,
         scale: 0.5,
     };
     let runtime = open();

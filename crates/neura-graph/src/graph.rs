@@ -39,9 +39,10 @@ impl<'g> Value<'g> {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct AttentionOptions {
+pub struct AttentionOptions<'g> {
     pub scale: f32,
     pub causal: bool,
+    pub origin: Option<Value<'g>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -61,6 +62,7 @@ pub struct TaskInfo {
     pub out: u32,
     pub extra: u32,
     pub inputs: [u32; 6],
+    pub origin: u32,
     pub slot: u32,
     pub param: f32,
     pub window: Window,
@@ -77,6 +79,7 @@ impl TaskInfo {
             out,
             extra: NO_VALUE,
             inputs,
+            origin: NO_VALUE,
             slot: 0,
             param: 0.0,
             window: Window::sliding([1, 1]),
@@ -261,7 +264,7 @@ impl<'g> Graph<'g> {
         query: Value<'g>,
         key: Value<'g>,
         value: Value<'g>,
-        attention: AttentionOptions,
+        attention: AttentionOptions<'g>,
     ) -> Value<'g> {
         let query = self.own(query);
         let key = self.own(key);
@@ -269,6 +272,7 @@ impl<'g> Graph<'g> {
         let query_shape = self.shape(query);
         let key_shape = self.shape(key);
         let value_shape = self.shape(value);
+        let origin = attention.origin.map(|origin| self.own(origin));
         assert!(
             attention.scale.is_finite() && attention.scale != 0.0,
             "an attention scaled by {} weighs every score to nothing",
@@ -298,9 +302,25 @@ impl<'g> Graph<'g> {
             key_shape.dims()[2],
             value_shape.dims()[2],
         );
+        if let Some(origin) = origin {
+            let positions = Shape::of([query_shape.dims()[0], query_shape.dims()[1], 1, 1]);
+            assert!(
+                self.shape(origin).fits_within(positions),
+                "a cursor holds one position per {:?} plane, and value {} walks {:?}",
+                positions.dims(),
+                origin.id(),
+                self.shape(origin).dims(),
+            );
+            assert!(
+                query_shape.dims()[2] <= key_shape.dims()[2],
+                "a cursor walks {} queries over {} keys, and the last query of a block reads every key before it",
+                query_shape.dims()[2],
+                key_shape.dims()[2],
+            );
+        }
         assert!(
-            !attention.causal || query_shape.dims()[2] == key_shape.dims()[2],
-            "a causal attention walks {} queries over {} keys, and a mask aligns them one by one",
+            !attention.causal || origin.is_some() || query_shape.dims()[2] == key_shape.dims()[2],
+            "a causal attention walks {} queries over {} keys, and a cursor is what aligns them",
             query_shape.dims()[2],
             key_shape.dims()[2],
         );
@@ -339,6 +359,7 @@ impl<'g> Graph<'g> {
             ],
         );
         task.extra = log_sum_exp.id();
+        task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.param = attention.scale;
         task.slot = u32::from(attention.causal);
         self.push(task);
@@ -685,6 +706,14 @@ impl<'g> Graph<'g> {
     }
 
     pub fn scatter_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+        self.rows_into(Kind::Scatter, target, indices, updates);
+    }
+
+    pub fn write_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+        self.rows_into(Kind::ScatterWrite, target, indices, updates);
+    }
+
+    fn rows_into(&self, kind: Kind, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
         let target = self.own(target);
         let indices = self.own(indices);
         let updates = self.own(updates);
@@ -696,11 +725,11 @@ impl<'g> Graph<'g> {
                     info.residency,
                     Residency::Input | Residency::Parameter | Residency::Resident
                 ),
-                "only a leaf tensor scatters in place, and value {} is derived from other tasks",
+                "only a leaf tensor takes rows in place, and value {} is derived from other tasks",
                 target.id(),
             );
         }
-        self.scatter(target, indices, updates);
+        self.scatter(kind, target, indices, updates);
         self.wrote_in_place(target);
     }
 
@@ -975,6 +1004,7 @@ impl<'g> Graph<'g> {
                     }
                     let out = self.fresh(self.shape(operand), Residency::Derived, false);
                     let mut grad = TaskInfo::of(kind, op::NONE, out.id(), inputs);
+                    grad.origin = task.origin;
                     grad.param = task.param;
                     grad.slot = task.slot;
                     self.push(grad);
@@ -1028,7 +1058,7 @@ impl<'g> Graph<'g> {
                 let indices = self.value_of(task.inputs[1]);
                 if self.tracked(&[table]) {
                     let zeros = self.fill(self.shape(table), 0.0);
-                    self.scatter(zeros, indices, gradient);
+                    self.scatter(Kind::Scatter, zeros, indices, gradient);
                     self.accumulate(grads, table, zeros);
                 }
             }
@@ -1074,7 +1104,8 @@ impl<'g> Graph<'g> {
             | Kind::PoolMean2dInputGrad
             | Kind::MatmulFold
             | Kind::Pack
-            | Kind::Scatter => {}
+            | Kind::Scatter
+            | Kind::ScatterWrite => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",
@@ -1273,7 +1304,7 @@ impl<'g> Graph<'g> {
         state.version += 1;
     }
 
-    fn scatter(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+    fn scatter(&self, kind: Kind, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
         self.index_list(indices);
         assert!(
             self.contiguous(target),
@@ -1296,7 +1327,7 @@ impl<'g> Graph<'g> {
             actual,
         );
         let mut task = TaskInfo::of(
-            Kind::Scatter,
+            kind,
             op::NONE,
             target.id(),
             [

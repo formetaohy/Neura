@@ -491,6 +491,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
         neura_graph::AttentionOptions {
             scale: 0.5,
             causal: true,
+            origin: None,
         },
     );
     graph.retain(out);
@@ -552,6 +553,7 @@ fn an_attention_keeps_the_shared_pool_its_products_stage_from() {
         neura_graph::AttentionOptions {
             scale: 0.5,
             causal: false,
+            origin: None,
         },
     );
     graph.retain(out);
@@ -580,6 +582,7 @@ fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carrie
         neura_graph::AttentionOptions {
             scale: 0.5,
             causal: false,
+            origin: None,
         },
     );
     graph.retain(out);

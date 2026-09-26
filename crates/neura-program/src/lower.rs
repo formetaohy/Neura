@@ -26,6 +26,7 @@ pub(crate) struct Task {
     pub(crate) out: u32,
     pub(crate) extra: u32,
     pub(crate) inputs: [u32; 6],
+    pub(crate) origin: u32,
     pub(crate) param: f32,
     pub(crate) window: Window,
     pub(crate) splits: u32,
@@ -53,6 +54,7 @@ impl Reads for Task {
         self.inputs
             .iter()
             .copied()
+            .chain([self.origin])
             .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
             .filter(|value| *value != NO_VALUE)
@@ -71,6 +73,7 @@ impl Task {
             out: unit.out,
             extra: unit.extra,
             inputs: unit.inputs,
+            origin: unit.origin,
             param: unit.param,
             window: unit.window,
             splits: 1,
@@ -172,7 +175,7 @@ fn redirected(unit: &TaskInfo, image: u32) -> TaskInfo {
 fn writes_every_element(kind: Kind) -> bool {
     match kind {
         Kind::Binary | Kind::Unary => true,
-        Kind::Scatter => false,
+        Kind::Scatter | Kind::ScatterWrite => false,
         other => panic!(
             "a {} task writes a narrow tensor, and only a pointwise task or a scatter updates a leaf",
             other.name(),
@@ -340,7 +343,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
                     .push(Task::span(unit, first, count, u64::from(count)));
             }
         }
-        Kind::Scatter => {
+        Kind::Scatter | Kind::ScatterWrite => {
             let rows = plan.shape(unit.inputs[1]).elements();
             let width = plan.shape(unit.out).columns();
             for (first, count) in spans(rows, scatter_rows_per_task(rows)) {

@@ -125,17 +125,17 @@ mod source {
                 if task.slot == 3u32 {
                     sum_rows_with_thread(task, lid, source, source.dims.w);
                 } else {
-                    refuse(kind::SUM_AXIS, task.geometry);
+                    refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry);
                 }
             }
             strategy::WORKGROUP_ROW => {
                 if task.slot == 3u32 {
                     sum_rows_with_workgroup(task, lid, source, source.dims.w);
                 } else {
-                    refuse(kind::SUM_AXIS, task.geometry);
+                    refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry);
                 }
             }
-            _ => refuse(kind::SUM_AXIS, task.geometry),
+            _ => refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry),
         }
     }
 }

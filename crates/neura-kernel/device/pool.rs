@@ -154,7 +154,7 @@ mod source {
         match task.kind {
             kind::POOL_MAX2D => run_pool_max2d(task, lid),
             kind::POOL_MEAN2D => run_pool_mean2d(task, lid),
-            _ => refuse(task.kind, 0u32),
+            _ => refuse(task.kind, refusal::TASK, 0u32),
         }
     }
 
@@ -162,7 +162,7 @@ mod source {
         match task.kind {
             kind::POOL_MAX2D_INPUT_GRAD => run_pool_max2d_input_grad(task, lid),
             kind::POOL_MEAN2D_INPUT_GRAD => run_pool_mean2d_input_grad(task, lid),
-            _ => refuse(task.kind, 0u32),
+            _ => refuse(task.kind, refusal::TASK, 0u32),
         }
     }
 }

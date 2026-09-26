@@ -16,7 +16,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, store), 4);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 104);
+    assert_eq!(size_of::<TaskRecord>(), 108);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -29,17 +29,18 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(TaskRecord, d), 48);
     assert_eq!(offset_of!(TaskRecord, e), 52);
     assert_eq!(offset_of!(TaskRecord, f), 56);
-    assert_eq!(offset_of!(TaskRecord, param), 60);
-    assert_eq!(offset_of!(TaskRecord, prelude), 64);
-    assert_eq!(offset_of!(TaskRecord, prelude_steps), 68);
-    assert_eq!(offset_of!(TaskRecord, chain), 72);
-    assert_eq!(offset_of!(TaskRecord, steps), 76);
-    assert_eq!(offset_of!(TaskRecord, reach_rows), 80);
-    assert_eq!(offset_of!(TaskRecord, reach_columns), 84);
-    assert_eq!(offset_of!(TaskRecord, stride_rows), 88);
-    assert_eq!(offset_of!(TaskRecord, stride_columns), 92);
-    assert_eq!(offset_of!(TaskRecord, pad_rows), 96);
-    assert_eq!(offset_of!(TaskRecord, pad_columns), 100);
+    assert_eq!(offset_of!(TaskRecord, origin), 60);
+    assert_eq!(offset_of!(TaskRecord, param), 64);
+    assert_eq!(offset_of!(TaskRecord, prelude), 68);
+    assert_eq!(offset_of!(TaskRecord, prelude_steps), 72);
+    assert_eq!(offset_of!(TaskRecord, chain), 76);
+    assert_eq!(offset_of!(TaskRecord, steps), 80);
+    assert_eq!(offset_of!(TaskRecord, reach_rows), 84);
+    assert_eq!(offset_of!(TaskRecord, reach_columns), 88);
+    assert_eq!(offset_of!(TaskRecord, stride_rows), 92);
+    assert_eq!(offset_of!(TaskRecord, stride_columns), 96);
+    assert_eq!(offset_of!(TaskRecord, pad_rows), 100);
+    assert_eq!(offset_of!(TaskRecord, pad_columns), 104);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -192,6 +193,7 @@ fn a_record_declares_what_the_device_reads() {
         d: 5,
         e: 6,
         f: 7,
+        origin: 8,
         param: 0.5,
         prelude: 5,
         prelude_steps: 3,
@@ -205,7 +207,7 @@ fn a_record_declares_what_the_device_reads() {
         pad_columns: 4,
     });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 104);
+    assert_eq!(bytes.len(), 108);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -214,17 +216,18 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[8..12].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 5);
     assert_eq!(u32::from_ne_bytes(bytes[24..28].try_into().unwrap()), 6);
-    assert_eq!(f32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 0.5);
-    assert_eq!(u32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 5);
-    assert_eq!(u32::from_ne_bytes(bytes[68..72].try_into().unwrap()), 3);
-    assert_eq!(u32::from_ne_bytes(bytes[72..76].try_into().unwrap()), 7);
-    assert_eq!(u32::from_ne_bytes(bytes[76..80].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[80..84].try_into().unwrap()), 1);
-    assert_eq!(u32::from_ne_bytes(bytes[84..88].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[88..92].try_into().unwrap()), 1);
-    assert_eq!(u32::from_ne_bytes(bytes[92..96].try_into().unwrap()), 2);
-    assert_eq!(u32::from_ne_bytes(bytes[96..100].try_into().unwrap()), 3);
-    assert_eq!(u32::from_ne_bytes(bytes[100..104].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[60..64].try_into().unwrap()), 8);
+    assert_eq!(f32::from_ne_bytes(bytes[64..68].try_into().unwrap()), 0.5);
+    assert_eq!(u32::from_ne_bytes(bytes[68..72].try_into().unwrap()), 5);
+    assert_eq!(u32::from_ne_bytes(bytes[72..76].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[76..80].try_into().unwrap()), 7);
+    assert_eq!(u32::from_ne_bytes(bytes[80..84].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[84..88].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[88..92].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[92..96].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[96..100].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[100..104].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[104..108].try_into().unwrap()), 4);
 }
 
 #[test]
@@ -277,4 +280,63 @@ fn a_zeroed_record_holds_no_number_the_shader_could_read() {
             "a zeroed record carries {bytes:?} where the shader reads every byte of it",
         );
     }
+}
+
+#[test]
+fn only_an_attention_starts_from_a_cursor() {
+    let reading = Kind::ALL
+        .iter()
+        .copied()
+        .filter(|kind| kind.reads_origin())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reading,
+        vec![
+            Kind::Attention,
+            Kind::AttentionQueryGrad,
+            Kind::AttentionKeyGrad,
+            Kind::AttentionValueGrad,
+        ],
+        "a cursor names the position a block of queries starts from, and only an attention walks such a block",
+    );
+}
+
+#[test]
+fn a_refusal_carries_the_subject_it_names_and_the_reason_it_refused() {
+    use neura_abi::refusal::{CODE_LIMIT, KIND_BITS};
+    use neura_abi::{Refusal, TENSOR};
+    assert_eq!(TENSOR, Kind::COUNT);
+    for reason in Refusal::ALL {
+        for subject in [0u32, Kind::Attention.code(), TENSOR] {
+            assert_eq!(
+                Refusal::read(reason.word(subject, 9)),
+                (subject, *reason, 9),
+                "the {} refusal leaves the subject it names",
+                reason.name(),
+            );
+        }
+        assert!(refuses(|| {
+            let _ = reason.word(Kind::Attention.code(), CODE_LIMIT);
+        }));
+        assert!(refuses(|| {
+            let _ = reason.word(1 << KIND_BITS, 0);
+        }));
+    }
+    let mut names = Refusal::ALL
+        .iter()
+        .map(|reason| reason.name())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), Refusal::ALL.len(), "two reasons share a name");
+    for (code, reason) in Refusal::ALL.iter().enumerate() {
+        assert_eq!(reason.code(), code as u32, "the reasons leave a hole");
+        assert_eq!(Refusal::of(code as u32), *reason);
+    }
+    assert!(refuses(|| {
+        let _ = Refusal::of(Refusal::COUNT);
+    }));
+    assert!(refuses(|| {
+        let _ = Refusal::read(0);
+    }));
 }

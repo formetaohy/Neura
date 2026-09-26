@@ -140,7 +140,7 @@ mod source {
         match task.geometry {
             strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, false),
             strategy::WORKGROUP_ROW => fold_rows_by_workgroup(task, lid, source, 0u32, false),
-            _ => refuse(kind::ARGMAX, task.geometry),
+            _ => refuse(kind::ARGMAX, refusal::GEOMETRY, task.geometry),
         }
     }
 
@@ -150,7 +150,7 @@ mod source {
         match task.geometry {
             strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, seed, true),
             strategy::WORKGROUP_ROW => fold_rows_by_workgroup(task, lid, source, seed, true),
-            _ => refuse(kind::CATEGORICAL, task.geometry),
+            _ => refuse(kind::CATEGORICAL, refusal::GEOMETRY, task.geometry),
         }
     }
 }

@@ -52,6 +52,7 @@ fn block(causal: bool) -> Block {
         AttentionOptions {
             scale: 1.0 / (WIDTH as f32).sqrt(),
             causal,
+            origin: None,
         },
     );
     let input = graph.input(Shape::of([HEADS, BATCH, TOKENS, WIDTH]), Element::Single);

@@ -3,7 +3,7 @@ mod source {
     fn op_apply(kind: u32, op: u32, a: f32, b: f32) -> f32 {
         match op {
             _ => {
-                refuse(kind, op);
+                refuse(kind, refusal::OP, op);
                 return 0.0;
             }
         }
@@ -20,7 +20,7 @@ mod source {
             let g = fetch(gradient, read_address(at, gradient.strides));
             let mut result = 0.0;
             match task.op * 2u32 + task.slot {
-                _ => refuse(task.kind, task.op * 2u32 + task.slot),
+                _ => refuse(task.kind, refusal::PARTIAL, task.op * 2u32 + task.slot),
             }
             publish(output, index, chained(task, at, result));
         }

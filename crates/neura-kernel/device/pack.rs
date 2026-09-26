@@ -30,7 +30,7 @@ mod source {
 
     fn run_pack(task: Task, lid: u32) {
         match task.geometry {
-            _ => refuse(kind::PACK, task.geometry),
+            _ => refuse(kind::PACK, refusal::GEOMETRY, task.geometry),
         }
     }
 }

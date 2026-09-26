@@ -10,7 +10,7 @@ mod support;
 
 use decision::{
     argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference,
-    scatter_reference,
+    scatter_reference, write_reference,
 };
 use reference::{matmul_reference, random};
 use support::{assert_close, open};
@@ -433,6 +433,34 @@ fn a_scatter_accumulates_updates_into_the_rows_it_names() {
     runtime.run(&program);
     let doubled = scatter_reference(&scattered, &index_data, &update_data, width);
     assert_close(&runtime.read(&program, table), &doubled, 0.0);
+}
+
+#[test]
+fn a_write_replaces_the_rows_a_scatter_accumulates() {
+    let runtime = open();
+    let classes = 4;
+    let width = 3;
+    let picks = 5;
+    let graph = Graph::new();
+    let table = graph.resident(Shape::matrix(classes, width), Element::Single);
+    let indices = graph.input(Shape::matrix(picks, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(picks, width), Element::Single);
+    graph.write_into(table, indices, updates);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let table_data = random(classes * width, 19);
+    let index_data = vec![1.0, 3.0, 1.0, 0.0, 1.0];
+    let update_data = random(picks * width, 23);
+    runtime.write(&program, table, &table_data);
+    runtime.write(&program, indices, &index_data);
+    runtime.write(&program, updates, &update_data);
+    runtime.run(&program);
+    let written = write_reference(&table_data, &index_data, &update_data, width);
+    assert_close(&runtime.read(&program, table), &written, 0.0);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, table), &written, 0.0);
+    let scattered = scatter_reference(&table_data, &index_data, &update_data, width);
+    assert_ne!(written, scattered, "a write replaces what it names");
 }
 
 #[test]
