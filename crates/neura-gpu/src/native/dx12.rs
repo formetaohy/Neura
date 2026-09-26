@@ -1,12 +1,14 @@
-use super::{NativeBuffer, NativePipeline};
+use super::{DeviceFailure, NativeBuffer, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
-    AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
+    PowerPreference,
 };
 use crate::pipeline::{BindingKind, ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
 use libloading::Library;
 use std::any::Any;
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
@@ -18,9 +20,15 @@ use windows::Win32::Graphics::Direct3D::Dxc::*;
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, ID3DBlob};
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_DESC1, IDXGIFactory1};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
+    DXGI_ERROR_NOT_FOUND, DXGI_GPU_PREFERENCE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+    DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6,
+};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{GUID, Interface, PCWSTR};
+
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct CompletionEvent(HANDLE);
 
@@ -94,89 +102,203 @@ fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
     &pipeline.resource
 }
 
-fn rank(ty: DeviceType, preference: PowerPreference) -> u8 {
-    match (preference, ty) {
-        (PowerPreference::HighPerformance, DeviceType::Discrete)
-        | (PowerPreference::LowPower, DeviceType::Integrated) => 3,
-        (PowerPreference::HighPerformance, DeviceType::Integrated)
-        | (PowerPreference::LowPower, DeviceType::Discrete) => 2,
-        _ => 1,
-    }
+fn software(desc: &DXGI_ADAPTER_DESC1) -> bool {
+    DXGI_ADAPTER_FLAG(desc.Flags as i32).contains(DXGI_ADAPTER_FLAG_SOFTWARE)
 }
 
-fn adapter_type(desc: &DXGI_ADAPTER_DESC1) -> DeviceType {
-    if desc.Flags & 2 != 0 {
-        DeviceType::Cpu
-    } else if desc.DedicatedVideoMemory > 0 {
-        DeviceType::Discrete
-    } else {
+fn architecture(device: &ID3D12Device) -> DeviceType {
+    let mut data = D3D12_FEATURE_DATA_ARCHITECTURE {
+        NodeIndex: 0,
+        ..Default::default()
+    };
+    let queried = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_ARCHITECTURE,
+            (&raw mut data).cast(),
+            size_of::<D3D12_FEATURE_DATA_ARCHITECTURE>() as u32,
+        )
+    }
+    .is_ok();
+    if queried && data.UMA.as_bool() {
         DeviceType::Integrated
+    } else {
+        DeviceType::Discrete
     }
 }
 
-impl Device {
-    pub(crate) fn open(
-        preference: PowerPreference,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), String> {
-        let _compiler = unsafe { Library::new("dxcompiler.dll") }
-            .map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
-        let factory: IDXGIFactory1 =
-            unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
-        let mut adapters = Vec::new();
-        for index in 0.. {
-            let adapter = match unsafe { factory.EnumAdapters1(index) } {
-                Ok(adapter) => adapter,
-                Err(error)
-                    if error.code() == windows::Win32::Graphics::Dxgi::DXGI_ERROR_NOT_FOUND =>
-                {
-                    break;
-                }
-                Err(error) => return Err(format!("enumerating DXGI adapters: {error}")),
-            };
-            let desc = unsafe { adapter.GetDesc1() }
-                .map_err(|error| format!("querying a DXGI adapter: {error}"))?;
-            let mut raw = None;
-            if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut raw) }.is_err() {
-                continue;
-            }
-            let raw: ID3D12Device = raw.expect("a successfully created D3D12 device exists");
-            let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
-                HighestShaderModel: D3D_SHADER_MODEL_6_0,
-            };
-            if unsafe {
-                raw.CheckFeatureSupport(
-                    D3D12_FEATURE_SHADER_MODEL,
-                    (&raw mut model).cast(),
-                    size_of::<D3D12_FEATURE_DATA_SHADER_MODEL>() as u32,
-                )
-            }
-            .is_err()
-                || model.HighestShaderModel.0 < D3D_SHADER_MODEL_6_0.0
-            {
-                continue;
-            }
-            adapters.push((adapter, desc, raw));
+fn preference(policy: AdapterPolicy) -> DXGI_GPU_PREFERENCE {
+    match policy {
+        AdapterPolicy::Power(PowerPreference::LowPower) => DXGI_GPU_PREFERENCE_MINIMUM_POWER,
+        AdapterPolicy::Power(PowerPreference::HighPerformance) | AdapterPolicy::Identity(_) => {
+            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE
         }
-        let (_, desc, raw) = adapters
-            .into_iter()
-            .max_by_key(|(_, desc, _)| rank(adapter_type(desc), preference))
-            .ok_or_else(|| "no D3D12 adapter supports compute shader model 6.0".to_owned())?;
-        let name = String::from_utf16_lossy(
+    }
+}
+
+fn adapters(factory: &IDXGIFactory1, policy: AdapterPolicy) -> Result<Vec<IDXGIAdapter1>, String> {
+    let preferred = factory.cast::<IDXGIFactory6>().ok();
+    let gpu = preference(policy);
+    let mut adapters = Vec::new();
+    for index in 0.. {
+        let adapter = match &preferred {
+            Some(factory) => unsafe { factory.EnumAdapterByGpuPreference(index, gpu) },
+            None => unsafe { factory.EnumAdapters1(index) },
+        };
+        match adapter {
+            Ok(adapter) => adapters.push(adapter),
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(format!("enumerating DXGI adapters: {error}")),
+        }
+    }
+    Ok(adapters)
+}
+
+fn describe(desc: &DXGI_ADAPTER_DESC1) -> AdapterInfo {
+    AdapterInfo {
+        name: String::from_utf16_lossy(
             &desc.Description[..desc
                 .Description
                 .iter()
                 .position(|unit| *unit == 0)
                 .unwrap_or(desc.Description.len())],
-        );
-        let info = AdapterInfo {
-            name,
-            backend: Backend::Dx12,
-            device_type: adapter_type(&desc),
-            id: AdapterId::Numeric {
-                vendor: desc.VendorId,
-                device: desc.DeviceId,
-            },
+        ),
+        backend: Backend::Dx12,
+        device_type: if software(desc) {
+            DeviceType::Cpu
+        } else {
+            DeviceType::Other
+        },
+        id: AdapterId::Numeric {
+            vendor: desc.VendorId,
+            device: desc.DeviceId,
+        },
+    }
+}
+
+fn limits() -> Limits {
+    Limits {
+        max_storage_buffers_per_shader_stage: 30,
+        max_storage_buffer_binding_size: 1 << 30,
+        max_buffer_size: 1 << 30,
+        max_compute_invocations_per_workgroup: 1024,
+        max_compute_workgroup_size_x: 1024,
+        max_compute_workgroup_storage_size: 32 << 10,
+        max_compute_workgroups_per_dimension: 65_535,
+        min_storage_buffer_offset_alignment: 16,
+    }
+}
+
+fn compiler() -> Result<&'static Library, String> {
+    static COMPILER: OnceLock<Result<Library, String>> = OnceLock::new();
+    COMPILER
+        .get_or_init(|| {
+            unsafe { Library::new("dxcompiler.dll") }.map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| error.clone())
+}
+
+struct Candidate {
+    device: ID3D12Device,
+    info: AdapterInfo,
+    order: u32,
+}
+
+fn shader_model(device: &ID3D12Device) -> bool {
+    let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
+        HighestShaderModel: D3D_SHADER_MODEL_6_0,
+    };
+    let queried = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_SHADER_MODEL,
+            (&raw mut model).cast(),
+            size_of::<D3D12_FEATURE_DATA_SHADER_MODEL>() as u32,
+        )
+    }
+    .is_ok();
+    queried && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_0.0
+}
+
+fn candidates(
+    factory: &IDXGIFactory1,
+    policy: AdapterPolicy,
+) -> Result<(Vec<Candidate>, Vec<AdapterInfo>), String> {
+    let mut candidates = Vec::new();
+    let mut offered = Vec::new();
+    for (order, adapter) in adapters(factory, policy)?.into_iter().enumerate() {
+        let desc = unsafe { adapter.GetDesc1() }
+            .map_err(|error| format!("querying a DXGI adapter: {error}"))?;
+        let mut info = describe(&desc);
+        offered.push(info.clone());
+        if !policy.wants(info.id) {
+            continue;
+        }
+        if software(&desc) && matches!(policy, AdapterPolicy::Power(_)) {
+            continue;
+        }
+        let mut raw = None;
+        if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut raw) }.is_err() {
+            continue;
+        }
+        let raw: ID3D12Device = raw.expect("a successfully created D3D12 device exists");
+        if !shader_model(&raw) {
+            continue;
+        }
+        info.device_type = if software(&desc) {
+            DeviceType::Cpu
+        } else {
+            architecture(&raw)
         };
+        candidates.push(Candidate {
+            device: raw,
+            info,
+            order: order as u32,
+        });
+    }
+    Ok((candidates, offered))
+}
+
+impl Device {
+    pub(crate) fn open(
+        policy: AdapterPolicy,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
+        compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
+        let factory: IDXGIFactory1 =
+            unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
+        let (mut candidates, offered) = candidates(&factory, policy)
+            .map_err(|error| format!("enumerating DXGI adapters: {error}"))?;
+        if candidates.is_empty() {
+            return Err(match policy {
+                AdapterPolicy::Identity(wanted)
+                    if offered.iter().any(|adapter| adapter.id == wanted) =>
+                {
+                    DeviceFailure::reason(format!(
+                        "the requested adapter {wanted} cannot run compute shader model 6.0"
+                    ))
+                }
+                AdapterPolicy::Identity(_) => DeviceFailure::missing(offered),
+                AdapterPolicy::Power(_) => {
+                    DeviceFailure::reason("no D3D12 adapter runs compute shader model 6.0")
+                }
+            });
+        }
+        let candidate = match policy {
+            AdapterPolicy::Identity(_) => candidates.swap_remove(0),
+            AdapterPolicy::Power(preference) => {
+                candidates.sort_by_key(|candidate| {
+                    (
+                        Reverse(candidate.info.device_type.rank(preference)),
+                        candidate.order,
+                    )
+                });
+                candidates.swap_remove(0)
+            }
+        };
+        let device = Self::assemble(candidate.device)?;
+        Ok((device, candidate.info, limits()))
+    }
+
+    fn assemble(raw: ID3D12Device) -> Result<Arc<Device>, DeviceFailure> {
         let queue: ID3D12CommandQueue = unsafe {
             raw.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -210,28 +332,14 @@ impl Device {
                 }),
             );
         }
-        let limits = Limits {
-            max_storage_buffers_per_shader_stage: 30,
-            max_storage_buffer_binding_size: 1 << 30,
-            max_buffer_size: 1 << 30,
-            max_compute_invocations_per_workgroup: 1024,
-            max_compute_workgroup_size_x: 1024,
-            max_compute_workgroup_storage_size: 32 << 10,
-            max_compute_workgroups_per_dimension: 65_535,
-            min_storage_buffer_offset_alignment: 16,
-        };
-        Ok((
-            Arc::new(Self {
-                raw,
-                queue,
-                fence,
-                event,
-                zero,
-                state: Mutex::new(QueueState::default()),
-            }),
-            info,
-            limits,
-        ))
+        Ok(Arc::new(Device {
+            raw,
+            queue,
+            fence,
+            event,
+            zero,
+            state: Mutex::new(QueueState::default()),
+        }))
     }
 
     pub(crate) fn create_buffer(
@@ -557,7 +665,9 @@ impl Device {
     fn retire(&self, state: &mut QueueState) {
         let completed = unsafe { self.fence.GetCompletedValue() };
         if completed == u64::MAX {
-            self.assert_device();
+            if let Err(error) = self.device_error() {
+                panic!("{error}");
+            }
             panic!("D3D12 compute fence failed");
         }
         while state
@@ -574,33 +684,50 @@ impl Device {
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
+        self.await_completion(index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the D3D12 compute queue is never poisoned");
-        assert!(
-            index <= state.next,
-            "waiting on an unsubmitted D3D12 command"
-        );
+        if index > state.next {
+            return Err("waiting on an unsubmitted D3D12 command".to_owned());
+        }
         self.retire(&mut state);
         if index <= state.completed {
-            return;
+            return Ok(());
         }
         unsafe { self.fence.SetEventOnCompletion(index, self.event.0) }
-            .unwrap_or_else(|error| panic!("arming the D3D12 compute fence: {error}"));
+            .map_err(|error| format!("arming the D3D12 compute fence: {error}"))?;
         let result = unsafe {
             WaitForSingleObject(
                 self.event.0,
                 timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
             )
         };
-        assert_eq!(
-            result, WAIT_OBJECT_0,
-            "waiting for D3D12 compute work failed or timed out: {result:?}"
-        );
-        self.assert_device();
+        if result != WAIT_OBJECT_0 {
+            return Err(format!(
+                "waiting for D3D12 compute work failed or timed out: {result:?}"
+            ));
+        }
+        self.device_error()?;
         self.retire(&mut state);
-        assert!(state.completed >= index, "D3D12 compute did not complete");
+        if state.completed < index {
+            return Err("D3D12 compute did not complete".to_owned());
+        }
+        Ok(())
+    }
+
+    fn release(&self) {
+        let index = self
+            .state
+            .lock()
+            .expect("the D3D12 compute queue is never poisoned")
+            .next;
+        let _ = self.await_completion(index, RELEASE_TIMEOUT);
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
@@ -627,13 +754,15 @@ impl Device {
         result
     }
 
-    fn assert_device(&self) {
+    fn device_error(&self) -> Result<(), String> {
         unsafe { self.raw.GetDeviceRemovedReason() }
-            .unwrap_or_else(|error| panic!("the D3D12 compute device was lost: {error}"));
+            .map_err(|error| format!("the D3D12 compute device was lost: {error}"))
     }
 
     pub(crate) fn assert_alive(&self) {
-        self.assert_device();
+        if let Err(error) = self.device_error() {
+            panic!("{error}");
+        }
         let mut state = self
             .state
             .lock()
@@ -732,7 +861,7 @@ impl Pipeline {
 }
 
 fn dxil(source: &str, entry: &str, label: &str) -> Vec<u8> {
-    let library = unsafe { Library::new("dxcompiler.dll") }
+    let library = compiler()
         .unwrap_or_else(|error| panic!("D3D12 needs dxcompiler.dll to compile {label}: {error}"));
     type Create = unsafe extern "system" fn(
         *const GUID,
@@ -807,11 +936,6 @@ fn dxil(source: &str, entry: &str, label: &str) -> Vec<u8> {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        let index = self
-            .state
-            .get_mut()
-            .expect("the D3D12 compute queue is never poisoned")
-            .next;
-        self.wait(index, Duration::from_secs(30));
+        self.release();
     }
 }

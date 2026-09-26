@@ -11,7 +11,8 @@ mod test;
 
 pub use buffer::{BufferBinding, GpuBuffer};
 pub use capability::{
-    AdapterId, AdapterInfo, Backend, Backends, BufferUsages, DeviceType, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, BufferUsages, DeviceType, Limits,
+    PowerPreference,
 };
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
 pub use pipeline::{

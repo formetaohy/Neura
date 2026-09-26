@@ -5,12 +5,35 @@ pub(crate) mod metal;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub(crate) mod vulkan;
 
-use crate::capability::{AdapterInfo, Backends, BufferUsages, Limits};
+use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
 use std::sync::Arc;
 use std::time::Duration;
+
+pub(crate) enum DeviceFailure {
+    Missing { offered: Vec<AdapterInfo> },
+    Unavailable { reason: String },
+}
+
+impl DeviceFailure {
+    pub(crate) fn missing(offered: Vec<AdapterInfo>) -> Self {
+        Self::Missing { offered }
+    }
+
+    pub(crate) fn reason(reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl From<String> for DeviceFailure {
+    fn from(reason: String) -> Self {
+        Self::reason(reason)
+    }
+}
 
 pub(crate) enum NativeDevice {
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -54,48 +77,54 @@ pub(crate) fn open(
     request: &GpuRequest,
 ) -> Result<(NativeDevice, AdapterInfo, Limits), GpuUnavailable> {
     let mut reasons = Vec::new();
+    let mut offered = Vec::new();
     let mut unsupported = None;
     #[cfg(target_os = "windows")]
     if request.backends.contains(Backends::DX12) {
-        match dx12::Device::open(request.power_preference) {
+        match dx12::Device::open(request.adapter) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Dx12(device), info, limits));
             }
             Ok((_, info, limits)) => unsupported = Some((info, limits)),
-            Err(error) => reasons.push(format!("D3D12: {error}")),
+            Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
+            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("D3D12: {reason}")),
         }
     }
     #[cfg(target_os = "macos")]
     if request.backends.contains(Backends::METAL) {
-        match metal::Device::open(request.power_preference) {
+        match metal::Device::open(request.adapter) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Metal(device), info, limits));
             }
             Ok((_, info, limits)) => unsupported = Some((info, limits)),
-            Err(error) => reasons.push(format!("Metal: {error}")),
+            Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
+            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Metal: {reason}")),
         }
     }
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     if request.backends.contains(Backends::VULKAN) {
-        match vulkan::Device::open(request.power_preference) {
+        match vulkan::Device::open(request.adapter) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Vulkan(device), info, limits));
             }
             Ok((_, info, limits)) => unsupported = Some((info, limits)),
-            Err(error) => reasons.push(format!("Vulkan: {error}")),
+            Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
+            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Vulkan: {reason}")),
         }
     }
     if let Some((info, limits)) = unsupported {
-        Err(GpuUnavailable::UnsupportedLimits { info, limits })
-    } else {
-        Err(GpuUnavailable::NoAdapter {
-            reason: if reasons.is_empty() {
-                "no requested compute backend is available on this platform".to_owned()
-            } else {
-                reasons.join("; ")
-            },
-        })
+        return Err(GpuUnavailable::UnsupportedLimits { info, limits });
     }
+    if let AdapterPolicy::Identity(wanted) = request.adapter {
+        return Err(GpuUnavailable::AdapterMissing { wanted, offered });
+    }
+    Err(GpuUnavailable::NoAdapter {
+        reason: if reasons.is_empty() {
+            "no requested compute backend is available on this platform".to_owned()
+        } else {
+            reasons.join("; ")
+        },
+    })
 }
 
 impl NativePipeline {

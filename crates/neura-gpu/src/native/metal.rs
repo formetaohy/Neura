@@ -1,7 +1,7 @@
-use super::{NativeBuffer, NativePipeline};
+use super::{DeviceFailure, NativeBuffer, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
-    AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
 use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
@@ -15,11 +15,14 @@ use objc2_metal::{
     MTLResource, MTLResourceOptions, MTLSize,
 };
 use std::any::Any;
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::mem::size_of;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct InFlight {
     index: u64,
@@ -83,21 +86,46 @@ fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
     &pipeline.resource
 }
 
+fn device_type(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
+    if device.hasUnifiedMemory() {
+        DeviceType::Integrated
+    } else {
+        DeviceType::Discrete
+    }
+}
+
+fn describe(device: &ProtocolObject<dyn MTLDevice>) -> AdapterInfo {
+    AdapterInfo {
+        name: device.name().to_string(),
+        backend: Backend::Metal,
+        device_type: device_type(device),
+        id: AdapterId::MetalRegistry(device.registryID()),
+    }
+}
+
 impl Device {
     pub(crate) fn open(
-        preference: PowerPreference,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), String> {
+        policy: AdapterPolicy,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
-        let raw = devices
+        let offered = devices
             .iter()
-            .max_by_key(|device| {
-                let discrete = !device.isLowPower();
-                match preference {
-                    PowerPreference::HighPerformance => u8::from(discrete),
-                    PowerPreference::LowPower => u8::from(!discrete),
-                }
-            })
-            .ok_or_else(|| "no Metal compute device".to_owned())?;
+            .map(|device| describe(&device))
+            .collect::<Vec<_>>();
+        let mut candidates = devices
+            .iter()
+            .filter(|device| policy.wants(AdapterId::MetalRegistry(device.registryID())))
+            .map(|device| (describe(&device), device))
+            .collect::<Vec<_>>();
+        if let AdapterPolicy::Power(preference) = policy {
+            candidates.sort_by_key(|(info, _)| Reverse(info.device_type.rank(preference)));
+        }
+        let Some((info, raw)) = candidates.into_iter().next() else {
+            return Err(match policy {
+                AdapterPolicy::Identity(_) => DeviceFailure::missing(offered),
+                AdapterPolicy::Power(_) => DeviceFailure::reason("no Metal compute device"),
+            });
+        };
         let limits = Limits {
             max_storage_buffers_per_shader_stage: u32::from(
                 crate::pipeline::METAL_SIZE_BUFFER_SLOT,
@@ -110,19 +138,9 @@ impl Device {
             max_compute_workgroups_per_dimension: 65_535,
             min_storage_buffer_offset_alignment: 256,
         };
-        let info = AdapterInfo {
-            name: raw.name().to_string(),
-            backend: Backend::Metal,
-            device_type: if raw.isLowPower() {
-                DeviceType::Integrated
-            } else {
-                DeviceType::Discrete
-            },
-            id: AdapterId::MetalRegistry(raw.registryID()),
-        };
         let queue = raw
             .newCommandQueue()
-            .ok_or_else(|| "Metal refused a compute command queue".to_owned())?;
+            .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
         Ok((
             Arc::new(Self {
                 raw,
@@ -183,7 +201,8 @@ impl Device {
             .state
             .lock()
             .expect("the Metal compute queue is never poisoned");
-        self.retire(&mut state);
+        self.retire(&mut state)
+            .unwrap_or_else(|error| panic!("{error}"));
         if writes.is_empty() && commands.is_empty() {
             return state.next;
         }
@@ -346,7 +365,7 @@ impl Device {
         index
     }
 
-    fn retire(&self, state: &mut QueueState) {
+    fn retire(&self, state: &mut QueueState) -> Result<(), String> {
         while let Some(front) = state.in_flight.front() {
             match front.command.status() {
                 MTLCommandBufferStatus::Completed => {
@@ -357,41 +376,53 @@ impl Device {
                         .index;
                 }
                 MTLCommandBufferStatus::Error => {
-                    panic!("Metal compute failed: {:?}", front.command.error());
+                    return Err(format!("Metal compute failed: {:?}", front.command.error()));
                 }
                 _ => break,
             }
         }
+        Ok(())
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
+        self.await_completion(index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the Metal compute queue is never poisoned");
-        assert!(
-            index <= state.next,
-            "waiting on an unsubmitted Metal command"
-        );
-        if index <= state.completed {
-            return;
+        if index > state.next {
+            return Err("waiting on an unsubmitted Metal command".to_owned());
         }
-        assert!(
-            state.in_flight.iter().any(|item| item.index == index),
-            "an unfinished Metal command is in flight"
-        );
+        if index <= state.completed {
+            return Ok(());
+        }
+        if !state.in_flight.iter().any(|item| item.index == index) {
+            return Err("an unfinished Metal command is in flight".to_owned());
+        }
         let started = Instant::now();
         loop {
-            self.retire(&mut state);
+            self.retire(&mut state)?;
             if state.completed >= index {
-                break;
+                return Ok(());
             }
-            assert!(
-                started.elapsed() < timeout,
-                "waiting for Metal compute work timed out"
-            );
+            if started.elapsed() >= timeout {
+                return Err("waiting for Metal compute work timed out".to_owned());
+            }
             std::thread::sleep(Duration::from_micros(250));
         }
+    }
+
+    fn release(&self) {
+        let index = self
+            .state
+            .lock()
+            .expect("the Metal compute queue is never poisoned")
+            .next;
+        let _ = self.await_completion(index, RELEASE_TIMEOUT);
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
@@ -409,7 +440,9 @@ impl Device {
             .state
             .lock()
             .expect("the Metal compute queue is never poisoned");
-        self.retire(&mut state);
+        if let Err(error) = self.retire(&mut state) {
+            panic!("{error}");
+        }
     }
 }
 
@@ -466,11 +499,6 @@ impl Pipeline {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        let index = self
-            .state
-            .get_mut()
-            .expect("the Metal compute queue is never poisoned")
-            .next;
-        self.wait(index, Duration::from_secs(30));
+        self.release();
     }
 }

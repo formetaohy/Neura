@@ -1,12 +1,13 @@
-use super::{NativeBuffer, NativeGroup, NativePipeline};
+use super::{DeviceFailure, NativeBuffer, NativeGroup, NativePipeline};
 use crate::buffer::GpuBuffer;
 use crate::capability::{
-    AdapterId, AdapterInfo, Backend, BufferUsages, DeviceType, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
 use std::any::Any;
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -16,6 +17,8 @@ struct InstanceOwner {
     _entry: Entry,
     raw: Instance,
 }
+
+const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl Drop for InstanceOwner {
     fn drop(&mut self) {
@@ -118,15 +121,21 @@ fn device_type(device: vk::PhysicalDeviceType) -> DeviceType {
     }
 }
 
-fn rank(ty: DeviceType, preference: PowerPreference) -> u8 {
-    match (preference, ty) {
-        (PowerPreference::HighPerformance, DeviceType::Discrete)
-        | (PowerPreference::LowPower, DeviceType::Integrated) => 5,
-        (PowerPreference::HighPerformance, DeviceType::Integrated)
-        | (PowerPreference::LowPower, DeviceType::Discrete) => 4,
-        (_, DeviceType::Virtual) => 3,
-        (_, DeviceType::Cpu) => 2,
-        _ => 1,
+fn identity(props: &vk::PhysicalDeviceProperties) -> AdapterId {
+    AdapterId::Numeric {
+        vendor: props.vendor_id,
+        device: props.device_id,
+    }
+}
+
+fn describe(props: &vk::PhysicalDeviceProperties, device_type: DeviceType) -> AdapterInfo {
+    AdapterInfo {
+        name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+        backend: Backend::Vulkan,
+        device_type,
+        id: identity(props),
     }
 }
 
@@ -144,8 +153,8 @@ fn complete_enumeration<T>(
 
 impl Device {
     pub(crate) fn open(
-        preference: PowerPreference,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), String> {
+        policy: AdapterPolicy,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
             complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
@@ -223,11 +232,37 @@ impl Device {
                 Some((*physical, props, family, ty, limits, memory))
             })
             .collect::<Vec<_>>();
-        candidates.sort_by_key(|(_, _, _, ty, limits, _)| {
-            (limits.supports(&Limits::BASELINE), rank(*ty, preference))
-        });
+        let offered = candidates
+            .iter()
+            .map(|(_, props, _, ty, _, _)| describe(props, *ty))
+            .collect::<Vec<_>>();
+        match policy {
+            AdapterPolicy::Identity(wanted) => {
+                candidates.retain(|(_, props, _, _, _, _)| identity(props) == wanted)
+            }
+            AdapterPolicy::Power(preference) => {
+                candidates.sort_by_key(|(_, _, _, ty, limits, _)| {
+                    Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
+                });
+            }
+        }
+        if candidates.is_empty() {
+            return Err(match policy {
+                AdapterPolicy::Identity(wanted)
+                    if offered.iter().any(|adapter| adapter.id == wanted) =>
+                {
+                    DeviceFailure::reason(format!(
+                        "the requested adapter {wanted} cannot run the compute baseline"
+                    ))
+                }
+                AdapterPolicy::Identity(_) => DeviceFailure::missing(offered),
+                AdapterPolicy::Power(_) => {
+                    DeviceFailure::reason("no Vulkan 1.1 device carries a compute queue")
+                }
+            });
+        }
         let mut failures = Vec::new();
-        for (physical, props, family, ty, limits, memory) in candidates.into_iter().rev() {
+        for (physical, props, family, ty, limits, memory) in candidates {
             let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
@@ -284,15 +319,7 @@ impl Device {
                     continue;
                 }
             };
-            let adapter_info = AdapterInfo {
-                name,
-                backend: Backend::Vulkan,
-                device_type: ty,
-                id: AdapterId::Numeric {
-                    vendor: props.vendor_id,
-                    device: props.device_id,
-                },
-            };
+            let adapter_info = describe(&props, ty);
             return Ok((
                 Arc::new(Self {
                     _owner: owner,
@@ -306,11 +333,11 @@ impl Device {
                 limits,
             ));
         }
-        Err(if failures.is_empty() {
+        Err(DeviceFailure::reason(if failures.is_empty() {
             "no Vulkan 1.1 device with a compute queue".to_owned()
         } else {
             failures.join("; ")
-        })
+        }))
     }
 
     fn allocate(&self, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Arc<BufferResource> {
@@ -703,16 +730,20 @@ impl Device {
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
+        self.await_completion(index, timeout)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    fn await_completion(&self, index: u64, timeout: Duration) -> Result<(), String> {
         let mut state = self
             .state
             .lock()
             .expect("the Vulkan queue is never poisoned");
-        assert!(
-            index <= state.next,
-            "waiting on an unsubmitted Vulkan command"
-        );
+        if index > state.next {
+            return Err("waiting on an unsubmitted Vulkan command".to_owned());
+        }
         if index <= state.completed {
-            return;
+            return Ok(());
         }
         let fence = state
             .in_flight
@@ -727,9 +758,21 @@ impl Device {
                 timeout.as_nanos().min(u64::MAX as u128) as u64,
             )
         }
-        .unwrap_or_else(|error| panic!("waiting for Vulkan compute work: {error:?}"));
+        .map_err(|error| format!("waiting for Vulkan compute work: {error:?}"))?;
         self.retire(&mut state);
-        assert!(state.completed >= index, "Vulkan compute did not complete");
+        if state.completed < index {
+            return Err("Vulkan compute did not complete".to_owned());
+        }
+        Ok(())
+    }
+
+    fn release(&self) {
+        let index = self
+            .state
+            .lock()
+            .expect("the Vulkan queue is never poisoned")
+            .next;
+        let _ = self.await_completion(index, RELEASE_TIMEOUT);
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {
@@ -860,19 +903,7 @@ impl Drop for BufferResource {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        let mut state = std::mem::take(
-            self.state
-                .get_mut()
-                .expect("the Vulkan queue is never poisoned"),
-        );
-        if let Some(last) = state.in_flight.back() {
-            unsafe {
-                self.raw
-                    .wait_for_fences(&[last.fence], true, 30_000_000_000)
-            }
-            .unwrap_or_else(|error| panic!("draining Vulkan on drop: {error:?}"));
-        }
-        self.retire(&mut state);
+        self.release();
         unsafe {
             self.raw.destroy_command_pool(self.pool, None);
             self.raw.destroy_device(None);

@@ -1,5 +1,6 @@
 use bitflags::bitflags;
 pub use neura_compiler::Backend;
+use std::fmt::{self, Display, Formatter};
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -26,7 +27,7 @@ pub enum PowerPreference {
     LowPower,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DeviceType {
     Discrete,
     Integrated,
@@ -35,10 +36,50 @@ pub enum DeviceType {
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+impl DeviceType {
+    pub(crate) const fn rank(self, preference: PowerPreference) -> u8 {
+        match (preference, self) {
+            (PowerPreference::HighPerformance, Self::Discrete)
+            | (PowerPreference::LowPower, Self::Integrated) => 5,
+            (PowerPreference::HighPerformance, Self::Integrated)
+            | (PowerPreference::LowPower, Self::Discrete) => 4,
+            (_, Self::Virtual) => 3,
+            (_, Self::Cpu) => 2,
+            (_, Self::Other) => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdapterId {
     Numeric { vendor: u32, device: u32 },
     MetalRegistry(u64),
+}
+
+impl Display for AdapterId {
+    fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Numeric { vendor, device } => {
+                write!(out, "vendor {vendor:#06x} device {device:#06x}")
+            }
+            Self::MetalRegistry(registry) => write!(out, "Metal registry {registry}"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdapterPolicy {
+    Power(PowerPreference),
+    Identity(AdapterId),
+}
+
+impl AdapterPolicy {
+    pub(crate) fn wants(self, id: AdapterId) -> bool {
+        match self {
+            Self::Power(_) => true,
+            Self::Identity(wanted) => wanted == id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +88,16 @@ pub struct AdapterInfo {
     pub backend: Backend,
     pub device_type: DeviceType,
     pub id: AdapterId,
+}
+
+impl Display for AdapterInfo {
+    fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            out,
+            "{} ({}, {:?}, {:?})",
+            self.name, self.id, self.device_type, self.backend,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

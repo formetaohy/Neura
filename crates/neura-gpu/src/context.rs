@@ -1,5 +1,5 @@
 use crate::buffer::GpuBuffer;
-use crate::capability::{AdapterInfo, Backends, Limits, PowerPreference};
+use crate::capability::{AdapterId, AdapterInfo, AdapterPolicy, Backends, Limits, PowerPreference};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
 use crate::pipeline::{ComputeProgram, PipelineHandle};
@@ -16,7 +16,7 @@ pub enum LimitsPolicy {
 
 pub struct GpuRequest {
     pub backends: Backends,
-    pub power_preference: PowerPreference,
+    pub adapter: AdapterPolicy,
     pub limits: LimitsPolicy,
 }
 
@@ -24,7 +24,7 @@ impl Default for GpuRequest {
     fn default() -> Self {
         Self {
             backends: Backends::all(),
-            power_preference: PowerPreference::HighPerformance,
+            adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
         }
     }
@@ -41,14 +41,33 @@ impl GpuRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GpuUnavailable {
-    NoAdapter { reason: String },
-    UnsupportedLimits { info: AdapterInfo, limits: Limits },
+    NoAdapter {
+        reason: String,
+    },
+    AdapterMissing {
+        wanted: AdapterId,
+        offered: Vec<AdapterInfo>,
+    },
+    UnsupportedLimits {
+        info: AdapterInfo,
+        limits: Limits,
+    },
 }
 
 impl Display for GpuUnavailable {
     fn fmt(&self, out: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoAdapter { reason } => write!(out, "no native compute device: {reason}"),
+            Self::AdapterMissing { wanted, offered } => {
+                write!(out, "the requested adapter {wanted} is missing")?;
+                if offered.is_empty() {
+                    return write!(out, ", and no requested backend offers an adapter");
+                }
+                for adapter in offered {
+                    write!(out, "; {adapter}")?;
+                }
+                Ok(())
+            }
             Self::UnsupportedLimits { info, limits } => write!(
                 out,
                 "{} ({:?}) cannot provide the compute baseline: {limits:?}",
@@ -65,20 +84,6 @@ pub(crate) struct DeviceState {
     pub(crate) native: NativeDevice,
     pub(crate) info: AdapterInfo,
     pub(crate) limits: Limits,
-}
-
-impl Drop for DeviceState {
-    fn drop(&mut self) {
-        let writes = self
-            .writes
-            .get_mut()
-            .expect("the compute queue is never poisoned");
-        if !writes.is_empty() {
-            let index = self.native.submit(writes, &[]);
-            self.native.wait(index, crate::readback::READBACK_TIMEOUT);
-            writes.clear();
-        }
-    }
 }
 
 #[derive(Clone)]
