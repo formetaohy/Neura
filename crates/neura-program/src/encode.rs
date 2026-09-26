@@ -208,6 +208,10 @@ impl Encoding {
                 | Kind::Scatter
                 | Kind::Conv2d
                 | Kind::Conv2dInputGrad
+                | Kind::PoolMax2d
+                | Kind::PoolMax2dInputGrad
+                | Kind::PoolMean2d
+                | Kind::PoolMean2dInputGrad
                 | Kind::MatmulFold => 0,
             };
             assert!(
@@ -248,6 +252,8 @@ impl Encoding {
                 prelude_steps: task.prelude.len() as u32,
                 chain,
                 steps: task.chain.len() as u32,
+                reach_rows: task.window.reach_rows(),
+                reach_columns: task.window.reach_columns(),
                 stride_rows: task.window.stride_rows(),
                 stride_columns: task.window.stride_columns(),
                 pad_rows: task.window.pad_rows(),

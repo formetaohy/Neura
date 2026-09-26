@@ -3,7 +3,7 @@ pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, Device, GpuRequest, GpuUnavailable,
     PowerPreference, Queue,
 };
-pub use neura_graph::{Gradients, Graph, Init, Shape, Value, Window};
+pub use neura_graph::{Gradients, Graph, Init, Pool, Shape, Value, Window};
 pub use neura_nn::{
     Adam, Conv2d, Embedding, LayerNorm, Linear, Mlp, Moments, Sgd, cross_entropy, mse_loss,
     policy_loss,

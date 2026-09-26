@@ -157,6 +157,7 @@ fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
     let conv = Conv2d::new(
         &graph,
         [1, 1],
+        1,
         Window::sliding([3, 3]),
         Init::Uniform {
             low: -0.2,

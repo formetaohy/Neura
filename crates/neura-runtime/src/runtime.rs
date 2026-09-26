@@ -532,7 +532,11 @@ fn refusal_message(word: u32) -> String {
         | Kind::LogSoftmax
         | Kind::LogSoftmaxGrad
         | Kind::Conv2d
-        | Kind::Conv2dInputGrad => {
+        | Kind::Conv2dInputGrad
+        | Kind::PoolMax2d
+        | Kind::PoolMax2dInputGrad
+        | Kind::PoolMean2d
+        | Kind::PoolMean2dInputGrad => {
             format!("the device refused code {code} of the {} task", kind.name())
         }
     }

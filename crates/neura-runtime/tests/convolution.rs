@@ -70,6 +70,48 @@ fn a_convolution_leaves_the_row_its_window_never_reaches() {
 }
 
 #[test]
+fn a_depthwise_convolution_reads_one_channel_at_a_time() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 4, 6, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 1, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::sliding([3, 3]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([2, 4, 4, 4]));
+    graph.retain(convolved);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(288, 43);
+    let filter_values = samples(36, 47);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected = conv2d_reference(&input_values, &filter_values, [2, 4, 6, 6], 4, window);
+    assert_close(&runtime.read(&program, convolved), &expected, 1e-4);
+}
+
+#[test]
+fn a_grouped_convolution_cuts_the_channels_it_reads() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 4, 7, 7]), Element::Single);
+    let filter = graph.parameter(Shape::of([6, 2, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([2, 6, 4, 4]));
+    graph.retain(convolved);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(392, 71);
+    let filter_values = samples(108, 73);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected = conv2d_reference(&input_values, &filter_values, [2, 4, 7, 7], 6, window);
+    assert_close(&runtime.read(&program, convolved), &expected, 1e-4);
+}
+
+#[test]
 fn two_windows_ride_one_tape() {
     let runtime = open();
     let graph = Graph::new();

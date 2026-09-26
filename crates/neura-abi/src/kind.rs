@@ -60,6 +60,10 @@ kinds! {
     Conv2d CONV2D = "conv2d";
     Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad";
     Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad";
+    PoolMax2d POOL_MAX2D = "pool_max2d";
+    PoolMax2dInputGrad POOL_MAX2D_INPUT_GRAD = "pool_max2d_input_grad";
+    PoolMean2d POOL_MEAN2D = "pool_mean2d";
+    PoolMean2dInputGrad POOL_MEAN2D_INPUT_GRAD = "pool_mean2d_input_grad";
 }
 
 impl Kind {

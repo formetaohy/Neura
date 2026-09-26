@@ -14,6 +14,8 @@ mod pack;
 mod pack_device;
 #[path = "../device/pointwise.rs"]
 mod pointwise;
+#[path = "../device/pool.rs"]
+mod pool;
 #[path = "../device/reduce.rs"]
 mod reduce;
 #[path = "../device/scatter.rs"]
@@ -91,6 +93,17 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
     }
     if kinds.contains(&Kind::Scatter) {
         scatter::define(compiler);
+    }
+    if kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            Kind::PoolMax2d
+                | Kind::PoolMean2d
+                | Kind::PoolMax2dInputGrad
+                | Kind::PoolMean2dInputGrad
+        )
+    }) {
+        pool::define(compiler);
     }
     if kinds.contains(&Kind::Pack) {
         pack::define(compiler, elements);

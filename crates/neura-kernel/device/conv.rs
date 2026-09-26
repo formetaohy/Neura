@@ -5,28 +5,28 @@ mod source {
         let taps = values[task.b];
         let output = values[task.out];
         let channels = taps.dims.y;
-        let reach_rows = taps.dims.z;
-        let reach_columns = taps.dims.w;
+        let out_channels = taps.dims.x / (input.dims.y / channels);
         let input_rows = i32(input.dims.z);
         let input_columns = i32(input.dims.w);
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let at = coordinates(index, output.dims);
+            let first_channel = (at.y / out_channels) * channels;
             let mut total = 0.0;
             for channel in stride(0u32, channels, 1u32) {
-                for reach_row in stride(0u32, reach_rows, 1u32) {
+                for reach_row in stride(0u32, task.reach_rows, 1u32) {
                     let row =
                         i32(at.z) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
                     if row < 0i32 || row >= input_rows {
                         continue;
                     }
-                    for reach_column in stride(0u32, reach_columns, 1u32) {
+                    for reach_column in stride(0u32, task.reach_columns, 1u32) {
                         let column = i32(at.w) * i32(task.stride_columns) + i32(reach_column)
                             - i32(task.pad_columns);
                         if column < 0i32 || column >= input_columns {
                             continue;
                         }
                         let source = read_address(
-                            uvec4(at.x, channel, u32(row), u32(column)),
+                            uvec4(at.x, first_channel + channel, u32(row), u32(column)),
                             input.strides,
                         );
                         let weight = read_address(
@@ -45,16 +45,17 @@ mod source {
         let taps = values[task.a];
         let gradient = values[task.b];
         let output = values[task.out];
-        let output_channels = taps.dims.x;
-        let reach_rows = taps.dims.z;
-        let reach_columns = taps.dims.w;
+        let channels = taps.dims.y;
+        let out_channels = taps.dims.x / (output.dims.y / channels);
         let gradient_rows = i32(gradient.dims.z);
         let gradient_columns = i32(gradient.dims.w);
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let at = coordinates(index, output.dims);
+            let first_channel = (at.y / channels) * out_channels;
+            let local_channel = at.y % channels;
             let mut total = 0.0;
-            for channel in stride(0u32, output_channels, 1u32) {
-                for reach_row in stride(0u32, reach_rows, 1u32) {
+            for channel in stride(first_channel, first_channel + out_channels, 1u32) {
+                for reach_row in stride(0u32, task.reach_rows, 1u32) {
                     let shifted_row = i32(at.z) + i32(task.pad_rows) - i32(reach_row);
                     if shifted_row < 0i32 || shifted_row % i32(task.stride_rows) != 0i32 {
                         continue;
@@ -63,7 +64,7 @@ mod source {
                     if row >= gradient_rows {
                         continue;
                     }
-                    for reach_column in stride(0u32, reach_columns, 1u32) {
+                    for reach_column in stride(0u32, task.reach_columns, 1u32) {
                         let shifted_column = i32(at.w) + i32(task.pad_columns) - i32(reach_column);
                         if shifted_column < 0i32
                             || shifted_column % i32(task.stride_columns) != 0i32
@@ -79,7 +80,7 @@ mod source {
                             gradient.strides,
                         );
                         let weight = read_address(
-                            uvec4(channel, at.y, reach_row, reach_column),
+                            uvec4(channel, local_channel, reach_row, reach_column),
                             taps.strides,
                         );
                         total = total + fetch(gradient, source) * fetch(taps, weight);
@@ -96,7 +97,8 @@ mod source {
         let taps = values[task.c];
         let output = values[task.out];
         let chunks = output.dims.z;
-        let input_channels = input.dims.y;
+        let channels = taps.dims.y;
+        let out_channels = taps.dims.x / (input.dims.y / channels);
         let input_rows = i32(input.dims.z);
         let input_columns = i32(input.dims.w);
         let gradient_rows = gradient.dims.z;
@@ -111,8 +113,9 @@ mod source {
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let reach_row = index / reach_columns % reach_rows;
             let reach_column = index % reach_columns;
-            let channel = index / (reach_columns * reach_rows) % input_channels;
-            let out_channel = index / (reach_columns * reach_rows * input_channels);
+            let channel = index / (reach_columns * reach_rows) % channels;
+            let out_channel = index / (reach_columns * reach_rows * channels);
+            let first_channel = (out_channel / out_channels) * channels;
             let mut total = 0.0;
             for position in stride(first, last, 1u32) {
                 let batch = position / plane;
@@ -131,7 +134,12 @@ mod source {
                 }
                 let source = read_address(uvec4(batch, out_channel, row, column), gradient.strides);
                 let weight = read_address(
-                    uvec4(batch, channel, u32(used_row), u32(used_column)),
+                    uvec4(
+                        batch,
+                        first_channel + channel,
+                        u32(used_row),
+                        u32(used_column),
+                    ),
                     input.strides,
                 );
                 total = total + fetch(gradient, source) * fetch(input, weight);

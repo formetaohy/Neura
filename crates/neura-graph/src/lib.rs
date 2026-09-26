@@ -1,9 +1,11 @@
 mod graph;
 mod init;
+mod pool;
 mod shape;
 mod window;
 
 pub use graph::{Gradients, Graph, GraphSnapshot, Residency, TaskInfo, Value, ValueInfo};
 pub use init::Init;
+pub use pool::Pool;
 pub use shape::Shape;
 pub use window::Window;

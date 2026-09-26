@@ -224,10 +224,32 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let out = plan.shape(unit.out);
             let filter = plan.shape(unit.inputs[0]);
             let dims = filter.dims();
-            let taps = u64::from(dims[0] * dims[2] * dims[3]);
+            let groups = out.dims()[1] / dims[1];
+            let taps = u64::from(dims[0] / groups * dims[2] * dims[3]);
             for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
                 plan.tasks
                     .push(Task::span(unit, first, count, u64::from(count) * taps));
+            }
+        }
+        Kind::PoolMax2d | Kind::PoolMean2d => {
+            let out = plan.shape(unit.out);
+            let taps = window_taps(unit.window);
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count) * taps));
+            }
+        }
+        Kind::PoolMax2dInputGrad | Kind::PoolMean2dInputGrad => {
+            let out = plan.shape(unit.out);
+            let covering = covering_windows(unit.window);
+            let scans = if unit.kind == Kind::PoolMax2dInputGrad {
+                covering * window_taps(unit.window)
+            } else {
+                covering
+            };
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count) * scans));
             }
         }
         Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit, profile),
@@ -265,6 +287,15 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
 
 fn device_workgroups(profile: Profile) -> u32 {
     profile.workgroups()
+}
+
+fn window_taps(window: Window) -> u64 {
+    u64::from(window.reach_rows()) * u64::from(window.reach_columns())
+}
+
+fn covering_windows(window: Window) -> u64 {
+    u64::from(window.reach_rows().div_ceil(window.stride_rows()))
+        * u64::from(window.reach_columns().div_ceil(window.stride_columns()))
 }
 
 fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {

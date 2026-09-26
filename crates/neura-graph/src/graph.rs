@@ -1,4 +1,5 @@
 use crate::init::Init;
+use crate::pool::Pool;
 use crate::shape::Shape;
 use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
@@ -230,10 +231,17 @@ impl<'g> Graph<'g> {
         let filter = self.own(filter);
         let input_dims = self.shape(input).dims();
         let filter_dims = self.shape(filter).dims();
-        assert_eq!(
-            filter_dims[1], input_dims[1],
-            "a convolution reads {} channels through a filter of {} of them",
-            input_dims[1], filter_dims[1],
+        assert!(
+            input_dims[1].is_multiple_of(filter_dims[1]),
+            "a convolution reads {} channels through a filter of {}",
+            input_dims[1],
+            filter_dims[1],
+        );
+        let groups = input_dims[1] / filter_dims[1];
+        assert!(
+            filter_dims[0].is_multiple_of(groups),
+            "a convolution of {groups} channel groups writes {} output channels",
+            filter_dims[0],
         );
         assert_eq!(
             [filter_dims[2], filter_dims[3]],
@@ -271,6 +279,40 @@ impl<'g> Graph<'g> {
             out.id(),
             [input.id(), filter.id(), NO_VALUE],
         );
+        task.window = window;
+        self.push(task);
+        out
+    }
+
+    pub fn pool2d(&self, input: Value<'g>, window: Window, mode: Pool) -> Value<'g> {
+        let input = self.own(input);
+        let input_dims = self.shape(input).dims();
+        let padded_rows = input_dims[2] + 2 * window.pad_rows();
+        let padded_columns = input_dims[3] + 2 * window.pad_columns();
+        assert!(
+            padded_rows >= window.reach_rows() && padded_columns >= window.reach_columns(),
+            "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
+            window.reach_rows(),
+            window.reach_columns(),
+            input_dims,
+            window.pad_rows(),
+            window.pad_columns(),
+        );
+        let out = self.fresh(
+            Shape::of([
+                input_dims[0],
+                input_dims[1],
+                (padded_rows - window.reach_rows()) / window.stride_rows() + 1,
+                (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
+            ]),
+            Residency::Derived,
+            self.tracked(&[input]),
+        );
+        let kind = match mode {
+            Pool::Max => Kind::PoolMax2d,
+            Pool::Mean => Kind::PoolMean2d,
+        };
+        let mut task = TaskInfo::of(kind, op::NONE, out.id(), [input.id(), NO_VALUE, NO_VALUE]);
         task.window = window;
         self.push(task);
         out
@@ -708,6 +750,26 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, table, zeros);
                 }
             }
+            Kind::PoolMax2d | Kind::PoolMean2d => {
+                let input = self.value_of(task.inputs[0]);
+                if self.tracked(&[input]) {
+                    let kind = if task.kind == Kind::PoolMax2d {
+                        Kind::PoolMax2dInputGrad
+                    } else {
+                        Kind::PoolMean2dInputGrad
+                    };
+                    let out = self.fresh(self.shape(input), Residency::Derived, false);
+                    let mut grad = TaskInfo::of(
+                        kind,
+                        op::NONE,
+                        out.id(),
+                        [input.id(), gradient.id(), NO_VALUE],
+                    );
+                    grad.window = task.window;
+                    self.push(grad);
+                    self.accumulate(grads, input, out);
+                }
+            }
             Kind::Fill
             | Kind::Broadcast
             | Kind::Partial
@@ -715,6 +777,8 @@ impl<'g> Graph<'g> {
             | Kind::LogSoftmaxGrad
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
+            | Kind::PoolMax2dInputGrad
+            | Kind::PoolMean2dInputGrad
             | Kind::MatmulFold
             | Kind::Pack
             | Kind::Scatter => {}

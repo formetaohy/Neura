@@ -104,6 +104,10 @@ mod source {
             kind::CONV2D => run_conv2d(task, lid),
             kind::CONV2D_INPUT_GRAD => run_conv2d_input_grad(task, lid),
             kind::CONV2D_WEIGHT_GRAD => run_conv2d_weight_grad(task, lid),
+            kind::POOL_MAX2D => run_pool2d(task, lid),
+            kind::POOL_MAX2D_INPUT_GRAD => run_pool2d_input_grad(task, lid),
+            kind::POOL_MEAN2D => run_pool2d(task, lid),
+            kind::POOL_MEAN2D_INPUT_GRAD => run_pool2d_input_grad(task, lid),
             _ => refuse(task.kind, 0u32),
         }
     }

@@ -45,18 +45,28 @@ impl<'g> Conv2d<'g> {
     pub fn new(
         graph: &Graph<'g>,
         channels: [u32; 2],
+        groups: u32,
         window: Window,
         init: Init,
         element: Element,
     ) -> Self {
         let [inputs, outputs] = channels;
         assert!(
-            inputs > 0 && outputs > 0,
-            "a convolution of {inputs} channels into {outputs} carries no filter",
+            inputs > 0 && outputs > 0 && groups > 0,
+            "a convolution of {inputs} channels into {outputs} over {groups} groups carries no filter",
+        );
+        assert!(
+            inputs.is_multiple_of(groups) && outputs.is_multiple_of(groups),
+            "a convolution of {inputs} channels into {outputs} cuts {groups} groups",
         );
         Self {
             filter: graph.parameter(
-                Shape::of([outputs, inputs, window.reach_rows(), window.reach_columns()]),
+                Shape::of([
+                    outputs,
+                    inputs / groups,
+                    window.reach_rows(),
+                    window.reach_columns(),
+                ]),
                 init,
                 element,
             ),
