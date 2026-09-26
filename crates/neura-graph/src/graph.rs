@@ -38,6 +38,12 @@ impl<'g> Value<'g> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AttentionOptions {
+    pub scale: f32,
+    pub causal: bool,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Residency {
     Input,
@@ -53,7 +59,8 @@ pub struct TaskInfo {
     pub kind: Kind,
     pub op: u32,
     pub out: u32,
-    pub inputs: [u32; 3],
+    pub extra: u32,
+    pub inputs: [u32; 6],
     pub slot: u32,
     pub param: f32,
     pub window: Window,
@@ -63,11 +70,12 @@ pub struct TaskInfo {
 }
 
 impl TaskInfo {
-    fn of(kind: Kind, op: u32, out: u32, inputs: [u32; 3]) -> Self {
+    fn of(kind: Kind, op: u32, out: u32, inputs: [u32; 6]) -> Self {
         Self {
             kind,
             op,
             out,
+            extra: NO_VALUE,
             inputs,
             slot: 0,
             param: 0.0,
@@ -181,7 +189,7 @@ impl<'g> Graph<'g> {
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
         let out = self.fresh(shape, Residency::Derived, false);
-        let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 3]);
+        let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 6]);
         task.param = value;
         self.push(task);
         out
@@ -221,8 +229,104 @@ impl<'g> Graph<'g> {
             Kind::Matmul,
             op::NONE,
             out.id(),
-            [left.id(), right.id(), NO_VALUE],
+            [
+                left.id(),
+                right.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
+        out
+    }
+
+    pub fn attention(
+        &self,
+        query: Value<'g>,
+        key: Value<'g>,
+        value: Value<'g>,
+        attention: AttentionOptions,
+    ) -> Value<'g> {
+        let query = self.own(query);
+        let key = self.own(key);
+        let value = self.own(value);
+        let query_shape = self.shape(query);
+        let key_shape = self.shape(key);
+        let value_shape = self.shape(value);
+        assert!(
+            attention.scale.is_finite() && attention.scale != 0.0,
+            "an attention scaled by {} weighs every score to nothing",
+            attention.scale,
+        );
+        assert_eq!(
+            query_shape.batch(),
+            key_shape.batch(),
+            "an attention reads {query_shape:?} through keys of {key_shape:?}",
+        );
+        assert_eq!(
+            key_shape.batch(),
+            value_shape.batch(),
+            "an attention reads keys of {key_shape:?} through values of {value_shape:?}",
+        );
+        assert_eq!(
+            query_shape.dims()[3],
+            key_shape.dims()[3],
+            "an attention of width {} scores keys of width {}",
+            query_shape.dims()[3],
+            key_shape.dims()[3],
+        );
+        assert_eq!(
+            key_shape.dims()[2],
+            value_shape.dims()[2],
+            "an attention weighs {} keys by {} values",
+            key_shape.dims()[2],
+            value_shape.dims()[2],
+        );
+        assert!(
+            !attention.causal || query_shape.dims()[2] == key_shape.dims()[2],
+            "a causal attention walks {} queries over {} keys, and a mask aligns them one by one",
+            query_shape.dims()[2],
+            key_shape.dims()[2],
+        );
+        let tracked = self.tracked(&[query, key, value]);
+        let out = self.fresh(
+            Shape::of([
+                query_shape.dims()[0],
+                query_shape.dims()[1],
+                query_shape.dims()[2],
+                value_shape.dims()[3],
+            ]),
+            Residency::Derived,
+            tracked,
+        );
+        let log_sum_exp = self.fresh(
+            Shape::of([
+                query_shape.dims()[0],
+                query_shape.dims()[1],
+                query_shape.dims()[2],
+                1,
+            ]),
+            Residency::Derived,
+            false,
+        );
+        let mut task = TaskInfo::of(
+            Kind::Attention,
+            op::NONE,
+            out.id(),
+            [
+                query.id(),
+                key.id(),
+                value.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.extra = log_sum_exp.id();
+        task.param = attention.scale;
+        task.slot = u32::from(attention.causal);
+        self.push(task);
         out
     }
 
@@ -277,7 +381,14 @@ impl<'g> Graph<'g> {
             Kind::Conv2d,
             op::NONE,
             out.id(),
-            [input.id(), filter.id(), NO_VALUE],
+            [
+                input.id(),
+                filter.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         );
         task.window = window;
         self.push(task);
@@ -312,7 +423,12 @@ impl<'g> Graph<'g> {
             Pool::Max => Kind::PoolMax2d,
             Pool::Mean => Kind::PoolMean2d,
         };
-        let mut task = TaskInfo::of(kind, op::NONE, out.id(), [input.id(), NO_VALUE, NO_VALUE]);
+        let mut task = TaskInfo::of(
+            kind,
+            op::NONE,
+            out.id(),
+            [input.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
         task.window = window;
         self.push(task);
         out
@@ -446,7 +562,7 @@ impl<'g> Graph<'g> {
             kind,
             op::NONE,
             out.id(),
-            [source.id(), seed, NO_VALUE],
+            [source.id(), seed, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         ));
         out
     }
@@ -482,7 +598,14 @@ impl<'g> Graph<'g> {
             Kind::OneHot,
             op::NONE,
             out.id(),
-            [indices.id(), NO_VALUE, NO_VALUE],
+            [
+                indices.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         out
     }
@@ -503,7 +626,14 @@ impl<'g> Graph<'g> {
             Kind::Gather,
             op::NONE,
             out.id(),
-            [table.id(), indices.id(), NO_VALUE],
+            [
+                table.id(),
+                indices.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         out
     }
@@ -540,7 +670,7 @@ impl<'g> Graph<'g> {
             Kind::SumChunk,
             op::NONE,
             out.id(),
-            [value.id(), NO_VALUE, NO_VALUE],
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         ));
         out
     }
@@ -579,7 +709,14 @@ impl<'g> Graph<'g> {
             Kind::Unary,
             op::IDENTITY,
             target.id(),
-            [source.id(), NO_VALUE, NO_VALUE],
+            [
+                source.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         );
         task.in_place = true;
         self.push(task);
@@ -713,6 +850,46 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, source, out);
                 }
             }
+            Kind::Attention => {
+                let query = self.value_of(task.inputs[0]);
+                let key = self.value_of(task.inputs[1]);
+                let value = self.value_of(task.inputs[2]);
+                assert_ne!(
+                    task.extra, NO_VALUE,
+                    "an attention carries the log sum of every row it weighs",
+                );
+                let operands = [
+                    task.inputs[0],
+                    task.inputs[1],
+                    task.inputs[2],
+                    gradient.id(),
+                    task.out,
+                    task.extra,
+                ];
+                let without_output = [
+                    operands[0],
+                    operands[1],
+                    NO_VALUE,
+                    operands[3],
+                    NO_VALUE,
+                    operands[5],
+                ];
+                for (operand, kind, inputs) in [
+                    (query, Kind::AttentionQueryGrad, operands),
+                    (key, Kind::AttentionKeyGrad, operands),
+                    (value, Kind::AttentionValueGrad, without_output),
+                ] {
+                    if !self.tracked(&[operand]) {
+                        continue;
+                    }
+                    let out = self.fresh(self.shape(operand), Residency::Derived, false);
+                    let mut grad = TaskInfo::of(kind, op::NONE, out.id(), inputs);
+                    grad.param = task.param;
+                    grad.slot = task.slot;
+                    self.push(grad);
+                    self.accumulate(grads, operand, out);
+                }
+            }
             Kind::Conv2d => {
                 let input = self.value_of(task.inputs[0]);
                 let filter = self.value_of(task.inputs[1]);
@@ -722,7 +899,14 @@ impl<'g> Graph<'g> {
                         Kind::Conv2dInputGrad,
                         op::NONE,
                         out.id(),
-                        [filter.id(), gradient.id(), NO_VALUE],
+                        [
+                            filter.id(),
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
                     );
                     grad.window = task.window;
                     self.push(grad);
@@ -734,7 +918,14 @@ impl<'g> Graph<'g> {
                         Kind::Conv2dWeightGrad,
                         op::NONE,
                         out.id(),
-                        [input.id(), gradient.id(), filter.id()],
+                        [
+                            input.id(),
+                            gradient.id(),
+                            filter.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
                     );
                     grad.window = task.window;
                     self.push(grad);
@@ -763,7 +954,14 @@ impl<'g> Graph<'g> {
                         kind,
                         op::NONE,
                         out.id(),
-                        [input.id(), gradient.id(), NO_VALUE],
+                        [
+                            input.id(),
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
                     );
                     grad.window = task.window;
                     self.push(grad);
@@ -775,6 +973,9 @@ impl<'g> Graph<'g> {
             | Kind::Partial
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad
+            | Kind::AttentionQueryGrad
+            | Kind::AttentionKeyGrad
+            | Kind::AttentionValueGrad
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
             | Kind::PoolMax2dInputGrad
@@ -819,7 +1020,7 @@ impl<'g> Graph<'g> {
             Kind::Partial,
             task.op,
             out.id(),
-            [left, right, gradient.id()],
+            [left, right, gradient.id(), NO_VALUE, NO_VALUE, NO_VALUE],
         );
         partial.slot = slot;
         self.push(partial);
@@ -841,7 +1042,14 @@ impl<'g> Graph<'g> {
             kind,
             op::NONE,
             out.id(),
-            [task.out, gradient.id(), NO_VALUE],
+            [
+                task.out,
+                gradient.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         self.accumulate(grads, source, out);
     }
@@ -860,7 +1068,7 @@ impl<'g> Graph<'g> {
             kind,
             op::NONE,
             out.id(),
-            [value.id(), NO_VALUE, NO_VALUE],
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         ));
         out
     }
@@ -874,7 +1082,14 @@ impl<'g> Graph<'g> {
             op::kind(op),
             op,
             out.id(),
-            [left.id(), right.id(), NO_VALUE],
+            [
+                left.id(),
+                right.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         out
     }
@@ -887,7 +1102,7 @@ impl<'g> Graph<'g> {
             op::kind(op),
             op,
             out.id(),
-            [value.id(), NO_VALUE, NO_VALUE],
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         ));
         out
     }
@@ -906,7 +1121,14 @@ impl<'g> Graph<'g> {
             op::kind(op),
             op,
             target.id(),
-            [target.id(), operand.id(), NO_VALUE],
+            [
+                target.id(),
+                operand.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         );
         task.in_place = true;
         self.push(task);
@@ -982,7 +1204,14 @@ impl<'g> Graph<'g> {
             Kind::Scatter,
             op::NONE,
             target.id(),
-            [target.id(), indices.id(), updates.id()],
+            [
+                target.id(),
+                indices.id(),
+                updates.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         );
         task.in_place = true;
         self.push(task);
@@ -1037,7 +1266,7 @@ impl<'g> Graph<'g> {
             Kind::SumAxis,
             op::NONE,
             out.id(),
-            [value.id(), NO_VALUE, NO_VALUE],
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         );
         task.slot = axis;
         self.push(task);
@@ -1057,7 +1286,14 @@ impl<'g> Graph<'g> {
             Kind::Broadcast,
             op::NONE,
             out.id(),
-            [source.id(), NO_VALUE, NO_VALUE],
+            [
+                source.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         out
     }

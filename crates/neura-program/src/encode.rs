@@ -9,7 +9,7 @@ use neura_abi::{
     TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
-use neura_profile::{MatmulTile, Profile};
+use neura_profile::{AttentionTile, MatmulTile, Profile};
 use std::mem::size_of;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -115,6 +115,7 @@ pub struct Encoding {
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     geometries: Vec<u32>,
+    attention: Vec<AttentionTile>,
     arena_bytes: u64,
     tensor_bytes: u64,
     layout: Layout,
@@ -135,7 +136,8 @@ impl Encoding {
         let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
         let values = &plan.values;
         let tasks = &plan.tasks;
-        let tiles = profile.tiles();
+        let tiles = &plan;
+        let matmul_tiles = profile.tiles();
 
         let kinds = carried_kinds(tasks);
         let elements = carried_elements(values);
@@ -173,17 +175,29 @@ impl Encoding {
         let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
         let mut updates_weights = false;
-        let mut geometries = vec![0u32; tiles.len()];
+        let mut geometries = vec![0u32; matmul_tiles.len()];
         let mut work = 0;
         for index in order {
             let task = &tasks[*index as usize];
             let geometry = match task.kind {
+                Kind::Attention
+                | Kind::AttentionQueryGrad
+                | Kind::AttentionKeyGrad
+                | Kind::AttentionValueGrad => {
+                    assert!(
+                        (task.geometry as usize) < tiles.attention.len(),
+                        "an attention names geometry {} beyond the {} tiles its plan carries",
+                        task.geometry,
+                        tiles.attention.len(),
+                    );
+                    task.geometry
+                }
                 Kind::Matmul => {
                     assert!(
-                        (task.geometry as usize) < tiles.len(),
+                        (task.geometry as usize) < matmul_tiles.len(),
                         "a product names geometry {} beyond the {} tiles its profile carries",
                         task.geometry,
-                        tiles.len(),
+                        matmul_tiles.len(),
                     );
                     geometries[task.geometry as usize] += 1;
                     task.geometry
@@ -244,9 +258,13 @@ impl Encoding {
                 slot: task.slot,
                 splits: task.splits,
                 out: task.out,
+                extra: task.extra,
                 a: task.inputs[0],
                 b: task.inputs[1],
                 c: task.inputs[2],
+                d: task.inputs[3],
+                e: task.inputs[4],
+                f: task.inputs[5],
                 param: task.param,
                 prelude,
                 prelude_steps: task.prelude.len() as u32,
@@ -259,7 +277,11 @@ impl Encoding {
                 pad_rows: task.window.pad_rows(),
                 pad_columns: task.window.pad_columns(),
             });
-            if task.in_place && store_of(info_of(values, task.out).residency) == Store::Weights {
+            if task.in_place
+                && task
+                    .writes()
+                    .any(|out| store_of(info_of(values, out).residency) == Store::Weights)
+            {
                 updates_weights = true;
             }
             work += task.work;
@@ -280,11 +302,13 @@ impl Encoding {
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
         for index in order {
             let task = &tasks[*index as usize];
-            let storage = values[task.out as usize].storage as usize;
-            if !arena_resident(values, storage) {
-                continue;
+            for out in task.writes() {
+                let storage = values[out as usize].storage as usize;
+                if !arena_resident(values, storage) {
+                    continue;
+                }
+                last_writer.insert(offsets[storage], out);
             }
-            last_writer.insert(offsets[storage], task.out);
         }
         for (id, info) in values.iter().enumerate() {
             if info.storage as usize != id {
@@ -324,6 +348,7 @@ impl Encoding {
             spans,
             readable,
             geometries,
+            attention: tiles.attention.clone(),
             arena_bytes,
             tensor_bytes,
             layout,
@@ -346,6 +371,10 @@ impl Encoding {
 
     pub fn elements(&self) -> &[Element] {
         &self.elements
+    }
+
+    pub fn attention(&self) -> &[AttentionTile] {
+        &self.attention
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
@@ -486,26 +515,28 @@ fn carried_elements(values: &[ValueInfo]) -> Vec<Element> {
 
 fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
     for task in tasks {
-        let out = &values[task.out as usize];
-        if task.kind == Kind::Pack {
-            let source = &values[task.inputs[0] as usize];
+        for out in task.writes() {
+            let out = &values[out as usize];
+            if task.kind == Kind::Pack {
+                let source = &values[task.inputs[0] as usize];
+                assert!(
+                    out.element.narrow() && source.element == Element::Single,
+                    "a pack of {} numbers into a {} tensor reads the {} source {} writes element by element",
+                    source.shape.elements(),
+                    out.element.name(),
+                    source.element.name(),
+                    task.kind.name(),
+                );
+                continue;
+            }
             assert!(
-                out.element.narrow() && source.element == Element::Single,
-                "a pack of {} numbers into a {} tensor reads the {} source {} writes element by element",
-                source.shape.elements(),
-                out.element.name(),
-                source.element.name(),
+                !out.element.narrow(),
+                "a {} task writes the {} tensor {} element by element, and a narrow tensor is written a word at a time by a pack",
                 task.kind.name(),
+                out.element.name(),
+                task.out,
             );
-            continue;
         }
-        assert!(
-            !out.element.narrow(),
-            "a {} task writes the {} tensor {} element by element, and a narrow tensor is written a word at a time by a pack",
-            task.kind.name(),
-            out.element.name(),
-            task.out,
-        );
     }
 }
 
@@ -514,7 +545,7 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
     for (position, task) in tasks.iter().enumerate() {
         let access = Access::of(values, task);
         for storage in access.reads() {
-            if access.in_place() && *storage == access.write() {
+            if access.in_place() && access.writes().contains(storage) {
                 continue;
             }
             match last_writer[*storage as usize] {
@@ -528,7 +559,9 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
                 ),
             }
         }
-        last_writer[access.write() as usize] = Some(position);
+        for storage in access.writes() {
+            last_writer[*storage as usize] = Some(position);
+        }
     }
 }
 
@@ -548,9 +581,13 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
     let mut readers = Vec::new();
     for (position, index) in order.iter().enumerate() {
         let task = &tasks[*index as usize];
-        let write = access::storage(values, task.out);
-        let aliases = reads_every_element_in_place(values, task, write);
-        touch(&mut live, write, position, false, None);
+        let writes = Access::of(values, task).writes().to_vec();
+        let aliases = writes
+            .first()
+            .is_some_and(|write| reads_every_element_in_place(values, task, *write));
+        for write in &writes {
+            touch(&mut live, *write, position, false, None);
+        }
         readers.clear();
         for value in task.reads() {
             if readers.contains(&value) {
@@ -558,7 +595,7 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
             }
             readers.push(value);
             let storage = access::storage(values, value);
-            let in_place = aliases && storage != write;
+            let in_place = aliases && !writes.contains(&storage);
             touch(
                 &mut live,
                 storage,

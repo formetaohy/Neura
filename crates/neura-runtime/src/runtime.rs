@@ -268,7 +268,12 @@ impl Runtime {
         let signature = tape::signature(&encoding, profile, self.alignment);
         let kinds = encoding.kinds().to_vec();
         let elements = encoding.elements().to_vec();
-        let geometry = Geometry::of(profile.workgroup(), encoding.tiles());
+        let geometry = Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            encoding.tiles(),
+            encoding.attention(),
+        );
         let kernel = self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
             Megakernel::assemble(&kinds, &elements, geometry)
         });
@@ -523,6 +528,13 @@ fn refusal_message(word: u32) -> String {
                 kind.name(),
             )
         }
+        Kind::Attention
+        | Kind::AttentionQueryGrad
+        | Kind::AttentionKeyGrad
+        | Kind::AttentionValueGrad => format!(
+            "the device refused geometry {code} of the {} task",
+            kind.name(),
+        ),
         Kind::Fill
         | Kind::Broadcast
         | Kind::SumChunk

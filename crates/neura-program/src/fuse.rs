@@ -38,8 +38,10 @@ impl<'a> Fold<'a> {
             write_times: vec![Vec::new(); values.len()],
         };
         for (index, task) in authored.iter().enumerate() {
-            fold.producers[task.out as usize] = Some(index);
-            fold.write_times[access::storage(values, task.out) as usize].push(index as u32);
+            for out in task.writes() {
+                fold.producers[out as usize] = Some(index);
+                fold.write_times[access::storage(values, out) as usize].push(index as u32);
+            }
             for (slot, value) in task.inputs.iter().enumerate() {
                 if *value != NO_VALUE {
                     fold.reads[*value as usize].push(Use {
@@ -114,6 +116,9 @@ impl<'a> Fold<'a> {
         let head = self.tasks[producer].as_ref()?.clone();
         let tail = self.tasks[consumer].as_ref()?;
         if head.in_place || tail.in_place || !head.prelude.is_empty() {
+            return None;
+        }
+        if head.extra != NO_VALUE {
             return None;
         }
         let shape = self.values[head.out as usize].shape;
@@ -273,6 +278,7 @@ impl<'a> Fold<'a> {
         let tail = self.tasks[consumer].as_ref()?;
         if head.kind == Kind::SumChunk
             || head.in_place
+            || head.extra != NO_VALUE
             || !matches!(tail.kind, Kind::Unary | Kind::Binary)
         {
             return None;
@@ -354,7 +360,9 @@ fn assert_sources(values: &[ValueInfo], authored: &[TaskInfo], tape: &[TaskInfo]
     let mut at = 0usize;
     for (index, (task, time)) in tape.iter().zip(times).enumerate() {
         while at < *time as usize {
-            authored_writer[access::storage(values, authored[at].out) as usize] = authored[at].out;
+            for out in authored[at].writes() {
+                authored_writer[access::storage(values, out) as usize] = out;
+            }
             at += 1;
         }
         for storage in Access::of(values, task).reads() {
@@ -363,6 +371,8 @@ fn assert_sources(values: &[ValueInfo], authored: &[TaskInfo], tape: &[TaskInfo]
                 "task {index} of the tape reads tensor {storage} past the task that rewrites it",
             );
         }
-        tape_writer[access::storage(values, task.out) as usize] = task.out;
+        for out in task.writes() {
+            tape_writer[access::storage(values, out) as usize] = out;
+        }
     }
 }

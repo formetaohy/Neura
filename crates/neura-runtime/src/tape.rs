@@ -185,6 +185,10 @@ pub(crate) fn signature(
         bytes.extend(tile.thread_rows().to_le_bytes());
         bytes.extend(tile.thread_columns().to_le_bytes());
     }
+    for tile in encoding.attention() {
+        bytes.extend(tile.keys().to_le_bytes());
+        bytes.extend(tile.width().to_le_bytes());
+    }
     bytes.extend(alignment.to_le_bytes());
     bytes.extend(encoding.tasks());
     bytes.extend(encoding.values());

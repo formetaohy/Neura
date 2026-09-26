@@ -466,3 +466,121 @@ fn a_scatter_stops_at_every_tensor_it_cannot_update() {
         graph.scatter_into(table, graph.transpose(indices), updates);
     }));
 }
+
+#[test]
+fn an_attention_hands_the_device_a_row_block_for_every_plane() {
+    let heads = 2u32;
+    let batch = 2u32;
+    let tokens = 9u32;
+    let width = 4u32;
+    let graph = Graph::new();
+    let tensor = |tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, batch, tokens, width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let out = graph.attention(
+        tensor(tokens),
+        tensor(tokens),
+        tensor(tokens),
+        neura_graph::AttentionOptions {
+            scale: 0.5,
+            causal: true,
+        },
+    );
+    graph.retain(out);
+    for profile in [narrow(), wide()] {
+        let encoding = encoding_with(&graph, profile);
+        let tiles = encoding.attention();
+        assert_eq!(
+            tiles.len(),
+            1,
+            "one width of one graph takes one attention tile",
+        );
+        assert_eq!(tiles[0].width(), width);
+        assert!(
+            tiles[0].shared_bytes() <= profile.shared_bytes(),
+            "an attention stages more than the pool its profile offers",
+        );
+        let tasks = tasks_of(&encoding, out);
+        let blocks = tokens.div_ceil(profile.workgroup());
+        assert_eq!(
+            tasks.len() as u32,
+            heads * batch * blocks,
+            "an attention hands the device one task per row block of every plane",
+        );
+        let mut plane = 0u32;
+        let mut block = 0u32;
+        for task in tasks {
+            assert_eq!(Kind::of(task.kind), Kind::Attention);
+            assert_eq!(task.geometry, 0);
+            assert_ne!(task.extra, neura_abi::NO_VALUE);
+            assert!(task.count > 0 && task.count <= profile.workgroup());
+            assert_eq!(task.first, plane * tokens + block * profile.workgroup());
+            assert!(task.param > 0.0 && task.slot == 1);
+            block += 1;
+            if block == blocks {
+                block = 0;
+                plane += 1;
+            }
+        }
+    }
+}
+
+#[test]
+fn an_attention_keeps_the_shared_pool_its_products_stage_from() {
+    let tokens = 64u32;
+    let width = 8u32;
+    let graph = Graph::new();
+    let data = graph.parameter(
+        Shape::of([1, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
+    let left = graph.parameter(Shape::matrix(64, 64), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(64, 64), Init::Zero, Element::Single);
+    graph.retain(graph.matmul(left, right));
+    let out = graph.attention(
+        data,
+        data,
+        data,
+        neura_graph::AttentionOptions {
+            scale: 0.5,
+            causal: false,
+        },
+    );
+    graph.retain(out);
+    let profile = wide();
+    let encoding = encoding_with(&graph, profile);
+    let spare = profile.shared_bytes() - profile.staging_bytes();
+    assert!(
+        encoding.attention()[0].shared_bytes() <= spare,
+        "an attention beside a product stages within what the product leaves",
+    );
+    assert!(
+        u64::from(encoding.attention()[0].keys()) * 2 * u64::from(width) * 4 <= spare,
+        "an attention keys within the pool the products leave",
+    );
+}
+
+#[test]
+fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carries() {
+    let graph = Graph::new();
+    let width = 96u32;
+    let tensor = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
+    let out = graph.attention(
+        tensor,
+        tensor,
+        tensor,
+        neura_graph::AttentionOptions {
+            scale: 0.5,
+            causal: false,
+        },
+    );
+    graph.retain(out);
+    assert!(refuses(|| {
+        let _ = encoding_with(&graph, narrow());
+    }));
+}

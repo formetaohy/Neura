@@ -84,6 +84,10 @@ mod source {
         match task.kind {
             kind::MATMUL => run_matmul(task, lid),
             kind::MATMUL_FOLD => run_matmul_fold(task, lid),
+            kind::ATTENTION => run_attention(task, lid),
+            kind::ATTENTION_QUERY_GRAD => run_attention_query_grad(task, lid),
+            kind::ATTENTION_KEY_GRAD => run_attention_key_grad(task, lid),
+            kind::ATTENTION_VALUE_GRAD => run_attention_value_grad(task, lid),
             kind::BINARY => run_binary(task, lid),
             kind::UNARY => run_unary(task, lid),
             kind::PARTIAL => run_partial(task, lid),

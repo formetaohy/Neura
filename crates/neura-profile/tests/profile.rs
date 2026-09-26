@@ -135,7 +135,12 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
 #[test]
 fn a_geometry_declares_every_tile_its_profile_offers() {
     for profile in Profile::derive(wide_device()) {
-        let geometry = Geometry::of(profile.workgroup(), profile.tiles());
+        let geometry = Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            profile.tiles(),
+            &[],
+        );
         let (left, right) = geometry.stage_lengths();
         assert_eq!(geometry.workgroup(), profile.workgroup());
         assert_eq!(geometry.tiles(), profile.tiles());

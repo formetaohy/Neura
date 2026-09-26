@@ -2,7 +2,7 @@ use naga::{AddressSpace, Expression, MathFunction, Statement, SwitchValue, TypeI
 use neura_abi::{Element, Kind, RECORDS};
 use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
-use neura_profile::{Budget, Geometry, Profile};
+use neura_profile::{AttentionTile, Budget, Geometry, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
@@ -22,7 +22,12 @@ fn all(profile: usize) -> &'static Megakernel {
                 Megakernel::assemble(
                     Kind::ALL,
                     Element::ALL,
-                    Geometry::of(profile.workgroup(), profile.tiles()),
+                    Geometry::of(
+                        profile.workgroup(),
+                        profile.shared_bytes(),
+                        profile.tiles(),
+                        &[],
+                    ),
                 )
             })
             .collect()
@@ -33,7 +38,12 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Megakerne
     Megakernel::assemble(
         kinds,
         elements,
-        Geometry::of(profile.workgroup(), profile.tiles()),
+        Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            profile.tiles(),
+            &[],
+        ),
     )
 }
 
@@ -342,4 +352,65 @@ fn the_same_rust_specialization_produces_the_same_device_program() {
     let second = selected(profiles()[0], &[Kind::Fill], &[Element::Single]).program();
     assert_eq!(first, second);
     assert_eq!(first.spirv(), second.spirv());
+}
+
+#[test]
+fn attention_specialization_contains_every_tile_of_its_geometry() {
+    let profile = *profiles().last().expect("a profile");
+    let attention = [AttentionTile::new(4, 8), AttentionTile::new(2, 16)];
+    let kernel = Megakernel::assemble(
+        &[
+            Kind::Attention,
+            Kind::AttentionQueryGrad,
+            Kind::AttentionKeyGrad,
+            Kind::AttentionValueGrad,
+        ],
+        &[Element::Single],
+        Geometry::of(profile.workgroup(), profile.shared_bytes(), &[], &attention),
+    );
+    let program = kernel.program();
+    let names = functions(&program);
+    for (index, tile) in attention.iter().enumerate() {
+        for name in [
+            format!("run_attention_{index}"),
+            format!("run_attention_query_grad_{index}"),
+            format!("run_attention_key_grad_{index}"),
+            format!("run_attention_value_grad_{index}"),
+            format!("stage_attention_{index}"),
+        ] {
+            assert!(names.contains(name.as_str()), "{name} is missing");
+        }
+        assert_eq!(
+            kernel.geometry().attention_tile(index as u32),
+            *tile,
+            "a device program carries the tile its geometry names",
+        );
+    }
+    let staged = program
+        .module()
+        .global_variables
+        .iter()
+        .filter(|(_, variable)| variable.name.as_deref() == Some("attention_left"))
+        .map(
+            |(_, variable)| match &program.module().types[variable.ty].inner {
+                TypeInner::Array {
+                    stride,
+                    size: naga::ArraySize::Constant(count),
+                    ..
+                } => u64::from(*stride) * u64::from(count.get()),
+                other => panic!("an attention stage {other:?} has no static size"),
+            },
+        )
+        .sum::<u64>();
+    assert_eq!(
+        staged,
+        u64::from(
+            attention
+                .iter()
+                .map(|tile| tile.stage_words())
+                .max()
+                .expect("an attention stage"),
+        ) * 4,
+        "a device program stages the widest attention tile it carries",
+    );
 }

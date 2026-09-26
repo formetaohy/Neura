@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_graph::{Graph, Init, Shape, Value, Window};
+use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 
 pub struct Linear<'g> {
     weight: Value<'g>,
@@ -170,6 +170,102 @@ impl<'g> Embedding<'g> {
 
     pub fn parameters(&self) -> [Value<'g>; 1] {
         [self.table]
+    }
+}
+
+pub struct MultiHeadAttention<'g> {
+    heads: u32,
+    width: u32,
+    queries: Value<'g>,
+    keys: Value<'g>,
+    values: Value<'g>,
+    output: Value<'g>,
+    query_bias: Value<'g>,
+    key_bias: Value<'g>,
+    value_bias: Value<'g>,
+    output_bias: Value<'g>,
+    options: AttentionOptions,
+}
+
+impl<'g> MultiHeadAttention<'g> {
+    pub fn new(
+        graph: &Graph<'g>,
+        heads: u32,
+        width: u32,
+        init: Init,
+        element: Element,
+        options: AttentionOptions,
+    ) -> Self {
+        assert!(
+            heads > 0 && width > 0,
+            "an attention of {heads} heads of {width} numbers carries no weight",
+        );
+        let projection =
+            |columns: u32| graph.parameter(Shape::of([heads, 1, columns, columns]), init, element);
+        let shift =
+            |columns: u32| graph.parameter(Shape::of([heads, 1, 1, columns]), Init::Zero, element);
+        Self {
+            heads,
+            width,
+            queries: projection(width),
+            keys: projection(width),
+            values: projection(width),
+            output: projection(width),
+            query_bias: shift(width),
+            key_bias: shift(width),
+            value_bias: shift(width),
+            output_bias: shift(width),
+            options,
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+        let shape = graph.shape(input);
+        assert_eq!(
+            shape.dims()[0],
+            self.heads,
+            "an attention of {} heads reads a tensor of {} heads",
+            self.heads,
+            shape.dims()[0],
+        );
+        assert_eq!(
+            shape.dims()[3],
+            self.width,
+            "an attention of width {} reads {} numbers per row",
+            self.width,
+            shape.dims()[3],
+        );
+        let project = |source: Value<'g>, weight: Value<'g>, bias: Value<'g>| {
+            graph.add(graph.matmul(source, weight), bias)
+        };
+        let attended = graph.attention(
+            project(input, self.queries, self.query_bias),
+            project(input, self.keys, self.key_bias),
+            project(input, self.values, self.value_bias),
+            self.options,
+        );
+        project(attended, self.output, self.output_bias)
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 8] {
+        [
+            self.queries,
+            self.keys,
+            self.values,
+            self.output,
+            self.query_bias,
+            self.key_bias,
+            self.value_bias,
+            self.output_bias,
+        ]
+    }
+
+    pub fn heads(&self) -> u32 {
+        self.heads
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
     }
 }
 

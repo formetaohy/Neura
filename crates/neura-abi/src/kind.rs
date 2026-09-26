@@ -40,6 +40,10 @@ macro_rules! kinds {
 kinds! {
     Matmul MATMUL = "matmul";
     MatmulFold MATMUL_FOLD = "matmul_fold";
+    Attention ATTENTION = "attention";
+    AttentionQueryGrad ATTENTION_QUERY_GRAD = "attention_query_grad";
+    AttentionKeyGrad ATTENTION_KEY_GRAD = "attention_key_grad";
+    AttentionValueGrad ATTENTION_VALUE_GRAD = "attention_value_grad";
     Binary BINARY = "binary";
     Unary UNARY = "unary";
     Partial PARTIAL = "partial";

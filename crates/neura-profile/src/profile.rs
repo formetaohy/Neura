@@ -1,6 +1,44 @@
 use neura_abi::WORD_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct AttentionTile {
+    keys: u32,
+    width: u32,
+}
+
+impl AttentionTile {
+    pub const REGISTER_CEILING: u32 = 200;
+
+    pub fn new(keys: u32, width: u32) -> Self {
+        assert!(
+            keys > 0 && width > 0,
+            "an attention tile walks no key of no width"
+        );
+        Self { keys, width }
+    }
+
+    pub const fn keys(self) -> u32 {
+        self.keys
+    }
+
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    pub const fn stage_words(self) -> u32 {
+        self.keys * self.width
+    }
+
+    pub const fn shared_bytes(self) -> u64 {
+        2 * self.stage_words() as u64 * WORD_BYTES
+    }
+
+    pub const fn registers(self) -> u32 {
+        3 * self.width + self.keys
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MatmulTile {
     rows: u32,
     columns: u32,
@@ -265,6 +303,22 @@ impl Profile {
     pub const fn fits(self, threads: u32, shared_bytes: u64) -> bool {
         self.workgroup <= threads && self.shared_bytes <= shared_bytes
     }
+
+    pub const fn staging_bytes(self) -> u64 {
+        let mut left = 0u64;
+        let mut right = 0u64;
+        let mut index = 0;
+        while index < self.count as usize {
+            if self.tiles[index].left_stage() > left {
+                left = self.tiles[index].left_stage();
+            }
+            if self.tiles[index].right_stage() > right {
+                right = self.tiles[index].right_stage();
+            }
+            index += 1;
+        }
+        2 * (left + right) * WORD_BYTES
+    }
 }
 
 fn blockings(
@@ -332,13 +386,20 @@ fn grids(workgroup: u32) -> Vec<(u32, u32)> {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Geometry {
     workgroup: u32,
+    shared_bytes: u64,
     tiles: Vec<MatmulTile>,
+    attention: Vec<AttentionTile>,
     left_stage: u64,
     right_stage: u64,
 }
 
 impl Geometry {
-    pub fn of(workgroup: u32, tiles: &[MatmulTile]) -> Self {
+    pub fn of(
+        workgroup: u32,
+        shared_bytes: u64,
+        tiles: &[MatmulTile],
+        attention: &[AttentionTile],
+    ) -> Self {
         assert!(
             tiles.is_empty() || tiles.iter().all(|tile| tile.threads() == workgroup),
             "a device program carries a tile another workgroup stages",
@@ -351,7 +412,9 @@ impl Geometry {
         }
         Self {
             workgroup,
+            shared_bytes,
             tiles: tiles.to_vec(),
+            attention: attention.to_vec(),
             left_stage,
             right_stage,
         }
@@ -359,6 +422,51 @@ impl Geometry {
 
     pub const fn workgroup(&self) -> u32 {
         self.workgroup
+    }
+
+    pub const fn shared_bytes(&self) -> u64 {
+        self.shared_bytes
+    }
+
+    pub const fn staging_bytes(&self) -> u64 {
+        2 * (self.left_stage + self.right_stage) * WORD_BYTES
+    }
+
+    pub fn attention(&self) -> &[AttentionTile] {
+        &self.attention
+    }
+
+    pub fn attention_geometry(&self, tile: AttentionTile) -> u32 {
+        self.attention
+            .iter()
+            .position(|candidate| *candidate == tile)
+            .unwrap_or_else(|| panic!("a device program carries no {tile:?}"))
+            .try_into()
+            .expect("a device program carries fewer attention tiles than a word holds")
+    }
+
+    pub fn attention_tile(&self, geometry: u32) -> AttentionTile {
+        self.attention
+            .get(geometry as usize)
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "attention geometry {geometry} lies outside the {} a device program carries",
+                    self.attention.len(),
+                )
+            })
+    }
+
+    pub fn attention_stage_words(&self) -> u32 {
+        self.attention
+            .iter()
+            .map(|tile| tile.stage_words())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn attention_stage_bytes(&self) -> u64 {
+        2 * u64::from(self.attention_stage_words()) * WORD_BYTES
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {

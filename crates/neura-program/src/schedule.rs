@@ -104,19 +104,23 @@ fn accesses(values: &[ValueInfo], tasks: &[Task], mut visit: impl FnMut(u32, u32
                 visit(*writer, index);
             }
         }
-        for reader in &readers[access.write() as usize] {
-            visit(*reader, index);
-        }
-        if access.in_place() {
-            for writer in &writers[access.write() as usize] {
-                visit(*writer, index);
+        for storage in access.writes() {
+            for reader in &readers[*storage as usize] {
+                visit(*reader, index);
+            }
+            if access.in_place() {
+                for writer in &writers[*storage as usize] {
+                    visit(*writer, index);
+                }
             }
         }
         for storage in access.reads() {
             readers[*storage as usize].push(index);
         }
-        writers[access.write() as usize].push(index);
-        readers[access.write() as usize].clear();
+        for storage in access.writes() {
+            writers[*storage as usize].push(index);
+            readers[*storage as usize].clear();
+        }
     }
 }
 

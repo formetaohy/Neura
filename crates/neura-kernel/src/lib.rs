@@ -1,3 +1,6 @@
+mod attention;
+#[path = "../device/attention.rs"]
+mod attention_device;
 #[path = "../device/choice.rs"]
 mod choice;
 #[path = "../device/conv.rs"]
@@ -29,10 +32,62 @@ use neura_abi::{Element, Kind};
 use neura_compiler::Compiler;
 use neura_profile::Geometry;
 
+pub fn declared_shared_bytes(kinds: &[Kind], geometry: &Geometry) -> u64 {
+    let reductions = [
+        Kind::SumChunk,
+        Kind::SumAxis,
+        Kind::Softmax,
+        Kind::SoftmaxGrad,
+        Kind::LogSoftmax,
+        Kind::LogSoftmaxGrad,
+        Kind::Argmax,
+        Kind::Categorical,
+    ];
+    let choices = [Kind::Argmax, Kind::Categorical];
+    let attention = [
+        Kind::Attention,
+        Kind::AttentionQueryGrad,
+        Kind::AttentionKeyGrad,
+        Kind::AttentionValueGrad,
+    ];
+    let mut bytes = 0;
+    if kinds.contains(&Kind::Matmul) {
+        bytes += geometry.staging_bytes();
+    }
+    if kinds.iter().any(|kind| reductions.contains(kind)) {
+        bytes += neura_abi::WORD_BYTES * u64::from(geometry.workgroup());
+    }
+    if kinds.iter().any(|kind| choices.contains(kind)) {
+        bytes += neura_abi::WORD_BYTES * u64::from(geometry.workgroup());
+    }
+    if kinds.iter().any(|kind| attention.contains(kind)) {
+        bytes += geometry.attention_stage_bytes();
+    }
+    bytes
+}
+
 pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geometry: &Geometry) {
+    assert!(
+        declared_shared_bytes(kinds, geometry) <= geometry.shared_bytes(),
+        "a device program of {} kinds declares {} bytes of workgroup scratch beyond the {} its profile offers",
+        kinds.len(),
+        declared_shared_bytes(kinds, geometry),
+        geometry.shared_bytes(),
+    );
     element::define(compiler, elements);
     pointwise::define(compiler);
     op::define(compiler);
+    if kinds.iter().any(|kind| {
+        matches!(
+            kind,
+            Kind::Attention
+                | Kind::AttentionQueryGrad
+                | Kind::AttentionKeyGrad
+                | Kind::AttentionValueGrad
+        )
+    }) {
+        attention::define(compiler, geometry);
+    }
     if kinds
         .iter()
         .any(|kind| matches!(kind, Kind::Matmul | Kind::MatmulFold))

@@ -2,7 +2,7 @@ use crate::access::Reads;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_op as op;
-use neura_profile::{MatmulTile, Profile};
+use neura_profile::{AttentionTile, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -13,6 +13,7 @@ const FOLD_ROW_CEILING: u32 = 8;
 const MATMUL_SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
 const MATMUL_PARTIALS_CEILING: u32 = 1 << 20;
+const ATTENTION_KEYS_CEILING: u32 = 16;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -23,7 +24,8 @@ pub(crate) struct Task {
     pub(crate) count: u32,
     pub(crate) slot: u32,
     pub(crate) out: u32,
-    pub(crate) inputs: [u32; 3],
+    pub(crate) extra: u32,
+    pub(crate) inputs: [u32; 6],
     pub(crate) param: f32,
     pub(crate) window: Window,
     pub(crate) splits: u32,
@@ -37,6 +39,10 @@ pub(crate) struct Task {
 impl Reads for Task {
     fn out(&self) -> u32 {
         self.out
+    }
+
+    fn extra(&self) -> u32 {
+        self.extra
     }
 
     fn in_place(&self) -> bool {
@@ -63,6 +69,7 @@ impl Task {
             count,
             slot: unit.slot,
             out: unit.out,
+            extra: unit.extra,
             inputs: unit.inputs,
             param: unit.param,
             window: unit.window,
@@ -80,6 +87,7 @@ pub(crate) struct Plan {
     pub(crate) values: Vec<ValueInfo>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) tiles: Vec<MatmulTile>,
+    pub(crate) attention: Vec<AttentionTile>,
 }
 
 pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
@@ -87,11 +95,12 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
         values: values.to_vec(),
         tasks: Vec::new(),
         tiles: profile.tiles().to_vec(),
+        attention: Vec::new(),
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
         match narrow_target(&plan.values, task) {
-            None => schedule_unit(&mut plan, task, profile),
+            None => schedule_unit(&mut plan, task, profile, spare_shared(units, profile)),
             Some(element) => schedule_narrow(&mut plan, task, element, profile),
         }
         for task in &mut plan.tasks[mark..] {
@@ -99,6 +108,35 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
         }
     }
     plan
+}
+
+fn spare_shared(units: &[TaskInfo], profile: Profile) -> u64 {
+    let carries = |kinds: &[Kind]| units.iter().any(|unit| kinds.contains(&unit.kind));
+    let mut declared = 0u64;
+    if carries(&[Kind::Matmul]) {
+        declared += profile.staging_bytes();
+    }
+    if carries(&[
+        Kind::SumChunk,
+        Kind::SumAxis,
+        Kind::Softmax,
+        Kind::SoftmaxGrad,
+        Kind::LogSoftmax,
+        Kind::LogSoftmaxGrad,
+        Kind::Argmax,
+        Kind::Categorical,
+    ]) {
+        declared += neura_abi::WORD_BYTES * u64::from(profile.workgroup());
+    }
+    if carries(&[Kind::Argmax, Kind::Categorical]) {
+        declared += neura_abi::WORD_BYTES * u64::from(profile.workgroup());
+    }
+    assert!(
+        declared <= profile.shared_bytes(),
+        "a profile declares {declared} bytes of workgroup scratch beyond the {} it offers",
+        profile.shared_bytes(),
+    );
+    profile.shared_bytes() - declared
 }
 
 fn narrow_target(values: &[ValueInfo], task: &TaskInfo) -> Option<Element> {
@@ -117,7 +155,7 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: 
         copy.geometry = 0;
         copy.slot = 0;
         copy.out = image;
-        copy.inputs = [target, NO_VALUE, NO_VALUE];
+        copy.inputs = [target, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         copy.param = 0.0;
         copy.splits = 1;
         copy.in_place = false;
@@ -125,7 +163,12 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, element: Element, profile: 
         copy.chain.clear();
         plan.tasks.push(copy);
     }
-    schedule_unit(plan, &redirected(unit, image), profile);
+    schedule_unit(
+        plan,
+        &redirected(unit, image),
+        profile,
+        spare_shared(std::slice::from_ref(unit), profile),
+    );
     pack(plan, unit, image, element, profile);
 }
 
@@ -159,7 +202,7 @@ fn pack(plan: &mut Plan, unit: &TaskInfo, image: u32, element: Element, profile:
         task.geometry = element.code();
         task.slot = 0;
         task.out = target;
-        task.inputs = [image, NO_VALUE, NO_VALUE];
+        task.inputs = [image, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         task.param = 0.0;
         task.splits = 1;
         task.in_place = true;
@@ -192,10 +235,46 @@ impl Plan {
     }
 }
 
-fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64) {
     let target = device_workgroups(profile);
     match unit.kind {
         Kind::Matmul => matmul(plan, unit, profile),
+        Kind::Attention | Kind::AttentionQueryGrad => {
+            let rows = plan.shape(unit.out).dims();
+            let tokens = rows[2];
+            let planes = rows[0] * rows[1];
+            let geometry = attention_geometry(plan, spare, rows[3]);
+            for plane in 0..planes {
+                for (first, count) in spans(tokens, profile.workgroup()) {
+                    let mut task = Task::span(
+                        unit,
+                        plane * tokens + first,
+                        count,
+                        attention_work(count, tokens, rows[3], spare),
+                    );
+                    task.geometry = geometry;
+                    plan.tasks.push(task);
+                }
+            }
+        }
+        Kind::AttentionKeyGrad | Kind::AttentionValueGrad => {
+            let keys = plan.shape(unit.inputs[1]).dims();
+            let tokens = keys[2];
+            let planes = keys[0] * keys[1];
+            let geometry = attention_geometry(plan, spare, keys[3]);
+            for plane in 0..planes {
+                for (first, count) in spans(tokens, profile.workgroup()) {
+                    let mut task = Task::span(
+                        unit,
+                        plane * tokens + first,
+                        count,
+                        attention_work(count, tokens, keys[3], spare),
+                    );
+                    task.geometry = geometry;
+                    plan.tasks.push(task);
+                }
+            }
+        }
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let out = plan.shape(unit.out);
             for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows(), target)) {
@@ -285,6 +364,40 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
+fn attention_work(count: u32, tokens: u32, width: u32, spare: u64) -> u64 {
+    let tile = attention_keys(spare, width);
+    let blocks = tokens.div_ceil(tile).max(1);
+    u64::from(count) * u64::from(tile) * u64::from(width) * u64::from(blocks)
+}
+
+fn attention_geometry(plan: &mut Plan, spare: u64, width: u32) -> u32 {
+    if let Some(index) = plan.attention.iter().position(|tile| tile.width() == width) {
+        return index as u32;
+    }
+    let tile = AttentionTile::new(attention_keys(spare, width), width);
+    assert!(
+        tile.registers() <= AttentionTile::REGISTER_CEILING,
+        "an attention of width {width} holds {} numbers of a query row and its gradient in one thread, beyond the {} a device thread carries",
+        tile.registers(),
+        AttentionTile::REGISTER_CEILING,
+    );
+    assert!(
+        tile.shared_bytes() <= spare,
+        "an attention of width {width} stages {} bytes of keys and values, beyond the {spare} bytes its device leaves beside the rest of its tape",
+        tile.shared_bytes(),
+    );
+    plan.attention.push(tile);
+    (plan.attention.len() - 1) as u32
+}
+
+fn attention_keys(spare: u64, width: u32) -> u32 {
+    let staged = neura_abi::WORD_BYTES * u64::from(width);
+    let keys = (spare / (2 * staged)).max(1);
+    u32::try_from(keys)
+        .unwrap_or(u32::MAX)
+        .clamp(1, ATTENTION_KEYS_CEILING)
+}
+
 fn device_workgroups(profile: Profile) -> u32 {
     profile.workgroups()
 }
@@ -317,7 +430,7 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             );
             task.geometry = strategy::WEIGHT_CHUNK;
             task.slot = chunk;
-            task.inputs = [unit.inputs[0], unit.inputs[1], unit.inputs[2]];
+            task.inputs = unit.inputs;
             task.out = partials;
             plan.tasks.push(task);
         }
@@ -325,7 +438,7 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     for (first, count) in spans(filters, per_task) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(chunks));
         task.geometry = strategy::WEIGHT_FOLD;
-        task.inputs = [partials, NO_VALUE, NO_VALUE];
+        task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         plan.tasks.push(task);
     }
 }
@@ -382,7 +495,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     ) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
         task.kind = Kind::MatmulFold;
-        task.inputs = [partials, NO_VALUE, NO_VALUE];
+        task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         task.splits = splits;
         task.prelude.clear();
         plan.tasks.push(task);
@@ -448,7 +561,7 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         let opens = source == unit.inputs[0];
         if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
-            task.inputs = [source, NO_VALUE, NO_VALUE];
+            task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
             if !opens {
                 task.prelude.clear();
             }
@@ -459,7 +572,7 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         let partials = plan.publish(Shape::vector(chunks));
         for (slot, (first, count)) in spans(elements, per_reduction).enumerate() {
             let mut task = Task::span(unit, first, count, u64::from(count));
-            task.inputs = [source, NO_VALUE, NO_VALUE];
+            task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
             if !opens {
                 task.prelude.clear();
             }
