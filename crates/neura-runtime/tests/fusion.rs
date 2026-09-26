@@ -212,7 +212,10 @@ fn an_opened_reduction_keeps_the_result_of_a_viewed_operand() {
     for pinned in [true, false] {
         let graph = Graph::new();
         let data = graph.input(Shape::matrix(4, 8), Element::Single);
-        let squared = graph.mul(graph.transpose(graph.transpose(data)), data);
+        let squared = graph.mul(
+            graph.permute(graph.permute(data, [0, 1, 3, 2]), [0, 1, 3, 2]),
+            data,
+        );
         if pinned {
             graph.retain(squared);
         }

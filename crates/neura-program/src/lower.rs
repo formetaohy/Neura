@@ -340,6 +340,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
         | Kind::Partial
         | Kind::Fill
         | Kind::Broadcast
+        | Kind::Layout
         | Kind::OneHot
         | Kind::Gather => {
             let out = plan.shape(unit.out);

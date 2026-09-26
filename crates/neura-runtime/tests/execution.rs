@@ -214,7 +214,7 @@ fn a_row_fold_sums_every_row_of_every_plane() {
 fn a_row_fold_walks_a_view_through_its_strides() {
     let graph = Graph::new();
     let matrix = graph.parameter(Shape::matrix(7, 3), Init::Zero, Element::Single);
-    let sums = graph.sum_rows(graph.transpose(matrix));
+    let sums = graph.sum_rows(graph.permute(matrix, [0, 1, 3, 2]));
     assert_eq!(sums.shape(), Shape::matrix(3, 1));
     let runtime = open();
     let weights = runtime.weights(&graph);
@@ -251,7 +251,7 @@ fn a_masked_attention_block_rides_one_tape() {
     );
     let mask = graph.parameter(Shape::matrix(tokens, tokens), Init::Zero, Element::Single);
     let scores = graph.mul(
-        graph.matmul(queries, graph.transpose(keys)),
+        graph.matmul(queries, graph.permute(keys, [0, 1, 3, 2])),
         graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
     );
     let weighted = graph.softmax(graph.add(scores, mask));
@@ -906,7 +906,10 @@ fn every_profile_the_device_offers_runs_the_same_matmul() {
     let left = graph.parameter(Shape::matrix(37, 19), Init::Zero, Element::Single);
     let right = graph.parameter(Shape::matrix(19, 43), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
-    let transposed = graph.matmul(graph.transpose(right), graph.transpose(left));
+    let transposed = graph.matmul(
+        graph.permute(right, [0, 1, 3, 2]),
+        graph.permute(left, [0, 1, 3, 2]),
+    );
     let left_data = random(37 * 19, 11);
     let right_data = random(19 * 43, 29);
     let expected = matmul_reference(&left_data, &right_data, 37, 19, 43);
@@ -1155,7 +1158,7 @@ fn a_view_reads_back_through_the_strides_it_was_transposed_to() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(3, 5), Element::Single);
     let table = graph.parameter(Shape::matrix(5, 3), Init::Zero, Element::Single);
-    let shifted = graph.add(data, graph.transpose(table));
+    let shifted = graph.add(data, graph.permute(table, [0, 1, 3, 2]));
     graph.retain(shifted);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -1246,7 +1249,7 @@ fn a_storage_a_view_reads_keeps_the_task_that_writes_it() {
     let left = graph.input(Shape::matrix(2, 3), Element::Single);
     let right = graph.input(Shape::matrix(2, 3), Element::Single);
     let product = graph.mul(left, right);
-    let flipped = graph.transpose(product);
+    let flipped = graph.permute(product, [0, 1, 3, 2]);
     let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
     let columns = graph.sum_rows(flipped);
     graph.retain(doubled);

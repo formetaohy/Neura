@@ -102,7 +102,10 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
     let graph = Graph::new();
     let short = graph.sum_rows(graph.input(Shape::matrix(64, 8), Element::Single));
     let long = graph.sum_rows(graph.input(Shape::matrix(2, 200), Element::Single));
-    let view = graph.sum_rows(graph.transpose(graph.input(Shape::matrix(200, 2), Element::Single)));
+    let view = graph.sum_rows(graph.permute(
+        graph.input(Shape::matrix(200, 2), Element::Single),
+        [0, 1, 3, 2],
+    ));
     graph.retain(short);
     graph.retain(long);
     graph.retain(view);
@@ -387,7 +390,7 @@ fn a_choice_stops_the_graph_it_cannot_fold() {
     let table = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
     let indices = graph.input(Shape::matrix(2, 1), Element::Single);
     assert!(refuses(|| {
-        let _ = graph.argmax(graph.transpose(table));
+        let _ = graph.argmax(graph.permute(table, [0, 1, 3, 2]));
     }));
     assert!(refuses(|| {
         let _ = graph.gather(
@@ -399,7 +402,7 @@ fn a_choice_stops_the_graph_it_cannot_fold() {
         let _ = graph.one_hot(indices, 0);
     }));
     assert!(refuses(|| {
-        let _ = graph.one_hot(graph.transpose(table), 2);
+        let _ = graph.one_hot(graph.permute(table, [0, 1, 3, 2]), 2);
     }));
     assert!(refuses(|| {
         let _ = graph.categorical(
@@ -463,7 +466,7 @@ fn a_scatter_stops_at_every_tensor_it_cannot_update() {
         graph.scatter_into(table, indices, wide);
     }));
     assert!(refuses(|| {
-        graph.scatter_into(table, graph.transpose(indices), updates);
+        graph.scatter_into(table, graph.permute(indices, [0, 1, 3, 2]), updates);
     }));
 }
 

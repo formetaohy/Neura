@@ -6,6 +6,8 @@ mod choice;
 #[path = "../device/conv.rs"]
 mod conv;
 mod element;
+#[path = "../device/layout.rs"]
+mod layout;
 mod matmul;
 #[path = "../device/matmul.rs"]
 mod matmul_device;
@@ -148,6 +150,9 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
     }
     if kinds.contains(&Kind::Scatter) {
         scatter::define(compiler);
+    }
+    if kinds.contains(&Kind::Layout) {
+        layout::define(compiler);
     }
     if kinds.iter().any(|kind| {
         matches!(

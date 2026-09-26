@@ -279,6 +279,7 @@ impl<'a> Fold<'a> {
         if head.kind == Kind::SumChunk
             || head.in_place
             || head.extra != NO_VALUE
+            || !head.kind.takes_chain()
             || !matches!(tail.kind, Kind::Unary | Kind::Binary)
         {
             return None;

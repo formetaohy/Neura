@@ -212,6 +212,7 @@ impl Encoding {
                 | Kind::Partial
                 | Kind::Fill
                 | Kind::Broadcast
+                | Kind::Layout
                 | Kind::SumChunk
                 | Kind::Softmax
                 | Kind::SoftmaxGrad
@@ -231,6 +232,11 @@ impl Encoding {
             assert!(
                 task.kind != Kind::SumChunk || task.chain.is_empty(),
                 "a reduction task writes one slot per task and carries no chain",
+            );
+            assert!(
+                task.chain.is_empty() || task.kind.takes_chain(),
+                "a {} task carries a chain no device body of it reads",
+                task.kind.name(),
             );
             assert!(
                 task.prelude.is_empty() || task.kind.takes_prelude(),
@@ -311,20 +317,21 @@ impl Encoding {
             }
         }
         for (id, info) in values.iter().enumerate() {
-            if info.storage as usize != id {
+            if !addressed_as_its_storage(values, id) {
                 continue;
             }
-            readable[id] = match info.residency {
+            let storage = info.storage as usize;
+            readable[id] = match values[storage].residency {
                 Residency::Parameter | Residency::Resident => true,
-                _ => match last_writer.get(&offsets[id]) {
-                    Some(writer) => *writer == id as u32,
-                    None => held(values, id),
+                _ => match last_writer.get(&offsets[storage]) {
+                    Some(writer) => *writer == storage as u32,
+                    None => held(values, storage),
                 },
             };
         }
         let mut spans = vec![None; values.len()];
         for (id, info) in values.iter().enumerate() {
-            if info.storage as usize != id {
+            if !addressed_as_its_storage(values, id) {
                 continue;
             }
             spans[id] = Some(Placed {
@@ -653,6 +660,12 @@ fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
 
 fn info_of(values: &[ValueInfo], value: u32) -> &ValueInfo {
     &values[values[value as usize].storage as usize]
+}
+
+fn addressed_as_its_storage(values: &[ValueInfo], id: usize) -> bool {
+    let info = &values[id];
+    let storage = &values[info.storage as usize];
+    info.shape.elements() == storage.shape.elements() && info.strides == info.shape.strides()
 }
 
 fn arena_resident(values: &[ValueInfo], storage: usize) -> bool {

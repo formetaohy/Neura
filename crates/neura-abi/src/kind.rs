@@ -49,6 +49,7 @@ kinds! {
     Partial PARTIAL = "partial";
     Fill FILL = "fill";
     Broadcast BROADCAST = "broadcast";
+    Layout LAYOUT = "layout";
     SumChunk SUM_CHUNK = "sum_chunk";
     SumAxis SUM_AXIS = "sum_axis";
     Softmax SOFTMAX = "softmax";
@@ -76,5 +77,9 @@ impl Kind {
             self,
             Self::SumChunk | Self::SumAxis | Self::Argmax | Self::Categorical
         )
+    }
+
+    pub const fn takes_chain(self) -> bool {
+        !matches!(self, Self::Pack | Self::Scatter | Self::Layout)
     }
 }

@@ -356,7 +356,7 @@ impl Runtime {
         let span = program.span(value);
         assert!(
             program.readable(value),
-            "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to write it",
+            "value {} is a temporary whose storage a later task of the tape reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before writing it",
             value.id(),
         );
         assert_eq!(
@@ -392,7 +392,7 @@ impl Runtime {
         for value in values {
             assert!(
                 program.readable(*value),
-                "value {} is a temporary whose storage a later task of the tape reuses; retain it before the run to pull it",
+                "value {} is a temporary whose storage a later task of the tape reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before pulling it",
                 value.id(),
             );
         }
@@ -537,6 +537,7 @@ fn refusal_message(word: u32) -> String {
         ),
         Kind::Fill
         | Kind::Broadcast
+        | Kind::Layout
         | Kind::SumChunk
         | Kind::MatmulFold
         | Kind::Softmax

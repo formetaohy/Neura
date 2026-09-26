@@ -339,7 +339,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
             Element::Single,
         );
         let scores = graph.mul(
-            graph.matmul(tensor, graph.transpose(tensor)),
+            graph.matmul(tensor, graph.permute(tensor, [0, 1, 3, 2])),
             graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
         );
         let out = graph.matmul(graph.softmax(scores), tensor);

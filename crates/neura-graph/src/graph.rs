@@ -675,18 +675,63 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn transpose(&self, value: Value<'g>) -> Value<'g> {
+    pub fn permute(&self, value: Value<'g>, order: [u32; 4]) -> Value<'g> {
         let value = self.own(value);
-        let (strides, storage, element, tracked) = {
+        let mut walked = 0u32;
+        for axis in order {
+            assert!(
+                axis < MAX_RANK && walked & (1 << axis) == 0,
+                "a permutation walks each of the {MAX_RANK} axes of {:?} once, and {order:?} does not",
+                self.shape(value).dims(),
+            );
+            walked |= 1 << axis;
+        }
+        let (dims, strides, storage, element, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.strides, info.storage, info.element, info.requires_grad)
+            (
+                info.shape.dims(),
+                info.strides,
+                info.storage,
+                info.element,
+                info.requires_grad,
+            )
         };
-        let mut strides = strides;
-        strides.swap(2, 3);
-        let mut dims = value.shape().dims();
-        dims.swap(2, 3);
-        self.alias(Shape::of(dims), strides, storage, element, tracked)
+        let mut permuted_dims = [1u32; MAX_RANK as usize];
+        let mut permuted_strides = [0u32; MAX_RANK as usize];
+        for axis in 0..MAX_RANK as usize {
+            permuted_dims[axis] = dims[order[axis] as usize];
+            permuted_strides[axis] = strides[order[axis] as usize];
+        }
+        self.alias(
+            Shape::of(permuted_dims),
+            permuted_strides,
+            storage,
+            element,
+            tracked,
+        )
+    }
+
+    pub fn reshape(&self, value: Value<'g>, shape: Shape) -> Value<'g> {
+        let value = self.own(value);
+        assert!(
+            self.contiguous(value),
+            "a reshape reads a tensor its storage lays out row by row, and value {} walks other strides; materialize it first",
+            value.id(),
+        );
+        assert_eq!(
+            shape.elements(),
+            self.shape(value).elements(),
+            "a reshape holds {} numbers where {} numbers are reshaped",
+            shape.elements(),
+            self.shape(value).elements(),
+        );
+        let (storage, element, tracked) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            (info.storage, info.element, info.requires_grad)
+        };
+        self.alias(shape, shape.strides(), storage, element, tracked)
     }
 
     pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
@@ -810,12 +855,12 @@ impl<'g> Graph<'g> {
             Kind::Matmul => {
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
                 if self.tracked(&[left]) {
-                    let transposed = self.transpose(right);
+                    let transposed = self.permute(right, [0, 1, 3, 2]);
                     let contribution = self.matmul(gradient, transposed);
                     self.accumulate(grads, left, contribution);
                 }
                 if self.tracked(&[right]) {
-                    let transposed = self.transpose(left);
+                    let transposed = self.permute(left, [0, 1, 3, 2]);
                     let contribution = self.matmul(transposed, gradient);
                     self.accumulate(grads, right, contribution);
                 }
@@ -970,6 +1015,7 @@ impl<'g> Graph<'g> {
             }
             Kind::Fill
             | Kind::Broadcast
+            | Kind::Layout
             | Kind::Partial
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad
@@ -1304,7 +1350,7 @@ impl<'g> Graph<'g> {
         let contribution = self.aligned(value, contribution);
         let contribution = self.reduced_to(contribution, self.value_of(owner));
         grads[owner as usize] = Some(match grads[owner as usize] {
-            None => self.stored(contribution).id(),
+            None => self.landed(contribution).id(),
             Some(existing) => {
                 let existing = self.value_of(existing);
                 self.add(existing, contribution).id()
@@ -1314,28 +1360,62 @@ impl<'g> Graph<'g> {
 
     fn aligned(&self, value: Value<'g>, contribution: Value<'g>) -> Value<'g> {
         let owner = self.owner_of(value.id());
-        let owner_shape = self.state.borrow().values[owner as usize].shape;
-        if self.shape(value).dims() == owner_shape.dims() {
+        let (view_shape, view_strides, owner_shape) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            (info.shape, info.strides, state.values[owner as usize].shape)
+        };
+        if view_shape.dims() == owner_shape.dims() && view_strides == owner_shape.strides() {
             return contribution;
         }
-        let mut swapped = owner_shape.dims();
-        swapped.swap(2, 3);
-        assert_eq!(
-            self.shape(value).dims(),
-            swapped,
-            "a gradient reaches a tensor through the layout its view declares, and {:?} is no view of {:?}",
-            self.shape(value).dims(),
-            owner_shape.dims(),
-        );
-        self.transpose(contribution)
+        let contribution = self.own(contribution);
+        if view_strides == view_shape.strides() {
+            assert!(
+                self.contiguous(contribution),
+                "a gradient of a tensor the storage lays out row by row arrives row by row, and value {} walks other strides",
+                contribution.id(),
+            );
+            return self.alias(
+                owner_shape,
+                owner_shape.strides(),
+                self.owner_of(contribution.id()),
+                self.element(contribution),
+                false,
+            );
+        }
+        let out = self.fresh(owner_shape, Residency::Derived, false);
+        self.push(TaskInfo::of(
+            Kind::Layout,
+            op::NONE,
+            out.id(),
+            [
+                contribution.id(),
+                value.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        ));
+        out
     }
 
-    fn stored(&self, value: Value<'g>) -> Value<'g> {
+    fn landed(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         if self.owner_of(value.id()) == value.id() {
             return value;
         }
-        self.identity(value)
+        let row_by_row = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            info.strides == info.shape.strides()
+        };
+        assert!(
+            row_by_row,
+            "a gradient reaches value {} through a view that walks other strides than the tensor that owns its storage, and a gradient lands row by row",
+            value.id(),
+        );
+        value
     }
 
     fn owner_of(&self, value: u32) -> u32 {

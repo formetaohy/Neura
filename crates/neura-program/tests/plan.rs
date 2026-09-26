@@ -645,7 +645,7 @@ fn a_graph_updated_in_place_is_refused_a_later_backward() {
 fn a_view_shares_the_storage_of_its_source() {
     let graph = Graph::new();
     let matrix = graph.parameter(Shape::matrix(8, 4), Init::Zero, Element::Single);
-    let transposed = graph.transpose(matrix);
+    let transposed = graph.permute(matrix, [0, 1, 3, 2]);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
     let encoding = encoding(&graph);
     assert_eq!(encoding.span(matrix, PLACEMENT).elements, 32);
@@ -655,6 +655,24 @@ fn a_view_shares_the_storage_of_its_source() {
         }),
         "a transposed view was handed its own storage",
     );
+    assert!(!encoding.readable(transposed));
+}
+
+#[test]
+fn a_view_that_its_storage_addresses_row_by_row_reads_back_as_that_storage() {
+    let graph = Graph::new();
+    let matrix = graph.input(Shape::matrix(8, 4), Element::Single);
+    let flattened = graph.reshape(matrix, Shape::vector(32));
+    let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Single);
+    let squared = graph.reshape(weight, Shape::matrix(2, 4));
+    let encoding = encoding(&graph);
+    for (view, storage) in [(flattened, matrix), (squared, weight)] {
+        assert_eq!(
+            encoding.span(view, PLACEMENT),
+            encoding.span(storage, PLACEMENT)
+        );
+        assert!(encoding.readable(view));
+    }
 }
 
 #[test]
@@ -1120,7 +1138,7 @@ fn a_fold_keeps_the_storage_a_view_reads_written() {
     let right = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
     let product = graph.mul(left, right);
     let doubled = graph.add(product, graph.fill(Shape::matrix(2, 3), 1.0));
-    let rows = graph.sum_rows(graph.transpose(product));
+    let rows = graph.sum_rows(graph.permute(product, [0, 1, 3, 2]));
     graph.retain(doubled);
     graph.retain(rows);
     let encoding = encoding(&graph);
@@ -1140,11 +1158,14 @@ fn an_update_in_place_reads_the_tensor_it_writes_through_its_own_layout() {
     graph.add_into(table, patch);
     assert!(
         refuses(|| {
-            graph.add_into(table, graph.transpose(table));
+            graph.add_into(table, graph.permute(table, [0, 1, 3, 2]));
         }),
         "an update in place accepted a transposed view of the tensor it writes",
     );
-    graph.add_into(table, graph.transpose(graph.transpose(table)));
+    graph.add_into(
+        table,
+        graph.permute(graph.permute(table, [0, 1, 3, 2]), [0, 1, 3, 2]),
+    );
 }
 
 #[test]

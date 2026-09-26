@@ -93,6 +93,7 @@ mod source {
             kind::PARTIAL => run_partial(task, lid),
             kind::FILL => run_fill(task, lid),
             kind::BROADCAST => run_broadcast(task, lid),
+            kind::LAYOUT => run_layout(task, lid),
             kind::SUM_CHUNK => run_sum_chunk(task, lid),
             kind::SUM_AXIS => run_sum_axis(task, lid),
             kind::SOFTMAX => run_softmax(task, lid),

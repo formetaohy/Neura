@@ -715,13 +715,13 @@ fn a_gradient_walks_back_through_a_view() {
     let turned_targets = graph.input(Shape::matrix(5, 2), Element::Single);
     let squared_targets = graph.input(Shape::matrix(3, 4), Element::Single);
     let hidden = graph.relu(graph.matmul(observations, weight));
-    let flipped = graph.transpose(hidden);
+    let flipped = graph.permute(hidden, [0, 1, 3, 2]);
     let loss = graph.add(
         graph.add(
             mse_loss(&graph, graph.matmul(observations, weight), targets),
             mse_loss(
                 &graph,
-                graph.matmul(turned, graph.transpose(weight)),
+                graph.matmul(turned, graph.permute(weight, [0, 1, 3, 2])),
                 turned_targets,
             ),
         ),
@@ -765,7 +765,7 @@ fn a_gradient_walks_back_through_a_view() {
 fn a_gradient_of_a_view_lands_on_the_tensor_that_owns_its_storage() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::matrix(3, 2), Init::Zero, Element::Single);
-    let turned = graph.transpose(weight);
+    let turned = graph.permute(weight, [0, 1, 3, 2]);
     let data = graph.input(Shape::matrix(4, 2), Element::Single);
     let loss = graph.sum(graph.matmul(data, turned));
     let gradients = graph.backward(loss);
