@@ -122,19 +122,37 @@ pub struct Encoding {
 }
 
 impl Encoding {
-    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile, precision: Precision) -> Self {
-        Self::plan(&graph.snapshot(), profile, alignment, precision)
+    pub fn of(
+        graph: &Graph<'_>,
+        alignment: u64,
+        profile: Profile,
+        precision: Precision,
+        carried: Vec<MatmulTile>,
+    ) -> Self {
+        Self::plan(&graph.snapshot(), profile, alignment, precision, carried)
     }
 
-    fn plan(state: &GraphSnapshot, profile: Profile, alignment: u64, precision: Precision) -> Self {
+    fn plan(
+        state: &GraphSnapshot,
+        profile: Profile,
+        alignment: u64,
+        precision: Precision,
+        carried: Vec<MatmulTile>,
+    ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
+        let plan = lower::lower(state.values(), &fuse::fuse(state), profile, carried);
         let values = &plan.values;
         let tasks = &plan.tasks;
         let tiles = &plan.tiles;
+        for tile in tiles {
+            assert!(
+                profile.tiles().contains(tile),
+                "a tape walks a matmul tile of {tile:?} the profile it compiles for never offers",
+            );
+        }
 
         let kinds = carried_kinds(tasks);
         let layout = Layout::of_values(values, precision, alignment);
@@ -326,6 +344,14 @@ impl Encoding {
             .zip(self.geometries.iter().copied())
             .filter(|(_, count)| *count > 0)
             .collect()
+    }
+
+    pub fn walked_tiles(&self) -> impl Iterator<Item = (u32, MatmulTile)> + '_ {
+        self.geometries
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(index, _)| (index as u32, self.tiles[index]))
     }
 
     pub fn tasks(&self) -> &[u8] {

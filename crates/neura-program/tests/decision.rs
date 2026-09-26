@@ -17,7 +17,7 @@ const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    Encoding::of(graph, ALIGNMENT, profile, Precision::Single)
+    Encoding::of(graph, ALIGNMENT, profile, Precision::Single, Vec::new())
 }
 
 fn refuses(action: impl FnOnce()) -> bool {

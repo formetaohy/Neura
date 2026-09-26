@@ -11,11 +11,12 @@ use neura_gpu::{
 use neura_graph::{Graph, Value};
 use neura_op as op;
 use neura_precision::Precision;
-use neura_profile::{Budget, Geometry, Profile};
+use neura_profile::{Budget, Geometry, MatmulTile, Profile};
 use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
@@ -24,6 +25,13 @@ pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GeometryKey {
+    kinds: Vec<Kind>,
+    profile: Profile,
+    precision: Precision,
+}
 
 pub struct Readout<'r> {
     brand: PhantomData<&'r ()>,
@@ -57,6 +65,7 @@ pub struct Runtime {
     heap: Arc<Heap>,
     pool: Arc<Pool>,
     tapes: Tapes,
+    geometries: Mutex<HashMap<GeometryKey, Vec<MatmulTile>>>,
     alignment: u64,
 }
 
@@ -99,6 +108,7 @@ impl Runtime {
             heap: Arc::new(Heap::new(&context, heap_bytes)),
             pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
             tapes: Tapes::new(),
+            geometries: Mutex::new(HashMap::new()),
             context,
         }
     }
@@ -260,7 +270,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let encoding = Encoding::of(graph, self.alignment, profile, weights.precision());
+        let encoding = self.carry(graph, profile, weights.precision());
         assert!(
             encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
@@ -289,10 +299,43 @@ impl Runtime {
         let tape = self.tapes.of(signature, |signature| {
             DeviceTape::build(&self.context, &self.pool, encoding, kernel, signature)
         });
+        tape.kernel.compile();
         let tensors = self
             .heap
             .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
         Program::of(&self.context, tape, tensors, weights.clone())
+    }
+
+    fn carry(&self, graph: &Graph, profile: Profile, precision: Precision) -> Encoding {
+        let first = Encoding::of(graph, self.alignment, profile, precision, Vec::new());
+        let mut geometries = self
+            .geometries
+            .lock()
+            .expect("a device geometry is never poisoned");
+        let carried = geometries
+            .entry(GeometryKey {
+                kinds: first.kinds().to_vec(),
+                profile,
+                precision,
+            })
+            .or_default();
+        if carried.as_slice() == first.tiles() {
+            return first;
+        }
+        for tile in first.tiles() {
+            if !carried.contains(tile) {
+                carried.push(*tile);
+            }
+        }
+        let encoding = Encoding::of(
+            graph,
+            self.alignment,
+            profile,
+            precision,
+            std::mem::take(carried),
+        );
+        *carried = encoding.tiles().to_vec();
+        encoding
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
@@ -341,6 +384,10 @@ impl Runtime {
     pub fn run(&self, program: &Program<'_>) {
         self.assert_owns(program);
         self.context.assert_alive();
+        assert!(
+            program.is_compiled(),
+            "a device program compiles at the call that compiles it, and a run only runs what a compile has compiled",
+        );
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
         submission.clear(program.refusal.buffer(), 0, program.refusal.buffer().size());

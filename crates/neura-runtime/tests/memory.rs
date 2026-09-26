@@ -90,7 +90,7 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256));
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = Encoding::of(&graph, 256, narrow(), Precision::Single);
+    let encoding = Encoding::of(&graph, 256, narrow(), Precision::Single, Vec::new());
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() >= 2 * 256 * 4,

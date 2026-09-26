@@ -179,7 +179,8 @@ pub(crate) fn signature(
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(profile.workgroup().to_le_bytes());
-    for tile in encoding.tiles() {
+    for (index, tile) in encoding.walked_tiles() {
+        bytes.extend(index.to_le_bytes());
         bytes.extend(tile.rows().to_le_bytes());
         bytes.extend(tile.columns().to_le_bytes());
         bytes.extend(tile.depth().to_le_bytes());

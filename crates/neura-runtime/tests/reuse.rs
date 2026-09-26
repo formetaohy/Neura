@@ -129,3 +129,74 @@ fn a_dropped_program_recycles_its_device_tape() {
         1e-5,
     );
 }
+
+#[test]
+fn a_program_is_compiled_by_the_call_that_compiles_it() {
+    let runtime = open();
+    let graph = Graph::new();
+    let sensor = sensor(&runtime, &graph, 16);
+    assert!(sensor.program.is_compiled());
+    let assembled = runtime.assembled_kernels();
+    for _ in 0..4 {
+        runtime.run(&sensor.program);
+        assert_eq!(
+            runtime.assembled_kernels(),
+            assembled,
+            "a run only runs what a compile has compiled",
+        );
+    }
+}
+
+#[test]
+fn a_shape_the_carried_geometry_covers_assembles_no_device_program() {
+    let runtime = open();
+    let both = Graph::new();
+    let shared = both.parameter(
+        Shape::matrix(4, 2),
+        Init::Uniform {
+            low: 0.25,
+            high: 0.75,
+        },
+    );
+    let small = both.input(Shape::matrix(8, 4));
+    let large = both.input(Shape::matrix(64, 4));
+    both.retain(both.matmul(small, shared));
+    both.retain(both.matmul(large, shared));
+    let weights = runtime.weights(&both, Precision::Single);
+    runtime.compile(&both, &weights);
+    let assembled = runtime.assembled_kernels();
+    let programs = runtime.declared_kernels();
+    assert_eq!(
+        programs, 1,
+        "one device program carries every tile of a model"
+    );
+    for samples in [8u32, 64] {
+        let graph = Graph::new();
+        let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero);
+        let input = graph.input(Shape::matrix(samples, 4));
+        let out = graph.matmul(input, weight);
+        graph.retain(out);
+        let weights = runtime.weights(&graph, Precision::Single);
+        let program = runtime.compile(&graph, &weights);
+        assert_eq!(
+            runtime.assembled_kernels(),
+            assembled,
+            "a shape whose tiles a carried geometry holds assembles no device program",
+        );
+        assert_eq!(
+            runtime.declared_kernels(),
+            programs,
+            "a shape whose tiles a carried geometry holds compiles no device program",
+        );
+        let input_data = random(samples * 4, samples);
+        let weight_data = random(8, 3);
+        runtime.write(&program, input, &input_data);
+        runtime.write(&program, weight, &weight_data);
+        runtime.run(&program);
+        assert_close(
+            &runtime.read(&program, out),
+            &matmul_reference(&input_data, &weight_data, samples, 4, 2),
+            1e-5,
+        );
+    }
+}

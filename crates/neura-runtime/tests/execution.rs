@@ -459,9 +459,10 @@ fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
 }
 
 #[test]
-fn a_device_program_is_declared_once_per_tile_a_tape_walks() {
+fn a_device_program_carries_every_tile_the_batches_of_one_model_walk() {
     let runtime = open();
     let mut declared: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
+    let mut programs = Vec::new();
     let mut results = Vec::new();
     for batch in [8u32, 64, 8] {
         let graph = Graph::new();
@@ -482,12 +483,13 @@ fn a_device_program_is_declared_once_per_tile_a_tape_walks() {
         assert_eq!(
             runtime.declared_kernels(),
             declared.len(),
-            "a device program is assembled once per tile its tape walks",
+            "a device program is assembled once per geometry its tapes carry",
         );
         let data_values = random(batch * 5, batch);
         runtime.write(&program, data, &data_values);
         runtime.run(&program);
         results.push(runtime.read(&program, out));
+        programs.push((program, out));
     }
     assert_eq!(results[0].len(), 8 * 3);
     assert_eq!(results[1].len(), 64 * 3);
@@ -496,6 +498,19 @@ fn a_device_program_is_declared_once_per_tile_a_tape_walks() {
         2,
         "two shapes that walk two tiles declare two programs",
     );
+    assert_eq!(
+        runtime.declared_kernels(),
+        2,
+        "a shape a carried geometry covers declares no third program",
+    );
+    for (index, (program, out)) in programs.iter().enumerate() {
+        runtime.run(program);
+        assert_eq!(
+            &runtime.read(program, *out),
+            &results[index],
+            "a geometry that grew keeps the programs it carried before",
+        );
+    }
 }
 
 #[test]

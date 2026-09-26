@@ -208,6 +208,10 @@ impl<'r> Program<'r> {
         self.tape.encoding.profile()
     }
 
+    pub fn is_compiled(&self) -> bool {
+        self.tape.kernel.is_compiled()
+    }
+
     pub fn tiles(&self) -> &[MatmulTile] {
         self.tape.encoding.tiles()
     }

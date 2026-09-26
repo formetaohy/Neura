@@ -182,7 +182,7 @@ fn tuning_leaves_the_parameter_store_untouched() {
 }
 
 #[test]
-fn one_device_program_serves_every_batch_that_walks_its_tiles() {
+fn one_device_geometry_serves_every_batch_that_walks_its_tiles() {
     let runtime = open();
     assert_eq!(runtime.assembled_kernels(), 0);
     let mut tiles: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
@@ -197,7 +197,7 @@ fn one_device_program_serves_every_batch_that_walks_its_tiles() {
         assert_eq!(
             runtime.assembled_kernels(),
             tiles.len(),
-            "a device program is assembled once per tile set a tape walks",
+            "a device program is assembled once per geometry its tapes carry",
         );
         let (observations, targets) = batch(samples, samples);
         runtime.write(&program, model.observations, &observations);
@@ -207,6 +207,6 @@ fn one_device_program_serves_every_batch_that_walks_its_tiles() {
     }
     assert!(
         tiles.len() > 1 && tiles.len() < 5,
-        "five batches walk between two and four tiles of one model",
+        "five batches walk between two and four geometries of one model",
     );
 }

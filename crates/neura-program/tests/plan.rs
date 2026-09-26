@@ -28,7 +28,7 @@ fn encoding(graph: &Graph) -> Encoding {
 }
 
 fn encoding_with(graph: &Graph, profile: Profile) -> Encoding {
-    Encoding::of(graph, ALIGNMENT, profile, Precision::Single)
+    Encoding::of(graph, ALIGNMENT, profile, Precision::Single, Vec::new())
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {

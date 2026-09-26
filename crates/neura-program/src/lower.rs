@@ -78,11 +78,16 @@ pub(crate) struct Plan {
     pub(crate) tiles: Vec<MatmulTile>,
 }
 
-pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
+pub(crate) fn lower(
+    values: &[ValueInfo],
+    units: &[TaskInfo],
+    profile: Profile,
+    carried: Vec<MatmulTile>,
+) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
-        tiles: Vec::new(),
+        tiles: carried,
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
