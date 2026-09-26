@@ -1274,3 +1274,59 @@ fn a_storage_a_view_reads_keeps_the_task_that_writes_it() {
         .collect::<Vec<_>>();
     assert_close(&runtime.read(&program, columns), &expected, 1e-6);
 }
+
+#[test]
+fn a_second_compile_of_one_graph_plans_once() {
+    let graph = Graph::new();
+    let weight = graph.parameter(
+        Shape::matrix(64, 64),
+        Init::Uniform {
+            low: -0.1,
+            high: 0.1,
+        },
+        Element::Single,
+    );
+    let data = graph.input(Shape::matrix(256, 64), Element::Single);
+    let hidden = graph.relu(graph.matmul(data, weight));
+    graph.retain(hidden);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let first = runtime.compile(&graph, &weights);
+    runtime.write(&first, data, &vec![0.25; 256 * 64]);
+    runtime.run(&first);
+    let produced = runtime.read(&first, hidden);
+    assert_eq!(runtime.built_plans(), 1, "one graph is planned once");
+    let again = runtime.compile(&graph, &weights);
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a graph that did not move is planned once",
+    );
+    assert_eq!(runtime.device_tapes(), 1);
+    assert_eq!(again.task_count(), first.task_count());
+    runtime.write(&again, data, &vec![0.25; 256 * 64]);
+    runtime.run(&again);
+    assert_eq!(
+        runtime.read(&again, hidden),
+        produced,
+        "the tape a second compile hands back computes what the tape the first one built computed",
+    );
+    let rectified = graph.relu(hidden);
+    graph.retain(rectified);
+    let grown = runtime.compile(&graph, &weights);
+    assert_eq!(
+        runtime.built_plans(),
+        2,
+        "a graph that took on another task is planned again",
+    );
+    runtime.write(&grown, data, &vec![0.25; 256 * 64]);
+    runtime.run(&grown);
+    assert_close(
+        &runtime.read(&grown, rectified),
+        &produced
+            .iter()
+            .map(|value| value.max(0.0))
+            .collect::<Vec<_>>(),
+        1e-6,
+    );
+}

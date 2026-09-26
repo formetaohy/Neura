@@ -122,11 +122,18 @@ struct GraphState {
     tasks: Vec<TaskInfo>,
     differentiated: bool,
     updated_in_place: bool,
+    version: u64,
 }
 
 pub struct GraphSnapshot {
     values: Vec<ValueInfo>,
     tasks: Vec<TaskInfo>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct GraphStamp {
+    graph: u64,
+    version: u64,
 }
 
 impl GraphSnapshot {
@@ -169,9 +176,17 @@ impl<'g> Graph<'g> {
                 tasks: Vec::new(),
                 differentiated: false,
                 updated_in_place: false,
+                version: 0,
             }),
             instance: NEXT_GRAPH.fetch_add(1, Ordering::Relaxed),
             brand: PhantomData,
+        }
+    }
+
+    pub fn stamp(&self) -> GraphStamp {
+        GraphStamp {
+            graph: self.instance,
+            version: self.state.borrow().version,
         }
     }
 
@@ -1187,7 +1202,9 @@ impl<'g> Graph<'g> {
     pub fn retain(&self, value: Value<'g>) {
         let value = self.own(value);
         let storage = self.state.borrow().values[value.id() as usize].storage;
-        self.state.borrow_mut().values[storage as usize].retained = true;
+        let mut state = self.state.borrow_mut();
+        state.values[storage as usize].retained = true;
+        state.version += 1;
     }
 
     fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
@@ -1253,6 +1270,7 @@ impl<'g> Graph<'g> {
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
+        state.version += 1;
     }
 
     fn scatter(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
@@ -1507,6 +1525,7 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             seed,
         });
+        state.version += 1;
         Value::of(self.instance, id, shape)
     }
 
@@ -1524,6 +1543,7 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             seed: None,
         });
+        state.version += 1;
         Value::of(self.instance, id, shape)
     }
 
@@ -1548,11 +1568,14 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             seed: None,
         });
+        state.version += 1;
         Value::of(self.instance, id, shape)
     }
 
     fn push(&self, task: TaskInfo) {
-        self.state.borrow_mut().tasks.push(task);
+        let mut state = self.state.borrow_mut();
+        state.tasks.push(task);
+        state.version += 1;
     }
 }
 

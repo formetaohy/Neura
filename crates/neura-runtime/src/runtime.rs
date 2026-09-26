@@ -2,7 +2,7 @@ use crate::checkpoint::Checkpoint;
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
-use crate::tape::{self, DeviceTape, Tapes};
+use crate::tape::{self, DeviceTape, Plan, Tapes};
 use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
@@ -254,17 +254,41 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let encoding = Encoding::of(graph, self.alignment, profile);
+        let tape = self.assemble(graph, profile);
         assert!(
-            encoding.task_count() > 0,
+            tape.encoding.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
         );
         assert!(
-            encoding.weights() == weights.region(),
+            tape.encoding.weights() == weights.region(),
             "this graph holds {} parameters where the weight store carries {}; one store serves every program of one model",
-            encoding.weights().tensors(),
+            tape.encoding.weights().tensors(),
             weights.tensors(),
         );
+        tape.kernel.compile();
+        let tensors = self
+            .heap
+            .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
+        Program::of(&self.context, tape, tensors, weights.clone())
+    }
+
+    fn assemble(&self, graph: &Graph, profile: Profile) -> Arc<DeviceTape> {
+        let plan = self.tapes.plan(graph.stamp(), profile, self.alignment, || {
+            self.plan(graph, profile)
+        });
+        self.tapes.of(plan.signature.clone(), |signature| {
+            DeviceTape::build(
+                &self.context,
+                &self.pool,
+                plan.encoding.clone(),
+                plan.kernel.clone(),
+                signature,
+            )
+        })
+    }
+
+    fn plan(&self, graph: &Graph, profile: Profile) -> Plan {
+        let encoding = Arc::new(Encoding::of(graph, self.alignment, profile));
         let signature = tape::signature(&encoding, profile, self.alignment);
         let kinds = encoding.kinds().to_vec();
         let elements = encoding.elements().to_vec();
@@ -277,14 +301,11 @@ impl Runtime {
         let kernel = self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
             Megakernel::assemble(&kinds, &elements, geometry)
         });
-        let tape = self.tapes.of(signature, |signature| {
-            DeviceTape::build(&self.context, &self.pool, encoding, kernel, signature)
-        });
-        tape.kernel.compile();
-        let tensors = self
-            .heap
-            .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
-        Program::of(&self.context, tape, tensors, weights.clone())
+        Plan {
+            signature,
+            encoding,
+            kernel,
+        }
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
@@ -484,6 +505,10 @@ impl Runtime {
 
     pub fn assembled_kernels(&self) -> usize {
         self.tapes.kernels()
+    }
+
+    pub fn built_plans(&self) -> usize {
+        self.tapes.built()
     }
 }
 

@@ -5,7 +5,8 @@ mod shape;
 mod window;
 
 pub use graph::{
-    AttentionOptions, Gradients, Graph, GraphSnapshot, Residency, TaskInfo, Value, ValueInfo,
+    AttentionOptions, Gradients, Graph, GraphSnapshot, GraphStamp, Residency, TaskInfo, Value,
+    ValueInfo,
 };
 pub use init::Init;
 pub use pool::Pool;

@@ -1,17 +1,19 @@
 use crate::pool::{Pool, Recycled};
 use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
+use neura_graph::GraphStamp;
 use neura_profile::Geometry;
 use neura_program::Encoding;
 use neura_shader::Megakernel;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::{size_of, size_of_val};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 pub(crate) struct DeviceTape {
     signature: Vec<u8>,
-    pub(crate) encoding: Encoding,
+    pub(crate) encoding: Arc<Encoding>,
     pub(crate) kernel: PipelineHandle,
     pub(crate) tasks: Recycled,
     pub(crate) values: Recycled,
@@ -25,7 +27,7 @@ impl DeviceTape {
     pub(crate) fn build(
         context: &GpuContext,
         pool: &Arc<Pool>,
-        encoding: Encoding,
+        encoding: Arc<Encoding>,
         kernel: Arc<Megakernel>,
         signature: Vec<u8>,
     ) -> Arc<Self> {
@@ -94,9 +96,45 @@ struct KernelIdentity {
     geometry: Geometry,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PlanIdentity {
+    stamp: GraphStamp,
+    profile: neura_profile::Profile,
+    alignment: u64,
+}
+
+const PLAN_CEILING: usize = 8;
+
+pub(crate) struct Plan {
+    pub(crate) signature: Vec<u8>,
+    pub(crate) encoding: Arc<Encoding>,
+    pub(crate) kernel: Arc<Megakernel>,
+}
+
+struct Plans {
+    entries: Vec<(PlanIdentity, Arc<Plan>)>,
+}
+
+impl Plans {
+    fn take(&mut self, identity: &PlanIdentity) -> Option<Arc<Plan>> {
+        let found = self.entries.iter().position(|(kept, _)| kept == identity)?;
+        Some(self.entries.remove(found).1)
+    }
+
+    fn keep(&mut self, identity: PlanIdentity, plan: Arc<Plan>) {
+        let _ = self.take(&identity);
+        self.entries.push((identity, plan));
+        while self.entries.len() > PLAN_CEILING {
+            self.entries.remove(0);
+        }
+    }
+}
+
 pub(crate) struct Tapes {
     kernels: Mutex<HashMap<KernelIdentity, Arc<Megakernel>>>,
     entries: Mutex<HashMap<u64, Vec<Weak<DeviceTape>>>>,
+    plans: Mutex<Plans>,
+    built: AtomicUsize,
 }
 
 impl Tapes {
@@ -104,7 +142,42 @@ impl Tapes {
         Self {
             kernels: Mutex::new(HashMap::new()),
             entries: Mutex::new(HashMap::new()),
+            plans: Mutex::new(Plans {
+                entries: Vec::new(),
+            }),
+            built: AtomicUsize::new(0),
         }
+    }
+
+    pub(crate) fn built(&self) -> usize {
+        self.built.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn plan(
+        &self,
+        stamp: GraphStamp,
+        profile: neura_profile::Profile,
+        alignment: u64,
+        build: impl FnOnce() -> Plan,
+    ) -> Arc<Plan> {
+        let identity = PlanIdentity {
+            stamp,
+            profile,
+            alignment,
+        };
+        let mut plans = self.plans.lock().expect("a plan cache is never poisoned");
+        if let Some(plan) = plans.take(&identity) {
+            plans.keep(identity, plan.clone());
+            return plan;
+        }
+        drop(plans);
+        let plan = Arc::new(build());
+        self.built.fetch_add(1, Ordering::Relaxed);
+        self.plans
+            .lock()
+            .expect("a plan cache is never poisoned")
+            .keep(identity, plan.clone());
+        plan
     }
 
     pub(crate) fn kernels(&self) -> usize {
