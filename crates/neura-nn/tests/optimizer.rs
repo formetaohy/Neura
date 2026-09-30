@@ -15,6 +15,10 @@ fn constant<'g>(graph: &Graph<'g>, name: f32) -> Value<'g> {
     graph.fill(Shape::scalar(), name)
 }
 
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
 #[test]
 fn a_corrected_adam_takes_its_rate_on_the_first_step() {
     let runtime = open();
@@ -258,4 +262,27 @@ fn a_checkpoint_carries_the_optimizer_clock() {
         (resumed - straight).abs() < 1e-5,
         "a resumed run kept {resumed} where ten unbroken steps say {straight}",
     );
+}
+
+#[test]
+fn a_frozen_parameter_enters_no_descent() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0), Element::Single);
+    graph.freeze(&[weight]);
+    assert!(refuses(|| {
+        let mut descent = Sgd::new(&graph, 0.1, 0.0);
+        descent.track(&graph, weight);
+    }));
+    assert!(refuses(|| {
+        let mut momentum = Sgd::momentum(&graph, 0.1, 0.9, 0.0);
+        momentum.track(&graph, weight);
+    }));
+    assert!(refuses(|| {
+        let mut adam = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+        adam.track(&graph, weight);
+    }));
+    assert!(refuses(|| {
+        let mut adam = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+        adam.track_all(&graph, &[weight]);
+    }));
 }

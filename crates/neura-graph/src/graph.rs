@@ -237,7 +237,7 @@ impl<'g> Gradients<'g> {
         );
         let mut squared = graph.fill(Shape::scalar(), 0.0);
         for (id, (_, gradient)) in self.values.iter() {
-            if !graph.trains(*id) {
+            if !graph.carries_gradient(*id) {
                 continue;
             }
             squared = graph.add(squared, graph.sum(graph.mul(*gradient, *gradient)));
@@ -1861,6 +1861,51 @@ impl<'g> Graph<'g> {
         advance(&mut state);
     }
 
+    pub fn freeze(&self, values: &[Value<'g>]) {
+        assert!(
+            !values.is_empty(),
+            "freezing no tensor leaves every parameter learning",
+        );
+        let ids = values
+            .iter()
+            .map(|value| self.own(*value).id())
+            .collect::<Vec<u32>>();
+        for id in &ids {
+            let state = self.state.borrow();
+            let info = &state.values[*id as usize];
+            assert_eq!(
+                info.residency,
+                Residency::Parameter,
+                "a frozen tensor holds a parameter of the weight store, and value {id} holds nothing the weight store carries",
+            );
+            assert!(
+                !state.tasks.iter().any(|task| reads(task, *id)),
+                "a parameter is frozen before the tasks that read it are authored, and value {id} already feeds one",
+            );
+        }
+        let mut state = self.state.borrow_mut();
+        for id in ids {
+            state.values[id as usize].requires_grad = false;
+        }
+        advance(&mut state);
+    }
+
+    pub fn detach(&self, value: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        let (shape, strides, storage, element, scale) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            (
+                info.shape,
+                info.strides,
+                info.storage,
+                info.element,
+                info.scale,
+            )
+        };
+        self.alias(shape, strides, storage, element, scale, false)
+    }
+
     fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
         let target = self.own(target);
         let operand = self.own(operand);
@@ -2185,8 +2230,15 @@ impl<'g> Graph<'g> {
         self.state.borrow().values[value as usize].storage
     }
 
-    fn trains(&self, id: u32) -> bool {
-        self.state.borrow().values[id as usize].residency == Residency::Parameter
+    pub fn trains(&self, value: Value<'g>) -> bool {
+        let value = self.own(value);
+        self.carries_gradient(value.id())
+    }
+
+    fn carries_gradient(&self, id: u32) -> bool {
+        let state = self.state.borrow();
+        let info = &state.values[id as usize];
+        info.residency == Residency::Parameter && info.requires_grad
     }
 
     fn contiguous(&self, value: Value<'g>) -> bool {
@@ -2411,4 +2463,11 @@ impl<'g> Default for Graph<'g> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn reads(task: &TaskInfo, value: u32) -> bool {
+    task.inputs.contains(&value)
+        || task.origin == value
+        || task.prelude.iter().any(|step| step.operand == value)
+        || task.chain.iter().any(|step| step.operand == value)
 }

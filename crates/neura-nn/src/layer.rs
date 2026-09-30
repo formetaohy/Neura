@@ -1,6 +1,62 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 
+pub struct Adapter<'g> {
+    down: Value<'g>,
+    up: Value<'g>,
+    scale: f32,
+}
+
+impl<'g> Adapter<'g> {
+    pub fn new(
+        graph: &Graph<'g>,
+        inputs: u32,
+        outputs: u32,
+        rank: u32,
+        init: Init,
+        element: Element,
+        scale: f32,
+    ) -> Self {
+        assert!(
+            inputs > 0 && outputs > 0 && rank > 0,
+            "an adapter of {inputs} by {outputs} over {rank} ranks carries no bypass",
+        );
+        assert!(
+            scale > 0.0 && scale.is_finite(),
+            "an adapter scaled by {scale} contributes nothing",
+        );
+        Self {
+            down: graph.parameter(Shape::matrix(inputs, rank), init, element),
+            up: graph.parameter(Shape::matrix(rank, outputs), Init::Zero, element),
+            scale,
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>, base: Value<'g>) -> Value<'g> {
+        let bypass = graph.matmul(graph.matmul(input, self.down), self.up);
+        graph.add(
+            base,
+            graph.mul(bypass, graph.fill(Shape::scalar(), self.scale)),
+        )
+    }
+
+    pub fn down(&self) -> Value<'g> {
+        self.down
+    }
+
+    pub fn up(&self) -> Value<'g> {
+        self.up
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 2] {
+        [self.down, self.up]
+    }
+}
+
 pub struct Linear<'g> {
     weight: Value<'g>,
     bias: Value<'g>,

@@ -48,6 +48,11 @@ impl<'g> Sgd<'g> {
     }
 
     pub fn track(&mut self, graph: &Graph<'g>, parameter: Value<'g>) {
+        assert!(
+            graph.trains(parameter),
+            "a descent follows a parameter a gradient reaches, and value {} learns nothing",
+            parameter.id(),
+        );
         match &mut self.tracked {
             Tracked::Plain(parameters) => {
                 assert!(
@@ -184,6 +189,11 @@ impl<'g> AdamW<'g> {
     }
 
     pub fn track(&mut self, graph: &Graph<'g>, parameter: Value<'g>) -> Moments<'g> {
+        assert!(
+            graph.trains(parameter),
+            "a descent follows a parameter a gradient reaches, and value {} learns nothing",
+            parameter.id(),
+        );
         assert!(
             !self
                 .moments
