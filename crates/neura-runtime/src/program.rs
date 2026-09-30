@@ -5,7 +5,7 @@ use neura_abi::{
     BoundsRecord, Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES,
 };
 use neura_gpu::{BindGroup, Binding, BufferUsages, Features, GpuBuffer, GpuContext, Submission};
-use neura_graph::Value;
+use neura_graph::{GraphStamp, Revision, Value};
 use neura_profile::{MatmulTile, Profile};
 use neura_program::{Region, Span};
 use neura_shader::{BOUNDS, HEAP, PLACEMENT, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
@@ -66,6 +66,7 @@ pub struct Program<'r> {
     pub(crate) tensors: Allocation,
     pub(crate) weights: Weights<'r>,
     placement: Recycled,
+    revision: Revision,
 }
 
 impl<'r> Program<'r> {
@@ -74,6 +75,7 @@ impl<'r> Program<'r> {
         tape: Arc<DeviceTape>,
         tensors: Allocation,
         weights: Weights<'r>,
+        revision: Revision,
     ) -> Self {
         let pool = tape.pool();
         let refusal = Recycled::claim(
@@ -151,7 +153,23 @@ impl<'r> Program<'r> {
             tensors,
             weights,
             placement,
+            revision,
         }
+    }
+
+    pub fn stamp(&self) -> GraphStamp {
+        self.revision.stamp()
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.revision.is_current()
+    }
+
+    pub(crate) fn assert_current(&self) {
+        assert!(
+            self.is_current(),
+            "a program serves the revision of the graph it was compiled from, and this graph has moved on since; compile again from the graph as it now stands",
+        );
     }
 
     fn at(&self) -> Placement {

@@ -258,6 +258,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
+        let revision = graph.revision();
         let tape = self.assemble(graph, profile);
         assert!(
             tape.encoding.task_count() > 0,
@@ -273,7 +274,7 @@ impl Runtime {
         let tensors = self
             .heap
             .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
-        Program::of(&self.context, tape, tensors, weights.clone())
+        Program::of(&self.context, tape, tensors, weights.clone(), revision)
     }
 
     fn assemble(&self, graph: &Graph, profile: Profile) -> Arc<DeviceTape> {
@@ -358,6 +359,7 @@ impl Runtime {
 
     pub fn run(&self, program: &Program<'_>) {
         self.assert_owns(program);
+        program.assert_current();
         self.context.assert_alive();
         assert!(
             program.is_compiled(),
@@ -381,6 +383,7 @@ impl Runtime {
 
     pub fn write(&self, program: &Program<'_>, value: Value<'_>, data: &[f32]) {
         self.assert_owns(program);
+        program.assert_current();
         let span = program.span(value);
         assert!(
             program.readable(value),
@@ -411,6 +414,7 @@ impl Runtime {
 
     pub fn pull(&self, program: &Program<'_>, values: &[Value<'_>]) -> Readout<'_> {
         self.assert_owns(program);
+        program.assert_current();
         self.context.assert_alive();
         assert!(!values.is_empty(), "a pull names at least one tensor");
         let spans = values

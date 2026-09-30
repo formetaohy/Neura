@@ -7,7 +7,8 @@ use neura_op as op;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 
@@ -150,6 +151,7 @@ struct GraphState {
     values: Vec<ValueInfo>,
     tasks: Vec<TaskInfo>,
     recomputations: Vec<Recomputation>,
+    revisions: Vec<Weak<RevisionState>>,
     differentiated: bool,
     updated_in_place: bool,
     version: u64,
@@ -164,6 +166,36 @@ pub struct GraphSnapshot {
 pub struct GraphStamp {
     graph: u64,
     version: u64,
+}
+
+#[derive(Debug)]
+struct RevisionState {
+    live: AtomicBool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Revision {
+    stamp: GraphStamp,
+    state: Arc<RevisionState>,
+}
+
+impl Revision {
+    pub const fn stamp(&self) -> GraphStamp {
+        self.stamp
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.state.live.load(Ordering::Acquire)
+    }
+}
+
+fn advance(state: &mut GraphState) {
+    state.version += 1;
+    for revision in state.revisions.drain(..) {
+        if let Some(revision) = revision.upgrade() {
+            revision.live.store(false, Ordering::Release);
+        }
+    }
 }
 
 impl GraphSnapshot {
@@ -239,6 +271,7 @@ impl<'g> Graph<'g> {
                 values: Vec::new(),
                 tasks: Vec::new(),
                 recomputations: Vec::new(),
+                revisions: Vec::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -253,6 +286,24 @@ impl<'g> Graph<'g> {
             graph: self.instance,
             version: self.state.borrow().version,
         }
+    }
+
+    pub fn revision(&self) -> Revision {
+        let mut state = self.state.borrow_mut();
+        state
+            .revisions
+            .retain(|revision| revision.strong_count() > 0);
+        let revision = Revision {
+            stamp: GraphStamp {
+                graph: self.instance,
+                version: state.version,
+            },
+            state: Arc::new(RevisionState {
+                live: AtomicBool::new(true),
+            }),
+        };
+        state.revisions.push(Arc::downgrade(&revision.state));
+        revision
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -1273,7 +1324,7 @@ impl<'g> Graph<'g> {
             recomputes: Some(value),
             ..info
         });
-        state.version += 1;
+        advance(&mut state);
         id
     }
 
@@ -1641,7 +1692,7 @@ impl<'g> Graph<'g> {
         let storage = self.state.borrow().values[value.id() as usize].storage;
         let mut state = self.state.borrow_mut();
         state.values[storage as usize].retained = true;
-        state.version += 1;
+        advance(&mut state);
     }
 
     fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
@@ -1707,7 +1758,7 @@ impl<'g> Graph<'g> {
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
         state.updated_in_place = true;
-        state.version += 1;
+        advance(&mut state);
     }
 
     fn scatter(&self, kind: Kind, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
@@ -1991,7 +2042,7 @@ impl<'g> Graph<'g> {
             recomputes: None,
             seed,
         });
-        state.version += 1;
+        advance(&mut state);
         Value::of(self.instance, id, shape)
     }
 
@@ -2036,7 +2087,7 @@ impl<'g> Graph<'g> {
             recomputes: None,
             seed: None,
         });
-        state.version += 1;
+        advance(&mut state);
         Value::of(self.instance, id, shape)
     }
 
@@ -2064,14 +2115,14 @@ impl<'g> Graph<'g> {
             recomputes: None,
             seed: None,
         });
-        state.version += 1;
+        advance(&mut state);
         Value::of(self.instance, id, shape)
     }
 
     fn push(&self, task: TaskInfo) {
         let mut state = self.state.borrow_mut();
         state.tasks.push(task);
-        state.version += 1;
+        advance(&mut state);
     }
 }
 

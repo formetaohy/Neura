@@ -4,7 +4,7 @@ pub use neura_gpu::{
     PowerPreference, Queue,
 };
 pub use neura_graph::{
-    AttentionOptions, Gradients, Graph, GraphStamp, Init, Pool, Shape, Value, Window,
+    AttentionOptions, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value, Window,
 };
 pub use neura_nn::{
     AdamW, Conv2d, Embedding, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, Sgd,
