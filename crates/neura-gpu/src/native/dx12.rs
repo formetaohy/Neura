@@ -2,6 +2,7 @@ use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
+use crate::cache::{PipelineCache, fingerprint};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
     PowerPreference,
@@ -30,6 +31,7 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{GUID, Interface, PCWSTR};
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
+const DXC_FLAGS: &[&str] = &["-T", "cs_6_0", "-O3", "-Wno-parentheses-equality", "-WX"];
 
 struct CompletionEvent(HANDLE);
 
@@ -134,6 +136,7 @@ pub(crate) struct Device {
     event: CompletionEvent,
     zero: Arc<BufferResource>,
     state: Mutex<QueueState>,
+    cache: Option<PipelineCache>,
 }
 
 struct BufferResource {
@@ -152,7 +155,6 @@ struct PipelineResource {
 }
 
 pub(crate) struct Pipeline {
-    device: ID3D12Device,
     resource: Arc<PipelineResource>,
 }
 
@@ -353,6 +355,7 @@ fn candidates(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
+        cache: Option<PipelineCache>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
@@ -387,11 +390,14 @@ impl Device {
             }
         };
         let features = features(&candidate.device);
-        let device = Self::assemble(candidate.device)?;
+        let device = Self::assemble(candidate.device, cache)?;
         Ok((device, candidate.info, limits(), features))
     }
 
-    fn assemble(raw: ID3D12Device) -> Result<Arc<Device>, DeviceFailure> {
+    fn assemble(
+        raw: ID3D12Device,
+        cache: Option<PipelineCache>,
+    ) -> Result<Arc<Device>, DeviceFailure> {
         let queue: ID3D12CommandQueue = unsafe {
             raw.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -432,7 +438,50 @@ impl Device {
             event,
             zero,
             state: Mutex::new(QueueState::default()),
+            cache,
         }))
+    }
+
+    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+        pipeline.resource.compiled.get_or_init(|| {
+            let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
+                panic!("D3D12 accepts HLSL compute programs");
+            };
+            let bytes = match &self.cache {
+                Some(cache) => {
+                    let mut parts = vec![source.as_bytes(), entry.as_bytes()];
+                    parts.extend(DXC_FLAGS.iter().map(|flag| flag.as_bytes()));
+                    let key = format!("dx12/{}.dxil", fingerprint(&parts));
+                    match cache.load(&key) {
+                        Some(bytes) => bytes,
+                        None => {
+                            let bytes = dxil(&source, &entry, program.label());
+                            cache.store(&key, &bytes);
+                            bytes
+                        }
+                    }
+                }
+                None => dxil(&source, &entry, program.label()),
+            };
+            let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                pRootSignature: ManuallyDrop::new(Some(pipeline.resource.root.clone())),
+                CS: D3D12_SHADER_BYTECODE {
+                    pShaderBytecode: bytes.as_ptr().cast(),
+                    BytecodeLength: bytes.len(),
+                },
+                ..Default::default()
+            };
+            let compiled =
+                unsafe { self.raw.CreateComputePipelineState(&state) }.unwrap_or_else(|error| {
+                    panic!(
+                        "creating the D3D12 compute pipeline of {}: {error}",
+                        program.label()
+                    )
+                });
+            let mut state = state;
+            unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
+            compiled
+        });
     }
 
     pub(crate) fn create_buffer(
@@ -517,7 +566,6 @@ impl Device {
                 )
             });
         Pipeline {
-            device: self.raw.clone(),
             resource: Arc::new(PipelineResource {
                 root,
                 compiled: OnceLock::new(),
@@ -912,33 +960,6 @@ impl Pipeline {
     pub(crate) fn is_compiled(&self) -> bool {
         self.resource.compiled.get().is_some()
     }
-
-    pub(crate) fn compile(&self, program: &ComputeProgram) {
-        self.resource.compiled.get_or_init(|| {
-            let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
-                panic!("D3D12 accepts HLSL compute programs");
-            };
-            let bytes = dxil(&source, &entry, program.label());
-            let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: ManuallyDrop::new(Some(self.resource.root.clone())),
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: bytes.as_ptr().cast(),
-                    BytecodeLength: bytes.len(),
-                },
-                ..Default::default()
-            };
-            let pipeline = unsafe { self.device.CreateComputePipelineState(&state) }
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "creating the D3D12 compute pipeline of {}: {error}",
-                        program.label()
-                    )
-                });
-            let mut state = state;
-            unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
-            pipeline
-        });
-    }
 }
 
 fn dxil(source: &str, entry: &str, label: &str) -> Vec<u8> {
@@ -956,15 +977,8 @@ fn dxil(source: &str, entry: &str, label: &str) -> Vec<u8> {
         .ok()
         .unwrap_or_else(|error| panic!("creating the D3D12 shader compiler: {error}"));
     let compiler = unsafe { IDxcCompiler3::from_raw(raw) };
-    let arguments = [
-        "-E",
-        entry,
-        "-T",
-        "cs_6_0",
-        "-O3",
-        "-Wno-parentheses-equality",
-        "-WX",
-    ];
+    let mut arguments = vec!["-E", entry];
+    arguments.extend_from_slice(DXC_FLAGS);
     let strings = arguments
         .iter()
         .map(|arg| arg.encode_utf16().chain([0]).collect::<Vec<_>>())

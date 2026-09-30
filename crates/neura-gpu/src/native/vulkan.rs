@@ -3,6 +3,7 @@ use super::{
     STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
+use crate::cache::{PipelineCache, fingerprint};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
 };
@@ -120,6 +121,8 @@ pub(crate) struct Device {
     memory: vk::PhysicalDeviceMemoryProperties,
     queue: vk::Queue,
     pool: vk::CommandPool,
+    uuid: [u8; vk::UUID_SIZE],
+    cache: Option<PipelineCache>,
     state: Mutex<QueueState>,
 }
 
@@ -245,6 +248,7 @@ fn complete_enumeration<T>(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
+        cache: Option<PipelineCache>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
@@ -419,6 +423,8 @@ impl Device {
                     memory,
                     queue,
                     pool,
+                    uuid: props.pipeline_cache_uuid,
+                    cache,
                     state: Mutex::new(QueueState::default()),
                 }),
                 adapter_info,
@@ -431,6 +437,63 @@ impl Device {
         } else {
             failures.join("; ")
         }))
+    }
+
+    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+        pipeline.resource.compiled.get_or_init(|| {
+            let key = format!(
+                "vulkan/{}/{}.bin",
+                uuids(&self.uuid),
+                fingerprint(&[&bytes_of(program.spirv())]),
+            );
+            let initial = self.cache.as_ref().and_then(|cache| cache.load(&key));
+            let pipeline_cache = pipeline_cache(&self.raw, initial.as_deref());
+            let spirv = program.spirv();
+            let module = unsafe {
+                self.raw
+                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(spirv), None)
+            }
+            .unwrap_or_else(|error| {
+                panic!(
+                    "creating the Vulkan SPIR-V module of {}: {error:?}",
+                    program.label()
+                )
+            });
+            let entry =
+                CString::new(program.entry()).expect("a compute entry point has no zero byte");
+            let stage = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(&entry);
+            let pipelines = unsafe {
+                self.raw.create_compute_pipelines(
+                    pipeline_cache,
+                    &[vk::ComputePipelineCreateInfo::default()
+                        .stage(stage)
+                        .layout(pipeline.resource.layout)],
+                    None,
+                )
+            };
+            unsafe { self.raw.destroy_shader_module(module, None) };
+            let compiled = pipelines.unwrap_or_else(|(_, error)| {
+                panic!(
+                    "compiling Vulkan compute pipeline {}: {error:?}",
+                    program.label()
+                )
+            })[0];
+            if let Some(cache) = &self.cache {
+                let data = unsafe { self.raw.get_pipeline_cache_data(pipeline_cache) }
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "reading the Vulkan pipeline cache of {}: {error:?}",
+                            program.label()
+                        )
+                    });
+                cache.store(&key, &data);
+            }
+            unsafe { self.raw.destroy_pipeline_cache(pipeline_cache, None) };
+            compiled
+        });
     }
 
     fn allocate(&self, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Arc<BufferResource> {
@@ -927,45 +990,6 @@ impl Pipeline {
     pub(crate) fn is_compiled(&self) -> bool {
         self.resource.compiled.get().is_some()
     }
-
-    pub(crate) fn compile(&self, program: &ComputeProgram) {
-        self.resource.compiled.get_or_init(|| {
-            let words = program.spirv();
-            let module = unsafe {
-                self.resource
-                    .raw
-                    .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(words), None)
-            }
-            .unwrap_or_else(|error| {
-                panic!(
-                    "creating the Vulkan SPIR-V module of {}: {error:?}",
-                    program.label()
-                )
-            });
-            let entry =
-                CString::new(program.entry()).expect("a compute entry point has no zero byte");
-            let stage = vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::COMPUTE)
-                .module(module)
-                .name(&entry);
-            let pipelines = unsafe {
-                self.resource.raw.create_compute_pipelines(
-                    vk::PipelineCache::null(),
-                    &[vk::ComputePipelineCreateInfo::default()
-                        .stage(stage)
-                        .layout(self.resource.layout)],
-                    None,
-                )
-            };
-            unsafe { self.resource.raw.destroy_shader_module(module, None) };
-            pipelines.unwrap_or_else(|(_, error)| {
-                panic!(
-                    "compiling Vulkan compute pipeline {}: {error:?}",
-                    program.label()
-                )
-            })[0]
-        });
-    }
 }
 
 impl Drop for PipelineResource {
@@ -1005,4 +1029,23 @@ impl Drop for Device {
             self.raw.destroy_device(None);
         }
     }
+}
+
+fn pipeline_cache(raw: &ash::Device, initial: Option<&[u8]>) -> vk::PipelineCache {
+    if let Some(data) = initial {
+        let info = vk::PipelineCacheCreateInfo::default().initial_data(data);
+        if let Ok(cache) = unsafe { raw.create_pipeline_cache(&info, None) } {
+            return cache;
+        }
+    }
+    unsafe { raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) }
+        .unwrap_or_else(|error| panic!("creating a Vulkan pipeline cache: {error:?}"))
+}
+
+fn uuids(uuid: &[u8; vk::UUID_SIZE]) -> String {
+    uuid.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn bytes_of(spirv: &[u32]) -> Vec<u8> {
+    spirv.iter().flat_map(|word| word.to_le_bytes()).collect()
 }

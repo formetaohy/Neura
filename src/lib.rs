@@ -1,7 +1,7 @@
 pub use neura_abi::{Element, Store};
 pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, Device, GpuRequest, GpuUnavailable,
-    PowerPreference, Queue,
+    PipelineCache, PowerPreference, Queue,
 };
 pub use neura_graph::{
     AttentionOptions, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value, Window,

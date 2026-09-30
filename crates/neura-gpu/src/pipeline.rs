@@ -130,6 +130,9 @@ impl PipelineHandle {
     }
 
     pub fn compile(&self) {
-        self.slot.native.compile(&self.slot.program);
+        self.slot
+            .device
+            .native()
+            .compile(&self.slot.native, &self.slot.program);
     }
 }

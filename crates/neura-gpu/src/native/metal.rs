@@ -2,6 +2,7 @@ use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
+use crate::cache::PipelineCache;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
 };
@@ -9,12 +10,13 @@ use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSRange, NSString};
+use objc2_foundation::{NSArray, NSRange, NSString, NSURL};
 use objc2_metal as mtl;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
-    MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLLibrary,
-    MTLResource, MTLResourceOptions, MTLSize,
+    MTLBinaryArchive, MTLBinaryArchiveDescriptor, MTLBlitCommandEncoder, MTLBuffer,
+    MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
+    MTLComputeCommandEncoder, MTLComputePipelineDescriptor, MTLComputePipelineState, MTLDevice,
+    MTLLibrary, MTLPipelineOption, MTLResource, MTLResourceOptions, MTLSize,
 };
 use std::any::Any;
 use std::cmp::Reverse;
@@ -89,6 +91,8 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
+    cache: Option<PipelineCache>,
+    archive: Option<Archive>,
 }
 
 struct BufferResource {
@@ -110,8 +114,33 @@ struct PipelineResource {
 }
 
 pub(crate) struct Pipeline {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
     resource: Arc<PipelineResource>,
+}
+
+struct Archive {
+    raw: Retained<ProtocolObject<dyn MTLBinaryArchive>>,
+    key: String,
+}
+
+impl Archive {
+    fn of(device: &ProtocolObject<dyn MTLDevice>, cache: &PipelineCache) -> Self {
+        let key = format!("metal/archive-{}.bin", device.registryID());
+        let file = cache.file(&key);
+        let descriptor = MTLBinaryArchiveDescriptor::new();
+        if cache.load(&key).is_some() {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+            descriptor.setUrl(Some(&url));
+        }
+        let raw = device
+            .newBinaryArchiveWithDescriptor_error(&descriptor)
+            .or_else(|_| {
+                device.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new())
+            })
+            .unwrap_or_else(|error| {
+                panic!("creating the Metal archive {}: {error}", file.display(),)
+            });
+        Self { raw, key }
+    }
 }
 
 fn native_buffer(native: &NativeBuffer) -> &Arc<BufferResource> {
@@ -152,6 +181,7 @@ fn describe(device: &ProtocolObject<dyn MTLDevice>) -> AdapterInfo {
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
+        cache: Option<PipelineCache>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
         let offered = devices
@@ -187,11 +217,14 @@ impl Device {
         let queue = raw
             .newCommandQueue()
             .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
+        let archive = cache.as_ref().map(|cache| Archive::of(&raw, cache));
         Ok((
             Arc::new(Self {
                 raw,
                 queue,
                 state: Mutex::new(QueueState::default()),
+                cache,
+                archive,
             }),
             info,
             limits,
@@ -225,13 +258,92 @@ impl Device {
 
     pub(crate) fn create_pipeline(self: &Arc<Self>, _program: &ComputeProgram) -> Pipeline {
         Pipeline {
-            device: self.raw.clone(),
             resource: Arc::new(PipelineResource {
                 compiled: OnceLock::new(),
                 threads: OnceLock::new(),
                 sizes: OnceLock::new(),
             }),
         }
+    }
+
+    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+        pipeline.resource.compiled.get_or_init(|| {
+            let ShaderTranslation::Msl {
+                source,
+                entry,
+                size_bindings,
+            } = program.translate(Backend::Metal)
+            else {
+                panic!("Metal accepts MSL compute programs");
+            };
+            let library = self
+                .raw
+                .newLibraryWithSource_options_error(&NSString::from_str(&source), None)
+                .unwrap_or_else(|error| {
+                    panic!("compiling the MSL of {}: {error}", program.label())
+                });
+            let function = library
+                .newFunctionWithName(&NSString::from_str(&entry))
+                .unwrap_or_else(|| panic!("{} has no Metal entry named {entry}", program.label()));
+            let descriptor = MTLComputePipelineDescriptor::new();
+            descriptor.setLabel(Some(&NSString::from_str(program.label())));
+            descriptor.setComputeFunction(Some(&function));
+            let archives = self
+                .archive
+                .as_ref()
+                .map(|archive| NSArray::from_retained_slice(std::slice::from_ref(&archive.raw)));
+            if let Some(archives) = &archives {
+                descriptor.setBinaryArchives(Some(archives));
+            }
+            let compiled = self
+                .raw
+                .newComputePipelineStateWithDescriptor_options_reflection_error(
+                    &descriptor,
+                    MTLPipelineOption::None,
+                    None,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "creating the Metal pipeline of {}: {error}",
+                        program.label()
+                    )
+                });
+            if let (Some(archive), Some(cache)) = (&self.archive, &self.cache) {
+                archive
+                    .raw
+                    .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "archiving the Metal pipeline of {}: {error}",
+                            program.label()
+                        )
+                    });
+                let file = cache.file(&archive.key);
+                let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+                archive
+                    .raw
+                    .serializeToURL_error(&url)
+                    .unwrap_or_else(|error| {
+                        panic!("writing the Metal archive {}: {error}", file.display())
+                    });
+            }
+            let workgroup = program.workgroup_size();
+            assert!(
+                workgroup > 0 && workgroup as usize <= compiled.maxTotalThreadsPerThreadgroup(),
+                "a Metal compute pipeline cannot schedule its declared workgroup"
+            );
+            pipeline
+                .resource
+                .threads
+                .set(workgroup)
+                .expect("a pipeline stores its workgroup once");
+            pipeline
+                .resource
+                .sizes
+                .set(size_bindings)
+                .expect("a pipeline stores its bindings once");
+            compiled
+        });
     }
 
     fn blit(
@@ -530,51 +642,6 @@ impl Device {
 impl Pipeline {
     pub(crate) fn is_compiled(&self) -> bool {
         self.resource.compiled.get().is_some()
-    }
-
-    pub(crate) fn compile(&self, program: &ComputeProgram) {
-        self.resource.compiled.get_or_init(|| {
-            let ShaderTranslation::Msl {
-                source,
-                entry,
-                size_bindings,
-            } = program.translate(Backend::Metal)
-            else {
-                panic!("Metal accepts MSL compute programs");
-            };
-            let library = self
-                .device
-                .newLibraryWithSource_options_error(&NSString::from_str(&source), None)
-                .unwrap_or_else(|error| {
-                    panic!("compiling the MSL of {}: {error}", program.label())
-                });
-            let function = library
-                .newFunctionWithName(&NSString::from_str(&entry))
-                .unwrap_or_else(|| panic!("{} has no Metal entry named {entry}", program.label()));
-            let pipeline = self
-                .device
-                .newComputePipelineStateWithFunction_error(&function)
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "creating the Metal pipeline of {}: {error}",
-                        program.label()
-                    )
-                });
-            let workgroup = program.workgroup_size();
-            assert!(
-                workgroup > 0 && workgroup as usize <= pipeline.maxTotalThreadsPerThreadgroup(),
-                "a Metal compute pipeline cannot schedule its declared workgroup"
-            );
-            self.resource
-                .threads
-                .set(workgroup)
-                .expect("a pipeline stores its workgroup once");
-            self.resource
-                .sizes
-                .set(size_bindings)
-                .expect("a pipeline stores its bindings once");
-            pipeline
-        });
     }
 }
 

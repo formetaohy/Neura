@@ -1,4 +1,5 @@
 use crate::buffer::GpuBuffer;
+use crate::cache::PipelineCache;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backends, Features, Limits, PowerPreference,
 };
@@ -7,6 +8,7 @@ use crate::native::{self, NativeDevice};
 use crate::pipeline::{ComputeProgram, PipelineHandle};
 use crate::submission::{Command, SubmissionIndex, Write};
 use std::fmt::{self, Display, Formatter};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +22,7 @@ pub struct GpuRequest {
     pub backends: Backends,
     pub adapter: AdapterPolicy,
     pub limits: LimitsPolicy,
+    pub pipeline_cache: Option<PathBuf>,
 }
 
 impl Default for GpuRequest {
@@ -28,6 +31,7 @@ impl Default for GpuRequest {
             backends: Backends::all(),
             adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
+            pipeline_cache: None,
         }
     }
 }
@@ -87,6 +91,7 @@ pub(crate) struct DeviceState {
     pub(crate) info: AdapterInfo,
     pub(crate) limits: Limits,
     pub(crate) features: Features,
+    pub(crate) cache: Option<PipelineCache>,
 }
 
 #[derive(Clone)]
@@ -96,7 +101,8 @@ pub struct Device {
 
 impl Device {
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        let (native, info, limits, features) = native::open(request)?;
+        let cache = request.pipeline_cache.clone().map(PipelineCache::at);
+        let (native, info, limits, features) = native::open(request, cache.clone())?;
         if !limits.supports(&Limits::BASELINE) {
             return Err(GpuUnavailable::UnsupportedLimits { info, limits });
         }
@@ -111,6 +117,7 @@ impl Device {
                 info,
                 limits,
                 features,
+                cache,
             }),
         })
     }
@@ -125,6 +132,10 @@ impl Device {
 
     pub fn features(&self) -> Features {
         self.state.features
+    }
+
+    pub fn pipeline_cache(&self) -> Option<&PipelineCache> {
+        self.state.cache.as_ref()
     }
 
     pub(crate) fn native(&self) -> &NativeDevice {
@@ -240,6 +251,10 @@ impl GpuContext {
 
     pub fn features(&self) -> Features {
         self.device.features()
+    }
+
+    pub fn pipeline_cache(&self) -> Option<&PipelineCache> {
+        self.device.pipeline_cache()
     }
 
     pub fn binding_alignment(&self) -> u64 {
