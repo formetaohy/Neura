@@ -97,6 +97,7 @@ pub struct ValueInfo {
     pub strides: [u32; 4],
     pub storage: u32,
     pub element: Element,
+    pub scale: f32,
     pub residency: Residency,
     pub requires_grad: bool,
     pub retained: bool,
@@ -112,6 +113,7 @@ impl ValueInfo {
             strides: shape.strides(),
             storage: id,
             element: Element::Single,
+            scale: 1.0,
             residency: Residency::Derived,
             requires_grad: false,
             retained: false,
@@ -218,15 +220,52 @@ impl<'g> Graph<'g> {
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
-        self.hold(shape, Residency::Input, element, None)
+        assert!(
+            !element.quantized(),
+            "an input of {} storage is declared with the scale it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
+            element.name(),
+        );
+        self.hold(shape, Residency::Input, element, 1.0, None)
     }
 
     pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
-        self.hold(shape, Residency::Resident, element, None)
+        assert!(
+            !element.quantized(),
+            "a resident tensor of {} storage is declared with the scale it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
+            element.name(),
+        );
+        self.hold(shape, Residency::Resident, element, 1.0, None)
     }
 
     pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
-        self.hold(shape, Residency::Parameter, element, Some(init))
+        assert!(
+            !element.quantized(),
+            "a parameter of {} storage is declared with the scale it reconstructs by, and a parameter carries none; declare a quantized parameter instead",
+            element.name(),
+        );
+        self.hold(shape, Residency::Parameter, element, 1.0, Some(init))
+    }
+
+    pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
+        self.hold(
+            shape,
+            Residency::Parameter,
+            Element::Int8,
+            scale,
+            Some(init),
+        )
+    }
+
+    pub fn quantize(&self, value: Value<'g>, scale: f32) -> Value<'g> {
+        let value = self.own(value);
+        let out = self.quantized(self.shape(value), scale);
+        self.push(TaskInfo::of(
+            Kind::Unary,
+            op::IDENTITY,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        ));
+        out
     }
 
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
@@ -257,14 +296,16 @@ impl<'g> Graph<'g> {
             left_dims,
             right_dims,
         );
-        let out = self.fresh(
+        let element = self.element(left).promote(self.element(right));
+        let out = self.stored(
             Shape::of([
                 left_batch[0].max(right_batch[0]),
                 left_batch[1].max(right_batch[1]),
                 left_dims[2],
                 right_dims[3],
             ]),
-            self.element(left).promote(self.element(right)),
+            element,
+            self.carries(element, &[left, right]),
             Residency::Derived,
             self.tracked(&[left, right]),
         );
@@ -354,7 +395,7 @@ impl<'g> Graph<'g> {
             .element(query)
             .promote(self.element(key))
             .promote(self.element(value));
-        let out = self.fresh(
+        let out = self.stored(
             Shape::of([
                 query_shape.dims()[0],
                 query_shape.dims()[1],
@@ -362,6 +403,7 @@ impl<'g> Graph<'g> {
                 value_shape.dims()[3],
             ]),
             element,
+            self.carries(element, &[query, key, value]),
             Residency::Derived,
             tracked,
         );
@@ -434,14 +476,16 @@ impl<'g> Graph<'g> {
             window.pad_rows(),
             window.pad_columns(),
         );
-        let out = self.fresh(
+        let element = self.element(input).promote(self.element(filter));
+        let out = self.stored(
             Shape::of([
                 input_dims[0],
                 filter_dims[0],
                 (padded_rows - filter_dims[2]) / window.stride_rows() + 1,
                 (padded_columns - filter_dims[3]) / window.stride_columns() + 1,
             ]),
-            self.element(input).promote(self.element(filter)),
+            element,
+            self.carries(element, &[input, filter]),
             Residency::Derived,
             self.tracked(&[input, filter]),
         );
@@ -477,7 +521,7 @@ impl<'g> Graph<'g> {
             window.pad_rows(),
             window.pad_columns(),
         );
-        let out = self.fresh(
+        let out = self.stored(
             Shape::of([
                 input_dims[0],
                 input_dims[1],
@@ -485,6 +529,7 @@ impl<'g> Graph<'g> {
                 (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
             ]),
             self.element(input),
+            self.carries(self.element(input), &[input]),
             Residency::Derived,
             self.tracked(&[input]),
         );
@@ -591,6 +636,11 @@ impl<'g> Graph<'g> {
 
     pub fn cast(&self, value: Value<'g>, element: Element) -> Value<'g> {
         let value = self.own(value);
+        assert!(
+            !element.quantized(),
+            "a cast into {} storage quantizes by a scale the cast does not declare; quantize the tensor instead",
+            element.name(),
+        );
         if self.element(value) == element {
             return value;
         }
@@ -729,9 +779,10 @@ impl<'g> Graph<'g> {
         );
         let mut dims = self.shape(indices).dims();
         dims[3] = self.shape(table).dims()[3];
-        let out = self.fresh(
+        let out = self.stored(
             Shape::of(dims),
             self.element(table),
+            self.carries(self.element(table), &[table]),
             Residency::Derived,
             self.tracked(&[table]),
         );
@@ -812,7 +863,7 @@ impl<'g> Graph<'g> {
             );
             walked |= 1 << axis;
         }
-        let (dims, strides, storage, element, tracked) = {
+        let (dims, strides, storage, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
@@ -820,6 +871,7 @@ impl<'g> Graph<'g> {
                 info.strides,
                 info.storage,
                 info.element,
+                info.scale,
                 info.requires_grad,
             )
         };
@@ -834,6 +886,7 @@ impl<'g> Graph<'g> {
             permuted_strides,
             storage,
             element,
+            scale,
             tracked,
         )
     }
@@ -852,12 +905,12 @@ impl<'g> Graph<'g> {
             shape.elements(),
             self.shape(value).elements(),
         );
-        let (storage, element, tracked) = {
+        let (storage, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.storage, info.element, info.requires_grad)
+            (info.storage, info.element, info.scale, info.requires_grad)
         };
-        self.alias(shape, shape.strides(), storage, element, tracked)
+        self.alias(shape, shape.strides(), storage, element, scale, tracked)
     }
 
     pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
@@ -902,6 +955,11 @@ impl<'g> Graph<'g> {
     pub fn element(&self, value: Value<'g>) -> Element {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].element
+    }
+
+    pub fn scale(&self, value: Value<'g>) -> f32 {
+        let value = self.own(value);
+        self.state.borrow().values[value.id() as usize].scale
     }
 
     pub fn value_count(&self) -> usize {
@@ -1475,9 +1533,10 @@ impl<'g> Graph<'g> {
             value.id(),
         );
         let shape = self.shape(value);
-        let out = self.fresh(
+        let out = self.stored(
             shape,
             self.element(value),
+            self.carries(self.element(value), &[value]),
             Residency::Derived,
             self.tracked(&[value]),
         );
@@ -1494,9 +1553,11 @@ impl<'g> Graph<'g> {
         let left = self.own(left);
         let right = self.own(right);
         let shape = self.shape(left).combined(self.shape(right));
-        let out = self.fresh(
+        let element = self.element(left).promote(self.element(right));
+        let out = self.stored(
             shape,
-            self.element(left).promote(self.element(right)),
+            element,
+            self.carries(element, &[left, right]),
             Residency::Derived,
             self.tracked(&[left, right]),
         );
@@ -1523,7 +1584,13 @@ impl<'g> Graph<'g> {
     fn unary_as(&self, op: u32, value: Value<'g>, element: Element) -> Value<'g> {
         let value = self.own(value);
         let shape = self.shape(value);
-        let out = self.fresh(shape, element, Residency::Derived, self.tracked(&[value]));
+        let out = self.stored(
+            shape,
+            element,
+            self.carries(element, &[value]),
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
         self.push(TaskInfo::of(
             op::kind(op),
             op,
@@ -1711,7 +1778,13 @@ impl<'g> Graph<'g> {
             self.shape(source).dims(),
             shape.dims(),
         );
-        let out = self.fresh(shape, self.element(source), Residency::Derived, false);
+        let out = self.stored(
+            shape,
+            self.element(source),
+            self.carries(self.element(source), &[source]),
+            Residency::Derived,
+            false,
+        );
         self.push(TaskInfo::of(
             Kind::Broadcast,
             op::NONE,
@@ -1764,12 +1837,15 @@ impl<'g> Graph<'g> {
                 owner_shape.strides(),
                 self.owner_of(contribution.id()),
                 self.element(contribution),
+                self.scale(contribution),
                 false,
             );
         }
-        let out = self.fresh(
+        let element = self.element(contribution);
+        let out = self.stored(
             owner_shape,
-            self.element(contribution),
+            element,
+            self.carries(element, &[contribution]),
             Residency::Derived,
             false,
         );
@@ -1818,6 +1894,13 @@ impl<'g> Graph<'g> {
         info.strides == info.shape.strides()
     }
 
+    fn carries(&self, element: Element, sources: &[Value<'g>]) -> f32 {
+        sources
+            .iter()
+            .find(|source| self.element(**source) == element)
+            .map_or(1.0, |source| self.scale(*source))
+    }
+
     fn tracked(&self, values: &[Value<'g>]) -> bool {
         let state = self.state.borrow();
         values
@@ -1850,6 +1933,7 @@ impl<'g> Graph<'g> {
         shape: Shape,
         residency: Residency,
         element: Element,
+        scale: f32,
         seed: Option<Init>,
     ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
@@ -1859,8 +1943,9 @@ impl<'g> Graph<'g> {
             strides: shape.strides(),
             storage: id,
             element,
+            scale,
             residency,
-            requires_grad: residency == Residency::Parameter,
+            requires_grad: residency == Residency::Parameter && !element.quantized(),
             retained: false,
             written_in_place: false,
             recomputes: None,
@@ -1877,6 +1962,25 @@ impl<'g> Graph<'g> {
         residency: Residency,
         tracked: bool,
     ) -> Value<'g> {
+        self.stored(shape, element, 1.0, residency, tracked)
+    }
+
+    fn quantized(&self, shape: Shape, scale: f32) -> Value<'g> {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "an int8 tensor of scale {scale} reconstructs nothing",
+        );
+        self.stored(shape, Element::Int8, scale, Residency::Derived, false)
+    }
+
+    fn stored(
+        &self,
+        shape: Shape,
+        element: Element,
+        scale: f32,
+        residency: Residency,
+        tracked: bool,
+    ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
@@ -1884,6 +1988,7 @@ impl<'g> Graph<'g> {
             strides: shape.strides(),
             storage: id,
             element,
+            scale,
             residency,
             requires_grad: tracked,
             retained: false,
@@ -1901,6 +2006,7 @@ impl<'g> Graph<'g> {
         strides: [u32; 4],
         storage: u32,
         element: Element,
+        scale: f32,
         tracked: bool,
     ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
@@ -1910,6 +2016,7 @@ impl<'g> Graph<'g> {
             strides,
             storage,
             element,
+            scale,
             residency: Residency::View,
             requires_grad: tracked,
             retained: false,
@@ -1971,10 +2078,11 @@ impl Recomputing {
                 info.shape,
                 info.strides,
                 info.element,
+                info.scale,
                 info.requires_grad,
             ))
         };
-        let Some((storage, shape, strides, element, tracked)) = view else {
+        let Some((storage, shape, strides, element, scale, tracked)) = view else {
             return value;
         };
         let Some(copy) = self.copies.get(&storage).copied() else {
@@ -1983,7 +2091,7 @@ impl Recomputing {
         if let Some(view) = self.views.get(&value) {
             return *view;
         }
-        let view = graph.alias(shape, strides, copy, element, tracked);
+        let view = graph.alias(shape, strides, copy, element, scale, tracked);
         self.views.insert(value, view.id());
         view.id()
     }

@@ -26,5 +26,6 @@ fn fetch_of(element: Element) -> &'static str {
         Element::Single => "fetch_single",
         Element::Half => "fetch_half",
         Element::Bfloat16 => "fetch_bfloat16",
+        Element::Int8 => "fetch_int8",
     }
 }

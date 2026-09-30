@@ -409,6 +409,17 @@ fn every_tensor_element_compiles_only_the_loads_it_reads() {
             ))
     );
     assert!(!functions(&half).contains("fetch_bfloat16"));
+    let quantized = selected(
+        Features::empty(),
+        profiles()[0],
+        &[Kind::Unary],
+        &[Element::Single, Element::Int8],
+    )
+    .program();
+    let reachable = functions(&quantized);
+    assert!(reachable.contains("fetch_int8"));
+    assert!(!reachable.contains("fetch_half"));
+    assert!(!reachable.contains("fetch_bfloat16"));
 }
 
 #[test]
@@ -434,6 +445,17 @@ fn a_convert_carries_only_the_elements_it_packs() {
     let reachable = functions(&both);
     assert!(reachable.contains("run_convert_half"));
     assert!(reachable.contains("run_convert_bfloat16"));
+    assert!(!reachable.contains("run_convert_int8"));
+    let quantized = selected(
+        Features::empty(),
+        profiles()[0],
+        &[Kind::Convert],
+        &[Element::Single, Element::Int8],
+    )
+    .program();
+    let reachable = functions(&quantized);
+    assert!(reachable.contains("run_convert_int8"));
+    assert!(!reachable.contains("run_convert_half"));
 }
 
 #[test]

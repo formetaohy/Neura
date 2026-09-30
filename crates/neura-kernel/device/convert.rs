@@ -34,6 +34,14 @@ mod source {
         return (bits + 0x7fffu32 + ((bits >> 16u32) & 1u32)) >> 16u32;
     }
 
+    fn int8_bits(value: f32, scale: f32) -> u32 {
+        let scaled = value / scale;
+        let rounded = trunc(scaled + select(-0.5, 0.5, scaled >= 0.0));
+        let clamped = min(max(rounded, -127.0), 127.0);
+        let magnitude = u32(abs(clamped));
+        return select(magnitude, 256u32 - magnitude, clamped < 0.0);
+    }
+
     fn convert_at(task: Task, source: Value, at: uvec4) -> f32 {
         return chained(task, at, fetch(source, read_address(at, source.strides)));
     }
@@ -77,6 +85,53 @@ mod source {
             let low_bits = bfloat16_bits(convert_at(task, source, low));
             let high_bits = bfloat16_bits(convert_at(task, source, high));
             publish_word(output, word, low_bits | (high_bits << 16u32));
+        }
+    }
+
+    fn run_convert_int8(task: Task, lid: u32) {
+        let source = values[task.a];
+        let output = values[task.out];
+        let dims = output.dims;
+        let elements = dims.x * dims.y * dims.z * dims.w;
+        let scale = output.scale;
+        for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let low = int8_bits(
+                convert_at(
+                    task,
+                    source,
+                    coordinates(min(4u32 * word, elements - 1u32), dims),
+                ),
+                scale,
+            );
+            let second = int8_bits(
+                convert_at(
+                    task,
+                    source,
+                    coordinates(min(4u32 * word + 1u32, elements - 1u32), dims),
+                ),
+                scale,
+            );
+            let third = int8_bits(
+                convert_at(
+                    task,
+                    source,
+                    coordinates(min(4u32 * word + 2u32, elements - 1u32), dims),
+                ),
+                scale,
+            );
+            let high = int8_bits(
+                convert_at(
+                    task,
+                    source,
+                    coordinates(min(4u32 * word + 3u32, elements - 1u32), dims),
+                ),
+                scale,
+            );
+            publish_word(
+                output,
+                word,
+                low | (second << 8u32) | (third << 16u32) | (high << 24u32),
+            );
         }
     }
 

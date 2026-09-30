@@ -12,12 +12,13 @@ use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
 use std::mem::size_of;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Span {
     pub store: Store,
     pub offset: u64,
     pub elements: u32,
     pub element: Element,
+    pub scale: f32,
 }
 
 struct Block {
@@ -100,6 +101,7 @@ struct Placed {
     address: u64,
     elements: u32,
     element: Element,
+    scale: f32,
 }
 
 pub struct Encoding {
@@ -143,6 +145,7 @@ impl Encoding {
         let elements = carried_elements(values);
         let layout = Layout::of_values(values, alignment);
         assert_writes_match_their_element(values, tasks);
+        assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, tasks);
         assert_units_keep_their_order(tasks);
         let schedule = schedule::Schedule::of(values, tasks);
@@ -166,6 +169,7 @@ impl Encoding {
                 }),
                 store: layout.store(values, id as u32).code(),
                 element: layout.element(values, id as u32).code(),
+                scale: layout.scale(values, id as u32),
                 dims: info.shape.dims(),
                 strides: info.strides,
             });
@@ -323,6 +327,7 @@ impl Encoding {
                 address: layout.address(values, &offsets, id as u32),
                 elements: info.shape.elements(),
                 element: layout.element(values, id as u32),
+                scale: layout.scale(values, id as u32),
             });
         }
 
@@ -430,6 +435,7 @@ impl Encoding {
             offset,
             elements: placed.elements,
             element: placed.element,
+            scale: placed.scale,
         }
     }
 
@@ -541,6 +547,19 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
                 task.out,
             );
         }
+    }
+}
+
+fn assert_quantized_scales_reconstruct(values: &[ValueInfo]) {
+    for (id, info) in values.iter().enumerate() {
+        if !info.element.quantized() {
+            continue;
+        }
+        assert!(
+            info.scale.is_finite() && info.scale > 0.0,
+            "value {id} quantum of scale {} reconstructs nothing",
+            info.scale,
+        );
     }
 }
 

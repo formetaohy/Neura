@@ -1,18 +1,19 @@
 use neura_abi::{Element, Placement, Store, WORD_BYTES};
 use neura_graph::{Graph, Init, Residency, ValueInfo};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Entry {
     pub word: u64,
     pub elements: u64,
     pub element: Element,
+    pub scale: f32,
 }
 
 #[derive(Clone, Debug)]
 pub struct Region {
     words: u64,
     entries: Vec<Entry>,
-    placed: Vec<Option<(u64, Element)>>,
+    placed: Vec<Option<(u64, Element, f32)>>,
 }
 
 impl Region {
@@ -27,11 +28,12 @@ impl Region {
             }
             let elements = u64::from(info.shape.elements());
             words = words.next_multiple_of(stride);
-            placed[id] = Some((words, info.element));
+            placed[id] = Some((words, info.element, info.scale));
             entries.push(Entry {
                 word: words,
                 elements,
                 element: info.element,
+                scale: info.scale,
             });
             words += info.element.words(elements);
         }
@@ -66,7 +68,11 @@ impl Region {
         self.placement(storage).1
     }
 
-    fn placement(&self, storage: u32) -> (u64, Element) {
+    pub(crate) fn scale(&self, storage: u32) -> f32 {
+        self.placement(storage).2
+    }
+
+    fn placement(&self, storage: u32) -> (u64, Element, f32) {
         self.placed
             .get(storage as usize)
             .copied()
@@ -77,16 +83,21 @@ impl Region {
 
 impl PartialEq for Region {
     fn eq(&self, other: &Self) -> bool {
-        self.words == other.words && self.entries == other.entries
+        self.words == other.words
+            && self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(&other.entries)
+                .all(|(left, right)| left == right)
     }
 }
-
-impl Eq for Region {}
 
 pub struct Seed {
     word: u64,
     elements: u32,
     element: Element,
+    scale: f32,
     init: Init,
 }
 
@@ -101,6 +112,10 @@ impl Seed {
 
     pub fn element(&self) -> Element {
         self.element
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
 
     pub fn init(&self) -> Init {
@@ -139,6 +154,7 @@ impl Layout {
             .map(|(id, info)| Seed {
                 word: weights.address(id as u32),
                 element: weights.element(id as u32),
+                scale: weights.scale(id as u32),
                 elements: info.shape.elements(),
                 init: info
                     .seed
@@ -177,6 +193,16 @@ impl Layout {
             info.element.name(),
         );
         info.element
+    }
+
+    pub(crate) fn scale(&self, values: &[ValueInfo], value: u32) -> f32 {
+        let info = &values[value as usize];
+        let owner = &values[info.storage as usize];
+        assert!(
+            info.scale == owner.scale,
+            "value {value} reconstructs numbers of another storage",
+        );
+        info.scale
     }
 
     pub(crate) fn address(&self, values: &[ValueInfo], arena: &[u64], value: u32) -> u64 {

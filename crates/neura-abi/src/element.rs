@@ -4,14 +4,16 @@ pub enum Element {
     Single,
     Half,
     Bfloat16,
+    Int8,
 }
 
 pub const SINGLE: u32 = Element::Single as u32;
 pub const HALF: u32 = Element::Half as u32;
 pub const BFLOAT16: u32 = Element::Bfloat16 as u32;
+pub const INT8: u32 = Element::Int8 as u32;
 
 impl Element {
-    pub const ALL: &'static [Element] = &[Self::Single, Self::Half, Self::Bfloat16];
+    pub const ALL: &'static [Element] = &[Self::Single, Self::Half, Self::Bfloat16, Self::Int8];
     pub const COUNT: u32 = Self::ALL.len() as u32;
 
     pub const fn code(self) -> u32 {
@@ -29,6 +31,7 @@ impl Element {
             Self::Single => "element::SINGLE",
             Self::Half => "element::HALF",
             Self::Bfloat16 => "element::BFLOAT16",
+            Self::Int8 => "element::INT8",
         }
     }
 
@@ -37,6 +40,7 @@ impl Element {
             Self::Single => "single",
             Self::Half => "half",
             Self::Bfloat16 => "bfloat16",
+            Self::Int8 => "int8",
         }
     }
 
@@ -44,6 +48,7 @@ impl Element {
         match self {
             Self::Single => 1,
             Self::Half | Self::Bfloat16 => 2,
+            Self::Int8 => 4,
         }
     }
 
@@ -55,9 +60,15 @@ impl Element {
         self.elements_per_word() > 1
     }
 
+    pub const fn quantized(self) -> bool {
+        matches!(self, Self::Int8)
+    }
+
     pub const fn promote(self, other: Self) -> Self {
         match (self, other) {
             (Self::Single, _) | (_, Self::Single) => Self::Single,
+            (Self::Int8, Self::Int8) => Self::Single,
+            (Self::Int8, other) | (other, Self::Int8) => other,
             (Self::Half, Self::Half) => Self::Half,
             (Self::Bfloat16, Self::Bfloat16) => Self::Bfloat16,
             (Self::Half, Self::Bfloat16) | (Self::Bfloat16, Self::Half) => Self::Single,

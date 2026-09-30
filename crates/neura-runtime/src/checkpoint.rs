@@ -2,13 +2,13 @@ use neura_abi::{Element, WORD_BYTES};
 use neura_program::Region;
 
 const MAGIC: [u8; 4] = *b"NRCP";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HEADER_BYTES: usize = 20;
-const ENTRY_BYTES: usize = 8;
+const ENTRY_BYTES: usize = 12;
 
 pub struct Checkpoint {
     bytes: Vec<u8>,
-    entries: Vec<(u32, Element)>,
+    entries: Vec<(u32, Element, f32)>,
     payload: usize,
 }
 
@@ -28,6 +28,7 @@ impl Checkpoint {
                 (
                     u32::try_from(entry.elements).expect("a tensor fits a u32 element count"),
                     entry.element,
+                    entry.scale,
                 )
             })
             .collect::<Vec<_>>();
@@ -37,9 +38,10 @@ impl Checkpoint {
         bytes.extend_from_slice(&VERSION.to_le_bytes());
         bytes.extend_from_slice(&(entries.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&region.words().to_le_bytes());
-        for (elements, element) in &entries {
+        for (elements, element, scale) in &entries {
             bytes.extend_from_slice(&elements.to_le_bytes());
             bytes.extend_from_slice(&element.code().to_le_bytes());
+            bytes.extend_from_slice(&scale.to_le_bytes());
         }
         bytes.extend_from_slice(&payload);
         Self {
@@ -84,14 +86,15 @@ impl Checkpoint {
                 (
                     u32::from_le_bytes(entry[..4].try_into().expect("an element count")),
                     Element::of(u32::from_le_bytes(
-                        entry[4..].try_into().expect("an element code"),
+                        entry[4..8].try_into().expect("an element code"),
                     )),
+                    f32::from_le_bytes(entry[8..].try_into().expect("a quantum scale")),
                 )
             })
             .collect::<Vec<_>>();
         let packed = entries
             .iter()
-            .map(|(elements, element)| element.words(u64::from(*elements)))
+            .map(|(elements, element, _)| element.words(u64::from(*elements)))
             .sum::<u64>();
         assert!(
             packed <= words,
@@ -132,6 +135,13 @@ impl Checkpoint {
             .1
     }
 
+    pub fn scale(&self, tensor: usize) -> f32 {
+        self.entries
+            .get(tensor)
+            .unwrap_or_else(|| panic!("this checkpoint holds {} tensors", self.entries.len()))
+            .2
+    }
+
     pub(crate) fn payload(&self) -> &[u8] {
         &self.bytes[self.payload..]
     }
@@ -144,7 +154,7 @@ impl Checkpoint {
             self.entries.len(),
             region.tensors(),
         );
-        for (index, ((checkpoint, element), entry)) in
+        for (index, ((checkpoint, element, scale), entry)) in
             self.entries.iter().zip(region.entries()).enumerate()
         {
             assert!(
@@ -153,6 +163,11 @@ impl Checkpoint {
                 element.name(),
                 entry.elements,
                 entry.element.name(),
+            );
+            assert!(
+                *scale == entry.scale,
+                "tensor {index} of the checkpoint quantizes by {scale} where the region quantizes by {}",
+                entry.scale,
             );
         }
         assert_eq!(

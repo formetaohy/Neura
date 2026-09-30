@@ -210,7 +210,7 @@ impl Runtime {
             self.heap.buffer().write_at(
                 queue,
                 layout.weight_bytes(placement, seed.address()),
-                &pack(seed.element(), &values),
+                &pack(seed.element(), seed.scale(), &values),
             );
         }
     }
@@ -394,7 +394,7 @@ impl Runtime {
             data.len(),
             span.elements,
         );
-        let bytes = pack(span.element, data);
+        let bytes = pack(span.element, span.scale, data);
         program
             .heap()
             .write_at(self.context.queue(), span.offset, &bytes);
@@ -476,6 +476,7 @@ impl Runtime {
                 let start = *offset as usize;
                 unpack(
                     span.element,
+                    span.scale,
                     span.elements as usize,
                     &bytes[start..start + *length as usize],
                 )

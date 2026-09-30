@@ -109,7 +109,7 @@ pub struct ValueRecord {
     pub base: u32,
     pub store: u32,
     pub element: u32,
-    padding: [u8; 4],
+    pub scale: f32,
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
@@ -119,6 +119,7 @@ pub struct ValueFields {
     pub base: u32,
     pub store: u32,
     pub element: u32,
+    pub scale: f32,
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
@@ -129,7 +130,7 @@ impl ValueRecord {
             base: fields.base,
             store: fields.store,
             element: fields.element,
-            padding: [0; 4],
+            scale: fields.scale,
             dims: fields.dims,
             strides: fields.strides,
         }
@@ -160,6 +161,11 @@ pub const VALUE: RecordLayout = RecordLayout {
             name: "element",
             offset: std::mem::offset_of!(ValueRecord, element) as u32,
             ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "scale",
+            offset: std::mem::offset_of!(ValueRecord, scale) as u32,
+            ty: FieldType::F32,
         },
         FieldLayout {
             name: "dims",

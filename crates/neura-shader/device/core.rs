@@ -73,6 +73,12 @@ mod source {
         );
     }
 
+    fn fetch_int8(value: Value, at: u32) -> f32 {
+        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
+        let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
+        return (f32(byte) - select(0.0, 256.0, byte >= 128u32)) * value.scale;
+    }
+
     fn fetch_by_element(value: Value, at: u32) -> f32 {
         match value.element {
             _ => {

@@ -153,6 +153,62 @@ fn a_half_store_round_trips_bit_for_bit() {
 }
 
 #[test]
+fn a_quantized_store_round_trips_bit_for_bit() {
+    let runtime = open();
+    let scale = 0.03125;
+    let graph = Graph::new();
+    let weight = graph.quantized_parameter(
+        Shape::matrix(4, 4),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        scale,
+    );
+    let observations = graph.input(Shape::matrix(2, 4), Element::Single);
+    let prediction = graph.matmul(observations, weight);
+    graph.retain(prediction);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, observations, &batch(7)[..8]);
+    runtime.run(&program);
+    let before = runtime.read(&program, prediction);
+    let checkpoint = runtime.checkpoint(&weights);
+    assert_eq!(checkpoint.element(0), Element::Int8);
+    assert_eq!(checkpoint.scale(0), scale);
+
+    let another = open();
+    let rebuilt = Graph::new();
+    let weight = rebuilt.quantized_parameter(
+        Shape::matrix(4, 4),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        scale,
+    );
+    let observations = rebuilt.input(Shape::matrix(2, 4), Element::Single);
+    let prediction = rebuilt.matmul(observations, weight);
+    rebuilt.retain(prediction);
+    let weights = another.load(&rebuilt, &checkpoint);
+    let program = another.compile(&rebuilt, &weights);
+    another.write(&program, observations, &batch(7)[..8]);
+    another.run(&program);
+    assert_eq!(
+        another.read(&program, prediction),
+        before,
+        "a quantized store pours back the very words it was saved from",
+    );
+
+    let rescaled = Graph::new();
+    rescaled.quantized_parameter(Shape::matrix(4, 4), Init::Zero, scale / 2.0);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        another.load(&rescaled, &checkpoint);
+    }))
+    .expect_err("a store loads only a checkpoint of the scale its graph declares");
+}
+
+#[test]
 fn a_checkpoint_carries_every_element_of_its_store() {
     let runtime = open();
     let graph = Graph::new();

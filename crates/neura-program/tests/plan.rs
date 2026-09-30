@@ -1298,6 +1298,61 @@ fn a_narrow_product_packs_the_image_it_computed() {
 }
 
 #[test]
+fn a_quantized_parameter_packs_four_numbers_a_word_by_its_scale() {
+    let graph = Graph::new();
+    let weight = graph.quantized_parameter(Shape::vector(300), Init::Zero, 0.25);
+    assert_eq!(graph.element(weight), Element::Int8);
+    assert_eq!(graph.scale(weight), 0.25);
+    let instead = Graph::new();
+    instead.parameter(Shape::vector(300), Init::Zero, Element::Single);
+    let single_precision = encoding(&instead);
+    let encoding = encoding(&graph);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    let record = values[weight.id() as usize];
+    assert_eq!(record.element, Element::Int8.code());
+    assert_eq!(record.scale, 0.25);
+    assert_eq!(record.store, Store::Weights.code());
+    assert_eq!(
+        encoding.weights().bytes() * 4,
+        single_precision.weights().bytes(),
+        "a quantized parameter holds a quarter of the bytes a single precision one holds",
+    );
+}
+
+#[test]
+fn a_quantized_image_packs_four_numbers_a_word() {
+    let graph = Graph::new();
+    let source = graph.parameter(Shape::vector(300), Init::Zero, Element::Single);
+    let quantized = graph.quantize(source, 0.125);
+    graph.retain(quantized);
+    let instead = Graph::new();
+    let source = instead.parameter(Shape::vector(300), Init::Zero, Element::Single);
+    instead.retain(instead.cast(source, Element::Half));
+    let half_precision = encoding(&instead);
+    let encoding = encoding(&graph);
+    let tape = tape(&encoding);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    let record = values[quantized.id() as usize];
+    assert_eq!(record.element, Element::Int8.code());
+    assert_eq!(record.scale, 0.125);
+    assert_eq!(record.store, Store::Tensors.code());
+    let convert = tape
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::Convert)
+        .expect("a quantized tensor packs the numbers its image computed");
+    assert_eq!(convert.out, quantized.id());
+    assert_eq!(convert.a, source.id());
+    assert_eq!(convert.first, 0);
+    assert_eq!(convert.count, 75);
+    assert_eq!(steps(&encoding)[convert.chain as usize].op, op::IDENTITY);
+    assert_eq!(
+        encoding.arena_bytes() * 2,
+        half_precision.arena_bytes(),
+        "the arena holds a word of every four numbers a quantized tensor carries",
+    );
+}
+
+#[test]
 fn a_cast_declares_the_numbers_a_tensor_carries() {
     let graph = Graph::new();
     let wide = graph.input(Shape::vector(6), Element::Single);

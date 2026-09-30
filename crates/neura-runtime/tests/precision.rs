@@ -18,7 +18,7 @@ fn narrow() -> Profile {
 }
 
 fn rounded(element: Element, values: &[f32]) -> Vec<f32> {
-    unpack(element, values.len(), &pack(element, values))
+    unpack(element, 1.0, values.len(), &pack(element, 1.0, values))
 }
 
 #[test]
@@ -127,6 +127,98 @@ fn a_narrow_arena_holds_half_the_bytes_of_a_wide_one() {
     assert_eq!(narrow.arena_bytes(), 4096);
 }
 
+#[test]
+fn a_quantized_tensor_carries_the_numbers_its_scale_places() {
+    let runtime = open();
+    let scale = 0.03125;
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(64), Element::Single);
+    let quantized = graph.quantize(data, scale);
+    let rectified = graph.relu(quantized);
+    assert_eq!(graph.element(quantized), Element::Int8);
+    assert_eq!(graph.element(rectified), Element::Int8);
+    assert_eq!(graph.scale(rectified), scale);
+    graph.retain(quantized);
+    graph.retain(rectified);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(64, 9);
+    runtime.write(&program, data, &values);
+    runtime.run(&program);
+
+    let quantized_expected = unpack(
+        Element::Int8,
+        scale,
+        values.len(),
+        &pack(Element::Int8, scale, &values),
+    );
+    assert_eq!(
+        runtime.read(&program, quantized),
+        quantized_expected,
+        "an int8 tensor carries the numbers a reader reconstructs through its scale",
+    );
+    let mut rectified_expected = quantized_expected;
+    for value in &mut rectified_expected {
+        *value = value.max(0.0);
+    }
+    assert_eq!(
+        runtime.read(&program, rectified),
+        rectified_expected,
+        "an op over a quantized tensor lands in the numbers its storage places",
+    );
+}
+
+#[test]
+fn a_quantized_weight_feeds_a_product_a_quarter_of_the_bytes() {
+    let runtime = open();
+    let scale = 0.03125;
+    let graph = Graph::new();
+    let weight = graph.quantized_parameter(
+        Shape::matrix(8, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        scale,
+    );
+    let input = graph.input(Shape::matrix(3, 8), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let inputs = random(24, 17);
+    let weights_values = random(32, 23);
+    runtime.write(&program, input, &inputs);
+    runtime.write(&program, weight, &weights_values);
+    runtime.run(&program);
+
+    let quantized = unpack(
+        Element::Int8,
+        scale,
+        weights_values.len(),
+        &pack(Element::Int8, scale, &weights_values),
+    );
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &quantized, 3, 8, 4),
+        1e-4,
+    );
+    let single = Graph::new();
+    single.parameter(
+        Shape::matrix(8, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Single,
+    );
+    assert_eq!(
+        weights.bytes() * 4,
+        runtime.weights(&single).bytes(),
+        "a quantized weight store holds a quarter of the bytes a single precision one holds",
+    );
+}
+
 fn rounding_contract(backends: neura_gpu::Backends) {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
@@ -148,7 +240,7 @@ fn rounding_contract(backends: neura_gpu::Backends) {
         runtime.write(&program, data, &probes);
         runtime.run(&program);
         let device = runtime.read(&program, narrowed);
-        let host = unpack(element, probes.len(), &pack(element, &probes));
+        let host = unpack(element, 1.0, probes.len(), &pack(element, 1.0, &probes));
         for (index, (device, host)) in device.iter().zip(&host).enumerate() {
             assert_eq!(
                 device.to_bits(),
@@ -159,6 +251,56 @@ fn rounding_contract(backends: neura_gpu::Backends) {
             );
         }
     }
+    let scale = 0.015625;
+    let probes = quantized_probes(scale);
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(probes.len() as u32), Element::Single);
+    let quantized = graph.quantize(data, scale);
+    graph.retain(quantized);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, &probes);
+    runtime.run(&program);
+    let device = runtime.read(&program, quantized);
+    let host = unpack(
+        Element::Int8,
+        scale,
+        probes.len(),
+        &pack(Element::Int8, scale, &probes),
+    );
+    for (index, (device, host)) in device.iter().zip(&host).enumerate() {
+        assert_eq!(
+            device.to_bits(),
+            host.to_bits(),
+            "element {index} of an int8 tensor came back as {device} where the host places {host}, from {}",
+            probes[index],
+        );
+    }
+}
+
+fn quantized_probes(scale: f32) -> Vec<f32> {
+    let mut probes = vec![
+        0.0,
+        -0.0,
+        scale / 2.0,
+        -scale / 2.0,
+        scale * (1.0 + f32::EPSILON),
+        -scale * (1.0 + f32::EPSILON),
+        126.5 * scale,
+        -126.5 * scale,
+        127.0 * scale,
+        128.0 * scale,
+        -127.0 * scale,
+        -128.0 * scale,
+        1.0e30,
+        -1.0e30,
+        scale,
+        -scale,
+    ];
+    let sample = |count: u32, seed: u32| random(count, seed);
+    probes.extend(sample(512, 29).iter().map(|value| value * scale * 64.0));
+    probes.extend(sample(512, 31).iter().map(|value| value * scale * 0.5));
+    probes
 }
 
 fn probes() -> Vec<f32> {
