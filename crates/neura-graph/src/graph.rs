@@ -101,6 +101,7 @@ pub struct ValueInfo {
     pub requires_grad: bool,
     pub retained: bool,
     pub written_in_place: bool,
+    pub recomputes: Option<u32>,
     pub seed: Option<Init>,
 }
 
@@ -115,14 +116,36 @@ impl ValueInfo {
             requires_grad: false,
             retained: false,
             written_in_place: false,
+            recomputes: None,
             seed: None,
         }
     }
 }
 
+struct Recomputation {
+    first: usize,
+    last: usize,
+    values: Vec<u32>,
+}
+
+impl Recomputation {
+    fn holds(&self, task: usize) -> bool {
+        self.first <= task && task < self.last
+    }
+}
+
+struct Recomputing {
+    indices: HashMap<u32, usize>,
+    copies: HashMap<u32, u32>,
+    views: HashMap<u32, u32>,
+    materialized: Vec<bool>,
+    differentiated: Vec<bool>,
+}
+
 struct GraphState {
     values: Vec<ValueInfo>,
     tasks: Vec<TaskInfo>,
+    recomputations: Vec<Recomputation>,
     differentiated: bool,
     updated_in_place: bool,
     version: u64,
@@ -177,6 +200,7 @@ impl<'g> Graph<'g> {
             state: RefCell::new(GraphState {
                 values: Vec::new(),
                 tasks: Vec::new(),
+                recomputations: Vec::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -903,6 +927,58 @@ impl<'g> Graph<'g> {
         })
     }
 
+    pub fn recompute(&self, region: impl FnOnce(&Graph<'g>) -> Value<'g>) -> Value<'g> {
+        let first = self.state.borrow().tasks.len();
+        assert!(
+            !self.state.borrow().differentiated,
+            "a graph declares its recompute regions before it differentiates them",
+        );
+        let out = self.own(region(self));
+        let mut state = self.state.borrow_mut();
+        let last = state.tasks.len();
+        assert!(
+            last > first,
+            "a recompute region holds no task the device could run again",
+        );
+        assert!(
+            state
+                .recomputations
+                .iter()
+                .all(|held| held.first >= last || held.last <= first),
+            "a recompute region opens inside another, and one block recomputes as one region",
+        );
+        let mut values = Vec::new();
+        for task in &state.tasks[first..last] {
+            assert!(
+                !task.in_place,
+                "a recompute region updates a tensor in place, and a second run of it would update that tensor twice",
+            );
+            for value in [task.out, task.extra] {
+                if value == NO_VALUE {
+                    continue;
+                }
+                let storage = state.values[value as usize].storage;
+                assert_eq!(
+                    storage, value,
+                    "a recompute region writes a tensor of another storage",
+                );
+                if !values.contains(&storage) {
+                    values.push(storage);
+                }
+            }
+        }
+        assert!(
+            values.contains(&state.values[out.id() as usize].storage),
+            "a recompute region returns the tensor its own tasks write",
+        );
+        state.recomputations.push(Recomputation {
+            first,
+            last,
+            values,
+        });
+        out
+    }
+
     pub fn backward(&self, loss: Value<'g>) -> Gradients<'g> {
         let loss = self.own(loss);
         {
@@ -934,14 +1010,26 @@ impl<'g> Graph<'g> {
         let mut grads: Vec<Option<u32>> = vec![None; self.value_count()];
         let seed = self.fill(self.shape(loss), 1.0);
         self.accumulate(&mut grads, loss, seed);
+        let mut recomputing = self.recomputing();
         for index in (0..forward).rev() {
+            if let Some(region) = self.region_of_task(index) {
+                if !recomputing.differentiated[region] {
+                    recomputing.differentiated[region] = true;
+                    self.recompute_region(region, &mut recomputing, &mut grads);
+                }
+                continue;
+            }
             let task = self.task(index);
             let Some(gradient) = grads[self.owner_of(task.out) as usize] else {
                 continue;
             };
+            self.materialize(&task, &mut recomputing, &mut grads);
+            let task = recomputing.resolved(self, &task);
+            self.widen(&mut grads);
             let gradient = self.value_of(gradient);
             self.backward_task(&task, gradient, &mut grads);
         }
+        recomputing.restore(&mut grads);
         let mut values = HashMap::new();
         for (id, grad) in grads.into_iter().enumerate() {
             if let Some(grad) = grad {
@@ -949,6 +1037,150 @@ impl<'g> Graph<'g> {
             }
         }
         Gradients { values }
+    }
+
+    fn recomputing(&self) -> Recomputing {
+        let state = self.state.borrow();
+        let mut indices = HashMap::new();
+        for (region, recomputation) in state.recomputations.iter().enumerate() {
+            for value in &recomputation.values {
+                indices.insert(*value, region);
+            }
+        }
+        Recomputing {
+            indices,
+            copies: HashMap::new(),
+            views: HashMap::new(),
+            materialized: vec![false; state.recomputations.len()],
+            differentiated: vec![false; state.recomputations.len()],
+        }
+    }
+
+    fn region_of_task(&self, task: usize) -> Option<usize> {
+        self.state
+            .borrow()
+            .recomputations
+            .iter()
+            .position(|recomputation| recomputation.holds(task))
+    }
+
+    fn materialize(
+        &self,
+        task: &TaskInfo,
+        recomputing: &mut Recomputing,
+        grads: &mut Vec<Option<u32>>,
+    ) {
+        let mut opened = Vec::new();
+        let reads = task
+            .inputs
+            .iter()
+            .copied()
+            .chain([task.origin])
+            .chain(task.prelude.iter().map(|step| step.operand))
+            .chain(task.chain.iter().map(|step| step.operand));
+        for value in reads {
+            if value == NO_VALUE {
+                continue;
+            }
+            let storage = self.owner_of(value);
+            let Some(region) = recomputing.indices.get(&storage).copied() else {
+                continue;
+            };
+            if recomputing.materialized[region]
+                || !self.state.borrow().values[storage as usize].requires_grad
+                || opened.contains(&region)
+            {
+                continue;
+            }
+            opened.push(region);
+        }
+        for region in opened {
+            self.materialize_region(region, recomputing, grads);
+        }
+    }
+
+    fn materialize_region(
+        &self,
+        region: usize,
+        recomputing: &mut Recomputing,
+        grads: &mut Vec<Option<u32>>,
+    ) {
+        let (first, last, values) = {
+            let state = self.state.borrow();
+            let recomputation = &state.recomputations[region];
+            (
+                recomputation.first,
+                recomputation.last,
+                recomputation.values.clone(),
+            )
+        };
+        for index in first..last {
+            let task = self.task(index);
+            recomputing.prepare(self, &task);
+            let copy = recomputing.resolved(self, &task);
+            self.push(copy);
+        }
+        recomputing.materialized[region] = true;
+        self.widen(grads);
+        for value in values {
+            if let Some(gradient) = grads[value as usize].take() {
+                grads[recomputing.copies[&value] as usize] = Some(gradient);
+            }
+        }
+    }
+
+    fn recompute_region(
+        &self,
+        region: usize,
+        recomputing: &mut Recomputing,
+        grads: &mut Vec<Option<u32>>,
+    ) {
+        if !recomputing.materialized[region] {
+            let carried = self.state.borrow().recomputations[region]
+                .values
+                .iter()
+                .any(|value| grads[*value as usize].is_some());
+            if !carried {
+                return;
+            }
+            self.materialize_region(region, recomputing, grads);
+        }
+        let (first, last) = {
+            let state = self.state.borrow();
+            let recomputation = &state.recomputations[region];
+            (recomputation.first, recomputation.last)
+        };
+        for index in (first..last).rev() {
+            let task = self.task(index);
+            let task = recomputing.resolved(self, &task);
+            self.widen(grads);
+            let Some(gradient) = grads[self.owner_of(task.out) as usize] else {
+                continue;
+            };
+            let gradient = self.value_of(gradient);
+            self.backward_task(&task, gradient, grads);
+        }
+    }
+
+    fn widen(&self, grads: &mut Vec<Option<u32>>) {
+        let width = self.value_count();
+        if grads.len() < width {
+            grads.resize(width, None);
+        }
+    }
+
+    fn copy_of(&self, value: u32) -> u32 {
+        let mut state = self.state.borrow_mut();
+        let info = state.values[value as usize].clone();
+        let id = state.values.len() as u32;
+        state.values.push(ValueInfo {
+            storage: id,
+            retained: false,
+            recomputes: Some(value),
+            ..info
+        });
+        state.version += 1;
+        id
     }
 
     fn backward_task(&self, task: &TaskInfo, gradient: Value<'g>, grads: &mut [Option<u32>]) {
@@ -1631,6 +1863,7 @@ impl<'g> Graph<'g> {
             requires_grad: residency == Residency::Parameter,
             retained: false,
             written_in_place: false,
+            recomputes: None,
             seed,
         });
         state.version += 1;
@@ -1655,6 +1888,7 @@ impl<'g> Graph<'g> {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
+            recomputes: None,
             seed: None,
         });
         state.version += 1;
@@ -1680,6 +1914,7 @@ impl<'g> Graph<'g> {
             requires_grad: tracked,
             retained: false,
             written_in_place: false,
+            recomputes: None,
             seed: None,
         });
         state.version += 1;
@@ -1690,6 +1925,75 @@ impl<'g> Graph<'g> {
         let mut state = self.state.borrow_mut();
         state.tasks.push(task);
         state.version += 1;
+    }
+}
+
+impl Recomputing {
+    fn prepare<'g>(&mut self, graph: &Graph<'g>, task: &TaskInfo) {
+        for written in [task.out, task.extra] {
+            if written == NO_VALUE || self.copies.contains_key(&written) {
+                continue;
+            }
+            let copy = graph.copy_of(written);
+            self.copies.insert(written, copy);
+        }
+    }
+
+    fn resolved<'g>(&mut self, graph: &Graph<'g>, task: &TaskInfo) -> TaskInfo {
+        let mut resolved = task.clone();
+        resolved.out = self.resolve(graph, task.out);
+        resolved.extra = self.resolve(graph, task.extra);
+        resolved.origin = self.resolve(graph, task.origin);
+        for (input, value) in resolved.inputs.iter_mut().zip(task.inputs) {
+            *input = self.resolve(graph, value);
+        }
+        for (step, source) in resolved.prelude.iter_mut().zip(&task.prelude) {
+            step.operand = self.resolve(graph, source.operand);
+        }
+        for (step, source) in resolved.chain.iter_mut().zip(&task.chain) {
+            step.operand = self.resolve(graph, source.operand);
+        }
+        resolved
+    }
+
+    fn resolve<'g>(&mut self, graph: &Graph<'g>, value: u32) -> u32 {
+        if value == NO_VALUE {
+            return value;
+        }
+        if let Some(copy) = self.copies.get(&value) {
+            return *copy;
+        }
+        let view = {
+            let state = graph.state.borrow();
+            let info = &state.values[value as usize];
+            (info.residency == Residency::View).then_some((
+                info.storage,
+                info.shape,
+                info.strides,
+                info.element,
+                info.requires_grad,
+            ))
+        };
+        let Some((storage, shape, strides, element, tracked)) = view else {
+            return value;
+        };
+        let Some(copy) = self.copies.get(&storage).copied() else {
+            return value;
+        };
+        if let Some(view) = self.views.get(&value) {
+            return *view;
+        }
+        let view = graph.alias(shape, strides, copy, element, tracked);
+        self.views.insert(value, view.id());
+        view.id()
+    }
+
+    fn restore(&self, grads: &mut [Option<u32>]) {
+        for (original, copy) in &self.copies {
+            if let Some(gradient) = grads[*copy as usize].take() {
+                grads[*original as usize] = Some(gradient);
+            }
+        }
     }
 }
 

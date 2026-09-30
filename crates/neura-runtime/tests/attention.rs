@@ -454,3 +454,96 @@ fn every_profile_the_device_offers_runs_the_same_attention() {
         assert_close(&produced[3], &expected_value, 1e-5);
     }
 }
+
+fn block<'g>(
+    graph: &Graph<'g>,
+    shapes: Shapes,
+    recomputed: bool,
+) -> (Value<'g>, [Value<'g>; 3], [Value<'g>; 3]) {
+    let tensor = |tokens: u32| {
+        graph.parameter(
+            Shape::of([shapes.heads, shapes.batch, tokens, shapes.width]),
+            Init::Uniform {
+                low: -0.5,
+                high: 0.5,
+            },
+            Element::Single,
+        )
+    };
+    let queries = tensor(shapes.queries);
+    let keys = tensor(shapes.keys);
+    let values = tensor(shapes.keys);
+    let attend = |graph: &Graph<'g>| {
+        graph.attention(
+            queries,
+            keys,
+            values,
+            AttentionOptions {
+                scale: shapes.scale,
+                causal: shapes.causal,
+                origin: None,
+            },
+        )
+    };
+    let out = if recomputed {
+        graph.recompute(|graph| attend(graph))
+    } else {
+        attend(graph)
+    };
+    graph.retain(out);
+    let gradients = graph.backward(graph.sum(out));
+    let weight_gradients = [
+        gradients.of(queries),
+        gradients.of(keys),
+        gradients.of(values),
+    ];
+    for gradient in &weight_gradients {
+        graph.retain(*gradient);
+    }
+    (out, [queries, keys, values], weight_gradients)
+}
+
+#[test]
+fn a_recomputed_attention_block_matches_the_gradients_it_replaced() {
+    let runtime = open();
+    let shapes = shapes(true);
+    let plain = Graph::new();
+    let (plain_out, plain_inputs, plain_gradients) = block(&plain, shapes, false);
+    let plain_weights = runtime.weights(&plain);
+    let plain_program = runtime.compile(&plain, &plain_weights);
+
+    let recomputed = Graph::new();
+    let (out, inputs, gradients) = block(&recomputed, shapes, true);
+    let weights = runtime.weights(&recomputed);
+    let program = runtime.compile(&recomputed, &weights);
+
+    let queries_data = data(
+        shapes.heads * shapes.batch * shapes.queries * shapes.width,
+        17,
+    );
+    let keys_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 29);
+    let values_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 43);
+    for (runtime, program, inputs) in [
+        (&runtime, &plain_program, plain_inputs),
+        (&runtime, &program, inputs),
+    ] {
+        runtime.write(program, inputs[0], &queries_data);
+        runtime.write(program, inputs[1], &keys_data);
+        runtime.write(program, inputs[2], &values_data);
+        runtime.run(program);
+    }
+    assert_close(
+        &runtime.read(&program, out),
+        &runtime.read(&plain_program, plain_out),
+        1e-5,
+    );
+    let observed = runtime.read_many(&program, &gradients);
+    let expected = runtime.read_many(&plain_program, &plain_gradients);
+    for (observed, expected) in observed.iter().zip(&expected) {
+        assert_close(observed, expected, 1e-5);
+    }
+    assert!(
+        program.dispatch_count() > plain_program.dispatch_count(),
+        "a recomputed block follows the tape prefix it was authored into",
+    );
+}

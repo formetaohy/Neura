@@ -24,7 +24,7 @@ struct Packed {
 impl Schedule {
     pub(crate) fn of(values: &[ValueInfo], tasks: &[Task]) -> Self {
         let conflicts = conflicts(values, tasks);
-        let packed = pack(tasks, &conflicts);
+        let packed = pack(values, tasks, &conflicts);
         let schedule = Self::layout(&packed);
         assert_ordered(values, tasks, &schedule);
         schedule
@@ -129,6 +129,7 @@ fn conflicts(values: &[ValueInfo], tasks: &[Task]) -> Vec<Vec<u32>> {
     accesses(values, tasks, |before, after| {
         conflicts[after as usize].push(before);
     });
+    barriers(values, tasks, &mut conflicts);
     for conflict in &mut conflicts {
         conflict.sort_unstable();
         conflict.dedup();
@@ -136,16 +137,53 @@ fn conflicts(values: &[ValueInfo], tasks: &[Task]) -> Vec<Vec<u32>> {
     conflicts
 }
 
-fn pack(tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed {
+fn recomputes(values: &[ValueInfo], task: &Task) -> bool {
+    let access = Access::of(values, task);
+    access
+        .reads()
+        .iter()
+        .chain(access.writes())
+        .any(|storage| values[*storage as usize].recomputes.is_some())
+}
+
+fn barriers(values: &[ValueInfo], tasks: &[Task], conflicts: &mut [Vec<u32>]) {
+    let mut touched = vec![Vec::<u32>::new(); values.len()];
+    for (index, task) in tasks.iter().enumerate() {
+        let access = Access::of(values, task);
+        for storage in access.reads().iter().chain(access.writes()) {
+            touched[*storage as usize].push(index as u32);
+        }
+    }
+    for (index, task) in tasks.iter().enumerate() {
+        let Some(original) = values[task.out as usize].recomputes else {
+            continue;
+        };
+        for before in &touched[original as usize] {
+            if *before != index as u32 {
+                conflicts[index].push(*before);
+            }
+        }
+    }
+}
+
+fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed {
     let lonely = lonely(conflicts);
     let mut waves = vec![0u32; tasks.len()];
     let mut segments = Vec::<Vec<u32>>::new();
     let mut segment_of = vec![0u32; tasks.len()];
     let mut work = Vec::<u64>::new();
+    let mut prefix = 0u32;
+    let mut stage = 0u32;
+    let mut in_recompute = false;
     for index in 0..tasks.len() {
         let index = index as u32;
+        let recomputed = recomputes(values, &tasks[index as usize]);
+        if recomputed && !in_recompute {
+            stage = prefix + 1;
+        }
+        in_recompute = recomputed;
         let conflicts = &conflicts[index as usize];
-        let folded = lonely[index as usize]
+        let folded = (lonely[index as usize] && !recomputed)
             .then(|| {
                 let earliest = conflicts
                     .iter()
@@ -183,10 +221,12 @@ fn pack(tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed {
                 )
             }
         };
+        let wave = if recomputed { wave.max(stage) } else { wave };
         waves[index as usize] = wave;
         segment_of[index as usize] = segment;
         work[segment as usize] += tasks[index as usize].work;
         segments[segment as usize].push(index);
+        prefix = prefix.max(wave);
     }
     Packed { waves, segments }
 }
