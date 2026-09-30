@@ -310,3 +310,120 @@ impl<'g> Mlp<'g> {
         &self.layers
     }
 }
+
+pub struct RmsNorm<'g> {
+    columns: u32,
+    scale: Value<'g>,
+    share: Value<'g>,
+    floor: Value<'g>,
+}
+
+impl<'g> RmsNorm<'g> {
+    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32, element: Element) -> Self {
+        assert!(
+            columns > 0,
+            "a root mean square of {columns} columns scales nothing",
+        );
+        assert!(floor > 0.0, "a floor of {floor} divides by zero");
+        Self {
+            columns,
+            scale: graph.parameter(Shape::vector(columns), init, element),
+            share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
+            floor: graph.fill(Shape::scalar(), floor),
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+        assert_eq!(
+            graph.shape(input).columns(),
+            self.columns,
+            "a root mean square of {} columns scales {:?}",
+            self.columns,
+            graph.shape(input).dims(),
+        );
+        let squares = graph.mul(input, input);
+        let mean = graph.mul(graph.sum_rows(squares), self.share);
+        let deviation = graph.sqrt(graph.add(mean, self.floor));
+        graph.mul(graph.mul(input, graph.recip(deviation)), self.scale)
+    }
+
+    pub fn scale(&self) -> Value<'g> {
+        self.scale
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 1] {
+        [self.scale]
+    }
+}
+
+pub struct GroupNorm<'g> {
+    channels: u32,
+    groups: u32,
+    scale: Value<'g>,
+    shift: Value<'g>,
+    floor: Value<'g>,
+}
+
+impl<'g> GroupNorm<'g> {
+    pub fn new(
+        graph: &Graph<'g>,
+        channels: u32,
+        groups: u32,
+        init: Init,
+        floor: f32,
+        element: Element,
+    ) -> Self {
+        assert!(
+            channels > 0 && groups > 0 && channels.is_multiple_of(groups),
+            "a normalization of {channels} channels cuts {groups} groups",
+        );
+        assert!(floor > 0.0, "a floor of {floor} divides by zero");
+        Self {
+            channels,
+            groups,
+            scale: graph.parameter(Shape::of([1, channels, 1, 1]), init, element),
+            shift: graph.parameter(Shape::of([1, channels, 1, 1]), Init::Zero, element),
+            floor: graph.fill(Shape::scalar(), floor),
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+        let dims = graph.shape(input).dims();
+        assert_eq!(
+            dims[1], self.channels,
+            "a normalization of {} channels reads {:?}",
+            self.channels, dims,
+        );
+        let grouped = graph.reshape(
+            input,
+            Shape::of([
+                dims[0] * self.groups,
+                self.channels / self.groups,
+                dims[2],
+                dims[3],
+            ]),
+        );
+        let mean = graph.mean_axis(graph.mean_axis(graph.mean_axis(grouped, 3), 2), 1);
+        let centered = graph.sub(grouped, mean);
+        let spread = graph.mean_axis(
+            graph.mean_axis(graph.mean_axis(graph.mul(centered, centered), 3), 2),
+            1,
+        );
+        let deviation = graph.sqrt(graph.add(spread, self.floor));
+        let normalized = graph.mul(centered, graph.recip(deviation));
+        let whole = graph.reshape(normalized, Shape::of(dims));
+        graph.add(graph.mul(whole, self.scale), self.shift)
+    }
+
+    pub fn scale(&self) -> Value<'g> {
+        self.scale
+    }
+
+    pub fn shift(&self) -> Value<'g> {
+        self.shift
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 2] {
+        [self.scale, self.shift]
+    }
+}

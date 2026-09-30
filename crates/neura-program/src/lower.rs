@@ -32,6 +32,8 @@ pub(crate) struct Task {
     pub(crate) splits: u32,
     pub(crate) work: u64,
     pub(crate) in_place: bool,
+    pub(crate) axis: u32,
+    pub(crate) offset: u32,
     pub(crate) prelude: Vec<StepRecord>,
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) unit: u32,
@@ -79,6 +81,8 @@ impl Task {
             splits: 1,
             work,
             in_place: unit.in_place,
+            axis: unit.axis,
+            offset: unit.offset,
             prelude: unit.prelude.clone(),
             chain: unit.chain.clone(),
             unit: 0,
@@ -391,6 +395,21 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
         | Kind::Layout
         | Kind::OneHot
         | Kind::Gather => {
+            let out = plan.shape(unit.out);
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count)));
+            }
+        }
+        Kind::Concat => {
+            let source = plan.shape(unit.inputs[0]);
+            for (first, count) in spans(source.elements(), task_elements(source.elements(), target))
+            {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count)));
+            }
+        }
+        Kind::Slice => {
             let out = plan.shape(unit.out);
             for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
                 plan.tasks

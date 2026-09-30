@@ -462,4 +462,20 @@ kinds! {
         chain: true,
         origin: false,
     };
+    Concat CONCAT = "concat" {
+        entry: "run_concat",
+        modules: [Layout],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    Slice SLICE = "slice" {
+        entry: "run_slice",
+        modules: [Layout],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

@@ -270,6 +270,8 @@ impl Encoding {
                 stride_columns: task.window.stride_columns(),
                 pad_rows: task.window.pad_rows(),
                 pad_columns: task.window.pad_columns(),
+                axis: task.axis,
+                offset: task.offset,
             });
             if task.in_place
                 && task

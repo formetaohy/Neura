@@ -101,6 +101,8 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     stride_columns: u32 => U32,
     pad_rows: u32 => U32,
     pad_columns: u32 => U32,
+    axis: u32 => U32,
+    offset: u32 => U32,
 });
 
 #[repr(C)]

@@ -70,6 +70,8 @@ pub struct TaskInfo {
     pub param: f32,
     pub window: Window,
     pub in_place: bool,
+    pub axis: u32,
+    pub offset: u32,
     pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
@@ -87,6 +89,8 @@ impl TaskInfo {
             param: 0.0,
             window: Window::sliding([1, 1]),
             in_place: false,
+            axis: 0,
+            offset: 0,
             prelude: Vec::new(),
             chain: Vec::new(),
         }
@@ -889,6 +893,112 @@ impl<'g> Graph<'g> {
         out
     }
 
+    pub fn concat(&self, values: &[Value<'g>], axis: u32) -> Value<'g> {
+        assert!(
+            !values.is_empty(),
+            "a concatenation joins at least one tensor",
+        );
+        assert!(
+            axis < MAX_RANK,
+            "a concatenation names one of the {MAX_RANK} axes",
+        );
+        let values = values
+            .iter()
+            .map(|value| self.own(*value))
+            .collect::<Vec<_>>();
+        let first = self.shape(values[0]);
+        let element = self.element(values[0]);
+        let scale = self.scale(values[0]);
+        let mut dims = first.dims();
+        dims[axis as usize] = 0;
+        for value in &values {
+            let shape = self.shape(*value);
+            assert_eq!(
+                self.element(*value),
+                element,
+                "a concatenation joins {} numbers with {} numbers",
+                self.element(*value).name(),
+                element.name(),
+            );
+            assert_eq!(
+                self.scale(*value),
+                scale,
+                "a concatenation joins numbers reconstructed by {} with numbers reconstructed by {scale}",
+                self.scale(*value),
+            );
+            for (index, (left, right)) in first.dims().iter().zip(shape.dims()).enumerate() {
+                assert!(
+                    index as u32 == axis || left == &right,
+                    "a concatenation along axis {axis} meets {:?} and {:?}",
+                    first.dims(),
+                    shape.dims(),
+                );
+            }
+            dims[axis as usize] += shape.dims()[axis as usize];
+        }
+        let widened = element.narrow();
+        let out = self.stored(
+            Shape::of(dims),
+            if widened { Element::Single } else { element },
+            if widened { 1.0 } else { scale },
+            Residency::Derived,
+            self.tracked(&values),
+        );
+        let mut offset = 0;
+        for value in &values {
+            let mut task = TaskInfo::of(
+                Kind::Concat,
+                op::NONE,
+                out.id(),
+                [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+            );
+            task.axis = axis;
+            task.offset = offset;
+            self.push(task);
+            offset += self.shape(*value).dims()[axis as usize];
+        }
+        if !widened {
+            return out;
+        }
+        match element {
+            Element::Int8 => self.quantize(out, scale),
+            other => self.cast(out, other),
+        }
+    }
+
+    pub fn slice(&self, value: Value<'g>, axis: u32, start: u32, length: u32) -> Value<'g> {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        assert!(
+            axis < MAX_RANK
+                && length > 0
+                && start
+                    .checked_add(length)
+                    .is_some_and(|end| end <= shape.dims()[axis as usize]),
+            "a slice of {length} numbers from {start} along axis {axis} reaches beyond {:?}",
+            shape.dims(),
+        );
+        let mut dims = shape.dims();
+        dims[axis as usize] = length;
+        let out = self.stored(
+            Shape::of(dims),
+            self.element(value),
+            self.scale(value),
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Slice,
+            op::NONE,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        task.axis = axis;
+        task.offset = start;
+        self.push(task);
+        out
+    }
+
     pub fn scatter_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
         self.rows_into(Kind::Scatter, target, indices, updates);
     }
@@ -1331,6 +1441,63 @@ impl<'g> Graph<'g> {
     fn backward_task(&self, task: &TaskInfo, gradient: Value<'g>, grads: &mut [Option<u32>]) {
         let gradient = self.own(gradient);
         match task.kind {
+            Kind::Broadcast => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    self.accumulate(grads, source, gradient);
+                }
+            }
+            Kind::Concat => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    let out = self.fresh(
+                        self.shape(source),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
+                    let mut grad = TaskInfo::of(
+                        Kind::Slice,
+                        op::NONE,
+                        out.id(),
+                        [
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    );
+                    grad.axis = task.axis;
+                    grad.offset = task.offset;
+                    self.push(grad);
+                    self.accumulate(grads, source, out);
+                }
+            }
+            Kind::Slice => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    let zeros = self.fill(self.shape(source), 0.0);
+                    let mut grad = TaskInfo::of(
+                        Kind::Concat,
+                        op::NONE,
+                        zeros.id(),
+                        [
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    );
+                    grad.axis = task.axis;
+                    grad.offset = task.offset;
+                    self.push(grad);
+                    self.accumulate(grads, source, zeros);
+                }
+            }
             Kind::Matmul => {
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
                 if self.tracked(&[left]) {
@@ -1514,7 +1681,6 @@ impl<'g> Graph<'g> {
                 }
             }
             Kind::Fill
-            | Kind::Broadcast
             | Kind::Layout
             | Kind::Partial
             | Kind::SoftmaxGrad
@@ -1827,6 +1993,51 @@ impl<'g> Graph<'g> {
         self.fold(value, MAX_RANK - 1)
     }
 
+    pub fn sum_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        assert!(
+            axis < MAX_RANK,
+            "a fold names one of the {MAX_RANK} axes of {:?}",
+            shape.dims(),
+        );
+        if shape.dims()[axis as usize] == 1 {
+            return value;
+        }
+        self.fold(value, axis)
+    }
+
+    pub fn mean_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        assert!(
+            axis < MAX_RANK,
+            "a mean names one of the {MAX_RANK} axes of {:?}",
+            shape.dims(),
+        );
+        let summed = self.sum_axis(value, axis);
+        let count = shape.dims()[axis as usize];
+        if count == 1 {
+            return summed;
+        }
+        self.mul(summed, self.fill(shape.reduced(axis), 1.0 / count as f32))
+    }
+
+    pub fn broadcast_to(&self, value: Value<'g>, shape: Shape) -> Value<'g> {
+        let value = self.own(value);
+        let source = self.shape(value);
+        assert!(
+            source.fits_within(shape),
+            "a broadcast spreads {:?} over {:?}",
+            source.dims(),
+            shape.dims(),
+        );
+        if source == shape {
+            return value;
+        }
+        self.broadcast(value, shape)
+    }
+
     fn fold(&self, value: Value<'g>, axis: u32) -> Value<'g> {
         let value = self.own(value);
         let shape = self.shape(value);
@@ -1870,7 +2081,7 @@ impl<'g> Graph<'g> {
             self.element(source),
             self.carries(self.element(source), &[source]),
             Residency::Derived,
-            false,
+            self.tracked(&[source]),
         );
         self.push(TaskInfo::of(
             Kind::Broadcast,
