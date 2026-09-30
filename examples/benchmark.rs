@@ -1,5 +1,5 @@
 use neura::{
-    Adam, Element, Graph, Init, MatmulTile, Mlp, Profile, Program, Runtime, RuntimeRequest, Shape,
+    AdamW, Element, Graph, Init, MatmulTile, Mlp, Profile, Program, Runtime, RuntimeRequest, Shape,
     mse_loss,
 };
 use std::time::Instant;
@@ -110,7 +110,7 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     let targets = graph.input(Shape::matrix(samples, outputs), Element::Single);
     let loss = mse_loss(&graph, model.forward(&graph, observations), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.005, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);

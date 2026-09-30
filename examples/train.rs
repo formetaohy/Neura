@@ -1,4 +1,4 @@
-use neura::{Adam, Element, Graph, Init, Mlp, Runtime, RuntimeRequest, Shape, mse_loss};
+use neura::{AdamW, Element, Graph, Init, Mlp, Runtime, RuntimeRequest, Shape, mse_loss};
 use std::time::Instant;
 
 fn session(samples: u32) -> (Vec<f32>, Vec<f32>) {
@@ -36,7 +36,7 @@ fn main() {
     graph.retain(prediction);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Adam::new(&graph, 0.005, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.005, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);

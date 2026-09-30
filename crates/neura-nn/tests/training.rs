@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Window};
-use neura_nn::{Adam, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
+use neura_nn::{AdamW, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
 use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
@@ -42,7 +42,7 @@ fn a_multilayer_perceptron_learns_a_nonlinear_surface() {
     let prediction = model.forward(&graph, inputs);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Adam::new(&graph, 0.02, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -85,8 +85,9 @@ fn descent_lowers_the_loss_of_a_single_layer() {
     let targets = graph.input(Shape::matrix(16, 1), Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.05);
-    optimizer.step(&graph, &gradients, &layer.parameters());
+    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    optimizer.track_all(&graph, &layer.parameters());
+    optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let inputs_data = (0..48)
@@ -126,8 +127,9 @@ fn a_batch_of_sequences_trains_one_dense_layer() {
     assert_eq!(prediction.shape(), Shape::of([8, 5, 2]));
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.05);
-    optimizer.step(&graph, &gradients, &layer.parameters());
+    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    optimizer.track_all(&graph, &layer.parameters());
+    optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(
@@ -169,8 +171,9 @@ fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
     let targets = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
     let loss = mse_loss(&graph, conv.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.1);
-    optimizer.step(&graph, &gradients, &conv.parameters());
+    let mut optimizer = Sgd::new(&graph, 0.1, 0.0);
+    optimizer.track_all(&graph, &conv.parameters());
+    optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let pattern = (0..36)
@@ -198,9 +201,10 @@ fn a_step_over_a_parameter_without_a_gradient_stops_the_graph() {
     let other = graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(weight));
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.1);
+    let mut optimizer = Sgd::new(&graph, 0.1, 0.0);
+    optimizer.track(&graph, other);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        optimizer.step(&graph, &gradients, &[other]);
+        optimizer.step(&graph, &gradients);
     }));
     assert!(
         outcome.is_err(),
@@ -212,7 +216,7 @@ fn a_step_over_a_parameter_without_a_gradient_stops_the_graph() {
 fn moments_track_each_parameter_once() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);
-    let mut optimizer = Adam::new(&graph, 0.1, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track(&graph, weight);
     assert_eq!(optimizer.moments().len(), 1);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -269,7 +273,7 @@ fn a_network_learns_the_action_it_was_shown() {
     graph.retain(logits);
     let loss = cross_entropy(&graph, logits, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Adam::new(&graph, 0.05, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.05, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -330,8 +334,9 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
     graph.retain(logits);
     graph.retain(action);
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.05);
-    optimizer.step(&graph, &gradients, &layer.parameters());
+    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    optimizer.track_all(&graph, &layer.parameters());
+    optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(

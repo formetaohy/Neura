@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
-use neura_nn::{Adam, Linear, Sgd, mse_loss};
+use neura_nn::{AdamW, Linear, Sgd, mse_loss};
 use neura_runtime::{Runtime, RuntimeRequest};
 use std::time::Instant;
 
@@ -57,7 +57,7 @@ fn half_precision_activations_train_a_model() {
     assert_eq!(graph.element(prediction), Element::Half);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Adam::new(&graph, 0.02, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &first.parameters());
     optimizer.track_all(&graph, &second.parameters());
     optimizer.step(&graph, &gradients);
@@ -131,8 +131,9 @@ fn a_narrow_step_runs_beside_a_wide_one() {
     let prediction = model.forward(&graph, input);
     let loss = mse_loss(&graph, prediction, prediction);
     let gradients = graph.backward(loss);
-    let optimizer = Sgd::new(&graph, 0.01);
-    optimizer.step(&graph, &gradients, &model.parameters());
+    let mut optimizer = Sgd::new(&graph, 0.01, 0.0);
+    optimizer.track_all(&graph, &model.parameters());
+    optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     runtime.write(&program, input, &vec![0.5; 256 * 256]);

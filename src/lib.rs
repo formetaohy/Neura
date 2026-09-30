@@ -7,7 +7,7 @@ pub use neura_graph::{
     AttentionOptions, Gradients, Graph, GraphStamp, Init, Pool, Shape, Value, Window,
 };
 pub use neura_nn::{
-    Adam, Conv2d, Embedding, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, Sgd,
+    AdamW, Conv2d, Embedding, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, Sgd,
     cross_entropy, mse_loss, policy_loss,
 };
 pub use neura_program::{Layout, Region, Seed};

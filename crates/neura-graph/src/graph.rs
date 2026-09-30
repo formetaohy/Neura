@@ -5,11 +5,13 @@ use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_op as op;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
+
+const NORM_FLOOR: f32 = 1e-6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Value<'g> {
@@ -176,17 +178,51 @@ impl GraphSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Gradients<'g> {
-    values: HashMap<u32, Value<'g>>,
+    values: BTreeMap<u32, (Value<'g>, Value<'g>)>,
 }
 
 impl<'g> Gradients<'g> {
     pub fn of(&self, value: Value<'g>) -> Value<'g> {
-        *self.values.get(&value.id()).unwrap_or_else(|| {
-            panic!(
-                "no gradient reaches {:?} from the loss, and the gradient of a view reaches the tensor that owns its storage",
-                value.shape(),
-            )
-        })
+        self.values
+            .get(&value.id())
+            .map(|(_, gradient)| *gradient)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no gradient reaches {:?} from the loss, and the gradient of a view reaches the tensor that owns its storage",
+                    value.shape(),
+                )
+            })
+    }
+
+    pub fn clip(&self, graph: &Graph<'g>, threshold: f32) -> Self {
+        assert!(
+            threshold.is_finite() && threshold > 0.0,
+            "a clip of {threshold} rescales a gradient set to nothing",
+        );
+        let mut squared = graph.fill(Shape::scalar(), 0.0);
+        for (id, (_, gradient)) in self.values.iter() {
+            if !graph.trains(*id) {
+                continue;
+            }
+            squared = graph.add(squared, graph.sum(graph.mul(*gradient, *gradient)));
+        }
+        let factor = graph.min(
+            graph.fill(Shape::scalar(), 1.0),
+            graph.mul(
+                graph.fill(Shape::scalar(), threshold),
+                graph
+                    .recip(graph.add(graph.sqrt(squared), graph.fill(Shape::scalar(), NORM_FLOOR))),
+            ),
+        );
+        Self {
+            values: self
+                .values
+                .iter()
+                .map(|(id, (parameter, gradient))| {
+                    (*id, (*parameter, graph.mul(*gradient, factor)))
+                })
+                .collect(),
+        }
     }
 }
 
@@ -1088,10 +1124,10 @@ impl<'g> Graph<'g> {
             self.backward_task(&task, gradient, &mut grads);
         }
         recomputing.restore(&mut grads);
-        let mut values = HashMap::new();
+        let mut values = BTreeMap::new();
         for (id, grad) in grads.into_iter().enumerate() {
             if let Some(grad) = grad {
-                values.insert(id as u32, self.value_of(grad));
+                values.insert(id as u32, (self.value_of(id as u32), self.value_of(grad)));
             }
         }
         Gradients { values }
@@ -1885,6 +1921,10 @@ impl<'g> Graph<'g> {
 
     fn owner_of(&self, value: u32) -> u32 {
         self.state.borrow().values[value as usize].storage
+    }
+
+    fn trains(&self, id: u32) -> bool {
+        self.state.borrow().values[id as usize].residency == Residency::Parameter
     }
 
     fn contiguous(&self, value: Value<'g>) -> bool {

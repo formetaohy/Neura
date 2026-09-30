@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Residency, Shape, Value};
-use neura_nn::{Adam, MultiHeadAttention, mse_loss};
+use neura_nn::{AdamW, MultiHeadAttention, mse_loss};
 use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
@@ -133,7 +133,7 @@ fn a_multi_head_attention_lowers_the_loss_it_was_shown() {
     let block = block(true);
     let gradients = block.graph.backward(block.loss);
     let parameters = block.model.parameters();
-    let mut optimizer = Adam::new(&block.graph, 0.02, 0.9, 0.999, 1e-8);
+    let mut optimizer = AdamW::new(&block.graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&block.graph, &parameters);
     optimizer.step(&block.graph, &gradients);
     let weights = block.runtime.weights(&block.graph);

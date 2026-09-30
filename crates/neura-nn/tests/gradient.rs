@@ -369,7 +369,7 @@ fn one_step_of_adam_moves_a_weight_against_its_gradient() {
     let targets = graph.input(Shape::matrix(4, 1), Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = neura_nn::Adam::new(&graph, 0.1, 0.9, 0.999, 1e-8);
+    let mut optimizer = neura_nn::AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     graph.retain(loss);
