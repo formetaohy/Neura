@@ -23,6 +23,18 @@ pub const FP4_E2M1: u32 = Element::Fp4E2M1 as u32;
 pub const INT4_BLOCK: u32 = 128;
 pub const FP4_BLOCK: u32 = 32;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FloatFormat {
+    pub bias: i32,
+    pub mantissa_bits: u32,
+    pub subnormal_shift: i32,
+    pub smallest: f32,
+    pub nan: u32,
+    pub infinity: u32,
+    pub max: u32,
+    pub ceiling: u32,
+}
+
 impl Element {
     pub const ALL: &'static [Element] = &[
         Self::Single,
@@ -119,6 +131,42 @@ impl Element {
 
     pub const fn per_block(self) -> bool {
         self.block() != 0
+    }
+
+    pub const fn format(self) -> Option<FloatFormat> {
+        match self {
+            Self::Fp8E4M3 => Some(FloatFormat {
+                bias: 7,
+                mantissa_bits: 3,
+                subnormal_shift: 14,
+                smallest: 1.0 / 512.0,
+                nan: 0x7f,
+                infinity: 0x7f,
+                max: 0x7e,
+                ceiling: 0x43e0_0000,
+            }),
+            Self::Fp8E5M2 => Some(FloatFormat {
+                bias: 15,
+                mantissa_bits: 2,
+                subnormal_shift: 7,
+                smallest: 1.0 / 65536.0,
+                nan: 0x7f,
+                infinity: 0x7c,
+                max: 0x7b,
+                ceiling: 0x4760_0000,
+            }),
+            Self::Fp4E2M1 => Some(FloatFormat {
+                bias: 1,
+                mantissa_bits: 1,
+                subnormal_shift: 22,
+                smallest: 0.5,
+                nan: u32::MAX,
+                infinity: u32::MAX,
+                max: 0b0111,
+                ceiling: 0x40c0_0000,
+            }),
+            _ => None,
+        }
     }
 
     pub const fn promote(self, other: Self) -> Self {

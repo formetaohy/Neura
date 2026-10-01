@@ -343,56 +343,91 @@ fn rounding_contract(backends: neura_gpu::Backends) {
         ..Default::default()
     }))
     .expect("a device rounds the numbers the host would");
-    for (element, probes) in [
-        (Element::Half, probes()),
-        (Element::Bfloat16, probes()),
-        (Element::Fp8E4M3, fp8_probes()),
-        (Element::Fp8E5M2, fp8_probes()),
-    ] {
-        let graph = Graph::new();
-        let data = graph.input(Shape::vector(probes.len() as u32), Element::Single);
-        let narrowed = graph.cast(data, element);
-        graph.retain(narrowed);
-        let weights = runtime.weights(&graph);
-        let program = runtime.compile(&graph, &weights);
-        runtime.write(&program, data, &probes);
-        runtime.run(&program);
-        let device = runtime.read(&program, narrowed);
-        let host = unpack(element, probes.len(), &pack(element, 1.0, &probes));
-        for (index, (device, host)) in device.iter().zip(&host).enumerate() {
-            assert_eq!(
-                device.to_bits(),
-                host.to_bits(),
-                "element {index} of a {} tensor came back as {device} where the host packs {host}, from {}",
-                element.name(),
-                probes[index],
-            );
+    for element in Element::ALL {
+        match element {
+            Element::Single => {}
+            Element::Half | Element::Bfloat16 => narrowing_contract(&runtime, *element, &probes()),
+            Element::Fp8E4M3 | Element::Fp8E5M2 => {
+                narrowing_contract(&runtime, *element, &fp8_probes())
+            }
+            Element::Int8 => {
+                let scale = 0.015625;
+                quantized_contract(&runtime, *element, scale, &quantized_probes(scale));
+            }
+            Element::Int4 | Element::Fp4E2M1 => block_contract(&runtime, *element),
         }
     }
-    let scale = 0.015625;
-    let probes = quantized_probes(scale);
+}
+
+fn narrowing_contract(runtime: &Runtime, element: Element, probes: &[f32]) {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(probes.len() as u32), Element::Single);
+    let narrowed = graph.cast(data, element);
+    graph.retain(narrowed);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, probes);
+    runtime.run(&program);
+    let device = runtime.read(&program, narrowed);
+    let host = unpack(element, probes.len(), &pack(element, 1.0, probes));
+    for (index, (device, host)) in device.iter().zip(&host).enumerate() {
+        assert_eq!(
+            device.to_bits(),
+            host.to_bits(),
+            "element {index} of a {} tensor came back as {device} where the host packs {host}, from {}",
+            element.name(),
+            probes[index],
+        );
+    }
+}
+
+fn quantized_contract(runtime: &Runtime, element: Element, scale: f32, probes: &[f32]) {
     let graph = Graph::new();
     let data = graph.input(Shape::vector(probes.len() as u32), Element::Single);
     let quantized = graph.quantize(data, scale);
     graph.retain(quantized);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
-    runtime.write(&program, data, &probes);
+    runtime.write(&program, data, probes);
     runtime.run(&program);
     let device = runtime.read(&program, quantized);
-    let host = unpack(
-        Element::Int8,
-        probes.len(),
-        &pack(Element::Int8, scale, &probes),
-    );
+    let host = unpack(element, probes.len(), &pack(element, scale, probes));
     for (index, (device, host)) in device.iter().zip(&host).enumerate() {
         assert_eq!(
             device.to_bits(),
             host.to_bits(),
-            "element {index} of an int8 tensor came back as {device} where the host places {host}, from {}",
+            "element {index} of a {} tensor came back as {device} where the host places {host}, from {}",
+            element.name(),
             probes[index],
         );
     }
+}
+
+fn block_contract(runtime: &Runtime, element: Element) {
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(
+        Shape::matrix(150, 8),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        element,
+    );
+    let input = graph.input(Shape::matrix(3, 150), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(1200, 23);
+    runtime.write(&program, weight, &values);
+    runtime.write(&program, input, &random(450, 17));
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, weight),
+        unpack(element, values.len(), &pack(element, 1.0, &values)),
+        "a {} weight reads back the numbers its blocks place",
+        element.name(),
+    );
 }
 
 fn fp8_probes() -> Vec<f32> {

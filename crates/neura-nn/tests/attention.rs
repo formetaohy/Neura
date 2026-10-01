@@ -73,9 +73,9 @@ fn elements() -> u32 {
     HEADS * BATCH * TOKENS * WIDTH
 }
 
-fn inputs(seed: u32) -> Vec<f32> {
+fn inputs(count: u32, seed: u32) -> Vec<f32> {
     let mut entropy = seed | 1;
-    (0..elements())
+    (0..count)
         .map(|_| {
             entropy ^= entropy << 13;
             entropy ^= entropy >> 17;
@@ -94,8 +94,12 @@ fn gradient_of_a_multi_head_attention_matches_finite_differences(causal: bool) {
     }
     let weights = block.runtime.weights(&block.graph);
     let program = block.runtime.compile(&block.graph, &weights);
-    block.runtime.write(&program, block.input, &inputs(23));
-    block.runtime.write(&program, block.target, &inputs(71));
+    block
+        .runtime
+        .write(&program, block.input, &inputs(elements(), 23));
+    block
+        .runtime
+        .write(&program, block.target, &inputs(elements(), 71));
     block.runtime.run(&program);
     for parameter in parameters {
         let values = block.runtime.read(&program, parameter);
@@ -138,8 +142,12 @@ fn a_multi_head_attention_lowers_the_loss_it_was_shown() {
     optimizer.step(&block.graph, &gradients);
     let weights = block.runtime.weights(&block.graph);
     let program = block.runtime.compile(&block.graph, &weights);
-    block.runtime.write(&program, block.input, &inputs(23));
-    block.runtime.write(&program, block.target, &inputs(71));
+    block
+        .runtime
+        .write(&program, block.input, &inputs(elements(), 23));
+    block
+        .runtime
+        .write(&program, block.target, &inputs(elements(), 71));
     let mut first = None;
     let mut last = 0.0;
     for step in 0..400 {
@@ -154,6 +162,82 @@ fn a_multi_head_attention_lowers_the_loss_it_was_shown() {
         last < 0.5 * first,
         "a step of {first} became {last} over 400 steps",
     );
+}
+
+fn rotary_block() -> Block {
+    let graph = Graph::new();
+    let width = WIDTH + 1;
+    let model = MultiHeadAttention::rotary(
+        &graph,
+        HEADS,
+        width,
+        Init::Uniform {
+            low: -0.3,
+            high: 0.3,
+        },
+        Element::Single,
+        AttentionOptions {
+            scale: 1.0 / (width as f32).sqrt(),
+            causal: true,
+            origin: None,
+        },
+        10000.0,
+    );
+    let input = graph.input(Shape::of([HEADS, BATCH, TOKENS, width]), Element::Single);
+    let target = graph.input(Shape::of([HEADS, BATCH, TOKENS, width]), Element::Single);
+    let loss = mse_loss(&graph, model.forward(&graph, input), target);
+    graph.retain(loss);
+    Block {
+        runtime: open(),
+        graph,
+        model,
+        input,
+        target,
+        loss,
+    }
+}
+
+#[test]
+fn a_rotary_attention_gradient_matches_finite_differences() {
+    let block = rotary_block();
+    let gradients = block.graph.backward(block.loss);
+    let parameters = block.model.parameters();
+    for parameter in parameters {
+        block.graph.retain(gradients.of(parameter));
+    }
+    let weights = block.runtime.weights(&block.graph);
+    let program = block.runtime.compile(&block.graph, &weights);
+    let count = HEADS * BATCH * TOKENS * (WIDTH + 1);
+    block
+        .runtime
+        .write(&program, block.input, &inputs(count, 23));
+    block
+        .runtime
+        .write(&program, block.target, &inputs(count, 71));
+    block.runtime.run(&program);
+    for parameter in parameters {
+        let values = block.runtime.read(&program, parameter);
+        let analytic = block.runtime.read(&program, gradients.of(parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            block.runtime.write(&program, parameter, &probe);
+            block.runtime.run(&program);
+            let high = block.runtime.read(&program, block.loss)[0];
+            probe[element] -= 2.0 * step;
+            block.runtime.write(&program, parameter, &probe);
+            block.runtime.run(&program);
+            let low = block.runtime.read(&program, block.loss)[0];
+            assert_slope(
+                element,
+                analytic[element],
+                (high - low) / (2.0 * step),
+                values.len(),
+            );
+        }
+        block.runtime.write(&program, parameter, &values);
+    }
 }
 
 #[test]

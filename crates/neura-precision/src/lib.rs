@@ -1,4 +1,4 @@
-use neura_abi::{Element, FP4_BLOCK, INT4_BLOCK, WORD_BYTES};
+use neura_abi::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK, WORD_BYTES};
 
 pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
     match element {
@@ -128,7 +128,7 @@ fn fp4_bits(value: f32, quantum: f32) -> u8 {
     if quantum == 0.0 {
         return 0;
     }
-    let code = fp8_bits(value / quantum, E2M1_SHAPE);
+    let code = fp8_bits(value / quantum, grid(Element::Fp4E2M1));
     (((code & 0x80) >> 4) | (code & 0x07)) as u8
 }
 
@@ -147,7 +147,10 @@ fn fp4_values(elements: usize, bytes: &[u8]) -> Vec<f32> {
 }
 
 fn fp4_value(nibble: u8) -> f32 {
-    fp8_value(((nibble & 0x08) << 4) | (nibble & 0x07), E2M1_SHAPE)
+    fp8_value(
+        ((nibble & 0x08) << 4) | (nibble & 0x07),
+        grid(Element::Fp4E2M1),
+    )
 }
 
 fn int4_values(elements: usize, bytes: &[u8]) -> Vec<f32> {
@@ -222,122 +225,86 @@ fn halves_of(bytes: &[u8], split: impl Fn(u32) -> [f32; 2]) -> Vec<f32> {
         .collect()
 }
 
-const E4M3_SHAPE: Shape = Shape {
-    bias: 7,
-    mantissa_bits: 3,
-    subnormal_shift: 14,
-    smallest: 1.0 / 512.0,
-    nan: 0x7f,
-    infinity: 0x7f,
-    max: 0x7e,
-    ceiling: 0x43e0_0000,
-};
-
-const E2M1_SHAPE: Shape = Shape {
-    bias: 1,
-    mantissa_bits: 1,
-    subnormal_shift: 22,
-    smallest: 0.5,
-    nan: u32::MAX,
-    infinity: u32::MAX,
-    max: 0b0111,
-    ceiling: 0x40c0_0000,
-};
-
-const E5M2_SHAPE: Shape = Shape {
-    bias: 15,
-    mantissa_bits: 2,
-    subnormal_shift: 7,
-    smallest: 1.0 / 65536.0,
-    nan: 0x7f,
-    infinity: 0x7c,
-    max: 0x7b,
-    ceiling: 0x4760_0000,
-};
-
-#[derive(Clone, Copy)]
-struct Shape {
-    bias: i32,
-    mantissa_bits: u32,
-    subnormal_shift: i32,
-    smallest: f32,
-    nan: u32,
-    infinity: u32,
-    max: u32,
-    ceiling: u32,
+fn grid(element: Element) -> FloatFormat {
+    element.format().unwrap_or_else(|| {
+        panic!(
+            "{} storage carries numbers on a grid the ABI does not declare",
+            element.name(),
+        )
+    })
 }
 
 fn e4m3_bits(value: f32) -> u32 {
-    fp8_bits(value, E4M3_SHAPE)
+    fp8_bits(value, grid(Element::Fp8E4M3))
 }
 
 fn e5m2_bits(value: f32) -> u32 {
-    fp8_bits(value, E5M2_SHAPE)
+    fp8_bits(value, grid(Element::Fp8E5M2))
 }
 
-fn fp8_bits(value: f32, shape: Shape) -> u32 {
+fn fp8_bits(value: f32, format: FloatFormat) -> u32 {
     let bits = value.to_bits();
     let sign = (bits >> 24) & 0x80;
     let magnitude = bits & 0x7fff_ffff;
     if magnitude > 0x7f80_0000 {
-        return sign | shape.nan;
+        return sign | format.nan;
     }
-    if magnitude >= shape.ceiling {
-        return sign | shape.max;
+    if magnitude >= format.ceiling {
+        return sign | format.max;
     }
     let exponent = ((magnitude >> 23) as i32) - 127;
     let significand = (magnitude & 0x007f_ffff) | 0x0080_0000;
-    let rounding = 23 - shape.mantissa_bits;
-    if exponent >= 1 - shape.bias {
+    let rounding = 23 - format.mantissa_bits;
+    if exponent >= 1 - format.bias {
         let pinned = (significand + (1 << (rounding - 1))) >> rounding;
-        let mut code = (exponent + shape.bias) as u32;
-        let mut carried = pinned - (1 << shape.mantissa_bits);
-        if carried > (1 << shape.mantissa_bits) - 1 {
+        let mut code = (exponent + format.bias) as u32;
+        let mut carried = pinned - (1 << format.mantissa_bits);
+        if carried > (1 << format.mantissa_bits) - 1 {
             carried = 0;
             code += 1;
         }
-        if code > (shape.max >> shape.mantissa_bits) {
-            return sign | shape.max;
+        if code > (format.max >> format.mantissa_bits) {
+            return sign | format.max;
         }
-        return sign | (code << shape.mantissa_bits) | carried;
+        return sign | (code << format.mantissa_bits) | carried;
     }
-    let shift = (shape.subnormal_shift - exponent) as u32;
+    let shift = (format.subnormal_shift - exponent) as u32;
     if shift >= 32 {
         return sign;
     }
     let pinned = (significand + (1 << (shift - 1))) >> shift;
-    if pinned > (1 << shape.mantissa_bits) - 1 {
-        return sign | (1 << shape.mantissa_bits);
+    if pinned > (1 << format.mantissa_bits) - 1 {
+        return sign | (1 << format.mantissa_bits);
     }
     sign | pinned
 }
 
 fn e4m3_value(byte: u8) -> f32 {
-    fp8_value(byte, E4M3_SHAPE)
+    fp8_value(byte, grid(Element::Fp8E4M3))
 }
 
 fn e5m2_value(byte: u8) -> f32 {
-    fp8_value(byte, E5M2_SHAPE)
+    fp8_value(byte, grid(Element::Fp8E5M2))
 }
 
-fn fp8_value(byte: u8, shape: Shape) -> f32 {
+fn fp8_value(byte: u8, format: FloatFormat) -> f32 {
     let code = u32::from(byte);
     let sign = code & 0x80;
     let body = code & 0x7f;
-    if body > shape.infinity || body == shape.nan {
+    if body > format.infinity || body == format.nan {
         return f32::from_bits((sign << 24) | 0x7fc0_0000);
     }
-    if body == shape.infinity {
+    if body == format.infinity {
         return f32::from_bits((sign << 24) | 0x7f80_0000);
     }
-    let exponent = body >> shape.mantissa_bits;
-    let mantissa = body & ((1 << shape.mantissa_bits) - 1);
+    let exponent = body >> format.mantissa_bits;
+    let mantissa = body & ((1 << format.mantissa_bits) - 1);
     let magnitude = if exponent == 0 {
-        mantissa as f32 * shape.smallest
+        mantissa as f32 * format.smallest
     } else {
         f32::from_bits(
-            (((exponent as i32 + 127 - shape.bias) as u32) << 23)
-                | (mantissa << (23 - shape.mantissa_bits)),
+            (((exponent as i32 + 127 - format.bias) as u32) << 23)
+                | (mantissa << (23 - format.mantissa_bits)),
         )
     };
     signed(sign, magnitude)

@@ -491,6 +491,34 @@ impl<'g> Graph<'g> {
                     self.row_gradient(Kind::SoftmaxGrad, task, source, gradient, grads);
                 }
             }
+            Kind::Rope => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    let out = self.fresh(
+                        self.shape(source),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
+                    let mut grad = TaskInfo::of(
+                        Kind::RopeGrad,
+                        op::NONE,
+                        out.id(),
+                        [
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    );
+                    grad.origin = task.origin;
+                    grad.param = task.param;
+                    self.push(grad);
+                    self.accumulate(grads, source, out);
+                }
+            }
             Kind::LogSoftmax => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
@@ -646,6 +674,7 @@ impl<'g> Graph<'g> {
             Kind::Fill
             | Kind::Layout
             | Kind::Partial
+            | Kind::RopeGrad
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad
             | Kind::AttentionQueryGrad

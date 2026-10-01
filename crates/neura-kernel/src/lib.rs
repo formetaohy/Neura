@@ -24,6 +24,9 @@ mod pool;
 mod reduce;
 #[path = "../device/reduce.rs"]
 mod reduce_device;
+mod rope;
+#[path = "../device/rope.rs"]
+mod rope_device;
 #[path = "../device/scatter.rs"]
 mod scatter;
 #[path = "../device/select.rs"]
@@ -80,6 +83,7 @@ fn substrate(compiler: &mut Compiler, elements: &[Element]) {
     element::define(compiler, elements);
     pointwise::define(compiler);
     op::define(compiler);
+    rope::define(compiler);
 }
 
 fn install(

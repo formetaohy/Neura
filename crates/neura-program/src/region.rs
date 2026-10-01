@@ -66,6 +66,39 @@ pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -
                 touches.reads.push((source.storage, region));
             }
         }
+        Kind::Rope | Kind::RopeGrad => {
+            let half = u64::from(out.shape.dims()[3] / 2);
+            let first = u64::from(task.first);
+            let count = u64::from(task.count);
+            for value in writes(task) {
+                touches
+                    .writes
+                    .push((values[value as usize].storage, Region::run(first, count)));
+            }
+            for value in task
+                .inputs
+                .iter()
+                .copied()
+                .filter(|value| *value != NO_VALUE)
+            {
+                let source = &values[value as usize];
+                let region = if source.shape == out.shape && dense(source) && owned(values, value) {
+                    Region::run(first.saturating_sub(half), count + 2 * half)
+                } else {
+                    Region::Whole
+                };
+                touches.reads.push((source.storage, region));
+            }
+            for value in std::iter::once(task.origin)
+                .chain(task.prelude.iter().map(|step| step.operand))
+                .chain(task.chain.iter().map(|step| step.operand))
+                .filter(|value| *value != NO_VALUE)
+            {
+                touches
+                    .reads
+                    .push((values[value as usize].storage, Region::Whole));
+            }
+        }
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let columns = u64::from(out.shape.dims()[3]);
             let range = Region::run(

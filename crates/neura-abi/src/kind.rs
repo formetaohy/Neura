@@ -478,4 +478,20 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Rope ROPE = "rope" {
+        entry: "run_rope",
+        modules: [],
+        geometry: None,
+        prelude: false,
+        chain: true,
+        origin: true,
+    };
+    RopeGrad ROPE_GRAD = "rope_grad" {
+        entry: "run_rope_grad",
+        modules: [],
+        geometry: None,
+        prelude: false,
+        chain: true,
+        origin: true,
+    };
 }

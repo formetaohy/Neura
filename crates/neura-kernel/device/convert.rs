@@ -249,7 +249,7 @@ mod source {
         }
     }
 
-    fn run_convert_fp8_e4m3(task: Task, lid: u32) {
+    fn template_run_convert_fp8(task: Task, lid: u32) {
         let output = values[task.out];
         let source = values[task.a];
         for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
@@ -261,35 +261,12 @@ mod source {
                     source,
                     output,
                     word,
-                    7u32,
-                    3u32,
-                    14u32,
-                    0x7fu32,
-                    0x7eu32,
-                    0x43e0_0000u32,
-                ),
-            );
-        }
-    }
-
-    fn run_convert_fp8_e5m2(task: Task, lid: u32) {
-        let output = values[task.out];
-        let source = values[task.a];
-        for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            publish_word(
-                output,
-                word,
-                pack_fp8(
-                    task,
-                    source,
-                    output,
-                    word,
-                    15u32,
-                    2u32,
-                    7u32,
-                    0x7fu32,
-                    0x7bu32,
-                    0x4760_0000u32,
+                    FP8_BIAS,
+                    FP8_MANTISSA_BITS,
+                    FP8_SUBNORMAL_SHIFT,
+                    FP8_NAN,
+                    FP8_MAX,
+                    FP8_CEILING,
                 ),
             );
         }

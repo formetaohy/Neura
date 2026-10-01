@@ -169,6 +169,55 @@ impl<'g> Graph<'g> {
         out
     }
 
+    pub fn rope(&self, value: Value<'g>, origin: Option<Value<'g>>, base: f32) -> Value<'g> {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        let width = shape.dims()[3];
+        assert!(
+            width.is_multiple_of(2),
+            "a rotation pairs every number of a row with the number half a row away, and {:?} holds {width} numbers per row",
+            shape.dims(),
+        );
+        assert!(
+            base.is_finite() && base > 1.0,
+            "a rotary base of {base} spreads every position over the same angle",
+        );
+        let element = self.element(value);
+        assert!(
+            !element.quantized(),
+            "a rotation places the numbers of {} storage on no grid, and the storage a tensor carries already holds the grid it reconstructs by",
+            element.name(),
+        );
+        let origin = origin.map(|origin| self.own(origin));
+        if let Some(origin) = origin {
+            let positions = Shape::of([shape.dims()[0], shape.dims()[1], 1, 1]);
+            assert!(
+                self.shape(origin).fits_within(positions),
+                "a cursor holds one position per {:?} plane, and value {} walks {:?}",
+                positions.dims(),
+                origin.id(),
+                self.shape(origin).dims(),
+            );
+        }
+        let out = self.stored(
+            shape,
+            element,
+            self.carries(element, &[value]),
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Rope,
+            op::NONE,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
+        task.param = base;
+        self.push(task);
+        out
+    }
+
     pub fn conv2d(&self, input: Value<'g>, filter: Value<'g>, window: Window) -> Value<'g> {
         let input = self.own(input);
         let filter = self.own(filter);

@@ -7,7 +7,7 @@ pub mod refusal;
 pub mod store;
 pub mod strategy;
 
-pub use element::{Element, FP4_BLOCK, INT4_BLOCK};
+pub use element::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK};
 pub use feature::Features;
 pub use kind::{Geometry, KINDS, Kind, KindInfo, Module, Scratch};
 pub use placement::Placement;

@@ -111,6 +111,57 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
 }
 
 #[test]
+fn every_float_grid_is_declared_once_for_the_host_and_the_device() {
+    for element in Element::ALL {
+        match element {
+            Element::Fp8E4M3 | Element::Fp8E5M2 | Element::Fp4E2M1 => {
+                let format = element.format().unwrap_or_else(|| {
+                    panic!(
+                        "the {} element walks a float grid the ABI does not declare",
+                        element.name(),
+                    )
+                });
+                assert!(
+                    format.bias > 0,
+                    "the {} grid biases its exponent by nothing",
+                    element.name(),
+                );
+                assert!(
+                    format.mantissa_bits > 0 && format.mantissa_bits < 8,
+                    "the {} grid holds {} mantissa bits in a word of at most eight",
+                    element.name(),
+                    format.mantissa_bits,
+                );
+                assert!(
+                    format.smallest > 0.0 && format.smallest.is_finite(),
+                    "the {} grid steps its subnormals by {}",
+                    element.name(),
+                    format.smallest,
+                );
+                let ceiling = f32::from_bits(format.ceiling);
+                assert!(
+                    ceiling.is_finite() && ceiling > 0.0,
+                    "the {} grid saturates from a ceiling of {ceiling}",
+                    element.name(),
+                );
+                assert!(
+                    format.max & 0x80 == 0,
+                    "the {} grid keeps the sign beside the largest finite code it declares",
+                    element.name(),
+                );
+            }
+            Element::Single | Element::Half | Element::Bfloat16 | Element::Int8 | Element::Int4 => {
+                assert!(
+                    element.format().is_none(),
+                    "{} storage carries no exponent and mantissa of its own",
+                    element.name(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn every_task_kind_is_declared_once() {
     assert_eq!(Kind::COUNT as usize, Kind::ALL.len());
     for (code, kind) in Kind::ALL.iter().enumerate() {
@@ -341,7 +392,7 @@ fn a_zeroed_record_holds_no_number_the_shader_could_read() {
 }
 
 #[test]
-fn only_an_attention_starts_from_a_cursor() {
+fn only_a_positional_task_walks_a_cursor() {
     let reading = Kind::ALL
         .iter()
         .copied()
@@ -354,8 +405,10 @@ fn only_an_attention_starts_from_a_cursor() {
             Kind::AttentionQueryGrad,
             Kind::AttentionKeyGrad,
             Kind::AttentionValueGrad,
+            Kind::Rope,
+            Kind::RopeGrad,
         ],
-        "a cursor names the position a block of queries starts from, and only an attention walks such a block",
+        "a cursor names the position a block of rows starts from, and only a task that places those rows walks one",
     );
 }
 

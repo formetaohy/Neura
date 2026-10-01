@@ -80,11 +80,18 @@ mod source {
             * heap[word_of(value, value.table)];
     }
 
-    fn fetch_fp4(value: Value, at: u32) -> f32 {
+    fn template_fetch_fp4(value: Value, at: u32) -> f32 {
         let word = bitcast_u32(heap[word_of(value, at >> 3u32)]);
         let nibble = (word >> ((at & 7u32) * 4u32)) & 0xfu32;
         let code = ((nibble & 0x8u32) << 4u32) | (nibble & 0x7u32);
-        let decoded = fp8_value(code, 1u32, 1u32, 0.5, 0xffffffffu32, 0xffffffffu32);
+        let decoded = fp8_value(
+            code,
+            FP8_BIAS,
+            FP8_MANTISSA_BITS,
+            bitcast_f32(FP8_SMALLEST),
+            FP8_NAN,
+            FP8_INFINITY,
+        );
         return decoded * heap[word_of(value, value.table + (at / FP4_BLOCK))];
     }
 
@@ -127,16 +134,17 @@ mod source {
         return select(-magnitude, magnitude, positive);
     }
 
-    fn fetch_fp8_e4m3(value: Value, at: u32) -> f32 {
+    fn template_fetch_fp8(value: Value, at: u32) -> f32 {
         let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
         let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
-        return fp8_value(byte, 7u32, 3u32, 1.0 / 512.0, 0x7fu32, 0x7fu32);
-    }
-
-    fn fetch_fp8_e5m2(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
-        let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
-        return fp8_value(byte, 15u32, 2u32, 1.0 / 65536.0, 0x7fu32, 0x7cu32);
+        return fp8_value(
+            byte,
+            FP8_BIAS,
+            FP8_MANTISSA_BITS,
+            bitcast_f32(FP8_SMALLEST),
+            FP8_NAN,
+            FP8_INFINITY,
+        );
     }
 
     fn fetch_by_element(value: Value, at: u32) -> f32 {

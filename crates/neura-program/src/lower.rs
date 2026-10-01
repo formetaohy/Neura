@@ -387,6 +387,13 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
         Kind::MatmulFold => {
             panic!("a fold of depth partials comes from the product whose depth split")
         }
+        Kind::Rope | Kind::RopeGrad => {
+            let out = plan.shape(unit.out);
+            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
+                plan.tasks
+                    .push(Task::span(unit, first, count, u64::from(count) * 4));
+            }
+        }
         Kind::Binary
         | Kind::Unary
         | Kind::Partial

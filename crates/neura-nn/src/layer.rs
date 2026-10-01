@@ -295,6 +295,7 @@ pub struct MultiHeadAttention<'g> {
     value_bias: Value<'g>,
     output_bias: Value<'g>,
     options: AttentionOptions<'g>,
+    rotary: Option<f32>,
 }
 
 impl<'g> MultiHeadAttention<'g> {
@@ -305,6 +306,34 @@ impl<'g> MultiHeadAttention<'g> {
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
+    ) -> Self {
+        Self::declared(graph, heads, width, init, element, options, None)
+    }
+
+    pub fn rotary(
+        graph: &Graph<'g>,
+        heads: u32,
+        width: u32,
+        init: Init,
+        element: Element,
+        options: AttentionOptions<'g>,
+        base: f32,
+    ) -> Self {
+        assert!(
+            base.is_finite() && base > 1.0,
+            "an attention rotated by a base of {base} places every position on the same angle",
+        );
+        Self::declared(graph, heads, width, init, element, options, Some(base))
+    }
+
+    fn declared(
+        graph: &Graph<'g>,
+        heads: u32,
+        width: u32,
+        init: Init,
+        element: Element,
+        options: AttentionOptions<'g>,
+        rotary: Option<f32>,
     ) -> Self {
         assert!(
             heads > 0 && width > 0,
@@ -326,6 +355,7 @@ impl<'g> MultiHeadAttention<'g> {
             value_bias: shift(width),
             output_bias: shift(width),
             options,
+            rotary,
         }
     }
 
@@ -348,9 +378,18 @@ impl<'g> MultiHeadAttention<'g> {
         let project = |source: Value<'g>, weight: Value<'g>, bias: Value<'g>| {
             graph.add(graph.matmul(source, weight), bias)
         };
+        let query = project(input, self.queries, self.query_bias);
+        let key = project(input, self.keys, self.key_bias);
+        let (query, key) = match self.rotary {
+            Some(base) => (
+                graph.rope(query, self.options.origin, base),
+                graph.rope(key, self.options.origin, base),
+            ),
+            None => (query, key),
+        };
         let attended = graph.attention(
-            project(input, self.queries, self.query_bias),
-            project(input, self.keys, self.key_bias),
+            query,
+            key,
             project(input, self.values, self.value_bias),
             self.options,
         );
