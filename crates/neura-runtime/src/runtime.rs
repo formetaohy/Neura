@@ -158,10 +158,12 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        checkpoint.matches(weights.region());
-        weights
-            .buffer()
-            .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
+        checkpoint.matches(weights.region(), weights.state());
+        weights.buffer().write_at(
+            self.context.queue(),
+            weights.offset(),
+            checkpoint.payload(weights.words()),
+        );
     }
 
     pub fn checkpoint(&self, weights: &Weights<'_>) -> Checkpoint {
@@ -170,7 +172,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let bytes = weights.region().bytes();
+        let bytes = weights.words() * WORD_BYTES;
         let staging = Recycled::claim(
             &self.pool,
             "neura checkpoint",
@@ -190,13 +192,13 @@ impl Runtime {
         let payload = staging
             .buffer()
             .read(self.context.queue(), submission, bytes);
-        Checkpoint::of(weights.region(), payload)
+        Checkpoint::of(weights.region(), weights.state(), payload)
     }
 
     fn parameter_store(&self, graph: &Graph) -> (Weights<'_>, Layout) {
         let layout = Layout::of(graph, self.alignment);
-        let store = self.heap.allocate(layout.weights().words());
-        let weights = Weights::new(store, layout.weights().clone());
+        let store = self.heap.allocate(layout.words());
+        let weights = Weights::new(store, layout.weights().clone(), layout.state().clone());
         (weights, layout)
     }
 
@@ -216,10 +218,12 @@ impl Runtime {
     }
 
     fn pour(&self, layout: &Layout, weights: &Weights<'_>, checkpoint: &Checkpoint) {
-        checkpoint.matches(layout.weights());
-        weights
-            .buffer()
-            .write_at(self.context.queue(), weights.offset(), checkpoint.payload());
+        checkpoint.matches(layout.weights(), layout.state());
+        weights.buffer().write_at(
+            self.context.queue(),
+            weights.offset(),
+            checkpoint.payload(layout.words()),
+        );
     }
 
     pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
@@ -228,11 +232,17 @@ impl Runtime {
         assert_eq!(
             layout.weights(),
             weights.region(),
-            "this parameter store of {} tensors holds {} bytes where the graph asks for {} tensors and {} bytes; a store rebinds only onto a graph that declares the very same parameters in the very same order",
+            "this weight store of {} tensors holds {} bytes where the graph asks for {} tensors and {} bytes; a store rebinds only onto a graph that declares the very same model parameters in the very same order",
             weights.tensors(),
             weights.bytes(),
             layout.weights().tensors(),
             layout.weights().bytes(),
+        );
+        assert!(
+            layout.state().tensors() == 0 || layout.state() == weights.state(),
+            "this graph trains with {} tensors of state where the store carries {}; a store rebinds only onto a graph that trains with the state it holds",
+            layout.state().tensors(),
+            weights.state().tensors(),
         );
     }
 
@@ -269,6 +279,12 @@ impl Runtime {
             "this graph holds {} parameters where the weight store carries {}; one store serves every program of one model",
             tape.encoding.weights().tensors(),
             weights.tensors(),
+        );
+        assert!(
+            tape.encoding.state().tensors() == 0 || tape.encoding.state() == weights.state(),
+            "this graph trains with {} tensors of state where the store carries {}; a store serves one training state",
+            tape.encoding.state().tensors(),
+            weights.state().tensors(),
         );
         tape.kernel.compile();
         let tensors = self

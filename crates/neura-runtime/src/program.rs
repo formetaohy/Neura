@@ -16,15 +16,17 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Weights<'r> {
     store: Allocation,
-    region: Region,
+    weights: Region,
+    state: Region,
     brand: PhantomData<&'r ()>,
 }
 
 impl<'r> Weights<'r> {
-    pub(crate) fn new(store: Allocation, region: Region) -> Self {
+    pub(crate) fn new(store: Allocation, weights: Region, state: Region) -> Self {
         Self {
             store,
-            region,
+            weights,
+            state,
             brand: PhantomData,
         }
     }
@@ -42,11 +44,19 @@ impl<'r> Weights<'r> {
     }
 
     pub fn tensors(&self) -> usize {
-        self.region.tensors()
+        self.weights.tensors()
     }
 
     pub(crate) fn region(&self) -> &Region {
-        &self.region
+        &self.weights
+    }
+
+    pub(crate) fn state(&self) -> &Region {
+        &self.state
+    }
+
+    pub(crate) fn words(&self) -> u64 {
+        self.state.words().max(self.weights.words())
     }
 
     pub(crate) fn allocation(&self) -> &Allocation {

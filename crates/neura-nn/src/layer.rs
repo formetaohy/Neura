@@ -283,9 +283,45 @@ impl<'g> Embedding<'g> {
     }
 }
 
-pub struct MultiHeadAttention<'g> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HeadShape {
     heads: u32,
+    key_heads: u32,
     width: u32,
+}
+
+impl HeadShape {
+    pub fn new(heads: u32, key_heads: u32, width: u32) -> Self {
+        assert!(
+            heads > 0 && key_heads > 0 && width > 0,
+            "an attention of {heads} heads over {key_heads} key heads of {width} numbers carries no weight",
+        );
+        assert!(
+            heads.is_multiple_of(key_heads),
+            "an attention of {heads} query heads shares {key_heads} key heads, and every key head serves a whole group of queries",
+        );
+        Self {
+            heads,
+            key_heads,
+            width,
+        }
+    }
+
+    pub const fn heads(self) -> u32 {
+        self.heads
+    }
+
+    pub const fn key_heads(self) -> u32 {
+        self.key_heads
+    }
+
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+}
+
+pub struct MultiHeadAttention<'g> {
+    head: HeadShape,
     queries: Value<'g>,
     keys: Value<'g>,
     values: Value<'g>,
@@ -301,19 +337,17 @@ pub struct MultiHeadAttention<'g> {
 impl<'g> MultiHeadAttention<'g> {
     pub fn new(
         graph: &Graph<'g>,
-        heads: u32,
-        width: u32,
+        head: HeadShape,
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
     ) -> Self {
-        Self::declared(graph, heads, width, init, element, options, None)
+        Self::declared(graph, head, init, element, options, None)
     }
 
     pub fn rotary(
         graph: &Graph<'g>,
-        heads: u32,
-        width: u32,
+        head: HeadShape,
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
@@ -323,37 +357,33 @@ impl<'g> MultiHeadAttention<'g> {
             base.is_finite() && base > 1.0,
             "an attention rotated by a base of {base} places every position on the same angle",
         );
-        Self::declared(graph, heads, width, init, element, options, Some(base))
+        Self::declared(graph, head, init, element, options, Some(base))
     }
 
     fn declared(
         graph: &Graph<'g>,
-        heads: u32,
-        width: u32,
+        head: HeadShape,
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
         rotary: Option<f32>,
     ) -> Self {
-        assert!(
-            heads > 0 && width > 0,
-            "an attention of {heads} heads of {width} numbers carries no weight",
-        );
-        let projection =
-            |columns: u32| graph.parameter(Shape::of([heads, 1, columns, columns]), init, element);
-        let shift =
-            |columns: u32| graph.parameter(Shape::of([heads, 1, 1, columns]), Init::Zero, element);
+        let projection = |heads: u32, columns: u32| {
+            graph.parameter(Shape::of([heads, 1, columns, columns]), init, element)
+        };
+        let shift = |heads: u32, columns: u32| {
+            graph.parameter(Shape::of([heads, 1, 1, columns]), Init::Zero, element)
+        };
         Self {
-            heads,
-            width,
-            queries: projection(width),
-            keys: projection(width),
-            values: projection(width),
-            output: projection(width),
-            query_bias: shift(width),
-            key_bias: shift(width),
-            value_bias: shift(width),
-            output_bias: shift(width),
+            head,
+            queries: projection(head.heads(), head.width()),
+            keys: projection(head.key_heads(), head.width()),
+            values: projection(head.key_heads(), head.width()),
+            output: projection(head.heads(), head.width()),
+            query_bias: shift(head.heads(), head.width()),
+            key_bias: shift(head.key_heads(), head.width()),
+            value_bias: shift(head.key_heads(), head.width()),
+            output_bias: shift(head.heads(), head.width()),
             options,
             rotary,
         }
@@ -361,18 +391,23 @@ impl<'g> MultiHeadAttention<'g> {
 
     pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
         let shape = graph.shape(input);
-        assert_eq!(
+        assert!(
+            shape.dims()[0] == 1 || shape.dims()[0] == self.head.heads(),
+            "an attention of {} heads reads a stream of {} heads, and one stream feeds every head or each head reads its own",
+            self.head.heads(),
             shape.dims()[0],
-            self.heads,
-            "an attention of {} heads reads a tensor of {} heads",
-            self.heads,
+        );
+        assert!(
+            shape.dims()[0] == 1 || shape.dims()[0] == self.head.key_heads(),
+            "an attention of {} key heads reads a stream of {} heads, and one stream feeds every key head or each key head reads its own",
+            self.head.key_heads(),
             shape.dims()[0],
         );
         assert_eq!(
             shape.dims()[3],
-            self.width,
+            self.head.width(),
             "an attention of width {} reads {} numbers per row",
-            self.width,
+            self.head.width(),
             shape.dims()[3],
         );
         let project = |source: Value<'g>, weight: Value<'g>, bias: Value<'g>| {
@@ -409,12 +444,20 @@ impl<'g> MultiHeadAttention<'g> {
         ]
     }
 
+    pub fn head(&self) -> HeadShape {
+        self.head
+    }
+
     pub fn heads(&self) -> u32 {
-        self.heads
+        self.head.heads()
+    }
+
+    pub fn key_heads(&self) -> u32 {
+        self.head.key_heads()
     }
 
     pub fn width(&self) -> u32 {
-        self.width
+        self.head.width()
     }
 }
 

@@ -351,7 +351,11 @@ fn consumer_step(consumer: &TaskInfo, slot: u32) -> Option<StepRecord> {
 
 fn pinned(values: &[ValueInfo], value: u32) -> bool {
     let info = &values[value as usize];
-    info.retained || matches!(info.residency, Residency::Input | Residency::Parameter)
+    info.retained
+        || matches!(
+            info.residency,
+            Residency::Input | Residency::Parameter | Residency::State
+        )
 }
 
 fn drop_use(reads: &mut [Vec<Use>], value: u32, task: usize) {

@@ -319,7 +319,7 @@ impl Encoding {
             }
             let storage = info.storage as usize;
             readable[id] = match values[storage].residency {
-                Residency::Parameter | Residency::Resident => true,
+                Residency::Parameter | Residency::State | Residency::Resident => true,
                 _ => match last_writer.get(&offsets[storage]) {
                     Some(writer) => *writer == storage as u32,
                     None => held(values, storage),
@@ -466,6 +466,10 @@ impl Encoding {
 
     pub fn weights(&self) -> &Region {
         self.layout.weights()
+    }
+
+    pub fn state(&self) -> &Region {
+        self.layout.state()
     }
 
     pub fn tensors(&self) -> &Region {
@@ -752,7 +756,7 @@ fn arena_resident(values: &[ValueInfo], storage: usize) -> bool {
 fn held(values: &[ValueInfo], storage: usize) -> bool {
     matches!(
         values[storage].residency,
-        Residency::Input | Residency::Parameter | Residency::Resident
+        Residency::Input | Residency::Parameter | Residency::State | Residency::Resident
     )
 }
 

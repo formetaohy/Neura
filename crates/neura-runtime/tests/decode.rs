@@ -42,6 +42,7 @@ fn options(cursor: Value<'static>) -> AttentionOptions<'static> {
 fn cached_shapes(queries: u32, origin: u32) -> Shapes {
     Shapes {
         heads: 1,
+        key_heads: 1,
         batch: 1,
         queries,
         keys: CAPACITY,
@@ -126,6 +127,7 @@ fn a_decode_step_reads_the_keys_its_cursor_reaches() {
     let (expected, _) = attention_forward(
         Shapes {
             heads: 1,
+            key_heads: 1,
             batch: 1,
             queries: TOKENS,
             keys: TOKENS,
@@ -268,5 +270,71 @@ fn a_cursor_frees_each_plane_at_its_own_position() {
             let at = agent as usize * width;
             assert_close(&produced[at..at + width], &expected, 1e-4);
         }
+    }
+}
+
+#[test]
+fn a_grouped_decode_reads_one_cache_for_every_query_head() {
+    let runtime = open();
+    let heads = 2u32;
+    let graph: Graph<'static> = Graph::new();
+    let keys = graph.resident(Shape::of([1, 1, CAPACITY, WIDTH]), Element::Single);
+    let values = graph.resident(Shape::of([1, 1, CAPACITY, WIDTH]), Element::Single);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let slot = graph.input(Shape::scalar(), Element::Single);
+    let row = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    let query = graph.input(Shape::of([heads, 1, 1, WIDTH]), Element::Single);
+    let doubled = graph.mul(row, graph.fill(Shape::scalar(), 2.0));
+    graph.write_into(keys, slot, doubled);
+    graph.write_into(values, slot, doubled);
+    let out = graph.attention(
+        query,
+        keys,
+        values,
+        AttentionOptions {
+            scale: SCALE,
+            causal: true,
+            origin: Some(cursor),
+        },
+    );
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let tokens = data(TOKENS * WIDTH, 17);
+    let queries = data(heads * WIDTH, 41);
+    runtime.write(&program, query, &queries);
+    for step in 0..TOKENS {
+        let at = step as usize * WIDTH as usize;
+        let mut cached = vec![0.0f32; CAPACITY as usize * WIDTH as usize];
+        for position in 0..=step {
+            let source = position as usize * WIDTH as usize;
+            for (slot, value) in cached[source..source + WIDTH as usize]
+                .iter_mut()
+                .zip(&tokens[source..source + WIDTH as usize])
+            {
+                *slot = value * 2.0;
+            }
+        }
+        let (expected, _) =
+            attention_forward(cached_shapes_of(heads, step), &queries, &cached, &cached);
+        runtime.write(&program, cursor, &[step as f32]);
+        runtime.write(&program, slot, &[step as f32]);
+        runtime.write(&program, row, &tokens[at..at + WIDTH as usize]);
+        runtime.run(&program);
+        assert_close(&runtime.read(&program, out), &expected, 1e-4);
+    }
+}
+
+fn cached_shapes_of(heads: u32, origin: u32) -> Shapes {
+    Shapes {
+        heads,
+        key_heads: 1,
+        batch: 1,
+        queries: 1,
+        keys: CAPACITY,
+        width: WIDTH,
+        causal: true,
+        origin,
+        scale: SCALE,
     }
 }

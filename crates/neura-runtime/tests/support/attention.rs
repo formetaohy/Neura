@@ -1,6 +1,7 @@
 #[derive(Clone, Copy)]
 pub struct Shapes {
     pub heads: u32,
+    pub key_heads: u32,
     pub batch: u32,
     pub queries: u32,
     pub keys: u32,
@@ -12,6 +13,16 @@ pub struct Shapes {
 
 fn planes(shapes: Shapes) -> usize {
     (shapes.heads * shapes.batch) as usize
+}
+
+fn groups(shapes: Shapes) -> usize {
+    (shapes.heads / shapes.key_heads) as usize
+}
+
+fn key_plane(shapes: Shapes, plane: usize) -> usize {
+    let batch = shapes.batch as usize;
+    let head = plane / batch;
+    (head / groups(shapes)) * batch + plane % batch
 }
 
 fn masked(shapes: Shapes, row: usize, column: usize) -> bool {
@@ -26,12 +37,13 @@ fn score(
     queries: &[f32],
     keys: &[f32],
     plane: usize,
+    source: usize,
     row: usize,
     column: usize,
 ) -> f64 {
     let width = shapes.width as usize;
     let at = (plane * shapes.queries as usize + row) * width;
-    let other = (plane * shapes.keys as usize + column) * width;
+    let other = (source * shapes.keys as usize + column) * width;
     (0..width)
         .map(|depth| f64::from(queries[at + depth]) * f64::from(keys[other + depth]))
         .sum::<f64>()
@@ -48,11 +60,12 @@ pub fn attention_forward(
     let mut out = vec![0.0f32; planes(shapes) * shapes.queries as usize * width];
     let mut statistics = vec![0.0f32; planes(shapes) * shapes.queries as usize];
     for plane in 0..planes(shapes) {
+        let source = key_plane(shapes, plane);
         for row in 0..shapes.queries as usize {
             let mut logits = Vec::with_capacity(shapes.keys as usize);
             for column in 0..shapes.keys as usize {
                 if masked(shapes, row, column) {
-                    logits.push(score(shapes, queries, keys, plane, row, column));
+                    logits.push(score(shapes, queries, keys, plane, source, row, column));
                 } else {
                     logits.push(f64::NEG_INFINITY);
                 }
@@ -67,7 +80,7 @@ pub fn attention_forward(
                 let mut sum = 0.0f64;
                 for (column, logit) in logits.iter().enumerate() {
                     let weight = (logit - largest).exp() / total;
-                    let at = (plane * shapes.keys as usize + column) * width + depth;
+                    let at = (source * shapes.keys as usize + column) * width + depth;
                     sum += weight * f64::from(values[at]);
                 }
                 out[(plane * shapes.queries as usize + row) * width + depth] = sum as f32;
@@ -91,6 +104,7 @@ pub fn attention_backward(
     let mut key_grad = vec![0.0f32; keys.len()];
     let mut value_grad = vec![0.0f32; values.len()];
     for plane in 0..planes(shapes) {
+        let source = key_plane(shapes, plane);
         for row in 0..shapes.queries as usize {
             let at = (plane * shapes.queries as usize + row) * width;
             let normalizer = f64::from(statistics[plane * shapes.queries as usize + row]);
@@ -98,9 +112,9 @@ pub fn attention_backward(
                 .map(|depth| f64::from(gradient[at + depth]) * f64::from(out[at + depth]))
                 .sum::<f64>();
             for column in 0..shapes.keys as usize {
-                let other = (plane * shapes.keys as usize + column) * width;
+                let other = (source * shapes.keys as usize + column) * width;
                 let weight = if masked(shapes, row, column) {
-                    (score(shapes, queries, keys, plane, row, column) - normalizer).exp()
+                    (score(shapes, queries, keys, plane, source, row, column) - normalizer).exp()
                 } else {
                     0.0
                 };

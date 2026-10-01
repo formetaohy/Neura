@@ -75,14 +75,27 @@ impl<'g> Graph<'g> {
             attention.scale,
         );
         assert_eq!(
-            query_shape.batch(),
-            key_shape.batch(),
+            query_shape.dims()[1],
+            key_shape.dims()[1],
             "an attention reads {query_shape:?} through keys of {key_shape:?}",
         );
         assert_eq!(
-            key_shape.batch(),
-            value_shape.batch(),
+            key_shape.dims()[1],
+            value_shape.dims()[1],
             "an attention reads keys of {key_shape:?} through values of {value_shape:?}",
+        );
+        assert_eq!(
+            key_shape.dims()[0],
+            value_shape.dims()[0],
+            "an attention weighs {} key heads by {} value heads, and a key head shares the values of its own head",
+            key_shape.dims()[0],
+            value_shape.dims()[0],
+        );
+        assert!(
+            query_shape.dims()[0].is_multiple_of(key_shape.dims()[0]),
+            "an attention of {} query heads reads {} key heads, and every key head serves a whole group of queries",
+            query_shape.dims()[0],
+            key_shape.dims()[0],
         );
         assert_eq!(
             query_shape.dims()[3],
@@ -92,6 +105,13 @@ impl<'g> Graph<'g> {
             key_shape.dims()[3],
         );
         assert_eq!(
+            key_shape.dims()[3],
+            value_shape.dims()[3],
+            "an attention scores keys of width {} through values of width {}",
+            key_shape.dims()[3],
+            value_shape.dims()[3],
+        );
+        assert_eq!(
             key_shape.dims()[2],
             value_shape.dims()[2],
             "an attention weighs {} keys by {} values",
@@ -99,7 +119,7 @@ impl<'g> Graph<'g> {
             value_shape.dims()[2],
         );
         if let Some(origin) = origin {
-            let positions = Shape::of([query_shape.dims()[0], query_shape.dims()[1], 1, 1]);
+            let positions = Shape::of([key_shape.dims()[0], key_shape.dims()[1], 1, 1]);
             assert!(
                 self.shape(origin).fits_within(positions),
                 "a cursor holds one position per {:?} plane, and value {} walks {:?}",
@@ -705,7 +725,10 @@ impl<'g> Graph<'g> {
             assert!(
                 matches!(
                     info.residency,
-                    Residency::Input | Residency::Parameter | Residency::Resident
+                    Residency::Input
+                        | Residency::Parameter
+                        | Residency::State
+                        | Residency::Resident
                 ),
                 "only a leaf tensor takes rows in place, and value {} is derived from other tasks",
                 target.id(),

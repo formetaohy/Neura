@@ -17,9 +17,14 @@ pub struct Region {
 }
 
 impl Region {
-    fn of(values: &[ValueInfo], wants: impl Fn(&ValueInfo) -> bool, alignment: u64) -> Self {
+    fn of(
+        values: &[ValueInfo],
+        wants: impl Fn(&ValueInfo) -> bool,
+        alignment: u64,
+        base: u64,
+    ) -> Self {
         let stride = (alignment / WORD_BYTES).max(1);
-        let mut words = 0u64;
+        let mut words = base;
         let mut placed = vec![None; values.len()];
         let mut entries = Vec::new();
         for (id, info) in values.iter().enumerate() {
@@ -62,14 +67,6 @@ impl Region {
 
     pub(crate) fn address(&self, storage: u32) -> u64 {
         self.placement(storage).0
-    }
-
-    pub(crate) fn element(&self, storage: u32) -> Element {
-        self.placement(storage).1
-    }
-
-    pub(crate) fn scale(&self, storage: u32) -> f32 {
-        self.placement(storage).2
     }
 
     fn placement(&self, storage: u32) -> (u64, Element, f32) {
@@ -125,6 +122,7 @@ impl Seed {
 
 pub struct Layout {
     weights: Region,
+    state: Region,
     tensors: Region,
     seeds: Vec<Seed>,
 }
@@ -139,30 +137,46 @@ impl Layout {
             values,
             |info| info.residency == Residency::Parameter,
             alignment,
+            0,
+        );
+        let state = Region::of(
+            values,
+            |info| info.residency == Residency::State,
+            alignment,
+            weights.words(),
         );
         let tensors = Region::of(
             values,
             |info| info.residency == Residency::Resident,
             alignment,
+            0,
         );
         let seeds = values
             .iter()
             .enumerate()
             .filter(|(id, info)| {
-                info.storage as usize == *id && info.residency == Residency::Parameter
+                info.storage as usize == *id
+                    && matches!(info.residency, Residency::Parameter | Residency::State)
             })
-            .map(|(id, info)| Seed {
-                word: weights.address(id as u32),
-                element: weights.element(id as u32),
-                scale: weights.scale(id as u32),
-                elements: info.shape.elements(),
-                init: info
-                    .seed
-                    .expect("a parameter carries the sampler it was declared with"),
+            .map(|(id, info)| {
+                let (word, element, scale) = match info.residency {
+                    Residency::State => state.placement(id as u32),
+                    _ => weights.placement(id as u32),
+                };
+                Seed {
+                    word,
+                    element,
+                    scale,
+                    elements: info.shape.elements(),
+                    init: info
+                        .seed
+                        .expect("a stored tensor carries the sampler it was declared with"),
+                }
             })
             .collect();
         Self {
             weights,
+            state,
             tensors,
             seeds,
         }
@@ -172,8 +186,16 @@ impl Layout {
         &self.weights
     }
 
+    pub fn state(&self) -> &Region {
+        &self.state
+    }
+
     pub fn tensors(&self) -> &Region {
         &self.tensors
+    }
+
+    pub fn words(&self) -> u64 {
+        self.state.words().max(self.weights.words())
     }
 
     pub fn seeds(&self) -> &[Seed] {
@@ -208,7 +230,10 @@ impl Layout {
     pub(crate) fn address(&self, values: &[ValueInfo], arena: &[u64], value: u32) -> u64 {
         let storage = values[value as usize].storage;
         match self.store(values, value) {
-            Store::Weights => self.weights.address(storage),
+            Store::Weights => match values[storage as usize].residency {
+                Residency::State => self.state.address(storage),
+                _ => self.weights.address(storage),
+            },
             Store::Tensors => match values[storage as usize].residency {
                 Residency::Resident => self.tensors.address(storage),
                 _ => arena[storage as usize] / WORD_BYTES,
@@ -223,7 +248,7 @@ impl Layout {
 
 pub(crate) fn store_of(residency: Residency) -> Store {
     match residency {
-        Residency::Parameter => Store::Weights,
+        Residency::Parameter | Residency::State => Store::Weights,
         Residency::Input | Residency::Resident | Residency::Derived | Residency::View => {
             Store::Tensors
         }

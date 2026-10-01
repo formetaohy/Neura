@@ -20,7 +20,7 @@ mod source {
         return at + origin >= column;
     }
 
-    fn block_origin(task: Task, plane: uvec4, keys: u32, tokens: u32) -> u32 {
+    fn block_origin(task: Task, head: u32, batch: u32, keys: u32, tokens: u32) -> u32 {
         if task.origin == NO_VALUE {
             return 0u32;
         }
@@ -31,7 +31,7 @@ mod source {
         let cursor = values[task.origin];
         let raw = fetch(
             cursor,
-            read_address(uvec4(plane.x, plane.y, 0u32, 0u32), cursor.strides),
+            read_address(uvec4(head, batch, 0u32, 0u32), cursor.strides),
         );
         return whole_index(raw, keys - tokens + 1u32, task.kind, refusal::ORIGIN);
     }
@@ -78,19 +78,21 @@ mod source {
         let statistic = values[task.extra];
         let tokens = query.dims.z;
         let keys = key.dims.z;
+        let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
             uvec4(query.dims.x, query.dims.y, query.dims.z, 1u32),
         );
+        let head = plane.x / groups;
         let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
-        let key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
-        let value_plane = plane.x * value.strides.x + plane.y * value.strides.y;
+        let key_plane = head * key.strides.x + plane.y * key.strides.y;
+        let value_plane = head * value.strides.x + plane.y * value.strides.y;
         let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let origin = block_origin(task, plane, keys, tokens);
+        let origin = block_origin(task, head, plane.y, keys, tokens);
         let position = origin + row;
         let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
@@ -184,13 +186,15 @@ mod source {
         let output = values[task.out];
         let tokens = query.dims.z;
         let keys = key.dims.z;
+        let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
             uvec4(query.dims.x, query.dims.y, query.dims.z, 1u32),
         );
+        let head = plane.x / groups;
         let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
-        let key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
-        let value_plane = plane.x * value.strides.x + plane.y * value.strides.y;
+        let key_plane = head * key.strides.x + plane.y * key.strides.y;
+        let value_plane = head * value.strides.x + plane.y * value.strides.y;
         let gradient_plane = plane.x * gradient.strides.x + plane.y * gradient.strides.y;
         let output_grad_plane = plane.x * output_grad.strides.x + plane.y * output_grad.strides.y;
         let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
@@ -198,7 +202,7 @@ mod source {
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let origin = block_origin(task, plane, keys, tokens);
+        let origin = block_origin(task, head, plane.y, keys, tokens);
         let position = origin + row;
         let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
@@ -289,18 +293,15 @@ mod source {
         let output = values[task.out];
         let tokens = query.dims.z;
         let keys = key.dims.z;
+        let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
-        let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
         let key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
         let value_plane = plane.x * value.strides.x + plane.y * value.strides.y;
-        let gradient_plane = plane.x * gradient.strides.x + plane.y * gradient.strides.y;
-        let output_grad_plane = plane.x * output_grad.strides.x + plane.y * output_grad.strides.y;
-        let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let origin = block_origin(task, plane, keys, tokens);
+        let origin = block_origin(task, plane.x, plane.y, keys, tokens);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
@@ -318,41 +319,52 @@ mod source {
                 );
             }
         }
-        for block in stride(first, blocks, 1u32) {
-            workgroup_barrier();
-            template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
-            workgroup_barrier();
-            if inside {
-                for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let at = block * ATTN_KEYS + step;
-                    let mut score = 0.0;
-                    for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        score = score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
-                    }
-                    let weight = select(
-                        0.0,
-                        exp(score * task.param
-                            - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                        attended(at, tokens, column, origin, causal),
-                    );
-                    let mut weighted = 0.0;
-                    let mut row_dot = 0.0;
-                    for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        weighted = weighted
-                            + attention_right[step * ATTN_WIDTH + depth] * values_row[depth];
-                        row_dot = row_dot
-                            + attention_right[step * ATTN_WIDTH + depth]
-                                * fetch(
-                                    output_grad,
-                                    output_grad_plane
-                                        + at * output_grad.strides.z
-                                        + depth * output_grad.strides.w,
-                                );
-                    }
-                    let scored = weight * (weighted - row_dot) * task.param;
-                    for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        accumulated[depth] =
-                            accumulated[depth] + scored * attention_left[step * ATTN_WIDTH + depth];
+        for group in stride(0u32, groups, 1u32) {
+            let query_plane =
+                (plane.x * groups + group) * query.strides.x + plane.y * query.strides.y;
+            let gradient_plane =
+                (plane.x * groups + group) * gradient.strides.x + plane.y * gradient.strides.y;
+            let output_grad_plane = (plane.x * groups + group) * output_grad.strides.x
+                + plane.y * output_grad.strides.y;
+            let statistic_plane =
+                (plane.x * groups + group) * statistic.strides.x + plane.y * statistic.strides.y;
+            for block in stride(first, blocks, 1u32) {
+                workgroup_barrier();
+                template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
+                workgroup_barrier();
+                if inside {
+                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
+                        let at = block * ATTN_KEYS + step;
+                        let mut score = 0.0;
+                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                            score =
+                                score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
+                        }
+                        let weight = select(
+                            0.0,
+                            exp(score * task.param
+                                - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                            attended(at, tokens, column, origin, causal),
+                        );
+                        let mut weighted = 0.0;
+                        let mut row_dot = 0.0;
+                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                            weighted = weighted
+                                + attention_right[step * ATTN_WIDTH + depth] * values_row[depth];
+                            row_dot = row_dot
+                                + attention_right[step * ATTN_WIDTH + depth]
+                                    * fetch(
+                                        output_grad,
+                                        output_grad_plane
+                                            + at * output_grad.strides.z
+                                            + depth * output_grad.strides.w,
+                                    );
+                        }
+                        let scored = weight * (weighted - row_dot) * task.param;
+                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                            accumulated[depth] = accumulated[depth]
+                                + scored * attention_left[step * ATTN_WIDTH + depth];
+                        }
                     }
                 }
             }
@@ -381,16 +393,14 @@ mod source {
         let output = values[task.out];
         let tokens = query.dims.z;
         let keys = key.dims.z;
+        let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
-        let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
         let key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
-        let gradient_plane = plane.x * gradient.strides.x + plane.y * gradient.strides.y;
-        let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let origin = block_origin(task, plane, keys, tokens);
+        let origin = block_origin(task, plane.x, plane.y, keys, tokens);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
@@ -403,26 +413,35 @@ mod source {
                 );
             }
         }
-        for block in stride(first, blocks, 1u32) {
-            workgroup_barrier();
-            template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
-            workgroup_barrier();
-            if inside {
-                for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let at = block * ATTN_KEYS + step;
-                    let mut score = 0.0;
-                    for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        score = score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
-                    }
-                    let weight = select(
-                        0.0,
-                        exp(score * task.param
-                            - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                        attended(at, tokens, column, origin, causal),
-                    );
-                    for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        accumulated[depth] = accumulated[depth]
-                            + weight * attention_right[step * ATTN_WIDTH + depth];
+        for group in stride(0u32, groups, 1u32) {
+            let query_plane =
+                (plane.x * groups + group) * query.strides.x + plane.y * query.strides.y;
+            let gradient_plane =
+                (plane.x * groups + group) * gradient.strides.x + plane.y * gradient.strides.y;
+            let statistic_plane =
+                (plane.x * groups + group) * statistic.strides.x + plane.y * statistic.strides.y;
+            for block in stride(first, blocks, 1u32) {
+                workgroup_barrier();
+                template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
+                workgroup_barrier();
+                if inside {
+                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
+                        let at = block * ATTN_KEYS + step;
+                        let mut score = 0.0;
+                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                            score =
+                                score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
+                        }
+                        let weight = select(
+                            0.0,
+                            exp(score * task.param
+                                - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                            attended(at, tokens, column, origin, causal),
+                        );
+                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                            accumulated[depth] = accumulated[depth]
+                                + weight * attention_right[step * ATTN_WIDTH + depth];
+                        }
                     }
                 }
             }

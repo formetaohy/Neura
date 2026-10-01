@@ -51,6 +51,7 @@ pub struct AttentionOptions<'g> {
 pub enum Residency {
     Input,
     Parameter,
+    State,
     Resident,
     Derived,
     View,
@@ -266,6 +267,15 @@ impl<'g> Graph<'g> {
         self.hold(shape, Residency::Parameter, element, 1.0, Some(init))
     }
 
+    pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
+        assert!(
+            !element.quantized(),
+            "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
+            element.name(),
+        );
+        self.hold(shape, Residency::State, element, 1.0, Some(init))
+    }
+
     pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
         self.hold(
             shape,
@@ -356,7 +366,11 @@ impl<'g> Graph<'g> {
     pub fn updates_weights(&self) -> bool {
         let state = self.state.borrow();
         state.tasks.iter().any(|task| {
-            task.in_place && state.values[task.out as usize].residency == Residency::Parameter
+            task.in_place
+                && matches!(
+                    state.values[task.out as usize].residency,
+                    Residency::Parameter | Residency::State
+                )
         })
     }
 
@@ -434,7 +448,7 @@ impl<'g> Graph<'g> {
             assert_eq!(
                 info.residency,
                 Residency::Parameter,
-                "a frozen tensor holds a parameter of the weight store, and value {id} holds nothing the weight store carries",
+                "a frozen tensor holds a model parameter, and value {id} holds training state or a tensor of no weight store",
             );
             assert!(
                 !state.tasks.iter().any(|task| reads(task, *id)),
@@ -495,7 +509,10 @@ impl<'g> Graph<'g> {
             assert!(
                 matches!(
                     info.residency,
-                    Residency::Input | Residency::Parameter | Residency::Resident
+                    Residency::Input
+                        | Residency::Parameter
+                        | Residency::State
+                        | Residency::Resident
                 ),
                 "only a leaf tensor updates in place, and value {} is derived from other tasks",
                 target.id(),

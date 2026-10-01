@@ -68,7 +68,7 @@ impl<'g> Sgd<'g> {
                         .any(|velocity| velocity.parameter == parameter),
                     "a parameter carries one velocity",
                 );
-                let velocity = graph.parameter(graph.shape(parameter), Init::Zero, Element::Single);
+                let velocity = graph.state(graph.shape(parameter), Init::Zero, Element::Single);
                 velocities.push(Velocity {
                     parameter,
                     velocity,
@@ -182,7 +182,7 @@ impl<'g> AdamW<'g> {
             variance_freshness: graph.fill(Shape::scalar(), 1.0 - variance_decay),
             floor: graph.fill(Shape::scalar(), floor),
             decay: (weight_decay > 0.0).then(|| graph.fill(Shape::scalar(), weight_decay)),
-            clock: graph.parameter(Shape::scalar(), Init::Zero, Element::Single),
+            clock: graph.state(Shape::scalar(), Init::Zero, Element::Single),
             one: graph.fill(Shape::scalar(), 1.0),
             moments: Vec::new(),
         }
@@ -203,8 +203,8 @@ impl<'g> AdamW<'g> {
         );
         let moments = Moments {
             parameter,
-            mean: graph.parameter(graph.shape(parameter), Init::Zero, Element::Single),
-            variance: graph.parameter(graph.shape(parameter), Init::Zero, Element::Single),
+            mean: graph.state(graph.shape(parameter), Init::Zero, Element::Single),
+            variance: graph.state(graph.shape(parameter), Init::Zero, Element::Single),
         };
         self.moments.push(moments);
         moments

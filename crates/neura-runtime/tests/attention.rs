@@ -36,16 +36,16 @@ fn graph_of(
     Value<'static>,
 ) {
     let graph = Graph::new();
-    let tensor = |tokens: u32| {
+    let tensor = |heads: u32, tokens: u32| {
         graph.parameter(
-            Shape::of([shapes.heads, shapes.batch, tokens, shapes.width]),
+            Shape::of([heads, shapes.batch, tokens, shapes.width]),
             Init::Zero,
             Element::Single,
         )
     };
-    let queries = tensor(shapes.queries);
-    let keys = tensor(shapes.keys);
-    let values = tensor(shapes.keys);
+    let queries = tensor(shapes.heads, shapes.queries);
+    let keys = tensor(shapes.key_heads, shapes.keys);
+    let values = tensor(shapes.key_heads, shapes.keys);
     let out = graph.attention(
         queries,
         keys,
@@ -69,8 +69,14 @@ fn run_forward(shapes: Shapes, tolerance: f32) -> (Vec<f32>, Vec<f32>) {
         shapes.heads * shapes.batch * shapes.queries * shapes.width,
         17,
     );
-    let keys_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 29);
-    let values_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 43);
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
     runtime.write(&program, queries, &queries_data);
     runtime.write(&program, keys, &keys_data);
     runtime.write(&program, values, &values_data);
@@ -98,8 +104,14 @@ fn run_backward(shapes: Shapes, tolerance: f32) {
         shapes.heads * shapes.batch * shapes.queries * shapes.width,
         17,
     );
-    let keys_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 29);
-    let values_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 43);
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
     runtime.write(&program, queries, &queries_data);
     runtime.write(&program, keys, &keys_data);
     runtime.write(&program, values, &values_data);
@@ -124,6 +136,7 @@ fn run_backward(shapes: Shapes, tolerance: f32) {
 fn shapes(causal: bool) -> Shapes {
     Shapes {
         heads: 2,
+        key_heads: 2,
         batch: 2,
         queries: 5,
         keys: 5,
@@ -145,6 +158,7 @@ fn an_attention_reads_queries_and_keys_of_different_lengths() {
     run_forward(
         Shapes {
             heads: 1,
+            key_heads: 1,
             batch: 1,
             queries: 3,
             keys: 7,
@@ -161,6 +175,7 @@ fn an_attention_reads_queries_and_keys_of_different_lengths() {
 fn an_attention_wider_than_one_task_walks_every_row_of_its_block() {
     let shapes = Shapes {
         heads: 1,
+        key_heads: 1,
         batch: 1,
         queries: 300,
         keys: 300,
@@ -187,6 +202,103 @@ fn an_attention_block_walks_its_gradient_back_into_queries_keys_and_values() {
 }
 
 #[test]
+fn an_attention_shares_one_key_head_among_a_group_of_queries() {
+    run_forward(
+        Shapes {
+            heads: 4,
+            key_heads: 2,
+            batch: 2,
+            queries: 5,
+            keys: 5,
+            width: 3,
+            causal: true,
+            origin: 0,
+            scale: 0.5,
+        },
+        1e-5,
+    );
+    run_backward(
+        Shapes {
+            heads: 4,
+            key_heads: 2,
+            batch: 2,
+            queries: 5,
+            keys: 5,
+            width: 3,
+            causal: true,
+            origin: 0,
+            scale: 0.5,
+        },
+        1e-5,
+    );
+    run_forward(
+        Shapes {
+            heads: 8,
+            key_heads: 1,
+            batch: 1,
+            queries: 6,
+            keys: 4,
+            width: 2,
+            causal: false,
+            origin: 0,
+            scale: 0.25,
+        },
+        1e-5,
+    );
+}
+
+#[test]
+fn an_attention_refuses_values_of_another_width() {
+    let runtime = open();
+    assert!(
+        refuses(|| {
+            let graph = Graph::new();
+            let queries = graph.parameter(Shape::of([1, 1, 2, 4]), Init::Zero, Element::Single);
+            let keys = graph.parameter(Shape::of([1, 1, 2, 4]), Init::Zero, Element::Single);
+            let values = graph.parameter(Shape::of([1, 1, 2, 6]), Init::Zero, Element::Single);
+            let out = graph.attention(
+                queries,
+                keys,
+                values,
+                AttentionOptions {
+                    scale: 0.5,
+                    causal: false,
+                    origin: None,
+                },
+            );
+            graph.retain(out);
+            let weights = runtime.weights(&graph);
+            let _ = runtime.compile(&graph, &weights);
+        }),
+        "an attention of width four reads keys of width four and values of width six",
+    );
+}
+
+#[test]
+fn an_attention_refuses_a_group_of_queries_that_does_not_divide() {
+    let runtime = open();
+    assert!(
+        refuses(|| {
+            let shapes = Shapes {
+                heads: 3,
+                key_heads: 2,
+                batch: 1,
+                queries: 2,
+                keys: 2,
+                width: 2,
+                causal: false,
+                origin: 0,
+                scale: 0.5,
+            };
+            let (graph, _, _, _, _) = graph_of(shapes);
+            let weights = runtime.weights(&graph);
+            let _ = runtime.compile(&graph, &weights);
+        }),
+        "three query heads share two key heads only by halves",
+    );
+}
+
+#[test]
 fn a_fused_attention_holds_no_score_matrix_of_its_own() {
     let runtime = open();
     let tokens = [64u32, 128, 256];
@@ -194,6 +306,7 @@ fn a_fused_attention_holds_no_score_matrix_of_its_own() {
     for tokens in tokens {
         let shapes = Shapes {
             heads: 4,
+            key_heads: 4,
             batch: 1,
             queries: tokens,
             keys: tokens,
@@ -233,6 +346,7 @@ fn an_attention_carries_the_log_sum_of_every_row_it_weights() {
     let runtime = open();
     let shapes = Shapes {
         heads: 1,
+        key_heads: 1,
         batch: 1,
         queries: 4,
         keys: 4,
@@ -404,6 +518,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
 fn every_profile_the_device_offers_runs_the_same_attention() {
     let shapes = Shapes {
         heads: 2,
+        key_heads: 2,
         batch: 1,
         queries: 7,
         keys: 7,
@@ -427,8 +542,14 @@ fn every_profile_the_device_offers_runs_the_same_attention() {
         shapes.heads * shapes.batch * shapes.queries * shapes.width,
         17,
     );
-    let keys_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 29);
-    let values_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 43);
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
     let (expected_out, statistics) =
         attention_forward(shapes, &queries_data, &keys_data, &values_data);
     let gradient = vec![1.0f32; expected_out.len()];
@@ -460,9 +581,9 @@ fn block<'g>(
     shapes: Shapes,
     recomputed: bool,
 ) -> (Value<'g>, [Value<'g>; 3], [Value<'g>; 3]) {
-    let tensor = |tokens: u32| {
+    let tensor = |heads: u32, tokens: u32| {
         graph.parameter(
-            Shape::of([shapes.heads, shapes.batch, tokens, shapes.width]),
+            Shape::of([heads, shapes.batch, tokens, shapes.width]),
             Init::Uniform {
                 low: -0.5,
                 high: 0.5,
@@ -470,9 +591,9 @@ fn block<'g>(
             Element::Single,
         )
     };
-    let queries = tensor(shapes.queries);
-    let keys = tensor(shapes.keys);
-    let values = tensor(shapes.keys);
+    let queries = tensor(shapes.heads, shapes.queries);
+    let keys = tensor(shapes.key_heads, shapes.keys);
+    let values = tensor(shapes.key_heads, shapes.keys);
     let attend = |graph: &Graph<'g>| {
         graph.attention(
             queries,
@@ -521,8 +642,14 @@ fn a_recomputed_attention_block_matches_the_gradients_it_replaced() {
         shapes.heads * shapes.batch * shapes.queries * shapes.width,
         17,
     );
-    let keys_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 29);
-    let values_data = data(shapes.heads * shapes.batch * shapes.keys * shapes.width, 43);
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
     for (runtime, program, inputs) in [
         (&runtime, &plain_program, plain_inputs),
         (&runtime, &program, inputs),
