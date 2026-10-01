@@ -543,7 +543,7 @@ fn a_recomputed_attention_block_matches_the_gradients_it_replaced() {
         assert_close(observed, expected, 1e-5);
     }
     assert!(
-        program.dispatch_count() > plain_program.dispatch_count(),
-        "a recomputed block follows the tape prefix it was authored into",
+        program.task_count() > plain_program.task_count(),
+        "a recomputed block re-runs the tape prefix it was authored into",
     );
 }

@@ -1,7 +1,11 @@
 use crate::access::Access;
 use crate::lower::Task;
+use crate::region::{self, Region};
 use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentFields, SegmentRecord};
 use neura_graph::ValueInfo;
+use neura_profile::MatmulTile;
+
+const MERGE_SPREAD: u64 = 16;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dispatch {
@@ -22,16 +26,23 @@ struct Packed {
 }
 
 impl Schedule {
-    pub(crate) fn of(values: &[ValueInfo], tasks: &[Task]) -> Self {
-        let conflicts = conflicts(values, tasks);
-        let packed = pack(values, tasks, &conflicts);
+    pub(crate) fn of(
+        values: &[ValueInfo],
+        tiles: &[MatmulTile],
+        tasks: &[Task],
+        workgroups: u32,
+    ) -> Self {
+        let conflicts = conflicts(values, tiles, tasks);
+        let packed = pack(values, tasks, &conflicts, workgroups);
         let schedule = Self::layout(&packed);
-        assert_ordered(values, tasks, &schedule);
+        assert_ordered(values, tiles, tasks, &schedule);
         schedule
     }
 
     fn layout(packed: &Packed) -> Self {
-        let mut grouped = (0..packed.segments.len()).collect::<Vec<_>>();
+        let mut grouped = (0..packed.segments.len())
+            .filter(|segment| !packed.segments[*segment].is_empty())
+            .collect::<Vec<_>>();
         grouped.sort_by_key(|segment| {
             (
                 packed.waves[packed.segments[*segment][0] as usize],
@@ -93,40 +104,51 @@ impl Schedule {
     }
 }
 
-fn accesses(values: &[ValueInfo], tasks: &[Task], mut visit: impl FnMut(u32, u32)) {
-    let mut writers = vec![Vec::<u32>::new(); values.len()];
-    let mut readers = vec![Vec::<u32>::new(); values.len()];
+fn accesses(
+    values: &[ValueInfo],
+    tiles: &[MatmulTile],
+    tasks: &[Task],
+    mut visit: impl FnMut(u32, u32),
+) {
+    let mut writers = vec![Vec::<(u32, Region)>::new(); values.len()];
+    let mut readers = vec![Vec::<(u32, Region)>::new(); values.len()];
     for (index, task) in tasks.iter().enumerate() {
         let index = index as u32;
-        let access = Access::of(values, task);
-        for storage in access.reads() {
-            for writer in &writers[*storage as usize] {
-                visit(*writer, index);
-            }
-        }
-        for storage in access.writes() {
-            for reader in &readers[*storage as usize] {
-                visit(*reader, index);
-            }
-            if access.in_place() {
-                for writer in &writers[*storage as usize] {
+        let touches = region::touches(values, tiles, task);
+        for (storage, region) in &touches.reads {
+            for (writer, written) in &writers[*storage as usize] {
+                if region.overlaps(*written) {
                     visit(*writer, index);
                 }
             }
         }
-        for storage in access.reads() {
-            readers[*storage as usize].push(index);
+        for (storage, region) in &touches.writes {
+            for (reader, read) in &readers[*storage as usize] {
+                if region.overlaps(*read) {
+                    visit(*reader, index);
+                }
+            }
+            if task.in_place {
+                for (writer, written) in &writers[*storage as usize] {
+                    if region.overlaps(*written) {
+                        visit(*writer, index);
+                    }
+                }
+            }
         }
-        for storage in access.writes() {
-            writers[*storage as usize].push(index);
-            readers[*storage as usize].clear();
+        for (storage, region) in touches.reads {
+            readers[storage as usize].push((index, region));
+        }
+        for (storage, region) in touches.writes {
+            writers[storage as usize].push((index, region));
+            readers[storage as usize].clear();
         }
     }
 }
 
-fn conflicts(values: &[ValueInfo], tasks: &[Task]) -> Vec<Vec<u32>> {
+fn conflicts(values: &[ValueInfo], tiles: &[MatmulTile], tasks: &[Task]) -> Vec<Vec<u32>> {
     let mut conflicts = vec![Vec::new(); tasks.len()];
-    accesses(values, tasks, |before, after| {
+    accesses(values, tiles, tasks, |before, after| {
         conflicts[after as usize].push(before);
     });
     barriers(values, tasks, &mut conflicts);
@@ -166,31 +188,40 @@ fn barriers(values: &[ValueInfo], tasks: &[Task], conflicts: &mut [Vec<u32>]) {
     }
 }
 
-fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed {
+enum Placement {
+    Fold { wave: u32, segment: u32 },
+    Merge { wave: u32, segments: Vec<u32> },
+    Open { wave: u32 },
+}
+
+fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>], workgroups: u32) -> Packed {
     let lonely = lonely(conflicts);
     let mut waves = vec![0u32; tasks.len()];
     let mut segments = Vec::<Vec<u32>>::new();
-    let mut segment_of = vec![0u32; tasks.len()];
     let mut work = Vec::<u64>::new();
+    let mut created = Vec::<u32>::new();
+    let mut rebuilt = Vec::<bool>::new();
+    let mut segment_of = vec![0u32; tasks.len()];
     let mut prefix = 0u32;
     let mut stage = 0u32;
     let mut in_recompute = false;
     for index in 0..tasks.len() {
         let index = index as u32;
-        let recomputed = recomputes(values, &tasks[index as usize]);
+        let task = &tasks[index as usize];
+        let recomputed = recomputes(values, task);
         if recomputed && !in_recompute {
             stage = prefix + 1;
         }
         in_recompute = recomputed;
         let conflicts = &conflicts[index as usize];
+        let earliest = conflicts
+            .iter()
+            .map(|dependency| waves[*dependency as usize])
+            .max();
         let folded = (lonely[index as usize] && !recomputed)
             .then(|| {
-                let earliest = conflicts
-                    .iter()
-                    .map(|dependency| waves[*dependency as usize])
-                    .max()?;
+                let earliest = earliest?;
                 (0..segments.len())
-                    .filter(|segment| waves[segments[*segment][0] as usize] == earliest)
                     .filter(|segment| {
                         conflicts
                             .iter()
@@ -206,29 +237,111 @@ fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>]) -> Packed 
                     .map(|segment| (earliest, segment as u32))
             })
             .flatten();
-        let (wave, segment) = match folded {
-            Some(folded) => folded,
-            None => {
+        let placement = match folded {
+            Some((wave, segment)) => Placement::Fold { wave, segment },
+            None => close(
+                task,
+                conflicts,
+                earliest,
+                &waves,
+                &segment_of,
+                &work,
+                &created,
+                &rebuilt,
+                recomputed,
+                workgroups,
+            ),
+        };
+        let (wave, segment) = match placement {
+            Placement::Fold { wave, segment } => (wave, segment),
+            Placement::Merge {
+                wave,
+                segments: merged,
+            } => {
+                let target = merged[0];
+                for segment in &merged[1..] {
+                    let moved = std::mem::take(&mut segments[*segment as usize]);
+                    for task in &moved {
+                        segment_of[*task as usize] = target;
+                    }
+                    work[target as usize] += work[*segment as usize];
+                    work[*segment as usize] = 0;
+                    segments[target as usize].extend(moved);
+                }
+                (wave, target)
+            }
+            Placement::Open { wave } => {
                 segments.push(Vec::new());
                 work.push(0);
-                (
-                    conflicts
-                        .iter()
-                        .map(|dependency| waves[*dependency as usize] + 1)
-                        .max()
-                        .unwrap_or(0),
-                    (segments.len() - 1) as u32,
-                )
+                rebuilt.push(false);
+                (wave, (segments.len() - 1) as u32)
             }
         };
         let wave = if recomputed { wave.max(stage) } else { wave };
         waves[index as usize] = wave;
         segment_of[index as usize] = segment;
-        work[segment as usize] += tasks[index as usize].work;
+        if segments[segment as usize].is_empty() {
+            if created.len() <= wave as usize {
+                created.resize(wave as usize + 1, 0);
+            }
+            created[wave as usize] += 1;
+        }
+        work[segment as usize] += task.work;
+        rebuilt[segment as usize] |= recomputed;
         segments[segment as usize].push(index);
         prefix = prefix.max(wave);
     }
     Packed { waves, segments }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn close(
+    task: &Task,
+    conflicts: &[u32],
+    earliest: Option<u32>,
+    waves: &[u32],
+    segment_of: &[u32],
+    work: &[u64],
+    created: &[u32],
+    rebuilt: &[bool],
+    recomputed: bool,
+    workgroups: u32,
+) -> Placement {
+    let Some(earliest) = earliest else {
+        return Placement::Open { wave: 0 };
+    };
+    let mut dependencies = conflicts
+        .iter()
+        .filter(|dependency| waves[**dependency as usize] == earliest)
+        .map(|dependency| segment_of[*dependency as usize])
+        .collect::<Vec<u32>>();
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    let heaviest = dependencies
+        .iter()
+        .map(|segment| work[*segment as usize])
+        .max()
+        .unwrap_or(0);
+    let claimed = dependencies
+        .iter()
+        .map(|segment| work[*segment as usize])
+        .sum::<u64>();
+    let saturated = created.get(earliest as usize).copied().unwrap_or(0) >= workgroups;
+    if dependencies.len() > 1
+        && heaviest > 0
+        && !saturated
+        && !recomputed
+        && dependencies
+            .iter()
+            .all(|segment| !rebuilt[*segment as usize])
+        && claimed + task.work <= MERGE_SPREAD * heaviest
+    {
+        return Placement::Merge {
+            wave: earliest,
+            segments: dependencies,
+        };
+    }
+    Placement::Open { wave: earliest + 1 }
 }
 
 fn lonely(conflicts: &[Vec<u32>]) -> Vec<bool> {
@@ -251,7 +364,7 @@ fn lonely(conflicts: &[Vec<u32>]) -> Vec<bool> {
         .collect()
 }
 
-fn assert_ordered(values: &[ValueInfo], tasks: &[Task], schedule: &Schedule) {
+fn assert_ordered(values: &[ValueInfo], tiles: &[MatmulTile], tasks: &[Task], schedule: &Schedule) {
     let mut dispatch_of = vec![0u32; schedule.segments.len()];
     for (index, dispatch) in schedule.dispatches.iter().enumerate() {
         for segment in dispatch.first_segment..dispatch.first_segment + dispatch.segments {
@@ -269,7 +382,7 @@ fn assert_ordered(values: &[ValueInfo], tasks: &[Task], schedule: &Schedule) {
             position[task] = within as u32;
         }
     }
-    accesses(values, tasks, |before, after| {
+    accesses(values, tiles, tasks, |before, after| {
         let (before, after) = (before as usize, after as usize);
         let ordered = dispatch[before] < dispatch[after]
             || (segment[before] == segment[after] && position[before] < position[after]);

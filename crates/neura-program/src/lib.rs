@@ -3,6 +3,7 @@ mod encode;
 mod fuse;
 mod layout;
 mod lower;
+mod region;
 mod schedule;
 
 pub use encode::{Encoding, Span};

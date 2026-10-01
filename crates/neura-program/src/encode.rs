@@ -148,7 +148,7 @@ impl Encoding {
         assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, tasks);
         assert_units_keep_their_order(tasks);
-        let schedule = schedule::Schedule::of(values, tasks);
+        let schedule = schedule::Schedule::of(values, &plan.tiles, tasks, profile.workgroups());
         let order = schedule.order();
         let ends = schedule.ends();
         let live = storage_liveness(values, tasks, order);

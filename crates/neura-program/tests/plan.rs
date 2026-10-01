@@ -222,7 +222,7 @@ fn a_retained_value_is_never_folded_away() {
 }
 
 #[test]
-fn independent_tasks_share_a_dispatch() {
+fn a_consumer_closes_the_producers_it_reads_into_one_segment() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let right = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
@@ -234,9 +234,18 @@ fn independent_tasks_share_a_dispatch() {
     graph.retain(out);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 3);
-    assert_eq!(encoding.dispatch_count(), 2);
-    assert_eq!(encoding.dispatches()[0].segments, 2);
-    assert_eq!(encoding.dispatches()[1].segments, 1);
+    assert_eq!(
+        encoding.dispatch_count(),
+        1,
+        "a wave the device cannot fill hands its work to the wave it reads",
+    );
+    assert_eq!(encoding.dispatches()[0].segments, 1);
+    assert_eq!(encoding.segments().len(), 1);
+    let sum_task = writers(&encoding, sum.id())[0];
+    let product_task = writers(&encoding, product.id())[0];
+    let consumer = writers(&encoding, out.id())[0];
+    assert!(follows(&encoding, sum_task, consumer));
+    assert!(follows(&encoding, product_task, consumer));
     assert_eq!(out.shape(), Shape::vector(64));
 }
 
@@ -418,6 +427,26 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         dispatch_of(&encoding, tape.len() - 1),
         encoding.dispatch_count() - 1,
         "the fold reads every slot after the last slot is written",
+    );
+}
+
+#[test]
+fn a_fold_leaves_the_wave_that_already_fills_the_device() {
+    let graph = Graph::new();
+    let narrow = graph.parameter(Shape::matrix(8, 4096), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero, Element::Single);
+    let out = graph.matmul(narrow, weight);
+    graph.retain(out);
+    let encoding = encoding_with(&graph, wide());
+    let tape = tape(&encoding);
+    let fold = tape
+        .iter()
+        .position(|task| Kind::of(task.kind) == Kind::MatmulFold)
+        .expect("a product that splits its depth carries a fold");
+    assert_ne!(
+        dispatch_of(&encoding, fold),
+        dispatch_of(&encoding, 0),
+        "a fold never lengthens the wave its own partials already fill",
     );
 }
 
