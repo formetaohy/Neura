@@ -263,9 +263,7 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
                 use ::neura_compiler::ir as neura_ir;
-                let mut compiler = ::neura_compiler::Compiler::new(
-                    ::neura_compiler::abi::Features::all(),
-                );
+                let mut compiler = ::neura_compiler::Compiler::empty();
                 #(#records)*
                 #(#bindings)*
                 compiler.function(#definition);

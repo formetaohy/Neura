@@ -230,15 +230,6 @@ impl Verifier<'_> {
                     );
                     state.barrier = true;
                 }
-                Statement::SubgroupBallot { result, .. }
-                | Statement::SubgroupCollectiveOperation { result, .. } => {
-                    assert!(
-                        state.control_uniform,
-                        "a subgroup collective is reached by different invocations"
-                    );
-                    state.barrier = true;
-                    state.values[result.index()] = state.control_uniform;
-                }
                 Statement::If {
                     condition,
                     accept,

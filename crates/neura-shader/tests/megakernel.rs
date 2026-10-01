@@ -1,5 +1,5 @@
 use naga::{AddressSpace, Expression, MathFunction, Statement, SwitchValue, TypeInner};
-use neura_abi::{Element, Features, Kind, RECORDS};
+use neura_abi::{Element, Kind, RECORDS};
 use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
 use neura_profile::{AttentionTile, Budget, Geometry, Profile};
@@ -13,17 +13,9 @@ use neura_shader::{BINDINGS, Megakernel};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
-const DEVICES: [Features; 2] = [Features::empty(), Features::SUBGROUP];
-
-fn all(features: Features, profile: usize) -> &'static Megakernel {
-    static WITHOUT: OnceLock<Vec<Megakernel>> = OnceLock::new();
-    static WITH: OnceLock<Vec<Megakernel>> = OnceLock::new();
-    let programs = if features.contains(Features::SUBGROUP) {
-        &WITH
-    } else {
-        &WITHOUT
-    };
-    &programs.get_or_init(|| {
+fn all(profile: usize) -> &'static Megakernel {
+    static PROGRAMS: OnceLock<Vec<Megakernel>> = OnceLock::new();
+    let programs = PROGRAMS.get_or_init(|| {
         profiles()
             .iter()
             .map(|profile| {
@@ -36,19 +28,14 @@ fn all(features: Features, profile: usize) -> &'static Megakernel {
                         profile.tiles(),
                         &[],
                     ),
-                    features,
                 )
             })
             .collect()
-    })[profile]
+    });
+    &programs[profile]
 }
 
-fn selected(
-    features: Features,
-    profile: Profile,
-    kinds: &[Kind],
-    elements: &[Element],
-) -> Megakernel {
+fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Megakernel {
     Megakernel::assemble(
         kinds,
         elements,
@@ -58,7 +45,6 @@ fn selected(
             profile.tiles(),
             &[],
         ),
-        features,
     )
 }
 
@@ -78,22 +64,13 @@ fn functions(program: &ComputeProgram) -> BTreeSet<&str> {
 
 #[test]
 fn rust_source_compiles_into_three_native_shader_formats() {
-    for features in DEVICES {
-        let program = all(features, 0).program();
-        assert_eq!(program.features(), features);
+    {
+        let program = all(0).program();
         let ShaderTranslation::Spirv(words) = program.translate(Backend::Vulkan) else {
             panic!("Vulkan requires SPIR-V");
         };
         assert_eq!(words[0], 0x0723_0203);
-        assert_eq!(
-            words[1],
-            if features.contains(Features::SUBGROUP) {
-                0x0001_0300
-            } else {
-                0x0001_0000
-            },
-            "a device program asks SPIR-V for the version its features need",
-        );
+        assert_eq!(words[1], 0x0001_0000, "a device program asks SPIR-V 1.0");
         let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
             panic!("D3D12 requires HLSL");
         };
@@ -117,9 +94,9 @@ fn rust_source_compiles_into_three_native_shader_formats() {
 }
 
 #[test]
-fn every_feature_set_compiles_every_task_for_every_native_backend() {
-    for features in DEVICES {
-        let program = selected(features, profiles()[0], Kind::ALL, Element::ALL).program();
+fn every_task_compiles_for_every_native_backend() {
+    {
+        let program = selected(profiles()[0], Kind::ALL, Element::ALL).program();
         assert!(matches!(
             program.translate(Backend::Vulkan),
             ShaderTranslation::Spirv(_)
@@ -137,9 +114,9 @@ fn every_feature_set_compiles_every_task_for_every_native_backend() {
 
 #[test]
 fn every_profile_compiles_the_rust_abi_and_bindings() {
-    for features in DEVICES {
+    {
         for (index, profile) in profiles().iter().enumerate() {
-            let kernel = all(features, index);
+            let kernel = all(index);
             let program = kernel.program();
             assert_eq!(kernel.workgroup_size(), profile.workgroup());
             assert_eq!(kernel.geometry().tiles(), profile.tiles());
@@ -174,12 +151,7 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
 
 #[test]
 fn specialization_includes_only_reachable_rust_functions() {
-    let kernel = selected(
-        Features::empty(),
-        profiles()[0],
-        &[Kind::Fill],
-        &[Element::Single],
-    );
+    let kernel = selected(profiles()[0], &[Kind::Fill], &[Element::Single]);
     let program = kernel.program();
     let reachable = functions(&program);
     assert!(reachable.contains("run_fill"));
@@ -203,54 +175,14 @@ fn specialization_includes_only_reachable_rust_functions() {
             .iter()
             .any(|(_, global)| global.space == AddressSpace::WorkGroup)
     );
-    let all = all(Features::empty(), 0).program();
+    let all = all(0).program();
     assert!(program.spirv().len() < all.spirv().len());
     assert_eq!(kernel.kinds(), &[Kind::Fill]);
 }
 
 #[test]
-fn a_device_program_reduces_with_the_lanes_its_device_offers() {
-    let kinds = [Kind::SumChunk, Kind::Softmax];
-    let elements = [Element::Single];
-    let mut reductions = Vec::new();
-    for features in DEVICES {
-        let kernel = selected(features, profiles()[0], &kinds, &elements);
-        let program = kernel.program();
-        assert_eq!(program.features(), features);
-        let (_, reduction) = program
-            .module()
-            .functions
-            .iter()
-            .find(|(_, function)| function.name.as_deref() == Some("workgroup_sum"))
-            .expect("every reduction the kinds reach is compiled");
-        let emitted = reduction
-            .body
-            .iter()
-            .filter(|statement| {
-                matches!(
-                    statement,
-                    Statement::SubgroupCollectiveOperation { .. }
-                        | Statement::SubgroupBallot { .. }
-                )
-            })
-            .count();
-        assert_eq!(
-            emitted > 0,
-            features.contains(Features::SUBGROUP),
-            "a reduction of {features} emits the lanes its device offers",
-        );
-        reductions.push(program.spirv().to_vec());
-    }
-    assert_ne!(
-        reductions[0], reductions[1],
-        "a device with subgroups runs another reduction than one without",
-    );
-}
-
-#[test]
 fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
     let program = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Fill, Kind::Binary],
         &[Element::Single],
@@ -282,7 +214,7 @@ fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
 
 #[test]
 fn every_declared_kind_reaches_the_device_body_it_names() {
-    let program = selected(Features::empty(), profiles()[0], Kind::ALL, Element::ALL).program();
+    let program = selected(profiles()[0], Kind::ALL, Element::ALL).program();
     let reachable = functions(&program);
     for kind in Kind::ALL {
         assert!(
@@ -329,7 +261,6 @@ fn every_declared_kind_reaches_the_device_body_it_names() {
 #[test]
 fn the_rust_operation_dispatcher_contains_every_declared_code() {
     let program = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Binary, Kind::Partial],
         &[Element::Single],
@@ -366,15 +297,8 @@ fn the_rust_operation_dispatcher_contains_every_declared_code() {
 
 #[test]
 fn every_tensor_element_compiles_only_the_loads_it_reads() {
-    let single = selected(
-        Features::empty(),
-        profiles()[0],
-        &[Kind::Unary],
-        &[Element::Single],
-    )
-    .program();
+    let single = selected(profiles()[0], &[Kind::Unary], &[Element::Single]).program();
     let half = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Unary],
         &[Element::Single, Element::Half],
@@ -410,7 +334,6 @@ fn every_tensor_element_compiles_only_the_loads_it_reads() {
     );
     assert!(!functions(&half).contains("fetch_bfloat16"));
     let quantized = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Unary],
         &[Element::Single, Element::Int8],
@@ -425,7 +348,6 @@ fn every_tensor_element_compiles_only_the_loads_it_reads() {
 #[test]
 fn a_convert_carries_only_the_elements_it_packs() {
     let half = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Convert],
         &[Element::Single, Element::Half],
@@ -436,7 +358,6 @@ fn a_convert_carries_only_the_elements_it_packs() {
     assert!(reachable.contains("run_convert_half"));
     assert!(!reachable.contains("run_convert_bfloat16"));
     let both = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Convert],
         &[Element::Half, Element::Bfloat16],
@@ -447,7 +368,6 @@ fn a_convert_carries_only_the_elements_it_packs() {
     assert!(reachable.contains("run_convert_bfloat16"));
     assert!(!reachable.contains("run_convert_int8"));
     let quantized = selected(
-        Features::empty(),
         profiles()[0],
         &[Kind::Convert],
         &[Element::Single, Element::Int8],
@@ -461,7 +381,7 @@ fn a_convert_carries_only_the_elements_it_packs() {
 #[test]
 fn matrix_specialization_contains_every_tile_in_the_profile() {
     for (index, profile) in profiles().iter().enumerate() {
-        let kernel = all(Features::empty(), index);
+        let kernel = all(index);
         let program = kernel.program();
         let names = functions(&program);
         for tile in 0..profile.tiles().len() {
@@ -474,7 +394,7 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
 #[test]
 fn workgroup_allocation_fits_the_advertised_profile() {
     for (index, profile) in profiles().iter().enumerate() {
-        let program = all(Features::empty(), index).program();
+        let program = all(index).program();
         let used = program
             .module()
             .global_variables
@@ -501,20 +421,8 @@ fn workgroup_allocation_fits_the_advertised_profile() {
 
 #[test]
 fn the_same_rust_specialization_produces_the_same_device_program() {
-    let first = selected(
-        Features::empty(),
-        profiles()[0],
-        &[Kind::Fill],
-        &[Element::Single],
-    )
-    .program();
-    let second = selected(
-        Features::empty(),
-        profiles()[0],
-        &[Kind::Fill],
-        &[Element::Single],
-    )
-    .program();
+    let first = selected(profiles()[0], &[Kind::Fill], &[Element::Single]).program();
+    let second = selected(profiles()[0], &[Kind::Fill], &[Element::Single]).program();
     assert_eq!(first, second);
     assert_eq!(first.spirv(), second.spirv());
 }
@@ -532,7 +440,6 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         ],
         &[Element::Single],
         Geometry::of(profile.workgroup(), profile.shared_bytes(), &[], &attention),
-        Features::empty(),
     );
     let program = kernel.program();
     let names = functions(&program);

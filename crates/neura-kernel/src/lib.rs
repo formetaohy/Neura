@@ -34,17 +34,11 @@ mod select;
 #[path = "../device/softmax.rs"]
 mod softmax;
 
-use neura_abi::{Element, Features, Kind, Module};
+use neura_abi::{Element, Kind, Module};
 use neura_compiler::{Compiler, ir};
 use neura_profile::Geometry;
 
-pub fn define(
-    compiler: &mut Compiler,
-    kinds: &[Kind],
-    elements: &[Element],
-    geometry: &Geometry,
-    features: Features,
-) {
+pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geometry: &Geometry) {
     let declared = geometry.declared_shared_bytes(kinds);
     assert!(
         declared <= geometry.shared_bytes(),
@@ -55,7 +49,7 @@ pub fn define(
     substrate(compiler, elements);
     for module in Module::ALL {
         if kinds.iter().any(|kind| kind.carries(*module)) {
-            install(compiler, *module, elements, geometry, features);
+            install(compiler, *module, elements, geometry);
         }
     }
     for kind in Kind::ALL {
@@ -86,13 +80,7 @@ fn substrate(compiler: &mut Compiler, elements: &[Element]) {
     rope::define(compiler);
 }
 
-fn install(
-    compiler: &mut Compiler,
-    module: Module,
-    elements: &[Element],
-    geometry: &Geometry,
-    features: Features,
-) {
+fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geometry: &Geometry) {
     match module {
         Module::Matmul => matmul_device::define(compiler),
         Module::MatmulTiles => {
@@ -104,7 +92,7 @@ fn install(
         Module::Attention => attention::define(compiler, geometry),
         Module::Reduce => {
             compiler.workgroup("reduction_scratch", "f32", geometry.workgroup());
-            reduce::define(compiler, features);
+            reduce::define(compiler);
         }
         Module::Softmax => softmax::define(compiler),
         Module::Choice => {

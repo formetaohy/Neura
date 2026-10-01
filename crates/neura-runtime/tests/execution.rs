@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
-use neura_runtime::{Features, Runtime, RuntimeRequest};
+use neura_runtime::{Runtime, RuntimeRequest};
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -229,17 +229,6 @@ fn every_backend_a_machine_offers_folds_a_row_the_same_way() {
         let runtime = open_with(backends);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        assert!(
-            runtime.features().contains(program.features()),
-            "a device that offers {} runs a device program of {}",
-            runtime.features(),
-            program.features(),
-        );
-        assert_eq!(
-            program.features().contains(Features::SUBGROUP),
-            runtime.features().contains(Features::SUBGROUP),
-            "a row of {columns} over {backends:?} folds through the lanes its device offers",
-        );
         runtime.write(&program, data, &values);
         runtime.run(&program);
         assert_close(

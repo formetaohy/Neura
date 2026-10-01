@@ -5,7 +5,7 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::{PipelineCache, fingerprint};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
@@ -205,23 +205,6 @@ fn identity(props: &vk::PhysicalDeviceProperties) -> AdapterId {
     }
 }
 
-fn features(instance: &Instance, physical: vk::PhysicalDevice) -> Features {
-    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
-    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut subgroup);
-    unsafe {
-        instance.get_physical_device_properties2(physical, &mut properties);
-    }
-    let operations = vk::SubgroupFeatureFlags::ARITHMETIC | vk::SubgroupFeatureFlags::BALLOT;
-    if subgroup.supported_operations.contains(operations)
-        && subgroup
-            .supported_stages
-            .contains(vk::ShaderStageFlags::COMPUTE)
-    {
-        return Features::SUBGROUP;
-    }
-    Features::empty()
-}
-
 fn describe(props: &vk::PhysicalDeviceProperties, device_type: DeviceType) -> AdapterInfo {
     AdapterInfo {
         name: unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -249,7 +232,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         cache: Option<PipelineCache>,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
             complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
@@ -324,17 +307,16 @@ impl Device {
                 let ty = device_type(props.device_type);
                 let memory = unsafe { owner.raw.get_physical_device_memory_properties(*physical) };
                 let limits = limits(&props, &memory);
-                let features = features(&owner.raw, *physical);
-                Some((*physical, props, family, ty, limits, memory, features))
+                Some((*physical, props, family, ty, limits, memory))
             })
             .collect::<Vec<_>>();
         let offered = candidates
             .iter()
-            .map(|(_, props, _, ty, _, _, _)| describe(props, *ty))
+            .map(|(_, props, _, ty, _, _)| describe(props, *ty))
             .collect::<Vec<_>>();
-        candidates.retain(|(_, props, _, _, _, _, _)| policy.wants(identity(props)));
+        candidates.retain(|(_, props, _, _, _, _)| policy.wants(identity(props)));
         if let AdapterPolicy::Power(preference) = policy {
-            candidates.sort_by_key(|(_, _, _, ty, limits, _, _)| {
+            candidates.sort_by_key(|(_, _, _, ty, limits, _)| {
                 Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
             });
         }
@@ -354,7 +336,7 @@ impl Device {
             });
         }
         let mut failures = Vec::new();
-        for (physical, props, family, ty, limits, memory, features) in candidates {
+        for (physical, props, family, ty, limits, memory) in candidates {
             let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
                 .to_string_lossy()
                 .into_owned();
@@ -425,7 +407,6 @@ impl Device {
                 }),
                 adapter_info,
                 limits,
-                features,
             ));
         }
         Err(DeviceFailure::reason(if failures.is_empty() {
@@ -853,17 +834,21 @@ impl Device {
     }
 
     fn retire(&self, state: &mut QueueState) {
-        for frame in &state.frames {
-            if frame.index > state.completed {
-                let signaled =
-                    unsafe { self.raw.get_fence_status(frame.fence) }.unwrap_or_else(|error| {
-                        panic!("checking Vulkan compute completion: {error:?}")
-                    });
-                if signaled {
-                    state.completed = state.completed.max(frame.index);
-                }
+        let mut completed = state.completed;
+        while let Some(slot) = state
+            .frames
+            .iter()
+            .position(|frame| frame.index == completed + 1)
+        {
+            let fence = state.frames[slot].fence;
+            let signaled = unsafe { self.raw.get_fence_status(fence) }
+                .unwrap_or_else(|error| panic!("checking Vulkan compute completion: {error:?}"));
+            if !signaled {
+                break;
             }
+            completed += 1;
         }
+        state.completed = completed;
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
@@ -903,19 +888,29 @@ impl Device {
         }
         .map_err(|error| format!("waiting for Vulkan compute work: {error:?}"))?;
         self.retire(state);
-        if state.completed < index {
-            return Err("Vulkan compute did not complete".to_owned());
-        }
         Ok(())
     }
 
     fn release(&self) {
-        let mut state = self
+        let state = self
             .state
             .lock()
             .expect("the Vulkan queue is never poisoned");
-        let index = state.next;
-        let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
+        let fences = state
+            .frames
+            .iter()
+            .map(|frame| frame.fence)
+            .collect::<Vec<_>>();
+        if fences.is_empty() {
+            return;
+        }
+        let _ = unsafe {
+            self.raw.wait_for_fences(
+                &fences,
+                true,
+                RELEASE_TIMEOUT.as_nanos().min(u64::MAX as u128) as u64,
+            )
+        };
     }
 
     fn discard(&mut self) {

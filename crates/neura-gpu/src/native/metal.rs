@@ -4,7 +4,7 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::PipelineCache;
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
 use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
@@ -182,7 +182,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         cache: Option<PipelineCache>,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
         let offered = devices
             .iter()
@@ -228,7 +228,6 @@ impl Device {
             }),
             info,
             limits,
-            Features::SUBGROUP,
         ))
     }
 
@@ -550,24 +549,25 @@ impl Device {
     }
 
     fn retire(&self, state: &mut QueueState) -> Result<(), String> {
-        for frame in &state.frames {
-            if frame.index <= state.completed {
-                continue;
-            }
-            let Some(command) = &frame.command else {
-                state.completed = frame.index;
-                continue;
-            };
+        let mut completed = state.completed;
+        while let Some(slot) = state
+            .frames
+            .iter()
+            .position(|frame| frame.index == completed + 1)
+        {
+            let command = state.frames[slot]
+                .command
+                .as_ref()
+                .expect("a submitted Metal command owns its command buffer");
             match command.status() {
-                MTLCommandBufferStatus::Completed => {
-                    state.completed = state.completed.max(frame.index);
-                }
+                MTLCommandBufferStatus::Completed => completed += 1,
                 MTLCommandBufferStatus::Error => {
                     return Err(format!("Metal compute failed: {:?}", command.error()));
                 }
-                _ => {}
+                _ => break,
             }
         }
+        state.completed = completed;
         Ok(())
     }
 
@@ -593,13 +593,18 @@ impl Device {
         if index <= state.completed {
             return Ok(());
         }
-        if !state.frames.iter().any(|frame| frame.index == index) {
-            return Err("an unfinished Metal command is in flight".to_owned());
-        }
         let started = Instant::now();
         loop {
             self.retire(state)?;
-            if state.completed >= index {
+            let command = state
+                .frames
+                .iter()
+                .find(|frame| frame.index == index)
+                .expect("an unfinished Metal command owns a command buffer")
+                .command
+                .as_ref()
+                .expect("a submitted Metal command owns its command buffer");
+            if command.status() == MTLCommandBufferStatus::Completed {
                 return Ok(());
             }
             if started.elapsed() >= timeout {
@@ -614,8 +619,14 @@ impl Device {
             .state
             .lock()
             .expect("the Metal compute queue is never poisoned");
-        let index = state.next;
-        let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
+        let indices = state
+            .frames
+            .iter()
+            .map(|frame| frame.index)
+            .collect::<Vec<_>>();
+        for index in indices {
+            let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
+        }
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

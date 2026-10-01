@@ -220,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "neura"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
  "neura-gpu",
@@ -233,15 +233,14 @@ dependencies = [
 
 [[package]]
 name = "neura-abi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
- "bitflags",
  "bytemuck",
 ]
 
 [[package]]
 name = "neura-compiler"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "naga",
  "neura-abi",
@@ -252,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "neura-gpu"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ash",
  "bitflags",
@@ -269,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "neura-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
  "neura-op",
@@ -277,11 +276,11 @@ dependencies = [
 
 [[package]]
 name = "neura-ir"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "neura-kernel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
  "neura-compiler",
@@ -291,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "neura-macro"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -300,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "neura-nn"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
  "neura-graph",
@@ -310,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "neura-op"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
  "neura-ir",
@@ -319,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "neura-precision"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -328,14 +327,14 @@ dependencies = [
 
 [[package]]
 name = "neura-profile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "neura-abi",
 ]
 
 [[package]]
 name = "neura-program"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "neura-abi",
@@ -346,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "neura-runtime"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytemuck",
  "neura-abi",
@@ -363,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "neura-shader"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "naga",
  "neura-abi",

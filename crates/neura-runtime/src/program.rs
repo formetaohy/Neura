@@ -4,7 +4,7 @@ use crate::tape::DeviceTape;
 use neura_abi::{
     BoundsRecord, Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES,
 };
-use neura_gpu::{BindGroup, Binding, BufferUsages, Features, GpuBuffer, GpuContext, Submission};
+use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_profile::{MatmulTile, Profile};
 use neura_program::{Region, Span};
@@ -238,10 +238,6 @@ impl<'r> Program<'r> {
 
     pub fn is_compiled(&self) -> bool {
         self.tape.kernel.is_compiled()
-    }
-
-    pub fn features(&self) -> Features {
-        self.tape.kernel.features()
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {

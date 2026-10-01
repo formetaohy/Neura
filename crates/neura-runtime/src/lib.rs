@@ -8,8 +8,7 @@ mod tape;
 pub use checkpoint::Checkpoint;
 pub use neura_abi::Placement;
 pub use neura_gpu::{
-    Backends, Device, Features, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, PipelineCache,
-    Queue,
+    Backends, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, PipelineCache, Queue,
 };
 pub use neura_profile::{Budget, MatmulTile, Profile};
 pub use neura_program::Span;

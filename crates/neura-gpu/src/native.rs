@@ -6,7 +6,7 @@ pub(crate) mod metal;
 pub(crate) mod vulkan;
 
 use crate::cache::PipelineCache;
-use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Features, Limits};
+use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
@@ -81,17 +81,17 @@ pub(crate) enum NativeGroup {
 pub(crate) fn open(
     request: &GpuRequest,
     cache: Option<PipelineCache>,
-) -> Result<(NativeDevice, AdapterInfo, Limits, Features), GpuUnavailable> {
+) -> Result<(NativeDevice, AdapterInfo, Limits), GpuUnavailable> {
     let mut reasons = Vec::new();
     let mut offered = Vec::new();
     let mut unsupported = None;
     #[cfg(target_os = "windows")]
     if request.backends.contains(Backends::DX12) {
         match dx12::Device::open(request.adapter, cache.clone()) {
-            Ok((device, info, limits, features)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Dx12(device), info, limits, features));
+            Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
+                return Ok((NativeDevice::Dx12(device), info, limits));
             }
-            Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
+            Ok((_, info, limits)) => unsupported = Some((info, limits)),
             Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
             Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("D3D12: {reason}")),
         }
@@ -99,10 +99,10 @@ pub(crate) fn open(
     #[cfg(target_os = "macos")]
     if request.backends.contains(Backends::METAL) {
         match metal::Device::open(request.adapter, cache.clone()) {
-            Ok((device, info, limits, features)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Metal(device), info, limits, features));
+            Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
+                return Ok((NativeDevice::Metal(device), info, limits));
             }
-            Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
+            Ok((_, info, limits)) => unsupported = Some((info, limits)),
             Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
             Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Metal: {reason}")),
         }
@@ -110,10 +110,10 @@ pub(crate) fn open(
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     if request.backends.contains(Backends::VULKAN) {
         match vulkan::Device::open(request.adapter, cache.clone()) {
-            Ok((device, info, limits, features)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Vulkan(device), info, limits, features));
+            Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
+                return Ok((NativeDevice::Vulkan(device), info, limits));
             }
-            Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
+            Ok((_, info, limits)) => unsupported = Some((info, limits)),
             Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
             Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Vulkan: {reason}")),
         }

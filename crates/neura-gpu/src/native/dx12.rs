@@ -4,7 +4,7 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::{PipelineCache, fingerprint};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Features, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
     PowerPreference,
 };
 use crate::pipeline::{BindingKind, ComputeProgram, ShaderTranslation};
@@ -278,26 +278,6 @@ struct Candidate {
     order: u32,
 }
 
-fn wave_operations(device: &ID3D12Device) -> bool {
-    let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
-    let queried = unsafe {
-        device.CheckFeatureSupport(
-            D3D12_FEATURE_D3D12_OPTIONS1,
-            (&raw mut options).cast(),
-            size_of::<D3D12_FEATURE_DATA_D3D12_OPTIONS1>() as u32,
-        )
-    }
-    .is_ok();
-    queried && options.WaveOps.as_bool()
-}
-
-fn features(device: &ID3D12Device) -> Features {
-    if wave_operations(device) {
-        return Features::SUBGROUP;
-    }
-    Features::empty()
-}
-
 fn shader_model(device: &ID3D12Device) -> bool {
     let mut model = D3D12_FEATURE_DATA_SHADER_MODEL {
         HighestShaderModel: D3D_SHADER_MODEL_6_0,
@@ -356,7 +336,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         cache: Option<PipelineCache>,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Features), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
@@ -389,9 +369,8 @@ impl Device {
                 candidates.swap_remove(0)
             }
         };
-        let features = features(&candidate.device);
         let device = Self::assemble(candidate.device, cache)?;
-        Ok((device, candidate.info, limits(), features))
+        Ok((device, candidate.info, limits()))
     }
 
     fn assemble(
