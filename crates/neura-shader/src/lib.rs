@@ -2,8 +2,8 @@
 mod core;
 
 use neura_abi::{
-    Element, Features, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal, store,
-    strategy,
+    Element, FP4_BLOCK, Features, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal,
+    store, strategy,
 };
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
 use neura_profile::Geometry;
@@ -123,6 +123,7 @@ impl Megakernel {
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
         compiler.constant("NO_VALUE", NO_VALUE);
         compiler.constant("INT4_BLOCK", INT4_BLOCK);
+        compiler.constant("FP4_BLOCK", FP4_BLOCK);
         compiler.constant("refusal::TENSOR", TENSOR);
         compiler.constant("refusal::KIND_BITS", refusal::KIND_BITS);
         compiler.constant("refusal::CODE_BITS", refusal::CODE_BITS);

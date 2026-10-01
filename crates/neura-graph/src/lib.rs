@@ -1,12 +1,15 @@
+mod autodiff;
 mod graph;
 mod init;
+mod op;
 mod pool;
 mod shape;
 mod window;
 
+pub use autodiff::Gradients;
 pub use graph::{
-    AttentionOptions, Gradients, Graph, GraphSnapshot, GraphStamp, Residency, Revision, TaskInfo,
-    Value, ValueInfo,
+    AttentionOptions, Graph, GraphSnapshot, GraphStamp, Residency, Revision, TaskInfo, Value,
+    ValueInfo,
 };
 pub use init::Init;
 pub use pool::Pool;

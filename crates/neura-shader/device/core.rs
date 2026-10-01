@@ -80,6 +80,14 @@ mod source {
             * heap[word_of(value, value.table)];
     }
 
+    fn fetch_fp4(value: Value, at: u32) -> f32 {
+        let word = bitcast_u32(heap[word_of(value, at >> 3u32)]);
+        let nibble = (word >> ((at & 7u32) * 4u32)) & 0xfu32;
+        let code = ((nibble & 0x8u32) << 4u32) | (nibble & 0x7u32);
+        let decoded = fp8_value(code, 1u32, 1u32, 0.5, 0xffffffffu32, 0xffffffffu32);
+        return decoded * heap[word_of(value, value.table + (at / FP4_BLOCK))];
+    }
+
     fn fetch_int4(value: Value, at: u32) -> f32 {
         let word = bitcast_u32(heap[word_of(value, at >> 3u32)]);
         let nibble = (word >> ((at & 7u32) * 4u32)) & 0xfu32;

@@ -198,7 +198,14 @@ fn a_frozen_base_trains_only_the_bypass_it_carries() {
 fn a_four_bit_base_trains_the_bypass_it_carries() {
     let runtime = open();
     let graph = Graph::new();
-    let base = Linear::block_quantized(&graph, 2, 1, Init::Constant(1.0), Element::Single);
+    let base = Linear::block_quantized(
+        &graph,
+        2,
+        1,
+        Init::Constant(1.0),
+        Element::Single,
+        Element::Int4,
+    );
     let adapter = Adapter::new(
         &graph,
         2,

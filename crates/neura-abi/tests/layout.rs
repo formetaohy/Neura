@@ -90,8 +90,13 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
     assert_eq!(Element::Half.payload_words(5), 3);
     assert_eq!(Element::Int8.payload_words(5), 2);
     assert_eq!(Element::Int4.payload_words(5), 1);
+    assert_eq!(Element::Fp4E2M1.payload_words(5), 1);
+    assert_eq!(Element::Fp4E2M1.storage_words(200), 32);
     assert!(Element::Int8.narrow() && Element::Int8.quantized());
     assert!(Element::Int4.narrow() && Element::Int4.quantized());
+    assert!(Element::Fp4E2M1.narrow() && Element::Fp4E2M1.quantized());
+    assert!(Element::Fp4E2M1.per_block() && !Element::Fp4E2M1.per_tensor());
+    assert_eq!(Element::Fp4E2M1.block(), neura_abi::FP4_BLOCK);
     assert!(!Element::Single.narrow() && !Element::Single.quantized());
     assert_eq!(Element::Int8.storage_words(5), 3);
     assert_eq!(Element::Int4.storage_words(200), 27);

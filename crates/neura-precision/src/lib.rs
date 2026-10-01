@@ -1,4 +1,4 @@
-use neura_abi::{Element, INT4_BLOCK, WORD_BYTES};
+use neura_abi::{Element, FP4_BLOCK, INT4_BLOCK, WORD_BYTES};
 
 pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
     match element {
@@ -13,6 +13,7 @@ pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
         Element::Int4 => int4(values),
         Element::Fp8E4M3 => words(values, |value| e4m3_bits(value) as u8),
         Element::Fp8E5M2 => words(values, |value| e5m2_bits(value) as u8),
+        Element::Fp4E2M1 => fp4(values),
     }
 }
 
@@ -52,6 +53,7 @@ pub fn unpack(element: Element, elements: usize, bytes: &[u8]) -> Vec<f32> {
             .iter()
             .flat_map(|word| (0..4).map(move |lane| e5m2_value((word >> (8 * lane)) as u8)))
             .collect(),
+        Element::Fp4E2M1 => fp4_values(elements, bytes),
     };
     values.truncate(elements);
     values
@@ -99,6 +101,53 @@ fn int4_bits(value: f32, quantum: f32) -> u8 {
         return 0;
     }
     ((value / quantum).round().clamp(-8.0, 7.0) as i8 as u8) & 0x0f
+}
+
+fn fp4(values: &[f32]) -> Vec<u8> {
+    let mut table = Vec::with_capacity(values.len().div_ceil(FP4_BLOCK as usize) * 4);
+    let mut words = Vec::with_capacity(values.len().div_ceil(8) * 4);
+    for block in values.chunks(FP4_BLOCK as usize) {
+        let peak = block
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let quantum = peak / 6.0;
+        table.extend_from_slice(&quantum.to_ne_bytes());
+        for lane in block.chunks(8) {
+            let mut word = 0u32;
+            for (slot, value) in lane.iter().enumerate() {
+                word |= u32::from(fp4_bits(*value, quantum)) << (4 * slot as u32);
+            }
+            words.extend_from_slice(&word.to_ne_bytes());
+        }
+    }
+    words.extend_from_slice(&table);
+    words
+}
+
+fn fp4_bits(value: f32, quantum: f32) -> u8 {
+    if quantum == 0.0 {
+        return 0;
+    }
+    let code = fp8_bits(value / quantum, E2M1_SHAPE);
+    (((code & 0x80) >> 4) | (code & 0x07)) as u8
+}
+
+fn fp4_values(elements: usize, bytes: &[u8]) -> Vec<f32> {
+    let table = bytes_to_words(&bytes[payload_bytes(Element::Fp4E2M1, elements)..]);
+    bytes_to_words(payload(Element::Fp4E2M1, elements, bytes))
+        .iter()
+        .enumerate()
+        .flat_map(|(word, packed)| {
+            (0..8).map(move |lane| {
+                let nibble = (packed >> (4 * lane)) & 0x0f;
+                fp4_value(nibble as u8) * single(table[(word * 8 + lane) / FP4_BLOCK as usize])
+            })
+        })
+        .collect()
+}
+
+fn fp4_value(nibble: u8) -> f32 {
+    fp8_value(((nibble & 0x08) << 4) | (nibble & 0x07), E2M1_SHAPE)
 }
 
 fn int4_values(elements: usize, bytes: &[u8]) -> Vec<f32> {
@@ -182,6 +231,17 @@ const E4M3_SHAPE: Shape = Shape {
     infinity: 0x7f,
     max: 0x7e,
     ceiling: 0x43e0_0000,
+};
+
+const E2M1_SHAPE: Shape = Shape {
+    bias: 1,
+    mantissa_bits: 1,
+    subnormal_shift: 22,
+    smallest: 0.5,
+    nan: u32::MAX,
+    infinity: u32::MAX,
+    max: 0b0111,
+    ceiling: 0x40c0_0000,
 };
 
 const E5M2_SHAPE: Shape = Shape {

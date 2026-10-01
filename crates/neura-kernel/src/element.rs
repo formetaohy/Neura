@@ -30,5 +30,6 @@ fn fetch_of(element: Element) -> &'static str {
         Element::Int4 => "fetch_int4",
         Element::Fp8E4M3 => "fetch_fp8_e4m3",
         Element::Fp8E5M2 => "fetch_fp8_e5m2",
+        Element::Fp4E2M1 => "fetch_fp4",
     }
 }

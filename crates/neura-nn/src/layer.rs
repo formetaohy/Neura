@@ -94,10 +94,11 @@ impl<'g> Linear<'g> {
         outputs: u32,
         init: Init,
         element: Element,
+        storage: Element,
     ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.block_quantized_parameter(weight, init),
+                graph.block_quantized_parameter(weight, init, storage),
                 graph.parameter(bias, Init::Zero, element),
             )
         })

@@ -1,4 +1,4 @@
-use neura_abi::{Element, INT4_BLOCK};
+use neura_abi::{Element, FP4_BLOCK, INT4_BLOCK};
 use neura_precision::{pack, unpack};
 
 fn round_trip(element: Element, values: &[f32]) -> Vec<f32> {
@@ -109,6 +109,52 @@ fn a_four_bit_word_holds_eight_numbers_beside_the_quantum_their_block_shares() {
         ),
     );
     assert_eq!(saturated, vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0]);
+}
+
+#[test]
+fn a_four_bit_float_word_holds_eight_numbers_beside_the_quantum_their_block_shares() {
+    let values = (0..200)
+        .map(|index| (index as f32 / 200.0) * 6.0 - 3.0)
+        .collect::<Vec<_>>();
+    let bytes = pack(Element::Fp4E2M1, 1.0, &values);
+    assert_eq!(
+        bytes.len() as u64,
+        Element::Fp4E2M1.storage_words(200) * 4,
+        "a block of {FP4_BLOCK} four bit floats packs its quantum beside the words they share",
+    );
+    let quantized = unpack(Element::Fp4E2M1, values.len(), &bytes);
+    for (index, (value, quantized)) in values.iter().zip(&quantized).enumerate() {
+        let block = &values[index / FP4_BLOCK as usize * FP4_BLOCK as usize..];
+        let peak = block[..block.len().min(FP4_BLOCK as usize)]
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()));
+        assert!(
+            (value - quantized).abs() <= peak / 6.0 + f32::EPSILON,
+            "a number below the peak of its block lands within the step its four bits hold",
+        );
+    }
+}
+
+#[test]
+fn a_four_bit_float_walks_the_grid_its_exponent_and_mantissa_name() {
+    let grid = [
+        0.0f32, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0,
+    ];
+    assert_eq!(
+        round_trip(Element::Fp4E2M1, &grid),
+        grid,
+        "the sixteen codes of a four bit float are its own numbers",
+    );
+    let rounded = unpack(
+        Element::Fp4E2M1,
+        8,
+        &pack(
+            Element::Fp4E2M1,
+            1.0,
+            &[0.2, 0.6, 1.2, 5.7, -0.2, -0.6, 2.9, 6.0],
+        ),
+    );
+    assert_eq!(rounded, vec![0.0, 0.5, 1.0, 6.0, 0.0, -0.5, 3.0, 6.0]);
 }
 
 #[test]

@@ -627,6 +627,7 @@ fn a_four_bit_weight_feeds_a_product_a_seventh_of_the_bytes() {
             low: -0.4,
             high: 0.4,
         },
+        Element::Int4,
     );
     let input = graph.input(Shape::matrix(2, 300), Element::Single);
     let product = graph.matmul(input, weight);
@@ -662,6 +663,55 @@ fn a_four_bit_weight_feeds_a_product_a_seventh_of_the_bytes() {
 }
 
 #[test]
+fn a_four_bit_float_weight_feeds_a_product_its_blocks_place() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(
+        Shape::matrix(300, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Fp4E2M1,
+    );
+    let input = graph.input(Shape::matrix(2, 300), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let inputs = random(600, 17);
+    let weight_values = random(1200, 23);
+    runtime.write(&program, input, &inputs);
+    runtime.write(&program, weight, &weight_values);
+    runtime.run(&program);
+
+    let quantized = unpack(
+        Element::Fp4E2M1,
+        weight_values.len(),
+        &pack(Element::Fp4E2M1, 1.0, &weight_values),
+    );
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &quantized, 2, 300, 4),
+        1e-4,
+    );
+    assert_eq!(
+        runtime.read(&program, weight),
+        quantized,
+        "a four bit float weight reads back the numbers its blocks place",
+    );
+    assert_eq!(
+        Layout::of(&graph, runtime.alignment()).weights().words(),
+        Element::Fp4E2M1.storage_words(1200),
+        "a four bit float weight packs eight numbers a word beside one quantum of every 32",
+    );
+    assert!(
+        Element::Fp4E2M1.storage_words(1200) < Element::Half.storage_words(1200),
+        "a four bit float weight weighs a quarter of the half precision storage it replaces",
+    );
+}
+
+#[test]
 fn a_seeded_four_bit_weight_decodes_as_the_host_reads_it() {
     let runtime = open();
     let graph = Graph::new();
@@ -671,6 +721,7 @@ fn a_seeded_four_bit_weight_decodes_as_the_host_reads_it() {
             low: -0.5,
             high: 0.5,
         },
+        Element::Int4,
     );
     let input = graph.input(Shape::matrix(3, 150), Element::Single);
     let product = graph.matmul(input, weight);

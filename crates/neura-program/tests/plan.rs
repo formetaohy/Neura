@@ -1536,7 +1536,7 @@ fn a_cursor_holds_one_position_per_plane() {
 #[test]
 fn a_block_quantized_weight_finds_its_quantum_beside_the_words_it_packs() {
     let graph = Graph::new();
-    let weight = graph.block_quantized_parameter(Shape::vector(300), Init::Zero);
+    let weight = graph.block_quantized_parameter(Shape::vector(300), Init::Zero, Element::Int4);
     let encoding = encoding(&graph);
     let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
     let record = values[weight.id() as usize];
@@ -1554,7 +1554,7 @@ fn a_block_quantized_weight_finds_its_quantum_beside_the_words_it_packs() {
 #[test]
 fn a_tape_never_writes_a_block_quantized_tensor() {
     let graph = Graph::new();
-    let weight = graph.block_quantized_parameter(Shape::vector(4), Init::Zero);
+    let weight = graph.block_quantized_parameter(Shape::vector(4), Init::Zero, Element::Int4);
     let data = graph.input(Shape::vector(4), Element::Single);
     graph.add_into(weight, data);
     assert!(

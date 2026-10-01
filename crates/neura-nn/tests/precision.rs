@@ -191,6 +191,26 @@ fn a_quantized_layer_keeps_a_bias_of_its_own_format() {
 }
 
 #[test]
+fn a_four_bit_float_layer_keeps_its_bias_in_the_numbers_it_adds() {
+    let graph = Graph::new();
+    let layer = Linear::block_quantized(
+        &graph,
+        4,
+        4,
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Single,
+        Element::Fp4E2M1,
+    );
+    assert_eq!(graph.element(layer.weight()), Element::Fp4E2M1);
+    assert_eq!(graph.element(layer.bias()), Element::Single);
+    let input = graph.input(Shape::matrix(2, 4), Element::Single);
+    assert_eq!(graph.element(layer.forward(&graph, input)), Element::Single);
+}
+
+#[test]
 fn a_quantized_layer_refuses_a_quantized_bias() {
     let graph = Graph::new();
     assert!(
@@ -209,6 +229,7 @@ fn a_quantized_layer_refuses_a_quantized_bias() {
                     low: -0.4,
                     high: 0.4,
                 },
+                Element::Int4,
                 Element::Int4,
             );
         }),
