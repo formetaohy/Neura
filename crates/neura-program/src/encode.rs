@@ -13,6 +13,12 @@ use neura_profile::{AttentionTile, MatmulTile, Profile};
 use std::mem::size_of;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Quantum {
+    pub offset: u64,
+    pub scale: f32,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Span {
     pub store: Store,
     pub offset: u64,
@@ -120,6 +126,7 @@ pub struct Encoding {
     attention: Vec<AttentionTile>,
     arena_bytes: u64,
     tensor_bytes: u64,
+    quanta: Vec<Quantum>,
     layout: Layout,
     updates_weights: bool,
     work: u64,
@@ -169,7 +176,7 @@ impl Encoding {
                 }),
                 store: layout.store(values, id as u32).code(),
                 element: layout.element(values, id as u32).code(),
-                scale: layout.scale(values, id as u32),
+                table: table_of(values, id as u32),
                 dims: info.shape.dims(),
                 strides: info.strides,
             });
@@ -349,6 +356,7 @@ impl Encoding {
             attention: tiles.attention.clone(),
             arena_bytes,
             tensor_bytes,
+            quanta: quanta(values, &offsets),
             layout,
             updates_weights,
             work,
@@ -452,6 +460,10 @@ impl Encoding {
         self.arena_bytes
     }
 
+    pub fn quanta(&self) -> &[Quantum] {
+        &self.quanta
+    }
+
     pub fn weights(&self) -> &Region {
         self.layout.weights()
     }
@@ -516,6 +528,14 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
     for task in tasks {
         for out in task.writes() {
             let out = &values[out as usize];
+            assert!(
+                !out.element.per_block(),
+                "a {} task writes the block quantized tensor {}; a {} tensor reconstructs through the quantum its storage holds of every {} blocks, and only its host holds those",
+                task.kind.name(),
+                task.out,
+                out.element.name(),
+                out.element.block(),
+            );
             if task.kind == Kind::Convert {
                 assert!(
                     out.element.narrow(),
@@ -554,7 +574,7 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
 
 fn assert_quantized_scales_reconstruct(values: &[ValueInfo]) {
     for (id, info) in values.iter().enumerate() {
-        if !info.element.quantized() {
+        if !info.element.per_tensor() {
             continue;
         }
         assert!(
@@ -674,7 +694,38 @@ fn touch(
 
 fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
     let info = &values[storage];
-    info.element.words(u64::from(info.shape.elements())) * WORD_BYTES
+    info.element.storage_words(u64::from(info.shape.elements())) * WORD_BYTES
+}
+
+fn table_of(values: &[ValueInfo], value: u32) -> u32 {
+    let info = &values[value as usize];
+    if !info.element.quantized() {
+        return NO_VALUE;
+    }
+    let owner = &values[info.storage as usize];
+    u32::try_from(
+        owner
+            .element
+            .payload_words(u64::from(owner.shape.elements())),
+    )
+    .unwrap_or_else(|_| {
+        panic!("the quantum table of value {value} lies beyond the device address space")
+    })
+}
+
+fn quanta(values: &[ValueInfo], offsets: &[u64]) -> Vec<Quantum> {
+    values
+        .iter()
+        .enumerate()
+        .filter(|(id, info)| {
+            info.storage as usize == *id && arena_resident(values, *id) && info.element.quantized()
+        })
+        .map(|(id, info)| Quantum {
+            offset: offsets[id]
+                + info.element.payload_words(u64::from(info.shape.elements())) * WORD_BYTES,
+            scale: info.scale,
+        })
+        .collect()
 }
 
 fn info_of(values: &[ValueInfo], value: u32) -> &ValueInfo {
@@ -685,6 +736,10 @@ fn addressed_as_its_storage(values: &[ValueInfo], id: usize) -> bool {
     let info = &values[id];
     let storage = &values[info.storage as usize];
     info.shape.elements() == storage.shape.elements() && info.strides == info.shape.strides()
+}
+
+fn owns_its_quanta(values: &[ValueInfo], storage: usize) -> bool {
+    values[storage].element.quantized()
 }
 
 fn arena_resident(values: &[ValueInfo], storage: usize) -> bool {
@@ -716,7 +771,7 @@ fn allocate(
         if !arena_resident(values, id) {
             continue;
         }
-        if held(values, id) || values[id].retained {
+        if held(values, id) || values[id].retained || owns_its_quanta(values, id) {
             offsets[id] = arena.reserve(storage_bytes(values, id), alignment);
         }
     }
@@ -724,6 +779,7 @@ fn allocate(
         .iter()
         .enumerate()
         .filter(|(id, _)| !held(values, *id) && !values[*id].retained)
+        .filter(|(id, _)| !owns_its_quanta(values, *id))
         .filter_map(|(id, live)| live.map(|live| (id, live)))
         .collect::<Vec<_>>();
     pending.sort_by_key(|(_, live)| (live.first, live.last));

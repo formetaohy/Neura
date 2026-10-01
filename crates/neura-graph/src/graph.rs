@@ -313,7 +313,7 @@ impl<'g> Graph<'g> {
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
         assert!(
             !element.quantized(),
-            "an input of {} storage is declared with the scale it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
+            "an input of {} storage is declared with the quantum it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
         self.hold(shape, Residency::Input, element, 1.0, None)
@@ -322,7 +322,7 @@ impl<'g> Graph<'g> {
     pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
         assert!(
             !element.quantized(),
-            "a resident tensor of {} storage is declared with the scale it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
+            "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
             element.name(),
         );
         self.hold(shape, Residency::Resident, element, 1.0, None)
@@ -331,7 +331,7 @@ impl<'g> Graph<'g> {
     pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
         assert!(
             !element.quantized(),
-            "a parameter of {} storage is declared with the scale it reconstructs by, and a parameter carries none; declare a quantized parameter instead",
+            "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
             element.name(),
         );
         self.hold(shape, Residency::Parameter, element, 1.0, Some(init))
@@ -345,6 +345,10 @@ impl<'g> Graph<'g> {
             scale,
             Some(init),
         )
+    }
+
+    pub fn block_quantized_parameter(&self, shape: Shape, init: Init) -> Value<'g> {
+        self.hold(shape, Residency::Parameter, Element::Int4, 1.0, Some(init))
     }
 
     pub fn quantize(&self, value: Value<'g>, scale: f32) -> Value<'g> {
@@ -729,7 +733,7 @@ impl<'g> Graph<'g> {
         let value = self.own(value);
         assert!(
             !element.quantized(),
-            "a cast into {} storage quantizes by a scale the cast does not declare; quantize the tensor instead",
+            "a cast into {} storage quantizes the numbers it copies, and only a weight holds the quantum it was declared with",
             element.name(),
         );
         if self.element(value) == element {
@@ -1155,6 +1159,18 @@ impl<'g> Graph<'g> {
     }
 
     pub fn scale(&self, value: Value<'g>) -> f32 {
+        let value = self.own(value);
+        let info = &self.state.borrow().values[value.id() as usize];
+        assert!(
+            !info.element.per_block(),
+            "a {} tensor reconstructs through the quantum its storage holds of every {} blocks, and the tensor itself declares none",
+            info.element.name(),
+            info.element.block(),
+        );
+        info.scale
+    }
+
+    fn declared_quantum(&self, value: Value<'g>) -> f32 {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].scale
     }
@@ -2252,7 +2268,7 @@ impl<'g> Graph<'g> {
         sources
             .iter()
             .find(|source| self.element(**source) == element)
-            .map_or(1.0, |source| self.scale(*source))
+            .map_or(1.0, |source| self.declared_quantum(*source))
     }
 
     fn tracked(&self, values: &[Value<'g>]) -> bool {
@@ -2322,7 +2338,7 @@ impl<'g> Graph<'g> {
     fn quantized(&self, shape: Shape, scale: f32) -> Value<'g> {
         assert!(
             scale.is_finite() && scale > 0.0,
-            "an int8 tensor of scale {scale} reconstructs nothing",
+            "an int8 tensor of quantum {scale} reconstructs nothing",
         );
         self.stored(shape, Element::Int8, scale, Residency::Derived, false)
     }
@@ -2335,6 +2351,12 @@ impl<'g> Graph<'g> {
         residency: Residency,
         tracked: bool,
     ) -> Value<'g> {
+        assert!(
+            !element.per_block(),
+            "a {} tensor is a weight whose storage packs the quantum of every {} numbers, and a task writes the numbers of a tensor it does not weigh; cast the weight into exact storage first",
+            element.name(),
+            element.block(),
+        );
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {

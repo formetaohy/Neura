@@ -64,14 +64,67 @@ pub struct Linear<'g> {
 
 impl<'g> Linear<'g> {
     pub fn new(graph: &Graph<'g>, inputs: u32, outputs: u32, init: Init, element: Element) -> Self {
+        Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
+            (
+                graph.parameter(weight, init, element),
+                graph.parameter(bias, Init::Zero, element),
+            )
+        })
+    }
+
+    pub fn quantized(
+        graph: &Graph<'g>,
+        inputs: u32,
+        outputs: u32,
+        quantum: f32,
+        init: Init,
+        element: Element,
+    ) -> Self {
+        Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
+            (
+                graph.quantized_parameter(weight, init, quantum),
+                graph.parameter(bias, Init::Zero, element),
+            )
+        })
+    }
+
+    pub fn block_quantized(
+        graph: &Graph<'g>,
+        inputs: u32,
+        outputs: u32,
+        init: Init,
+        element: Element,
+    ) -> Self {
+        Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
+            (
+                graph.block_quantized_parameter(weight, init),
+                graph.parameter(bias, Init::Zero, element),
+            )
+        })
+    }
+
+    fn declared(
+        graph: &Graph<'g>,
+        inputs: u32,
+        outputs: u32,
+        element: Element,
+        declare: impl FnOnce(&Graph<'g>, Shape, Shape) -> (Value<'g>, Value<'g>),
+    ) -> Self {
         assert!(
             inputs > 0 && outputs > 0,
             "a dense layer of {inputs} by {outputs} carries no weight",
         );
-        Self {
-            weight: graph.parameter(Shape::matrix(inputs, outputs), init, element),
-            bias: graph.parameter(Shape::vector(outputs), Init::Zero, element),
-        }
+        assert!(
+            !element.quantized(),
+            "the product of a dense layer lands in the numbers its bias adds, and {} storage quantizes them; declare a quantized or a block quantized layer instead",
+            element.name(),
+        );
+        let (weight, bias) = declare(
+            graph,
+            Shape::matrix(inputs, outputs),
+            Shape::vector(outputs),
+        );
+        Self { weight, bias }
     }
 
     pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {

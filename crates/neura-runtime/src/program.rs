@@ -94,6 +94,13 @@ impl<'r> Program<'r> {
         let mut clearing = Submission::new(context.device(), "neura tensors");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
+        for quantum in tape.encoding.quanta() {
+            tensors.buffer().write_at(
+                queue,
+                tensors.offset() + quantum.offset,
+                &quantum.scale.to_ne_bytes(),
+            );
+        }
         placement.buffer().write(
             queue,
             bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {

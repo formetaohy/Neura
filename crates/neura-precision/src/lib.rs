@@ -1,43 +1,54 @@
-use neura_abi::{Element, WORD_BYTES};
+use neura_abi::{Element, INT4_BLOCK, WORD_BYTES};
 
-pub fn pack(element: Element, scale: f32, values: &[f32]) -> Vec<u8> {
+pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
     match element {
         Element::Single => bytemuck::cast_slice(values).to_vec(),
         Element::Half => halves(values, |value| half::f16::from_f32(value).to_bits()),
         Element::Bfloat16 => halves(values, bfloat16),
-        Element::Int8 => words(values, |value| i8_bits(value, scale)),
+        Element::Int8 => {
+            let mut bytes = words(values, |value| i8_bits(value, quantum));
+            bytes.extend_from_slice(&quantum.to_ne_bytes());
+            bytes
+        }
+        Element::Int4 => int4(values),
         Element::Fp8E4M3 => words(values, |value| e4m3_bits(value) as u8),
         Element::Fp8E5M2 => words(values, |value| e5m2_bits(value) as u8),
     }
 }
 
-pub fn unpack(element: Element, scale: f32, elements: usize, bytes: &[u8]) -> Vec<f32> {
+pub fn unpack(element: Element, elements: usize, bytes: &[u8]) -> Vec<f32> {
     assert!(
-        bytes.len() as u64 >= element.words(elements as u64) * WORD_BYTES,
+        bytes.len() as u64 >= element.storage_words(elements as u64) * WORD_BYTES,
         "unpacking {elements} {} elements out of {} bytes",
         element.name(),
         bytes.len(),
     );
     let mut values = match element {
         Element::Single => bytemuck::cast_slice::<u8, f32>(bytes).to_vec(),
-        Element::Half => halves_of(bytes, |word| {
+        Element::Half => halves_of(payload(element, elements, bytes), |word| {
             [
                 half::f16::from_bits(word as u16).to_f32(),
                 half::f16::from_bits((word >> 16) as u16).to_f32(),
             ]
         }),
-        Element::Bfloat16 => halves_of(bytes, |word| {
+        Element::Bfloat16 => halves_of(payload(element, elements, bytes), |word| {
             [single(word << 16), single(word & 0xffff_0000)]
         }),
-        Element::Int8 => bytes_to_words(bytes)
-            .iter()
-            .flat_map(|word| (0..4).map(move |lane| i8_value((word >> (8 * lane)) as u8) * scale))
-            .collect(),
-        Element::Fp8E4M3 => bytes_to_words(bytes)
+        Element::Int8 => {
+            let quantum = quantum_of(element, elements, bytes);
+            bytes_to_words(payload(element, elements, bytes))
+                .iter()
+                .flat_map(|word| {
+                    (0..4).map(move |lane| i8_value((word >> (8 * lane)) as u8) * quantum)
+                })
+                .collect()
+        }
+        Element::Int4 => int4_values(elements, bytes),
+        Element::Fp8E4M3 => bytes_to_words(payload(element, elements, bytes))
             .iter()
             .flat_map(|word| (0..4).map(move |lane| e4m3_value((word >> (8 * lane)) as u8)))
             .collect(),
-        Element::Fp8E5M2 => bytes_to_words(bytes)
+        Element::Fp8E5M2 => bytes_to_words(payload(element, elements, bytes))
             .iter()
             .flat_map(|word| (0..4).map(move |lane| e5m2_value((word >> (8 * lane)) as u8)))
             .collect(),
@@ -60,6 +71,71 @@ fn i8_bits(value: f32, scale: f32) -> u8 {
         "an int8 tensor of scale {scale} reconstructs nothing",
     );
     (value / scale).round().clamp(-127.0, 127.0) as i8 as u8
+}
+
+fn int4(values: &[f32]) -> Vec<u8> {
+    let mut table = Vec::with_capacity(values.len().div_ceil(INT4_BLOCK as usize) * 4);
+    let mut words = Vec::with_capacity(values.len().div_ceil(8) * 4);
+    for block in values.chunks(INT4_BLOCK as usize) {
+        let peak = block
+            .iter()
+            .fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let quantum = peak / 7.0;
+        table.extend_from_slice(&quantum.to_ne_bytes());
+        for lane in block.chunks(8) {
+            let mut word = 0u32;
+            for (slot, value) in lane.iter().enumerate() {
+                word |= u32::from(int4_bits(*value, quantum)) << (4 * slot as u32);
+            }
+            words.extend_from_slice(&word.to_ne_bytes());
+        }
+    }
+    words.extend_from_slice(&table);
+    words
+}
+
+fn int4_bits(value: f32, quantum: f32) -> u8 {
+    if quantum == 0.0 {
+        return 0;
+    }
+    ((value / quantum).round().clamp(-8.0, 7.0) as i8 as u8) & 0x0f
+}
+
+fn int4_values(elements: usize, bytes: &[u8]) -> Vec<f32> {
+    let table = bytes_to_words(&bytes[payload_bytes(Element::Int4, elements)..]);
+    bytes_to_words(payload(Element::Int4, elements, bytes))
+        .iter()
+        .enumerate()
+        .flat_map(|(word, packed)| {
+            (0..8).map(move |lane| {
+                let nibble = (packed >> (4 * lane)) & 0x0f;
+                let code = nibble as i32 - if nibble >= 8 { 16 } else { 0 };
+                code as f32 * single(table[(word * 8 + lane) / INT4_BLOCK as usize])
+            })
+        })
+        .collect()
+}
+
+fn payload(element: Element, elements: usize, bytes: &[u8]) -> &[u8] {
+    &bytes[..(element.payload_words(elements as u64) * WORD_BYTES) as usize]
+}
+
+fn payload_bytes(element: Element, elements: usize) -> usize {
+    (element.payload_words(elements as u64) * WORD_BYTES) as usize
+}
+
+fn quantum_of(element: Element, elements: usize, bytes: &[u8]) -> f32 {
+    assert!(
+        element.per_tensor(),
+        "{} storage carries one quantum of its own per block, so a reader reconstructs through the table its storage holds",
+        element.name(),
+    );
+    let at = payload_bytes(element, elements);
+    single(u32::from_ne_bytes(
+        bytes[at..at + WORD_BYTES as usize]
+            .try_into()
+            .expect("a quantum table holds a word"),
+    ))
 }
 
 fn words(values: &[f32], convert: impl Fn(f32) -> u8) -> Vec<u8> {

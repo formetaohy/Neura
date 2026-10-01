@@ -1327,7 +1327,7 @@ fn a_narrow_product_packs_the_image_it_computed() {
 }
 
 #[test]
-fn a_quantized_parameter_packs_four_numbers_a_word_by_its_scale() {
+fn a_quantized_parameter_packs_four_numbers_a_word_beside_its_quantum() {
     let graph = Graph::new();
     let weight = graph.quantized_parameter(Shape::vector(300), Init::Zero, 0.25);
     assert_eq!(graph.element(weight), Element::Int8);
@@ -1339,13 +1339,14 @@ fn a_quantized_parameter_packs_four_numbers_a_word_by_its_scale() {
     let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
     let record = values[weight.id() as usize];
     assert_eq!(record.element, Element::Int8.code());
-    assert_eq!(record.scale, 0.25);
     assert_eq!(record.store, Store::Weights.code());
     assert_eq!(
-        encoding.weights().bytes() * 4,
-        single_precision.weights().bytes(),
-        "a quantized parameter holds a quarter of the bytes a single precision one holds",
+        record.table,
+        Element::Int8.payload_words(300) as u32,
+        "the quantum a quantized tensor reconstructs by stands at the end of the words its numbers pack into",
     );
+    assert_eq!(encoding.weights().words(), Element::Int8.storage_words(300));
+    assert_eq!(single_precision.weights().words(), 300);
 }
 
 #[test]
@@ -1363,7 +1364,7 @@ fn a_quantized_image_packs_four_numbers_a_word() {
     let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
     let record = values[quantized.id() as usize];
     assert_eq!(record.element, Element::Int8.code());
-    assert_eq!(record.scale, 0.125);
+    assert_eq!(record.table, Element::Int8.payload_words(300) as u32);
     assert_eq!(record.store, Store::Tensors.code());
     let convert = tape
         .iter()
@@ -1375,9 +1376,13 @@ fn a_quantized_image_packs_four_numbers_a_word() {
     assert_eq!(convert.count, 75);
     assert_eq!(steps(&encoding)[convert.chain as usize].op, op::IDENTITY);
     assert_eq!(
-        encoding.arena_bytes() * 2,
+        encoding.arena_bytes(),
+        Element::Int8.storage_words(300) * WORD_BYTES,
+        "the arena holds a word of every four numbers a quantized tensor carries beside the quantum they share",
+    );
+    assert_eq!(
         half_precision.arena_bytes(),
-        "the arena holds a word of every four numbers a quantized tensor carries",
+        Element::Half.storage_words(300) * WORD_BYTES,
     );
 }
 
@@ -1526,4 +1531,34 @@ fn a_cursor_holds_one_position_per_plane() {
             options(Some(positions([1, 1, 1, 1]))),
         );
     }));
+}
+
+#[test]
+fn a_block_quantized_weight_finds_its_quantum_beside_the_words_it_packs() {
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(Shape::vector(300), Init::Zero);
+    let encoding = encoding(&graph);
+    let values = records::<ValueRecord>(encoding.values(), size_of::<ValueRecord>());
+    let record = values[weight.id() as usize];
+    assert_eq!(record.element, Element::Int4.code());
+    assert_eq!(record.store, Store::Weights.code());
+    assert_eq!(
+        record.table,
+        Element::Int4.payload_words(300) as u32,
+        "the quantum of every block stands beside the words its numbers pack into",
+    );
+    assert_eq!(Element::Int4.quanta(300), 3);
+    assert_eq!(encoding.weights().words(), Element::Int4.storage_words(300));
+}
+
+#[test]
+fn a_tape_never_writes_a_block_quantized_tensor() {
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(Shape::vector(4), Init::Zero);
+    let data = graph.input(Shape::vector(4), Element::Single);
+    graph.add_into(weight, data);
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encoding(&graph))).is_err(),
+        "a block quantized weight packs the quantum of every block out of the numbers it holds, and a tape carries none of them",
+    );
 }

@@ -100,3 +100,73 @@ fn a_cast_refuses_a_quantized_storage() {
     );
     assert_eq!(graph.element(graph.quantize(data, 0.25)), Element::Int8);
 }
+
+#[test]
+fn a_block_quantized_parameter_carries_the_quantum_of_every_block_it_packs() {
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(Shape::matrix(300, 4), Init::Zero);
+    assert_eq!(graph.element(weight), Element::Int4);
+    assert_eq!(
+        graph.element(graph.permute(weight, [0, 1, 3, 2])),
+        Element::Int4,
+        "a view walks the storage a block quantized tensor packs",
+    );
+    assert_eq!(
+        graph.element(graph.matmul(graph.input(Shape::matrix(2, 300), Element::Single), weight,)),
+        Element::Single,
+    );
+    assert!(
+        refuses(|| {
+            graph.scale(weight);
+        }),
+        "a block quantized tensor reconstructs through the quantum its storage holds",
+    );
+    assert!(
+        refuses(|| {
+            graph.scale(graph.permute(weight, [0, 1, 3, 2]));
+        }),
+        "a view of a block quantized tensor carries the storage it walks",
+    );
+}
+
+#[test]
+fn a_block_quantized_tensor_is_a_weight_and_nothing_else() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.parameter(Shape::vector(4), Init::Zero, Element::Int4);
+        }),
+        "a block quantized weight packs the quantum of every block out of the numbers it holds",
+    );
+    assert!(
+        refuses(|| {
+            graph.input(Shape::vector(4), Element::Int4);
+        }),
+        "an input arrives quantized by no host",
+    );
+    assert!(
+        refuses(|| {
+            graph.resident(Shape::vector(4), Element::Int4);
+        }),
+        "a resident tensor holds the numbers a host wrote, and only a weight packs its blocks",
+    );
+    assert!(
+        refuses(|| {
+            graph.cast(data, Element::Int4);
+        }),
+        "a cast into int4 storage packs blocks the cast does not weigh",
+    );
+    let weight = graph.block_quantized_parameter(Shape::vector(4), Init::Zero);
+    assert!(
+        refuses(|| {
+            graph.relu(weight);
+        }),
+        "a pointwise op over a block quantized weight writes a storage whose blocks it does not weigh",
+    );
+    assert_eq!(
+        graph.element(graph.cast(weight, Element::Single)),
+        Element::Single,
+        "a weight materializes into exact storage before the numbers it holds feed an op",
+    );
+}

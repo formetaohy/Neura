@@ -14,7 +14,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(size_of::<ValueRecord>(), 48);
     assert_eq!(offset_of!(ValueRecord, base), 0);
     assert_eq!(offset_of!(ValueRecord, store), 4);
-    assert_eq!(offset_of!(ValueRecord, scale), 12);
+    assert_eq!(offset_of!(ValueRecord, table), 12);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
     assert_eq!(size_of::<TaskRecord>(), 116);
@@ -74,7 +74,7 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
         assert_eq!(Element::of(element.code()), *element);
         assert!(!element.name().is_empty() && !element.symbol().is_empty());
         assert!(
-            element.words(4) * element.elements_per_word() >= 4,
+            element.payload_words(4) * element.elements_per_word() >= 4,
             "four {} numbers outrun the word they pack into",
             element.name(),
         );
@@ -86,11 +86,15 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
     names.sort_unstable();
     names.dedup();
     assert_eq!(names.len(), Element::ALL.len(), "two elements share a name");
-    assert_eq!(Element::Single.words(5), 5);
-    assert_eq!(Element::Half.words(5), 3);
-    assert_eq!(Element::Int8.words(5), 2);
+    assert_eq!(Element::Single.payload_words(5), 5);
+    assert_eq!(Element::Half.payload_words(5), 3);
+    assert_eq!(Element::Int8.payload_words(5), 2);
+    assert_eq!(Element::Int4.payload_words(5), 1);
     assert!(Element::Int8.narrow() && Element::Int8.quantized());
+    assert!(Element::Int4.narrow() && Element::Int4.quantized());
     assert!(!Element::Single.narrow() && !Element::Single.quantized());
+    assert_eq!(Element::Int8.storage_words(5), 3);
+    assert_eq!(Element::Int4.storage_words(200), 27);
     assert_eq!(Element::Int8.promote(Element::Half), Element::Half);
     assert_eq!(Element::Half.promote(Element::Int8), Element::Half);
     assert_eq!(
@@ -204,7 +208,7 @@ fn a_record_declares_what_the_device_reads() {
         base: 6,
         store: Store::Weights.code(),
         element: Element::Half.code(),
-        scale: 0.25,
+        table: 7,
         dims: [1, 2, 3, 4],
         strides: [12, 6, 2, 1],
     });
@@ -219,7 +223,7 @@ fn a_record_declares_what_the_device_reads() {
         u32::from_ne_bytes(bytes[8..12].try_into().unwrap()),
         Element::Half.code()
     );
-    assert_eq!(f32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 0.25);
+    assert_eq!(u32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 7);
     assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 1);
     assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);
     let task = TaskRecord::of(TaskFields {

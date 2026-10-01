@@ -240,7 +240,7 @@ fn convert(
 ) -> Vec<Task> {
     let target = unit.out;
     let element = plan.values[target as usize].element;
-    let words = element.words(u64::from(plan.shape(target).elements()));
+    let words = element.payload_words(u64::from(plan.shape(target).elements()));
     let words = u32::try_from(words).expect("a tensor of words fits the device word space");
     let per_task = task_elements(words, device_workgroups(profile));
     spans(words, per_task)
@@ -254,7 +254,7 @@ fn convert(
             task.extra = NO_VALUE;
             task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
             task.origin = NO_VALUE;
-            task.param = 0.0;
+            task.param = plan.values[target as usize].scale;
             task.splits = 1;
             task.in_place = true;
             task.prelude.clear();

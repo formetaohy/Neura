@@ -35,7 +35,7 @@ impl Region {
                 element: info.element,
                 scale: info.scale,
             });
-            words += info.element.words(elements);
+            words += info.element.storage_words(elements);
         }
         Self {
             words,

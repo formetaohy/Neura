@@ -2,7 +2,7 @@ use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Pool, Shape, Value, Window};
 use neura_precision::{pack, unpack};
 use neura_profile::{Budget, Profile};
-use neura_program::Encoding;
+use neura_program::{Encoding, Layout};
 use neura_runtime::{Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
@@ -18,7 +18,7 @@ fn narrow() -> Profile {
 }
 
 fn rounded(element: Element, values: &[f32]) -> Vec<f32> {
-    unpack(element, 1.0, values.len(), &pack(element, 1.0, values))
+    unpack(element, values.len(), &pack(element, 1.0, values))
 }
 
 #[test]
@@ -211,7 +211,6 @@ fn a_quantized_tensor_carries_the_numbers_its_scale_places() {
 
     let quantized_expected = unpack(
         Element::Int8,
-        scale,
         values.len(),
         &pack(Element::Int8, scale, &values),
     );
@@ -257,7 +256,6 @@ fn a_quantized_weight_feeds_a_product_a_quarter_of_the_bytes() {
 
     let quantized = unpack(
         Element::Int8,
-        scale,
         weights_values.len(),
         &pack(Element::Int8, scale, &weights_values),
     );
@@ -276,9 +274,13 @@ fn a_quantized_weight_feeds_a_product_a_quarter_of_the_bytes() {
         Element::Single,
     );
     assert_eq!(
-        weights.bytes() * 4,
-        runtime.weights(&single).bytes(),
-        "a quantized weight store holds a quarter of the bytes a single precision one holds",
+        Layout::of(&graph, runtime.alignment()).weights().words(),
+        Element::Int8.storage_words(32),
+        "a quantized weight packs four numbers a word beside the quantum they share",
+    );
+    assert_eq!(
+        Layout::of(&single, runtime.alignment()).weights().words(),
+        32,
     );
 }
 
@@ -307,7 +309,6 @@ fn an_eight_bit_float_weight_feeds_a_product_a_quarter_of_the_bytes() {
 
     let packed = unpack(
         Element::Fp8E4M3,
-        1.0,
         weights_values.len(),
         &pack(Element::Fp8E4M3, 1.0, &weights_values),
     );
@@ -357,7 +358,7 @@ fn rounding_contract(backends: neura_gpu::Backends) {
         runtime.write(&program, data, &probes);
         runtime.run(&program);
         let device = runtime.read(&program, narrowed);
-        let host = unpack(element, 1.0, probes.len(), &pack(element, 1.0, &probes));
+        let host = unpack(element, probes.len(), &pack(element, 1.0, &probes));
         for (index, (device, host)) in device.iter().zip(&host).enumerate() {
             assert_eq!(
                 device.to_bits(),
@@ -381,7 +382,6 @@ fn rounding_contract(backends: neura_gpu::Backends) {
     let device = runtime.read(&program, quantized);
     let host = unpack(
         Element::Int8,
-        scale,
         probes.len(),
         &pack(Element::Int8, scale, &probes),
     );
@@ -614,5 +614,81 @@ fn a_narrow_model_meets_its_wide_twin() {
     assert!(
         (wide_total - narrow_total).abs() <= 1e-3 * (1.0 + wide_total.abs()),
         "a half precision stack of convolution, pool, product and attention summed {narrow_total} where its single precision twin summed {wide_total}",
+    );
+}
+
+#[test]
+fn a_four_bit_weight_feeds_a_product_a_seventh_of_the_bytes() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(
+        Shape::matrix(300, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+    );
+    let input = graph.input(Shape::matrix(2, 300), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let inputs = random(600, 17);
+    let weight_values = random(1200, 23);
+    runtime.write(&program, input, &inputs);
+    runtime.write(&program, weight, &weight_values);
+    runtime.run(&program);
+
+    let quantized = unpack(
+        Element::Int4,
+        weight_values.len(),
+        &pack(Element::Int4, 1.0, &weight_values),
+    );
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &quantized, 2, 300, 4),
+        1e-4,
+    );
+    assert_eq!(
+        runtime.read(&program, weight),
+        quantized,
+        "a block quantized weight reads back the numbers its blocks place",
+    );
+    assert_eq!(
+        Layout::of(&graph, runtime.alignment()).weights().words(),
+        Element::Int4.storage_words(1200),
+        "a four bit weight packs eight numbers a word beside one quantum of every 128",
+    );
+}
+
+#[test]
+fn a_seeded_four_bit_weight_decodes_as_the_host_reads_it() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(
+        Shape::matrix(150, 8),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+    );
+    let input = graph.input(Shape::matrix(3, 150), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let inputs = random(450, 29);
+    runtime.write(&program, input, &inputs);
+    runtime.run(&program);
+
+    let seeded = runtime.read(&program, weight);
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &seeded, 3, 150, 8),
+        1e-4,
+    );
+    assert!(
+        seeded.iter().any(|value| value.abs() > 1e-3),
+        "the seeded weight holds numbers rather than the zeros a missing quantum would place",
     );
 }

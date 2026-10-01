@@ -12,6 +12,10 @@ fn open() -> Runtime {
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
 fn surface(samples: u32) -> (Vec<f32>, Vec<f32>) {
     let mut inputs = Vec::with_capacity(samples as usize * 2);
     let mut targets = Vec::with_capacity(samples as usize);
@@ -152,4 +156,62 @@ fn a_narrow_step_runs_beside_a_wide_one() {
         "the optimizer writes the half precision weights it steps over",
     );
     assert!(per_step > 0.0 && per_step.is_finite());
+}
+
+#[test]
+fn a_quantized_layer_keeps_a_bias_of_its_own_format() {
+    let runtime = open();
+    let graph = Graph::new();
+    let layer = Linear::quantized(
+        &graph,
+        512,
+        8,
+        0.03125,
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Half,
+    );
+    let input = graph.input(Shape::matrix(4, 512), Element::Half);
+    let produced = layer.forward(&graph, input);
+    assert_eq!(graph.element(layer.weight()), Element::Int8);
+    assert_eq!(graph.element(layer.bias()), Element::Half);
+    assert_eq!(graph.element(produced), Element::Half);
+    assert_eq!(graph.scale(layer.weight()), 0.03125);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, input, &vec![0.5; 4 * 512]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, produced).len(),
+        4 * 8,
+        "a quantized layer writes every row it scores",
+    );
+}
+
+#[test]
+fn a_quantized_layer_refuses_a_quantized_bias() {
+    let graph = Graph::new();
+    assert!(
+        refuses(|| {
+            Linear::quantized(&graph, 4, 4, 0.25, Init::Zero, Element::Int8);
+        }),
+        "the bias a quantized weight adds lands in the format the layer declares",
+    );
+    assert!(
+        refuses(|| {
+            Linear::block_quantized(
+                &graph,
+                4,
+                4,
+                Init::Uniform {
+                    low: -0.4,
+                    high: 0.4,
+                },
+                Element::Int4,
+            );
+        }),
+        "a block quantized bias packs the quantum of every block out of numbers no host weighs",
+    );
 }

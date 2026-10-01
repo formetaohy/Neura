@@ -480,7 +480,6 @@ impl Runtime {
                 let start = *offset as usize;
                 unpack(
                     span.element,
-                    span.scale,
                     span.elements as usize,
                     &bytes[start..start + *length as usize],
                 )
@@ -525,7 +524,7 @@ impl Runtime {
 }
 
 fn span_bytes(span: Span) -> u64 {
-    span.element.words(u64::from(span.elements)) * WORD_BYTES
+    span.element.storage_words(u64::from(span.elements)) * WORD_BYTES
 }
 
 fn refusal_message(word: u32) -> String {

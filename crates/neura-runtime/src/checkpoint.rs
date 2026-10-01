@@ -2,7 +2,7 @@ use neura_abi::{Element, WORD_BYTES};
 use neura_program::Region;
 
 const MAGIC: [u8; 4] = *b"NRCP";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER_BYTES: usize = 20;
 const ENTRY_BYTES: usize = 12;
 
@@ -94,7 +94,7 @@ impl Checkpoint {
             .collect::<Vec<_>>();
         let packed = entries
             .iter()
-            .map(|(elements, element, _)| element.words(u64::from(*elements)))
+            .map(|(elements, element, _)| element.storage_words(u64::from(*elements)))
             .sum::<u64>();
         assert!(
             packed <= words,
