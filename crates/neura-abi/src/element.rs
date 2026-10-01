@@ -5,15 +5,26 @@ pub enum Element {
     Half,
     Bfloat16,
     Int8,
+    Fp8E4M3,
+    Fp8E5M2,
 }
 
 pub const SINGLE: u32 = Element::Single as u32;
 pub const HALF: u32 = Element::Half as u32;
 pub const BFLOAT16: u32 = Element::Bfloat16 as u32;
 pub const INT8: u32 = Element::Int8 as u32;
+pub const FP8_E4M3: u32 = Element::Fp8E4M3 as u32;
+pub const FP8_E5M2: u32 = Element::Fp8E5M2 as u32;
 
 impl Element {
-    pub const ALL: &'static [Element] = &[Self::Single, Self::Half, Self::Bfloat16, Self::Int8];
+    pub const ALL: &'static [Element] = &[
+        Self::Single,
+        Self::Half,
+        Self::Bfloat16,
+        Self::Int8,
+        Self::Fp8E4M3,
+        Self::Fp8E5M2,
+    ];
     pub const COUNT: u32 = Self::ALL.len() as u32;
 
     pub const fn code(self) -> u32 {
@@ -32,6 +43,8 @@ impl Element {
             Self::Half => "element::HALF",
             Self::Bfloat16 => "element::BFLOAT16",
             Self::Int8 => "element::INT8",
+            Self::Fp8E4M3 => "element::FP8_E4M3",
+            Self::Fp8E5M2 => "element::FP8_E5M2",
         }
     }
 
@@ -41,6 +54,8 @@ impl Element {
             Self::Half => "half",
             Self::Bfloat16 => "bfloat16",
             Self::Int8 => "int8",
+            Self::Fp8E4M3 => "fp8e4m3",
+            Self::Fp8E5M2 => "fp8e5m2",
         }
     }
 
@@ -48,7 +63,7 @@ impl Element {
         match self {
             Self::Single => 1,
             Self::Half | Self::Bfloat16 => 2,
-            Self::Int8 => 4,
+            Self::Int8 | Self::Fp8E4M3 | Self::Fp8E5M2 => 4,
         }
     }
 
@@ -66,6 +81,7 @@ impl Element {
 
     pub const fn promote(self, other: Self) -> Self {
         match (self, other) {
+            (Self::Fp8E4M3 | Self::Fp8E5M2, _) | (_, Self::Fp8E4M3 | Self::Fp8E5M2) => Self::Single,
             (Self::Single, _) | (_, Self::Single) => Self::Single,
             (Self::Int8, Self::Int8) => Self::Single,
             (Self::Int8, other) | (other, Self::Int8) => other,

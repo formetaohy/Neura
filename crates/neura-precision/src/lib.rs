@@ -6,6 +6,8 @@ pub fn pack(element: Element, scale: f32, values: &[f32]) -> Vec<u8> {
         Element::Half => halves(values, |value| half::f16::from_f32(value).to_bits()),
         Element::Bfloat16 => halves(values, bfloat16),
         Element::Int8 => words(values, |value| i8_bits(value, scale)),
+        Element::Fp8E4M3 => words(values, |value| e4m3_bits(value) as u8),
+        Element::Fp8E5M2 => words(values, |value| e5m2_bits(value) as u8),
     }
 }
 
@@ -30,6 +32,14 @@ pub fn unpack(element: Element, scale: f32, elements: usize, bytes: &[u8]) -> Ve
         Element::Int8 => bytes_to_words(bytes)
             .iter()
             .flat_map(|word| (0..4).map(move |lane| i8_value((word >> (8 * lane)) as u8) * scale))
+            .collect(),
+        Element::Fp8E4M3 => bytes_to_words(bytes)
+            .iter()
+            .flat_map(|word| (0..4).map(move |lane| e4m3_value((word >> (8 * lane)) as u8)))
+            .collect(),
+        Element::Fp8E5M2 => bytes_to_words(bytes)
+            .iter()
+            .flat_map(|word| (0..4).map(move |lane| e5m2_value((word >> (8 * lane)) as u8)))
             .collect(),
     };
     values.truncate(elements);
@@ -85,6 +95,120 @@ fn halves_of(bytes: &[u8], split: impl Fn(u32) -> [f32; 2]) -> Vec<f32> {
         .iter()
         .flat_map(|word| split(*word))
         .collect()
+}
+
+const E4M3_SHAPE: Shape = Shape {
+    bias: 7,
+    mantissa_bits: 3,
+    subnormal_shift: 14,
+    smallest: 1.0 / 512.0,
+    nan: 0x7f,
+    infinity: 0x7f,
+    max: 0x7e,
+    ceiling: 0x43e0_0000,
+};
+
+const E5M2_SHAPE: Shape = Shape {
+    bias: 15,
+    mantissa_bits: 2,
+    subnormal_shift: 7,
+    smallest: 1.0 / 65536.0,
+    nan: 0x7f,
+    infinity: 0x7c,
+    max: 0x7b,
+    ceiling: 0x4760_0000,
+};
+
+#[derive(Clone, Copy)]
+struct Shape {
+    bias: i32,
+    mantissa_bits: u32,
+    subnormal_shift: i32,
+    smallest: f32,
+    nan: u32,
+    infinity: u32,
+    max: u32,
+    ceiling: u32,
+}
+
+fn e4m3_bits(value: f32) -> u32 {
+    fp8_bits(value, E4M3_SHAPE)
+}
+
+fn e5m2_bits(value: f32) -> u32 {
+    fp8_bits(value, E5M2_SHAPE)
+}
+
+fn fp8_bits(value: f32, shape: Shape) -> u32 {
+    let bits = value.to_bits();
+    let sign = (bits >> 24) & 0x80;
+    let magnitude = bits & 0x7fff_ffff;
+    if magnitude > 0x7f80_0000 {
+        return sign | shape.nan;
+    }
+    if magnitude >= shape.ceiling {
+        return sign | shape.max;
+    }
+    let exponent = ((magnitude >> 23) as i32) - 127;
+    let significand = (magnitude & 0x007f_ffff) | 0x0080_0000;
+    let rounding = 23 - shape.mantissa_bits;
+    if exponent >= 1 - shape.bias {
+        let pinned = (significand + (1 << (rounding - 1))) >> rounding;
+        let mut code = (exponent + shape.bias) as u32;
+        let mut carried = pinned - (1 << shape.mantissa_bits);
+        if carried > (1 << shape.mantissa_bits) - 1 {
+            carried = 0;
+            code += 1;
+        }
+        if code > (shape.max >> shape.mantissa_bits) {
+            return sign | shape.max;
+        }
+        return sign | (code << shape.mantissa_bits) | carried;
+    }
+    let shift = (shape.subnormal_shift - exponent) as u32;
+    if shift >= 32 {
+        return sign;
+    }
+    let pinned = (significand + (1 << (shift - 1))) >> shift;
+    if pinned > (1 << shape.mantissa_bits) - 1 {
+        return sign | (1 << shape.mantissa_bits);
+    }
+    sign | pinned
+}
+
+fn e4m3_value(byte: u8) -> f32 {
+    fp8_value(byte, E4M3_SHAPE)
+}
+
+fn e5m2_value(byte: u8) -> f32 {
+    fp8_value(byte, E5M2_SHAPE)
+}
+
+fn fp8_value(byte: u8, shape: Shape) -> f32 {
+    let code = u32::from(byte);
+    let sign = code & 0x80;
+    let body = code & 0x7f;
+    if body > shape.infinity || body == shape.nan {
+        return f32::from_bits((sign << 24) | 0x7fc0_0000);
+    }
+    if body == shape.infinity {
+        return f32::from_bits((sign << 24) | 0x7f80_0000);
+    }
+    let exponent = body >> shape.mantissa_bits;
+    let mantissa = body & ((1 << shape.mantissa_bits) - 1);
+    let magnitude = if exponent == 0 {
+        mantissa as f32 * shape.smallest
+    } else {
+        f32::from_bits(
+            (((exponent as i32 + 127 - shape.bias) as u32) << 23)
+                | (mantissa << (23 - shape.mantissa_bits)),
+        )
+    };
+    signed(sign, magnitude)
+}
+
+fn signed(sign: u32, value: f32) -> f32 {
+    if sign == 0 { value } else { -value }
 }
 
 fn bfloat16(value: f32) -> u16 {

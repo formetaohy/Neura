@@ -114,6 +114,69 @@ fn a_narrow_gather_feeds_a_narrow_product() {
 }
 
 #[test]
+fn a_cast_packs_the_numbers_it_narrows_into_a_float_of_eight_bits() {
+    for element in [Element::Fp8E4M3, Element::Fp8E5M2] {
+        let runtime = open();
+        let graph = Graph::new();
+        let data = graph.input(Shape::vector(64), Element::Single);
+        let packed = graph.cast(data, element);
+        let squared = graph.mul(packed, packed);
+        let back = graph.cast(squared, element);
+        assert_eq!(graph.element(packed), element);
+        assert_eq!(
+            graph.element(squared),
+            Element::Single,
+            "an op over an eight bit float lands in single precision",
+        );
+        assert_eq!(graph.element(back), element);
+        graph.retain(packed);
+        graph.retain(squared);
+        graph.retain(back);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        let values = random(64, 5);
+        runtime.write(&program, data, &values);
+        runtime.run(&program);
+
+        let packed_expected = rounded(element, &values);
+        assert_eq!(
+            runtime.read(&program, packed),
+            packed_expected,
+            "a cast narrows every number the tape carries",
+        );
+        let swept = runtime.read(&program, squared);
+        let mut squared_expected = Vec::new();
+        for value in &packed_expected {
+            squared_expected.push(value * value);
+        }
+        assert_close(&swept, &squared_expected, 1e-6);
+        let mut back_expected = Vec::new();
+        for element_value in rounded(element, &squared_expected) {
+            back_expected.push(element_value);
+        }
+        assert_eq!(
+            runtime.read(&program, back),
+            back_expected,
+            "a product of eight bit floats packs back the way the host packs it",
+        );
+    }
+}
+
+#[test]
+fn an_eight_bit_float_arena_holds_a_quarter_of_the_bytes_of_a_wide_one() {
+    let wide_graph = Graph::new();
+    let data = wide_graph.input(Shape::vector(1024), Element::Single);
+    wide_graph.retain(wide_graph.relu(data));
+    let narrow_graph = Graph::new();
+    let data = narrow_graph.input(Shape::vector(1024), Element::Fp8E4M3);
+    narrow_graph.retain(narrow_graph.relu(data));
+    let wide = Encoding::of(&wide_graph, 256, narrow());
+    let narrow = Encoding::of(&narrow_graph, 256, narrow());
+    assert_eq!(wide.arena_bytes(), 8192);
+    assert_eq!(narrow.arena_bytes(), 2048);
+}
+
+#[test]
 fn a_narrow_arena_holds_half_the_bytes_of_a_wide_one() {
     let wide_graph = Graph::new();
     let data = wide_graph.input(Shape::vector(1024), Element::Single);
@@ -219,6 +282,56 @@ fn a_quantized_weight_feeds_a_product_a_quarter_of_the_bytes() {
     );
 }
 
+#[test]
+fn an_eight_bit_float_weight_feeds_a_product_a_quarter_of_the_bytes() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(
+        Shape::matrix(8, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Fp8E4M3,
+    );
+    let input = graph.input(Shape::matrix(3, 8), Element::Single);
+    let product = graph.matmul(input, weight);
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let inputs = random(24, 17);
+    let weights_values = random(32, 23);
+    runtime.write(&program, input, &inputs);
+    runtime.write(&program, weight, &weights_values);
+    runtime.run(&program);
+
+    let packed = unpack(
+        Element::Fp8E4M3,
+        1.0,
+        weights_values.len(),
+        &pack(Element::Fp8E4M3, 1.0, &weights_values),
+    );
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &packed, 3, 8, 4),
+        1e-3,
+    );
+    let single = Graph::new();
+    single.parameter(
+        Shape::matrix(8, 4),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Single,
+    );
+    assert_eq!(
+        weights.bytes() * 4,
+        runtime.weights(&single).bytes(),
+        "an eight bit float weight store holds a quarter of the bytes a single precision one holds",
+    );
+}
+
 fn rounding_contract(backends: neura_gpu::Backends) {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
@@ -229,8 +342,12 @@ fn rounding_contract(backends: neura_gpu::Backends) {
         ..Default::default()
     }))
     .expect("a device rounds the numbers the host would");
-    let probes = probes();
-    for element in [Element::Half, Element::Bfloat16] {
+    for (element, probes) in [
+        (Element::Half, probes()),
+        (Element::Bfloat16, probes()),
+        (Element::Fp8E4M3, fp8_probes()),
+        (Element::Fp8E5M2, fp8_probes()),
+    ] {
         let graph = Graph::new();
         let data = graph.input(Shape::vector(probes.len() as u32), Element::Single);
         let narrowed = graph.cast(data, element);
@@ -276,6 +393,46 @@ fn rounding_contract(backends: neura_gpu::Backends) {
             probes[index],
         );
     }
+}
+
+fn fp8_probes() -> Vec<f32> {
+    let mut probes = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        1.0 / 512.0,
+        -1.0 / 512.0,
+        1.0 / 1024.0,
+        1.0 / 256.0,
+        1.0 / 65536.0,
+        -1.0 / 65536.0,
+        1.0 / 131072.0,
+        448.0,
+        -448.0,
+        700.0,
+        -700.0,
+        57344.0,
+        -57344.0,
+        70000.0,
+        -70000.0,
+        1.175_494_4e-38,
+        1.0e30,
+        -1.0e30,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    let sample = |count: u32, seed: u32| random(count, seed);
+    probes.extend(sample(512, 37));
+    for exponent in -24i32..10 {
+        let scale = 2.0f32.powi(exponent);
+        let seed = (exponent + 25) as u32;
+        probes.extend(sample(4, seed).iter().map(|value| value * scale));
+    }
+    probes
 }
 
 fn quantized_probes(scale: f32) -> Vec<f32> {

@@ -22,6 +22,8 @@ fn convert_of(element: Element) -> &'static str {
         Element::Half => "run_convert_half",
         Element::Bfloat16 => "run_convert_bfloat16",
         Element::Int8 => "run_convert_int8",
+        Element::Fp8E4M3 => "run_convert_fp8_e4m3",
+        Element::Fp8E5M2 => "run_convert_fp8_e5m2",
         Element::Single => panic!("a single precision tensor holds one element per word"),
     }
 }

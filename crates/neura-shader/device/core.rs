@@ -79,6 +79,50 @@ mod source {
         return (f32(byte) - select(0.0, 256.0, byte >= 128u32)) * value.scale;
     }
 
+    fn fp8_value(
+        code: u32,
+        bias: u32,
+        mantissa_bits: u32,
+        smallest: f32,
+        nan: u32,
+        infinity: u32,
+    ) -> f32 {
+        let body = code & 0x7fu32;
+        let positive = (code & 0x80u32) == 0u32;
+        if body > infinity || body == nan {
+            return bitcast_f32(0x7fc00000u32);
+        }
+        if body == infinity {
+            return select(
+                -bitcast_f32(0x7f800000u32),
+                bitcast_f32(0x7f800000u32),
+                positive,
+            );
+        }
+        let exponent = body >> mantissa_bits;
+        let mantissa = body & ((1u32 << mantissa_bits) - 1u32);
+        let magnitude = select(
+            bitcast_f32(
+                ((exponent + 127u32 - bias) << 23u32) | (mantissa << (23u32 - mantissa_bits)),
+            ),
+            f32(mantissa) * smallest,
+            exponent == 0u32,
+        );
+        return select(-magnitude, magnitude, positive);
+    }
+
+    fn fetch_fp8_e4m3(value: Value, at: u32) -> f32 {
+        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
+        let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
+        return fp8_value(byte, 7u32, 3u32, 1.0 / 512.0, 0x7fu32, 0x7fu32);
+    }
+
+    fn fetch_fp8_e5m2(value: Value, at: u32) -> f32 {
+        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
+        let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
+        return fp8_value(byte, 15u32, 2u32, 1.0 / 65536.0, 0x7fu32, 0x7cu32);
+    }
+
     fn fetch_by_element(value: Value, at: u32) -> f32 {
         match value.element {
             _ => {

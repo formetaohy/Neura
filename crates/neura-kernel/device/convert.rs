@@ -42,6 +42,120 @@ mod source {
         return select(magnitude, 256u32 - magnitude, clamped < 0.0);
     }
 
+    fn fp8_bits(
+        value: f32,
+        bias: u32,
+        mantissa_bits: u32,
+        subnormal_shift: u32,
+        nan: u32,
+        max: u32,
+        ceiling: u32,
+    ) -> u32 {
+        let bits = bitcast_u32(value);
+        let sign = (bits >> 24u32) & 0x80u32;
+        let magnitude = bits & 0x7fff_ffffu32;
+        if magnitude > 0x7f80_0000u32 {
+            return sign | nan;
+        }
+        if magnitude >= ceiling {
+            return sign | max;
+        }
+        let exponent = i32(magnitude >> 23u32) - 127i32;
+        let significand = (magnitude & 0x007f_ffffu32) | 0x0080_0000u32;
+        let rounding = 23u32 - mantissa_bits;
+        if exponent >= 1i32 - i32(bias) {
+            let pinned = (significand + (1u32 << (rounding - 1u32))) >> rounding;
+            let mut code = u32(exponent + i32(bias));
+            let mut carried = pinned - (1u32 << mantissa_bits);
+            if carried > (1u32 << mantissa_bits) - 1u32 {
+                carried = 0u32;
+                code = code + 1u32;
+            }
+            if code > (max >> mantissa_bits) {
+                return sign | max;
+            }
+            return sign | (code << mantissa_bits) | carried;
+        }
+        let shift = i32(subnormal_shift) - exponent;
+        if shift >= 32i32 {
+            return sign;
+        }
+        let pinned = (significand + (1u32 << (u32(shift) - 1u32))) >> u32(shift);
+        if pinned > (1u32 << mantissa_bits) - 1u32 {
+            return sign | (1u32 << mantissa_bits);
+        }
+        return sign | pinned;
+    }
+
+    fn pack_fp8(
+        task: Task,
+        source: Value,
+        output: Value,
+        word: u32,
+        bias: u32,
+        mantissa_bits: u32,
+        subnormal_shift: u32,
+        nan: u32,
+        max: u32,
+        ceiling: u32,
+    ) -> u32 {
+        let dims = output.dims;
+        let elements = dims.x * dims.y * dims.z * dims.w;
+        let low = fp8_bits(
+            convert_at(
+                task,
+                source,
+                coordinates(min(4u32 * word, elements - 1u32), dims),
+            ),
+            bias,
+            mantissa_bits,
+            subnormal_shift,
+            nan,
+            max,
+            ceiling,
+        );
+        let second = fp8_bits(
+            convert_at(
+                task,
+                source,
+                coordinates(min(4u32 * word + 1u32, elements - 1u32), dims),
+            ),
+            bias,
+            mantissa_bits,
+            subnormal_shift,
+            nan,
+            max,
+            ceiling,
+        );
+        let third = fp8_bits(
+            convert_at(
+                task,
+                source,
+                coordinates(min(4u32 * word + 2u32, elements - 1u32), dims),
+            ),
+            bias,
+            mantissa_bits,
+            subnormal_shift,
+            nan,
+            max,
+            ceiling,
+        );
+        let high = fp8_bits(
+            convert_at(
+                task,
+                source,
+                coordinates(min(4u32 * word + 3u32, elements - 1u32), dims),
+            ),
+            bias,
+            mantissa_bits,
+            subnormal_shift,
+            nan,
+            max,
+            ceiling,
+        );
+        return low | (second << 8u32) | (third << 16u32) | (high << 24u32);
+    }
+
     fn convert_at(task: Task, source: Value, at: uvec4) -> f32 {
         return chained(task, at, fetch(source, read_address(at, source.strides)));
     }
@@ -131,6 +245,52 @@ mod source {
                 output,
                 word,
                 low | (second << 8u32) | (third << 16u32) | (high << 24u32),
+            );
+        }
+    }
+
+    fn run_convert_fp8_e4m3(task: Task, lid: u32) {
+        let output = values[task.out];
+        let source = values[task.a];
+        for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            publish_word(
+                output,
+                word,
+                pack_fp8(
+                    task,
+                    source,
+                    output,
+                    word,
+                    7u32,
+                    3u32,
+                    14u32,
+                    0x7fu32,
+                    0x7eu32,
+                    0x43e0_0000u32,
+                ),
+            );
+        }
+    }
+
+    fn run_convert_fp8_e5m2(task: Task, lid: u32) {
+        let output = values[task.out];
+        let source = values[task.a];
+        for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            publish_word(
+                output,
+                word,
+                pack_fp8(
+                    task,
+                    source,
+                    output,
+                    word,
+                    15u32,
+                    2u32,
+                    7u32,
+                    0x7fu32,
+                    0x7bu32,
+                    0x4760_0000u32,
+                ),
             );
         }
     }
