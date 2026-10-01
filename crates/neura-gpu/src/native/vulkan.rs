@@ -332,15 +332,11 @@ impl Device {
             .iter()
             .map(|(_, props, _, ty, _, _, _)| describe(props, *ty))
             .collect::<Vec<_>>();
-        match policy {
-            AdapterPolicy::Identity(wanted) => {
-                candidates.retain(|(_, props, _, _, _, _, _)| identity(props) == wanted)
-            }
-            AdapterPolicy::Power(preference) => {
-                candidates.sort_by_key(|(_, _, _, ty, limits, _, _)| {
-                    Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
-                });
-            }
+        candidates.retain(|(_, props, _, _, _, _, _)| policy.wants(identity(props)));
+        if let AdapterPolicy::Power(preference) = policy {
+            candidates.sort_by_key(|(_, _, _, ty, limits, _, _)| {
+                Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
+            });
         }
         if candidates.is_empty() {
             return Err(match policy {
