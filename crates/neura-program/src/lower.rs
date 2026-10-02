@@ -115,7 +115,31 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
             task.unit = unit as u32;
         }
     }
+    walk(&mut plan);
     plan
+}
+
+fn walk(plan: &mut Plan) {
+    for task in &mut plan.tasks {
+        if task.kind.geometry() == neura_abi::Geometry::Access {
+            task.geometry = if walks_by_index(&plan.values, task) {
+                strategy::INDEX
+            } else {
+                strategy::FRAME
+            };
+        }
+    }
+}
+
+fn walks_by_index(values: &[ValueInfo], task: &Task) -> bool {
+    let out = values[task.out as usize].shape;
+    task.reads().all(|value| {
+        let info = &values[value as usize];
+        info.strides == [0u32; MAX_RANK as usize]
+            || (info.shape == out
+                && info.strides == info.shape.strides()
+                && info.strides[MAX_RANK as usize - 1] == 1)
+    })
 }
 
 fn spare_shared(units: &[TaskInfo], profile: Profile) -> u64 {

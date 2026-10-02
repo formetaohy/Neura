@@ -19,6 +19,13 @@ mod source {
         return at.x * strides.x + at.y * strides.y + at.z * strides.z + at.w * strides.w;
     }
 
+    fn walked_at(mode: u32, index: u32, dims: uvec4) -> uvec4 {
+        if mode == strategy::INDEX {
+            return uvec4(0u32, 0u32, 0u32, index);
+        }
+        return coordinates(index, dims);
+    }
+
     fn component(at: uvec4, axis: u32) -> u32 {
         return select(
             select(at.x, at.y, axis == 1u32),

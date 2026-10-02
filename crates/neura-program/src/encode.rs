@@ -211,6 +211,16 @@ impl Encoding {
                     task.geometry
                 }
                 Geometry::Strategy => task.geometry,
+                Geometry::Access => {
+                    assert!(
+                        task.geometry == neura_abi::strategy::FRAME
+                            || task.geometry == neura_abi::strategy::INDEX,
+                        "a {} task walks its reads by the frame or by the tape index, not by geometry {}",
+                        task.kind.name(),
+                        task.geometry,
+                    );
+                    task.geometry
+                }
                 Geometry::None => {
                     assert_eq!(
                         task.geometry,

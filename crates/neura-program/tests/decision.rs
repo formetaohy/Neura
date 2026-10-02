@@ -590,3 +590,81 @@ fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carrie
         let _ = encoding_with(&graph, narrow());
     }));
 }
+
+#[test]
+fn a_pointwise_task_walks_the_tape_index_over_the_tensors_it_shares_a_frame_with() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(64, 64), Element::Single);
+    let scaled = graph.mul(data, graph.fill(Shape::scalar(), 2.0));
+    let shifted = graph.add(graph.relu(scaled), data);
+    graph.retain(shifted);
+    let encoding = encoding_with(&graph, wide());
+    let tasks = tape(&encoding)
+        .into_iter()
+        .filter(|task| matches!(Kind::of(task.kind), Kind::Unary | Kind::Binary))
+        .collect::<Vec<_>>();
+    assert!(
+        tasks.len() >= 2,
+        "a chain of a product and a sum walks two tasks"
+    );
+    for task in tasks {
+        assert_eq!(
+            task.geometry,
+            strategy::INDEX,
+            "a {} task over tensors of one dense frame walks the index the tape hands it",
+            Kind::of(task.kind).name(),
+        );
+    }
+}
+
+#[test]
+fn a_pointwise_task_walks_the_frame_of_a_row_that_shares_no_frame() {
+    let graph = Graph::new();
+    let rows = graph.input(Shape::of([1, 1, 4, 3]), Element::Single);
+    let row = graph.input(Shape::of([1, 1, 1, 3]), Element::Single);
+    let summed = graph.add(rows, row);
+    graph.retain(summed);
+    let encoding = encoding_with(&graph, wide());
+    let tasks = tasks_of(&encoding, summed);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].geometry,
+        strategy::FRAME,
+        "a row that spans one column of its frame walks the frame",
+    );
+}
+
+#[test]
+fn a_pointwise_task_walks_the_frame_of_a_view_that_shares_no_frame() {
+    let graph = Graph::new();
+    let left = graph.input(Shape::of([1, 1, 3, 3]), Element::Single);
+    let square = graph.input(Shape::of([1, 1, 3, 3]), Element::Single);
+    let turned = graph.permute(square, [0, 1, 3, 2]);
+    let walked = graph.add(left, turned);
+    graph.retain(walked);
+    let encoding = encoding_with(&graph, wide());
+    let tasks = tasks_of(&encoding, walked);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].geometry,
+        strategy::FRAME,
+        "a tensor a permutation turns walks the frame it names",
+    );
+}
+
+#[test]
+fn a_convert_walks_the_tape_index_over_the_tensor_it_narrows() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(16, 16), Element::Single);
+    let narrowed = graph.cast(graph.relu(data), Element::Half);
+    graph.retain(narrowed);
+    let encoding = encoding_with(&graph, wide());
+    let converts = tasks_of(&encoding, narrowed);
+    assert!(
+        !converts.is_empty(),
+        "a narrow tensor is written by a convert"
+    );
+    for task in converts {
+        assert_eq!(task.geometry, strategy::INDEX);
+    }
+}

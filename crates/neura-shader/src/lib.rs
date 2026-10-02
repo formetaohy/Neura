@@ -139,6 +139,8 @@ impl Megakernel {
             ("strategy::THREAD_ELEMENT", strategy::THREAD_ELEMENT),
             ("strategy::WEIGHT_CHUNK", strategy::WEIGHT_CHUNK),
             ("strategy::WEIGHT_FOLD", strategy::WEIGHT_FOLD),
+            ("strategy::FRAME", strategy::FRAME),
+            ("strategy::INDEX", strategy::INDEX),
         ] {
             compiler.constant(name, value);
         }

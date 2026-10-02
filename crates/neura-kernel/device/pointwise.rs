@@ -78,7 +78,7 @@ mod source {
         let output = values[task.out];
         let dims = output.dims;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, dims);
+            let at = walked_at(task.geometry, index, dims);
             let a = fetch(left, read_address(at, left.strides));
             let b = fetch(right, read_address(at, right.strides));
             publish(
@@ -94,7 +94,7 @@ mod source {
         let output = values[task.out];
         let dims = output.dims;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, dims);
+            let at = walked_at(task.geometry, index, dims);
             let a = fetch(source, read_address(at, source.strides));
             publish(
                 output,
@@ -111,7 +111,7 @@ mod source {
             publish(
                 output,
                 index,
-                chained(task, coordinates(index, dims), task.param),
+                chained(task, walked_at(task.geometry, index, dims), task.param),
             );
         }
     }
@@ -121,7 +121,7 @@ mod source {
         let source = values[task.a];
         let dims = output.dims;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, dims);
+            let at = walked_at(task.geometry, index, dims);
             publish(
                 output,
                 index,

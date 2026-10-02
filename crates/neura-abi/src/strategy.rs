@@ -3,3 +3,5 @@ pub const WORKGROUP_ROW: u32 = 1;
 pub const THREAD_ELEMENT: u32 = 2;
 pub const WEIGHT_CHUNK: u32 = 3;
 pub const WEIGHT_FOLD: u32 = 4;
+pub const FRAME: u32 = 5;
+pub const INDEX: u32 = 6;

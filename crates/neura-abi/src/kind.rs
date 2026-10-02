@@ -90,6 +90,7 @@ pub enum Geometry {
     Product,
     Attention,
     Strategy,
+    Access,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -257,7 +258,7 @@ kinds! {
     Binary BINARY = "binary" {
         entry: "run_binary",
         modules: [],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,
@@ -265,7 +266,7 @@ kinds! {
     Unary UNARY = "unary" {
         entry: "run_unary",
         modules: [],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,
@@ -273,7 +274,7 @@ kinds! {
     Partial PARTIAL = "partial" {
         entry: "run_partial",
         modules: [],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,
@@ -281,7 +282,7 @@ kinds! {
     Fill FILL = "fill" {
         entry: "run_fill",
         modules: [],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,
@@ -289,7 +290,7 @@ kinds! {
     Broadcast BROADCAST = "broadcast" {
         entry: "run_broadcast",
         modules: [],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,
@@ -401,7 +402,7 @@ kinds! {
     Convert CONVERT = "convert" {
         entry: "run_convert",
         modules: [Convert],
-        geometry: None,
+        geometry: Access,
         prelude: false,
         chain: true,
         origin: false,

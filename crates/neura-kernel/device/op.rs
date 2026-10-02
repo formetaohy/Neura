@@ -16,7 +16,7 @@ mod source {
         let output = values[task.out];
         let dims = output.dims;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, dims);
+            let at = walked_at(task.geometry, index, dims);
             let g = fetch(gradient, read_address(at, gradient.strides));
             let mut result = 0.0;
             match task.op * 2u32 + task.slot {

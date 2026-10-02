@@ -105,7 +105,7 @@ mod source {
             convert_at(
                 task,
                 source,
-                coordinates(min(4u32 * word, elements - 1u32), dims),
+                walked_at(task.geometry, min(4u32 * word, elements - 1u32), dims),
             ),
             bias,
             mantissa_bits,
@@ -118,7 +118,11 @@ mod source {
             convert_at(
                 task,
                 source,
-                coordinates(min(4u32 * word + 1u32, elements - 1u32), dims),
+                walked_at(
+                    task.geometry,
+                    min(4u32 * word + 1u32, elements - 1u32),
+                    dims,
+                ),
             ),
             bias,
             mantissa_bits,
@@ -131,7 +135,11 @@ mod source {
             convert_at(
                 task,
                 source,
-                coordinates(min(4u32 * word + 2u32, elements - 1u32), dims),
+                walked_at(
+                    task.geometry,
+                    min(4u32 * word + 2u32, elements - 1u32),
+                    dims,
+                ),
             ),
             bias,
             mantissa_bits,
@@ -144,7 +152,11 @@ mod source {
             convert_at(
                 task,
                 source,
-                coordinates(min(4u32 * word + 3u32, elements - 1u32), dims),
+                walked_at(
+                    task.geometry,
+                    min(4u32 * word + 3u32, elements - 1u32),
+                    dims,
+                ),
             ),
             bias,
             mantissa_bits,
@@ -166,8 +178,9 @@ mod source {
         let dims = output.dims;
         let elements = dims.x * dims.y * dims.z * dims.w;
         for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let low = coordinates(2u32 * word, dims);
-            let high = coordinates(
+            let low = walked_at(task.geometry, 2u32 * word, dims);
+            let high = walked_at(
+                task.geometry,
                 select(
                     2u32 * word,
                     2u32 * word + 1u32,
@@ -187,8 +200,9 @@ mod source {
         let dims = output.dims;
         let elements = dims.x * dims.y * dims.z * dims.w;
         for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let low = coordinates(2u32 * word, dims);
-            let high = coordinates(
+            let low = walked_at(task.geometry, 2u32 * word, dims);
+            let high = walked_at(
+                task.geometry,
                 select(
                     2u32 * word,
                     2u32 * word + 1u32,
@@ -213,7 +227,7 @@ mod source {
                 convert_at(
                     task,
                     source,
-                    coordinates(min(4u32 * word, elements - 1u32), dims),
+                    walked_at(task.geometry, min(4u32 * word, elements - 1u32), dims),
                 ),
                 scale,
             );
@@ -221,7 +235,11 @@ mod source {
                 convert_at(
                     task,
                     source,
-                    coordinates(min(4u32 * word + 1u32, elements - 1u32), dims),
+                    walked_at(
+                        task.geometry,
+                        min(4u32 * word + 1u32, elements - 1u32),
+                        dims,
+                    ),
                 ),
                 scale,
             );
@@ -229,7 +247,11 @@ mod source {
                 convert_at(
                     task,
                     source,
-                    coordinates(min(4u32 * word + 2u32, elements - 1u32), dims),
+                    walked_at(
+                        task.geometry,
+                        min(4u32 * word + 2u32, elements - 1u32),
+                        dims,
+                    ),
                 ),
                 scale,
             );
@@ -237,7 +259,11 @@ mod source {
                 convert_at(
                     task,
                     source,
-                    coordinates(min(4u32 * word + 3u32, elements - 1u32), dims),
+                    walked_at(
+                        task.geometry,
+                        min(4u32 * word + 3u32, elements - 1u32),
+                        dims,
+                    ),
                 ),
                 scale,
             );
