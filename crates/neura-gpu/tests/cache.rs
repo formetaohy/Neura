@@ -1,6 +1,6 @@
 use neura_compiler::{DynamicRead, ReadWrite, kernel};
 use neura_gpu::{
-    Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, PipelineCache,
+    ArtifactCache, Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest,
     Submission,
 };
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
     let backend = backends.backend();
     let context = pollster::block_on(GpuContext::open(&GpuRequest {
         backends,
-        pipeline_cache: Some(directory.to_path_buf()),
+        artifacts: Some(directory.to_path_buf()),
         ..Default::default()
     }))
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
@@ -67,9 +67,7 @@ fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
     let mut transfer = Submission::new(&device, "native cache transfer");
     transfer.copy(&output, 0, &readback, 0, 256);
     let index = transfer.submit(&queue);
-    let cache = context
-        .pipeline_cache()
-        .expect("a device that names a cache carries it");
+    let cache = context.artifact_cache();
     let counts = (cache.loads(), cache.stores());
     let values = bytemuck::cast_slice::<u8, u32>(&readback.read(&queue, index, 256)).to_vec();
     (values, counts.0, counts.1)
@@ -85,22 +83,29 @@ fn cached(backends: Backends) {
     );
     assert_eq!(loads, 0, "a cold cache holds no artifact");
     assert_eq!(stores, 1, "a cold compile writes one artifact");
-    let (second, loads, stores) = round_trip(backends, &directory);
+    let (second, warm_loads, warm_stores) = round_trip(backends, &directory);
     assert_eq!(second, first, "a cache serves the very pipeline it holds");
-    assert!(loads >= 1, "a warm cache serves its artifact");
+    assert!(warm_loads > loads, "a warm cache serves its artifact");
     if backend == Backend::Dx12 {
-        assert_eq!(stores, 0, "a cached DXIL feeds the pipeline without DXC");
+        assert_eq!(
+            warm_stores, stores,
+            "a cached DXIL feeds the pipeline without DXC",
+        );
     }
     if backend == Backend::Vulkan {
-        assert_eq!(stores, 1, "a Vulkan pipeline cache persists every compile");
+        assert_eq!(
+            warm_stores,
+            stores + 1,
+            "a Vulkan pipeline cache persists every compile",
+        );
     }
     std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
 }
 
 #[test]
-fn a_pipeline_cache_publishes_its_artifacts() {
+fn an_artifact_cache_publishes_its_artifacts() {
     let directory = directory("host");
-    let cache = PipelineCache::at(&directory);
+    let cache = ArtifactCache::at(&directory);
     assert!(cache.load("dx12/one.dxil").is_none());
     cache.store("dx12/one.dxil", b"first");
     assert_eq!(cache.load("dx12/one.dxil").as_deref(), Some(&b"first"[..]));
@@ -108,7 +113,7 @@ fn a_pipeline_cache_publishes_its_artifacts() {
     assert_eq!(cache.load("dx12/one.dxil").as_deref(), Some(&b"second"[..]));
     assert_eq!(cache.stores(), 2);
     assert_eq!(cache.loads(), 2);
-    let leftovers = std::fs::read_dir(cache.root())
+    let leftovers = std::fs::read_dir(cache.root().expect("a named cache owns a root"))
         .expect("a cache directory is readable")
         .filter(|entry| {
             entry
@@ -127,8 +132,14 @@ fn a_pipeline_cache_publishes_its_artifacts() {
 #[should_panic(expected = "holds no byte")]
 fn an_empty_artifact_is_refused() {
     let directory = directory("empty");
-    let cache = PipelineCache::at(&directory);
-    std::fs::write(cache.file("dx12/empty.dxil"), []).expect("a test writes an empty artifact");
+    let cache = ArtifactCache::at(&directory);
+    std::fs::write(
+        cache
+            .file("dx12/empty.dxil")
+            .expect("a named cache names a file"),
+        [],
+    )
+    .expect("a test writes an empty artifact");
     cache.load("dx12/empty.dxil");
 }
 

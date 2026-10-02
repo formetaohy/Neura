@@ -11,7 +11,7 @@ mod submission;
 mod test;
 
 pub use buffer::{BufferBinding, GpuBuffer};
-pub use cache::PipelineCache;
+pub use cache::ArtifactCache;
 pub use capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, BufferUsages, DeviceType, Limits,
     PowerPreference,

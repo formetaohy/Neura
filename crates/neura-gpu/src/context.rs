@@ -1,5 +1,5 @@
 use crate::buffer::GpuBuffer;
-use crate::cache::PipelineCache;
+use crate::cache::ArtifactCache;
 use crate::capability::{AdapterId, AdapterInfo, AdapterPolicy, Backends, Limits, PowerPreference};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
@@ -7,20 +7,21 @@ use crate::pipeline::{ComputeProgram, PipelineHandle};
 use crate::submission::{Command, SubmissionIndex, Write};
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LimitsPolicy {
     Minimum,
     Adapter,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GpuRequest {
     pub backends: Backends,
     pub adapter: AdapterPolicy,
     pub limits: LimitsPolicy,
-    pub pipeline_cache: Option<PathBuf>,
+    pub artifacts: Option<PathBuf>,
 }
 
 impl Default for GpuRequest {
@@ -29,7 +30,7 @@ impl Default for GpuRequest {
             backends: Backends::COMPILED,
             adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
-            pipeline_cache: None,
+            artifacts: None,
         }
     }
 }
@@ -88,7 +89,7 @@ pub(crate) struct DeviceState {
     pub(crate) native: NativeDevice,
     pub(crate) info: AdapterInfo,
     pub(crate) limits: Limits,
-    pub(crate) cache: Option<PipelineCache>,
+    pub(crate) artifacts: ArtifactCache,
 }
 
 #[derive(Clone)]
@@ -96,10 +97,35 @@ pub struct Device {
     pub(crate) state: Arc<DeviceState>,
 }
 
+const DEVICE_POOL_CEILING: usize = 8;
+
+static DEVICE_POOL: LazyLock<Mutex<Vec<(GpuRequest, Device)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
 impl Device {
+    pub(crate) fn shared(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
+        let mut pool = DEVICE_POOL
+            .lock()
+            .expect("the shared device pool is never poisoned");
+        if let Some(index) = pool.iter().position(|(kept, _)| kept == request) {
+            let (kept, device) = pool.remove(index);
+            pool.push((kept, device.clone()));
+            return Ok(device);
+        }
+        let device = Self::open(request)?;
+        pool.push((request.clone(), device.clone()));
+        if pool.len() > DEVICE_POOL_CEILING {
+            pool.remove(0);
+        }
+        Ok(device)
+    }
+
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        let cache = request.pipeline_cache.clone().map(PipelineCache::at);
-        let (native, info, limits) = native::open(request, cache.clone())?;
+        let artifacts = match &request.artifacts {
+            Some(root) => ArtifactCache::at(root.clone()),
+            None => ArtifactCache::default_location(),
+        };
+        let (native, info, limits) = native::open(request, artifacts.clone())?;
         if !limits.supports(&Limits::BASELINE) {
             return Err(GpuUnavailable::UnsupportedLimits { info, limits });
         }
@@ -113,7 +139,7 @@ impl Device {
                 native,
                 info,
                 limits,
-                cache,
+                artifacts,
             }),
         })
     }
@@ -126,8 +152,8 @@ impl Device {
         &self.state.limits
     }
 
-    pub fn pipeline_cache(&self) -> Option<&PipelineCache> {
-        self.state.cache.as_ref()
+    pub fn artifact_cache(&self) -> &ArtifactCache {
+        &self.state.artifacts
     }
 
     pub(crate) fn native(&self) -> &NativeDevice {
@@ -214,7 +240,7 @@ impl GpuContext {
     pub const MINIMUM_LIMITS: Limits = Limits::BASELINE;
 
     pub async fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        Device::open(request).map(Self::of_device)
+        Device::shared(request).map(Self::of_device)
     }
 
     pub fn of_device(device: Device) -> Self {
@@ -241,8 +267,8 @@ impl GpuContext {
         self.device.limits()
     }
 
-    pub fn pipeline_cache(&self) -> Option<&PipelineCache> {
-        self.device.pipeline_cache()
+    pub fn artifact_cache(&self) -> &ArtifactCache {
+        self.device.artifact_cache()
     }
 
     pub fn binding_alignment(&self) -> u64 {

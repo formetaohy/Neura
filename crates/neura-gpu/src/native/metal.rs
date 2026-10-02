@@ -3,7 +3,7 @@ use super::{
     STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
-use crate::cache::PipelineCache;
+use crate::cache::ArtifactCache;
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
@@ -92,7 +92,7 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
-    cache: Option<PipelineCache>,
+    artifacts: ArtifactCache,
     archive: Option<Archive>,
 }
 
@@ -123,12 +123,15 @@ struct Archive {
     key: String,
 }
 
+unsafe impl Send for Archive {}
+unsafe impl Sync for Archive {}
+
 impl Archive {
-    fn of(device: &ProtocolObject<dyn MTLDevice>, cache: &PipelineCache) -> Self {
+    fn of(device: &ProtocolObject<dyn MTLDevice>, artifacts: &ArtifactCache) -> Option<Self> {
         let key = format!("metal/archive-{}.bin", device.registryID());
-        let file = cache.file(&key);
+        let file = artifacts.file(&key)?;
         let descriptor = MTLBinaryArchiveDescriptor::new();
-        if cache.load(&key).is_some() {
+        if artifacts.load(&key).is_some() {
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
             descriptor.setUrl(Some(&url));
         }
@@ -140,7 +143,7 @@ impl Archive {
             .unwrap_or_else(|error| {
                 panic!("creating the Metal archive {}: {error}", file.display(),)
             });
-        Self { raw, key }
+        Some(Self { raw, key })
     }
 }
 
@@ -192,7 +195,7 @@ fn describe(device: &ProtocolObject<dyn MTLDevice>) -> AdapterInfo {
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        cache: Option<PipelineCache>,
+        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
         let offered = devices
@@ -228,13 +231,13 @@ impl Device {
         let queue = raw
             .newCommandQueue()
             .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
-        let archive = cache.as_ref().map(|cache| Archive::of(&raw, cache));
+        let archive = Archive::of(&raw, &artifacts);
         Ok((
             Arc::new(Self {
                 raw,
                 queue,
                 state: Mutex::new(QueueState::default()),
-                cache,
+                artifacts,
                 archive,
             }),
             info,
@@ -318,7 +321,7 @@ impl Device {
                         program.label()
                     )
                 });
-            if let (Some(archive), Some(cache)) = (&self.archive, &self.cache) {
+            if let Some(archive) = &self.archive {
                 archive
                     .raw
                     .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
@@ -328,7 +331,10 @@ impl Device {
                             program.label()
                         )
                     });
-                let file = cache.file(&archive.key);
+                let file = self
+                    .artifacts
+                    .file(&archive.key)
+                    .expect("an archive lives only beside an artifact cache");
                 let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
                 archive
                     .raw

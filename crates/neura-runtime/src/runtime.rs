@@ -246,12 +246,14 @@ impl Runtime {
         self.compile_with(graph, weights, self.default_profile())
     }
 
-    pub fn compile_with<'r>(
-        &'r self,
-        graph: &Graph,
-        weights: &Weights<'r>,
-        profile: Profile,
-    ) -> Program<'r> {
+    pub fn precompile(&self, graph: &Graph, profile: Profile) {
+        self.assert_profile(profile);
+        let encoding = Encoding::of(graph, self.alignment, profile);
+        let kernel = self.kernel(&encoding, profile);
+        self.context.declare(kernel.program()).compile();
+    }
+
+    fn assert_profile(&self, profile: Profile) {
         let (threads, shared_bytes) = self.workgroup_budget();
         assert!(
             profile.fits(threads, shared_bytes),
@@ -260,6 +262,15 @@ impl Runtime {
             profile.shared_bytes(),
         );
         self.context.assert_alive();
+    }
+
+    pub fn compile_with<'r>(
+        &'r self,
+        graph: &Graph,
+        weights: &Weights<'r>,
+        profile: Profile,
+    ) -> Program<'r> {
+        self.assert_profile(profile);
         assert!(
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
@@ -307,6 +318,15 @@ impl Runtime {
     fn plan(&self, graph: &Graph, profile: Profile) -> Plan {
         let encoding = Arc::new(Encoding::of(graph, self.alignment, profile));
         let signature = tape::signature(&encoding, profile, self.alignment);
+        let kernel = self.kernel(&encoding, profile);
+        Plan {
+            signature,
+            encoding,
+            kernel,
+        }
+    }
+
+    fn kernel(&self, encoding: &Encoding, profile: Profile) -> Arc<Megakernel> {
         let kinds = encoding.kinds().to_vec();
         let elements = encoding.elements().to_vec();
         let geometry = Geometry::of(
@@ -315,14 +335,9 @@ impl Runtime {
             encoding.tiles(),
             encoding.attention(),
         );
-        let kernel = self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
+        self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
             Megakernel::assemble(&kinds, &elements, geometry)
-        });
-        Plan {
-            signature,
-            encoding,
-            kernel,
-        }
+        })
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {

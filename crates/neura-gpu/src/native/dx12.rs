@@ -3,7 +3,7 @@ use super::{
     STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
-use crate::cache::{PipelineCache, fingerprint};
+use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
     PowerPreference,
@@ -137,7 +137,7 @@ pub(crate) struct Device {
     event: CompletionEvent,
     zero: Arc<BufferResource>,
     state: Mutex<QueueState>,
-    cache: Option<PipelineCache>,
+    artifacts: ArtifactCache,
 }
 
 struct BufferResource {
@@ -344,7 +344,7 @@ fn candidates(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        cache: Option<PipelineCache>,
+        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
@@ -378,14 +378,11 @@ impl Device {
                 candidates.swap_remove(0)
             }
         };
-        let device = Self::assemble(candidate.device, cache)?;
+        let device = Self::assemble(candidate.device, artifacts)?;
         Ok((device, candidate.info, limits()))
     }
 
-    fn assemble(
-        raw: ID3D12Device,
-        cache: Option<PipelineCache>,
-    ) -> Result<Arc<Device>, DeviceFailure> {
+    fn assemble(raw: ID3D12Device, artifacts: ArtifactCache) -> Result<Arc<Device>, DeviceFailure> {
         let queue: ID3D12CommandQueue = unsafe {
             raw.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -426,7 +423,7 @@ impl Device {
             event,
             zero,
             state: Mutex::new(QueueState::default()),
-            cache,
+            artifacts,
         }))
     }
 
@@ -435,21 +432,16 @@ impl Device {
             let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
                 panic!("D3D12 accepts HLSL compute programs");
             };
-            let bytes = match &self.cache {
-                Some(cache) => {
-                    let mut parts = vec![source.as_bytes(), entry.as_bytes()];
-                    parts.extend(DXC_FLAGS.iter().map(|flag| flag.as_bytes()));
-                    let key = format!("dx12/{}.dxil", fingerprint(&parts));
-                    match cache.load(&key) {
-                        Some(bytes) => bytes,
-                        None => {
-                            let bytes = dxil(&source, &entry, program.label());
-                            cache.store(&key, &bytes);
-                            bytes
-                        }
-                    }
+            let mut parts = vec![source.as_bytes(), entry.as_bytes()];
+            parts.extend(DXC_FLAGS.iter().map(|flag| flag.as_bytes()));
+            let key = format!("dx12/{}.dxil", fingerprint(&parts));
+            let bytes = match self.artifacts.load(&key) {
+                Some(bytes) => bytes,
+                None => {
+                    let bytes = dxil(&source, &entry, program.label());
+                    self.artifacts.store(&key, &bytes);
+                    bytes
                 }
-                None => dxil(&source, &entry, program.label()),
             };
             let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
                 pRootSignature: ManuallyDrop::new(Some(pipeline.resource.root.clone())),

@@ -3,7 +3,7 @@ use super::{
     STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
-use crate::cache::{PipelineCache, fingerprint};
+use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
 };
@@ -122,7 +122,7 @@ pub(crate) struct Device {
     queue: vk::Queue,
     pool: vk::CommandPool,
     uuid: [u8; vk::UUID_SIZE],
-    cache: Option<PipelineCache>,
+    artifacts: ArtifactCache,
     state: Mutex<QueueState>,
 }
 
@@ -231,7 +231,7 @@ fn complete_enumeration<T>(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        cache: Option<PipelineCache>,
+        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
@@ -402,7 +402,7 @@ impl Device {
                     queue,
                     pool,
                     uuid: props.pipeline_cache_uuid,
-                    cache,
+                    artifacts,
                     state: Mutex::new(QueueState::default()),
                 }),
                 adapter_info,
@@ -423,7 +423,7 @@ impl Device {
                 uuids(&self.uuid),
                 fingerprint(&[&bytes_of(program.spirv())]),
             );
-            let initial = self.cache.as_ref().and_then(|cache| cache.load(&key));
+            let initial = self.artifacts.load(&key);
             let pipeline_cache = pipeline_cache(&self.raw, initial.as_deref());
             let spirv = program.spirv();
             let module = unsafe {
@@ -458,16 +458,15 @@ impl Device {
                     program.label()
                 )
             })[0];
-            if let Some(cache) = &self.cache {
-                let data = unsafe { self.raw.get_pipeline_cache_data(pipeline_cache) }
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "reading the Vulkan pipeline cache of {}: {error:?}",
-                            program.label()
-                        )
-                    });
-                cache.store(&key, &data);
-            }
+            let data = unsafe { self.raw.get_pipeline_cache_data(pipeline_cache) }.unwrap_or_else(
+                |error| {
+                    panic!(
+                        "reading the Vulkan pipeline cache of {}: {error:?}",
+                        program.label()
+                    )
+                },
+            );
+            self.artifacts.store(&key, &data);
             unsafe { self.raw.destroy_pipeline_cache(pipeline_cache, None) };
             compiled
         });

@@ -51,7 +51,7 @@ bitflags! {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PowerPreference {
     HighPerformance,
     LowPower,
@@ -97,7 +97,7 @@ impl Display for AdapterId {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AdapterPolicy {
     Power(PowerPreference),
     Identity(AdapterId),

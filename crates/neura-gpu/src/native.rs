@@ -5,7 +5,7 @@ pub(crate) mod metal;
 #[cfg(vulkan_backend)]
 pub(crate) mod vulkan;
 
-use crate::cache::PipelineCache;
+use crate::cache::ArtifactCache;
 use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
 use crate::pipeline::{BoundBuffer, ComputeProgram};
@@ -80,14 +80,14 @@ pub(crate) enum NativeGroup {
 
 pub(crate) fn open(
     request: &GpuRequest,
-    cache: Option<PipelineCache>,
+    artifacts: ArtifactCache,
 ) -> Result<(NativeDevice, AdapterInfo, Limits), GpuUnavailable> {
     let mut reasons = Vec::new();
     let mut offered = Vec::new();
     let mut unsupported = None;
     #[cfg(dx12_backend)]
     if request.backends.contains(Backends::DX12) {
-        match dx12::Device::open(request.adapter, cache.clone()) {
+        match dx12::Device::open(request.adapter, artifacts.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Dx12(device), info, limits));
             }
@@ -98,7 +98,7 @@ pub(crate) fn open(
     }
     #[cfg(metal_backend)]
     if request.backends.contains(Backends::METAL) {
-        match metal::Device::open(request.adapter, cache.clone()) {
+        match metal::Device::open(request.adapter, artifacts.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Metal(device), info, limits));
             }
@@ -109,7 +109,7 @@ pub(crate) fn open(
     }
     #[cfg(vulkan_backend)]
     if request.backends.contains(Backends::VULKAN) {
-        match vulkan::Device::open(request.adapter, cache.clone()) {
+        match vulkan::Device::open(request.adapter, artifacts.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((NativeDevice::Vulkan(device), info, limits));
             }

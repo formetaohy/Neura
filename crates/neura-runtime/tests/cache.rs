@@ -12,7 +12,7 @@ fn directory() -> PathBuf {
 fn step(directory: &Path) -> (Vec<f32>, u64, u64) {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
-            pipeline_cache: Some(directory.to_path_buf()),
+            artifacts: Some(directory.to_path_buf()),
             ..Default::default()
         },
         readback_bytes: 1 << 16,
@@ -42,10 +42,7 @@ fn step(directory: &Path) -> (Vec<f32>, u64, u64) {
         .collect::<Vec<_>>();
     runtime.write(&program, input, &data);
     runtime.run(&program);
-    let cache = runtime
-        .context()
-        .pipeline_cache()
-        .expect("a runtime that names a cache carries it");
+    let cache = runtime.context().artifact_cache();
     let counts = (cache.loads(), cache.stores());
     let values = runtime.read(&program, out);
     (values, counts.0, counts.1)
