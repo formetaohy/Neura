@@ -246,7 +246,16 @@ impl<'g> Graph<'g> {
             "an input of {} storage is declared with the quantum it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(shape, Residency::Input, element, 1.0, None)
+        self.hold(shape, Residency::Input, element, 1.0, None, false)
+    }
+
+    pub fn gradient_input(&self, shape: Shape, element: Element) -> Value<'g> {
+        assert!(
+            !element.quantized(),
+            "a gradient input of {} storage is declared with the quantum it reconstructs by, and a gradient input carries none; quantize the tensor that reads it instead",
+            element.name(),
+        );
+        self.hold(shape, Residency::Input, element, 1.0, None, true)
     }
 
     pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -255,7 +264,7 @@ impl<'g> Graph<'g> {
             "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(shape, Residency::Resident, element, 1.0, None)
+        self.hold(shape, Residency::Resident, element, 1.0, None, false)
     }
 
     pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -264,7 +273,7 @@ impl<'g> Graph<'g> {
             "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
             element.name(),
         );
-        self.hold(shape, Residency::Parameter, element, 1.0, Some(init))
+        self.hold(shape, Residency::Parameter, element, 1.0, Some(init), true)
     }
 
     pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -273,7 +282,7 @@ impl<'g> Graph<'g> {
             "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
             element.name(),
         );
-        self.hold(shape, Residency::State, element, 1.0, Some(init))
+        self.hold(shape, Residency::State, element, 1.0, Some(init), false)
     }
 
     pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
@@ -283,6 +292,7 @@ impl<'g> Graph<'g> {
             Element::Int8,
             scale,
             Some(init),
+            false,
         )
     }
 
@@ -297,7 +307,7 @@ impl<'g> Graph<'g> {
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
             element.name(),
         );
-        self.hold(shape, Residency::Parameter, element, 1.0, Some(init))
+        self.hold(shape, Residency::Parameter, element, 1.0, Some(init), false)
     }
 
     pub fn quantize(&self, value: Value<'g>, scale: f32) -> Value<'g> {
@@ -715,7 +725,7 @@ impl<'g> Graph<'g> {
     pub(crate) fn carries_gradient(&self, id: u32) -> bool {
         let state = self.state.borrow();
         let info = &state.values[id as usize];
-        info.residency == Residency::Parameter && info.requires_grad
+        info.requires_grad && matches!(info.residency, Residency::Input | Residency::Parameter)
     }
 
     pub(crate) fn contiguous(&self, value: Value<'g>) -> bool {
@@ -766,6 +776,7 @@ impl<'g> Graph<'g> {
         element: Element,
         scale: f32,
         seed: Option<Init>,
+        requires_grad: bool,
     ) -> Value<'g> {
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
@@ -776,7 +787,7 @@ impl<'g> Graph<'g> {
             element,
             scale,
             residency,
-            requires_grad: residency == Residency::Parameter && !element.quantized(),
+            requires_grad,
             retained: false,
             written_in_place: false,
             recomputes: None,
