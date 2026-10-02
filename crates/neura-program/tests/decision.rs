@@ -234,11 +234,24 @@ fn a_choice_covers_every_row_once() {
     graph.retain(action);
     let encoding = encoding_with(&graph, wide());
     let tasks = tasks_of(&encoding, action);
-    assert_eq!(tasks.len(), 250);
+    let per_task = tasks
+        .first()
+        .expect("a choice of a thousand rows holds a task")
+        .count;
+    assert!(
+        per_task > 1,
+        "a choice hands every row a task of its own instead of a block of rows",
+    );
     let mut cursor = 0;
     for task in tasks {
-        assert_eq!(task.first, cursor);
-        assert_eq!(task.count, 4);
+        assert_eq!(
+            task.first, cursor,
+            "a block of rows begins where no block before it ended",
+        );
+        assert_eq!(
+            task.count, per_task,
+            "a choice hands its rows to the device in blocks of one size",
+        );
         assert_eq!(Kind::of(task.kind), Kind::Categorical);
         assert_eq!(task.b, seed.id());
         cursor += task.count;

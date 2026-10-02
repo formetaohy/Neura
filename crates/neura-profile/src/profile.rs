@@ -200,7 +200,7 @@ impl Budget {
 
     pub const BALANCED_THREADS: u32 = 256;
 
-    pub const NOMINAL_RESIDENT_THREADS: u32 = 65_536;
+    pub const NOMINAL_RESIDENT_THREADS: u32 = 32_768;
 
     pub const fn of(threads: u32, shared_bytes: u64) -> Self {
         assert!(
@@ -228,7 +228,7 @@ impl Budget {
 
 pub const MAX_TILES: usize = 32;
 const PLAINEST_BLOCKING: (u32, u32) = (1, 1);
-const WIDEST_BLOCKINGS: usize = 2;
+const WIDEST_BLOCKINGS: usize = 4;
 const WORKGROUP_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
 const BLOCKINGS: [(u32, u32); 11] = [
     (8, 8),

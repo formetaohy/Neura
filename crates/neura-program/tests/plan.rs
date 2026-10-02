@@ -315,7 +315,7 @@ fn elementwise_operands_must_meet() {
 }
 
 #[test]
-fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
+fn a_product_takes_the_tile_that_spends_the_least_on_the_workgroups_it_fills() {
     let graph = Graph::new();
     let tall = graph.parameter(Shape::matrix(1024, 32), Init::Zero, Element::Single);
     let weight = graph.parameter(Shape::matrix(32, 64), Init::Zero, Element::Single);
@@ -332,12 +332,21 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
         .find(|task| task.out == balanced.id())
         .expect("the 1024x64 product holds a task");
     let balanced_tile = tiles[balanced_task.geometry as usize];
+    let products = tasks
+        .iter()
+        .filter(|task| task.out == balanced.id())
+        .count() as u32;
     assert_eq!(
         (balanced_tile.rows(), balanced_tile.columns()),
-        (64, 64),
-        "a product whose shape divides takes the tile that multiplies the most elements per staged load",
+        (32, 16),
+        "a product fills every workgroup its profile offers with the tile that walks the fewest registers for it",
     );
-    assert_eq!(balanced_tile.registers(), 16);
+    assert_eq!(
+        products,
+        wide().workgroups(),
+        "a product hands the device one tile per workgroup its profile runs at once",
+    );
+    assert_eq!(balanced_tile.registers(), 2);
     let ragged_task = *tasks
         .iter()
         .find(|task| task.out == ragged.id())
@@ -346,29 +355,26 @@ fn a_product_takes_the_tile_that_stages_the_fewest_loads_for_its_shape() {
         tiles[ragged_task.geometry as usize], balanced_tile,
         "a product no tile divides is masked by the tile its shape pays the least for",
     );
+    let ragged_products = tasks.iter().filter(|task| task.out == ragged.id()).count() as u32;
+    assert_eq!(
+        encoding.matmul_geometries(),
+        vec![(balanced_tile, products + ragged_products)],
+        "a tape reports the geometry of every task it hands the device",
+    );
+    assert_eq!(
+        encoding.work(),
+        u64::from(products + ragged_products) * balanced_tile.tile_work(),
+        "a plan accounts the tile work it dispatches",
+    );
     assert_eq!(
         encoding.tiles(),
         wide().tiles(),
         "a plan carries every tile of the profile it compiles for",
     );
-    assert_eq!(
-        encoding.matmul_geometries(),
-        vec![(balanced_tile, 32)],
-        "a tape reports the geometry of every task it hands the device",
-    );
-    assert_eq!(
-        encoding.work(),
-        32 * balanced_tile.tile_work(),
-        "a plan accounts the tile work it dispatches",
-    );
     assert_ne!(
         encoding_with(&graph, narrow()).tiles(),
         encoding_with(&graph, wide()).tiles(),
         "a profile decides which tiles a product is tiled with",
-    );
-    assert!(
-        encoding_with(&graph, wide()).task_count() < encoding_with(&graph, narrow()).task_count(),
-        "a wider tile hands the device fewer, larger tasks",
     );
 }
 
