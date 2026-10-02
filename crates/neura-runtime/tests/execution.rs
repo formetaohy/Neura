@@ -602,6 +602,36 @@ fn a_write_lands_after_every_write_it_follows() {
 }
 
 #[test]
+fn a_wide_update_in_place_lands_every_span_once() {
+    let graph = Graph::new();
+    let state = graph.state(Shape::vector(100_000), Init::Zero, Element::Single);
+    let factor = graph.fill(Shape::vector(100_000), 0.5);
+    let addend = graph.fill(Shape::vector(100_000), 0.25);
+    graph.mul_into(state, factor);
+    let halfway = graph.relu(state);
+    graph.add_into(state, addend);
+    graph.retain(halfway);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let data = (0..100_000)
+        .map(|index| index as f32 * 1e-5 - 0.5)
+        .collect::<Vec<_>>();
+    runtime.write(&program, state, &data);
+    runtime.run(&program);
+    let expected = data
+        .iter()
+        .map(|value| value * 0.5 + 0.25)
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, state), &expected, 1e-6);
+    let halfway_read = data
+        .iter()
+        .map(|value| (value * 0.5).max(0.0))
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, halfway), &halfway_read, 1e-6);
+}
+
+#[test]
 fn a_chain_of_updates_rides_one_dispatch() {
     let graph = Graph::new();
     let source = graph.input(Shape::vector(2048), Element::Single);

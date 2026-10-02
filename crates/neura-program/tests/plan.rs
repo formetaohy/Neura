@@ -982,6 +982,42 @@ fn a_write_takes_its_turn_after_every_write_it_follows() {
 }
 
 #[test]
+fn an_update_in_place_spreads_the_spans_it_names_over_workgroups() {
+    let graph = Graph::new();
+    let state = graph.state(Shape::vector(200_000), Init::Zero, Element::Single);
+    graph.mul_into(state, graph.fill(Shape::scalar(), 0.5));
+    let encoding = encoding(&graph);
+    let updates = writers(&encoding, state.id());
+    assert!(
+        updates.len() > 1,
+        "one update in place of one tensor spans the work its decomposition names",
+    );
+    assert_eq!(
+        encoding.dispatch_count(),
+        2,
+        "the constant the update reads is a wave of its own",
+    );
+    let dispatch = dispatch_of(&encoding, updates[0]);
+    assert!(
+        updates
+            .iter()
+            .all(|task| dispatch_of(&encoding, *task) == dispatch),
+        "the spans of one update in place meet in one dispatch",
+    );
+    let mut workgroups = updates
+        .iter()
+        .map(|task| segment_of(&encoding, *task))
+        .collect::<Vec<_>>();
+    workgroups.sort_unstable();
+    workgroups.dedup();
+    assert_eq!(
+        workgroups.len(),
+        updates.len(),
+        "every span of an update in place rides a workgroup of its own",
+    );
+}
+
+#[test]
 fn a_chain_of_single_task_levels_rides_one_segment() {
     let graph = Graph::new();
     let mut value = graph.input(Shape::vector(64), Element::Single);
@@ -1261,6 +1297,38 @@ fn a_narrow_parameter_update_packs_the_image_the_chain_folded() {
         tape.len(),
         2,
         "the fill and the convert that packs its product are the whole tape",
+    );
+}
+
+#[test]
+fn a_wide_narrow_update_in_place_spreads_the_words_it_packs() {
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::vector(200_000), Init::Zero, Element::Half);
+    let factor = graph.input(Shape::vector(200_000), Element::Single);
+    graph.mul_into(weight, factor);
+    let encoding = encoding(&graph);
+    let packs = writers(&encoding, weight.id());
+    assert!(
+        packs.len() > 1,
+        "a wide narrow write packs the words its decomposition names",
+    );
+    let dispatch = dispatch_of(&encoding, packs[0]);
+    assert!(
+        packs
+            .iter()
+            .all(|task| dispatch_of(&encoding, *task) == dispatch),
+        "the words of one narrow write meet in one dispatch",
+    );
+    let mut workgroups = packs
+        .iter()
+        .map(|task| segment_of(&encoding, *task))
+        .collect::<Vec<_>>();
+    workgroups.sort_unstable();
+    workgroups.dedup();
+    assert_eq!(
+        workgroups.len(),
+        packs.len(),
+        "every word of a narrow write rides a workgroup of its own",
     );
 }
 

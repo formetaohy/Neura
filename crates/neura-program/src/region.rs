@@ -43,7 +43,7 @@ pub(crate) struct Touches {
 pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
     let mut touches = Touches::default();
     let out = values[task.out as usize].clone();
-    if task.in_place || !owned(values, task.out) || !dense(&out) {
+    if !owned(values, task.out) || !dense(&out) {
         whole(values, task, &mut touches);
         return touches;
     }
