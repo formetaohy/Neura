@@ -102,6 +102,10 @@ impl MatmulTile {
             columns.is_multiple_of(thread_columns),
             "a matmul tile does not divide its columns by the threads along columns",
         );
+        assert!(
+            matches!(strategy, MatmulStrategy::Streamed) || depth.is_multiple_of(2),
+            "a staged tile walks two of its rows at one stride into the same bank of the workgroup scratch",
+        );
         Self {
             strategy,
             rows,
@@ -156,9 +160,16 @@ impl MatmulTile {
         self.rows as u64 * self.columns as u64 * self.depth as u64
     }
 
+    pub const fn left_stride(self) -> u32 {
+        match self.strategy {
+            MatmulStrategy::Staged => self.depth + 1,
+            MatmulStrategy::Streamed => 0,
+        }
+    }
+
     pub const fn left_stage(self) -> u64 {
         match self.strategy {
-            MatmulStrategy::Staged => self.rows as u64 * self.depth as u64,
+            MatmulStrategy::Staged => self.rows as u64 * self.left_stride() as u64,
             MatmulStrategy::Streamed => 0,
         }
     }
@@ -217,8 +228,12 @@ impl Budget {
 
 pub const MAX_TILES: usize = 32;
 const PLAINEST_BLOCKING: (u32, u32) = (1, 1);
+const WIDEST_BLOCKINGS: usize = 2;
 const WORKGROUP_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
-const BLOCKINGS: [(u32, u32); 8] = [
+const BLOCKINGS: [(u32, u32); 11] = [
+    (8, 8),
+    (8, 4),
+    (4, 8),
     (4, 4),
     (2, 4),
     (4, 2),
@@ -382,29 +397,15 @@ fn blockings(
     right_stage: u64,
     workgroup: u32,
     shared_bytes: u64,
-) -> [(u32, u32); 2] {
-    [
-        PLAINEST_BLOCKING,
-        widest(
-            rows,
-            columns,
-            left_stage,
-            right_stage,
-            workgroup,
-            shared_bytes,
-        ),
-    ]
-}
-
-fn widest(
-    rows: u32,
-    columns: u32,
-    left_stage: u64,
-    right_stage: u64,
-    workgroup: u32,
-    shared_bytes: u64,
-) -> (u32, u32) {
-    for (register_rows, register_columns) in BLOCKINGS {
+) -> Vec<(u32, u32)> {
+    let mut chosen = vec![PLAINEST_BLOCKING];
+    let mut left = left_stage;
+    let mut right = right_stage;
+    for blocking in BLOCKINGS {
+        if chosen.len() > WIDEST_BLOCKINGS {
+            break;
+        }
+        let (register_rows, register_columns) = blocking;
         let tile = MatmulTile::new(
             MatmulStrategy::Staged,
             rows * register_rows,
@@ -413,14 +414,24 @@ fn widest(
             rows,
             columns,
         );
-        let staged = 2
-            * (left_stage.max(tile.left_stage()) + right_stage.max(tile.right_stage()))
-            * WORD_BYTES;
-        if staged + REDUCTION_SCRATCH * u64::from(workgroup) <= shared_bytes {
-            return (register_rows, register_columns);
+        if !carried(
+            left.max(tile.left_stage()),
+            right.max(tile.right_stage()),
+            workgroup,
+            shared_bytes,
+        ) {
+            continue;
         }
+        left = left.max(tile.left_stage());
+        right = right.max(tile.right_stage());
+        chosen.push(blocking);
     }
-    PLAINEST_BLOCKING
+    chosen
+}
+
+fn carried(left_stage: u64, right_stage: u64, workgroup: u32, shared_bytes: u64) -> bool {
+    let staged = 2 * (left_stage + right_stage) * WORD_BYTES;
+    staged + REDUCTION_SCRATCH * u64::from(workgroup) <= shared_bytes
 }
 
 fn grids(workgroup: u32) -> Vec<(u32, u32)> {

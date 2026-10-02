@@ -8,6 +8,7 @@ pub fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
             ("MATMUL_ROWS", tile.rows()),
             ("MATMUL_COLUMNS", tile.columns()),
             ("MATMUL_DEPTH", tile.depth()),
+            ("MATMUL_LEFT_STRIDE", tile.left_stride()),
             ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
             ("MATMUL_REGISTER_ROWS", tile.register_rows()),
             ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),

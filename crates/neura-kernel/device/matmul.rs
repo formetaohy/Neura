@@ -14,17 +14,20 @@ mod source {
         depth: u32,
         columns: u32,
     ) {
-        let left_slot = buffer * MATMUL_ROWS * MATMUL_DEPTH;
+        let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
         for unit in stride(lid, MATMUL_ROWS * MATMUL_DEPTH, WORKGROUP_SIZE) {
-            let row = base_row + unit / MATMUL_DEPTH;
-            let column = base_depth + unit % MATMUL_DEPTH;
-            let inside = row < rows && column < depth;
+            let row = unit / MATMUL_DEPTH;
+            let column = unit % MATMUL_DEPTH;
+            let at_row = base_row + row;
+            let at_column = base_depth + column;
+            let inside = at_row < rows && at_column < depth;
             let address = select(
                 0u32,
-                left_plane + row * left.strides.z + column * left.strides.w,
+                left_plane + at_row * left.strides.z + at_column * left.strides.w,
                 inside,
             );
-            matmul_left[left_slot + unit] = select(0.0, fetch(left, address), inside);
+            matmul_left[left_slot + row * MATMUL_LEFT_STRIDE + column] =
+                select(0.0, fetch(left, address), inside);
         }
         let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
         for unit in stride(lid, MATMUL_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
@@ -56,7 +59,10 @@ mod source {
         let first_block = (task.slot * depth_blocks) / task.splits;
         let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
         let thread_row = (lid / MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_ROWS;
-        let thread_column = (lid % MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_COLUMNS;
+        let thread_column = lid % MATMUL_THREAD_COLUMNS;
+        let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
+        let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
+        let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
         for tile in stride(task.first, task.first + task.count, 1u32) {
             let plane = tile / tiles_per_plane;
             let plane_row = plane / plane_columns;
@@ -67,7 +73,9 @@ mod source {
             let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
             let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
             let out_plane = (task.slot * planes + plane) * rows * columns;
-            let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
+            for register in unroll(0u32, MATMUL_REGISTERS, 1u32) {
+                acc[register] = 0.0;
+            }
             let mut buffer = 0u32;
             template_matmul_load(
                 lid,
@@ -101,18 +109,18 @@ mod source {
                         columns,
                     );
                 }
-                let left_slot = buffer * MATMUL_ROWS * MATMUL_DEPTH;
+                let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
                 let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
                 for step in stride(0u32, MATMUL_DEPTH, 1u32) {
-                    let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
-                    let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         left_registers[row] =
-                            matmul_left[left_slot + (thread_row + row) * MATMUL_DEPTH + step];
+                            matmul_left[left_slot + (thread_row + row) * MATMUL_LEFT_STRIDE + step];
                     }
                     for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
-                        right_registers[column] = matmul_right
-                            [right_slot + step * MATMUL_COLUMNS + thread_column + column];
+                        right_registers[column] = matmul_right[right_slot
+                            + step * MATMUL_COLUMNS
+                            + thread_column
+                            + column * MATMUL_THREAD_COLUMNS];
                     }
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
@@ -128,7 +136,7 @@ mod source {
             for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                 for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
                     let out_row = base_row + thread_row + row;
-                    let out_column = base_column + thread_column + column;
+                    let out_column = base_column + thread_column + column * MATMUL_THREAD_COLUMNS;
                     if out_row < rows && out_column < columns {
                         let index = out_row * columns + out_column;
                         publish(
