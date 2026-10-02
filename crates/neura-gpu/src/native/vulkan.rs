@@ -163,7 +163,7 @@ struct GroupResource {
 fn native_buffer(native: &NativeBuffer) -> &Arc<BufferResource> {
     match native {
         NativeBuffer::Vulkan(buffer) => &buffer.resource,
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        #[cfg(multiple_backends)]
         _ => panic!("a Vulkan command cannot use another backend's buffer"),
     }
 }
@@ -175,7 +175,7 @@ fn buffer(gpu: &GpuBuffer) -> &Arc<BufferResource> {
 fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
     match native {
         NativePipeline::Vulkan(pipeline) => &pipeline.resource,
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        #[cfg(multiple_backends)]
         _ => panic!("a Vulkan command cannot use another backend's pipeline"),
     }
 }
@@ -183,7 +183,7 @@ fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
 fn group(native: &NativeGroup) -> &Arc<GroupResource> {
     match native {
         NativeGroup::Vulkan(group) => &group.resource,
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        #[cfg(multiple_backends)]
         _ => panic!("a Vulkan command cannot use another backend's bind group"),
     }
 }

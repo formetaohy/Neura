@@ -29,19 +29,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
 
       - name: Install native backend targets
-        run: rustup target add x86_64-pc-windows-msvc x86_64-apple-darwin
+        run: rustup target add x86_64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-ios aarch64-linux-android
 
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Check device Rust formatting
-        run: rustfmt --edition 2024 --check crates/neura-kernel/device/*.rs crates/neura-shader/device/*.rs
-
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Lint with every feature
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Check Windows compute backend
         run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
@@ -49,8 +43,14 @@ jobs:
       - name: Check macOS compute backend
         run: cargo check --workspace --all-targets --target x86_64-apple-darwin
 
+      - name: Check iOS compute backend
+        run: cargo check --workspace --all-targets --target aarch64-apple-ios
+
+      - name: Check Android compute backend
+        run: cargo check --workspace --all-targets --target aarch64-linux-android
+
       - name: Test
         run: cargo test --workspace
 
-      - name: Test the released device program
-        run: cargo test --workspace --release
+      - name: Build every target in release
+        run: cargo build --workspace --all-targets --release

@@ -1,14 +1,13 @@
 use neura_compiler::{DynamicRead, ReadWrite, kernel};
-use neura_gpu::{
-    Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission,
-};
+use neura_gpu::{Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission};
 
 #[kernel(workgroup_size = 64)]
 fn double(lid: u32, input: DynamicRead<u32>, output: ReadWrite<u32>) {
     output[lid] = input[lid] * 2u32;
 }
 
-fn compute(backend: Backend, backends: Backends) {
+fn compute(backends: Backends) {
+    let backend = backends.backend();
     let context = pollster::block_on(GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
@@ -88,20 +87,9 @@ fn compute(backend: Backend, backends: Backends) {
     );
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
-fn vulkan_executes_native_compute() {
-    compute(Backend::Vulkan, Backends::VULKAN);
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn dx12_executes_native_compute() {
-    compute(Backend::Dx12, Backends::DX12);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metal_executes_native_compute() {
-    compute(Backend::Metal, Backends::METAL);
+fn every_platform_backend_executes_native_compute() {
+    for backends in Backends::PLATFORM {
+        compute(backends);
+    }
 }

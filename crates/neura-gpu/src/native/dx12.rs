@@ -1,5 +1,6 @@
 use super::{
-    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
+    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
+    STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::{PipelineCache, fingerprint};
@@ -174,6 +175,14 @@ fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
         panic!("a D3D12 command cannot use another backend's pipeline");
     };
     &pipeline.resource
+}
+
+fn claim_group(native: &NativeGroup) {
+    match native {
+        NativeGroup::Dx12 => {}
+        #[cfg(multiple_backends)]
+        _ => panic!("a D3D12 command cannot use another backend's bind group"),
+    }
 }
 
 fn software(desc: &DXGI_ADAPTER_DESC1) -> bool {
@@ -688,6 +697,7 @@ impl Device {
                     offsets,
                     groups,
                 } => {
+                    claim_group(&group.native);
                     let pipeline = pipeline(&handle.slot.native);
                     unsafe {
                         list.SetComputeRootSignature(&pipeline.root);

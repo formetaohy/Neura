@@ -26,12 +26,9 @@ fn release(backends: Backends) {
 
 #[test]
 fn pending_uploads_do_not_keep_a_device_alive() {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    release(Backends::VULKAN);
-    #[cfg(target_os = "windows")]
-    release(Backends::DX12);
-    #[cfg(target_os = "macos")]
-    release(Backends::METAL);
+    for backends in Backends::PLATFORM {
+        release(backends);
+    }
 }
 
 fn recycling(backends: Backends) {
@@ -65,12 +62,9 @@ fn recycling(backends: Backends) {
 
 #[test]
 fn a_queue_recycles_the_frames_of_its_submissions() {
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
-    recycling(Backends::VULKAN);
-    #[cfg(target_os = "windows")]
-    recycling(Backends::DX12);
-    #[cfg(target_os = "macos")]
-    recycling(Backends::METAL);
+    for backends in Backends::PLATFORM {
+        recycling(backends);
+    }
 }
 
 #[test]

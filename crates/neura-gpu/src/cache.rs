@@ -4,8 +4,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(any(vulkan_backend, dx12_backend))]
 const FNV_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+#[cfg(any(vulkan_backend, dx12_backend))]
 const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+#[cfg(any(vulkan_backend, dx12_backend))]
 const SEPARATOR: u8 = 0xff;
 
 static PARTIAL: AtomicU64 = AtomicU64::new(1);
@@ -104,6 +107,7 @@ impl PipelineCache {
     }
 }
 
+#[cfg(any(vulkan_backend, dx12_backend))]
 pub(crate) fn fingerprint(parts: &[&[u8]]) -> String {
     let mut state = FNV_BASIS;
     for part in parts {

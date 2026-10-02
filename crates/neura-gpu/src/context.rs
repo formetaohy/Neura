@@ -26,7 +26,7 @@ pub struct GpuRequest {
 impl Default for GpuRequest {
     fn default() -> Self {
         Self {
-            backends: Backends::all(),
+            backends: Backends::COMPILED,
             adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
             pipeline_cache: None,

@@ -1,5 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
+use neura_runtime::Backends;
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -411,7 +412,7 @@ fn a_concatenation_carries_a_gradient_through_its_words() {
 
 #[test]
 fn every_backend_runs_a_region_and_an_axis() {
-    for backends in backend::backends() {
+    for backends in Backends::PLATFORM {
         let runtime = backend::open_with(backends);
         let graph = Graph::new();
         let input = graph.input(Shape::of([2, 3, 4, 5]), Element::Single);

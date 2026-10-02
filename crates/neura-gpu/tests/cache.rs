@@ -16,7 +16,8 @@ fn directory(name: &str) -> PathBuf {
     path
 }
 
-fn round_trip(backend: Backend, backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
+fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
+    let backend = backends.backend();
     let context = pollster::block_on(GpuContext::open(&GpuRequest {
         backends,
         pipeline_cache: Some(directory.to_path_buf()),
@@ -74,16 +75,17 @@ fn round_trip(backend: Backend, backends: Backends, directory: &Path) -> (Vec<u3
     (values, counts.0, counts.1)
 }
 
-fn cached(backend: Backend, backends: Backends) {
+fn cached(backends: Backends) {
+    let backend = backends.backend();
     let directory = directory(&format!("{backend:?}"));
-    let (first, loads, stores) = round_trip(backend, backends, &directory);
+    let (first, loads, stores) = round_trip(backends, &directory);
     assert_eq!(
         first,
         (1..=64u32).map(|value| value * 3).collect::<Vec<_>>()
     );
     assert_eq!(loads, 0, "a cold cache holds no artifact");
     assert_eq!(stores, 1, "a cold compile writes one artifact");
-    let (second, loads, stores) = round_trip(backend, backends, &directory);
+    let (second, loads, stores) = round_trip(backends, &directory);
     assert_eq!(second, first, "a cache serves the very pipeline it holds");
     assert!(loads >= 1, "a warm cache serves its artifact");
     if backend == Backend::Dx12 {
@@ -130,20 +132,9 @@ fn an_empty_artifact_is_refused() {
     cache.load("dx12/empty.dxil");
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
-fn vulkan_reuses_its_compiled_pipeline() {
-    cached(Backend::Vulkan, Backends::VULKAN);
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn dx12_reuses_its_compiled_shader() {
-    cached(Backend::Dx12, Backends::DX12);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metal_reuses_its_compiled_archive() {
-    cached(Backend::Metal, Backends::METAL);
+fn every_platform_backend_reuses_its_compiled_pipeline() {
+    for backends in Backends::PLATFORM {
+        cached(backends);
+    }
 }

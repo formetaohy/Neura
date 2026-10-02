@@ -1,5 +1,6 @@
 use super::{
-    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativePipeline, STAGING_BYTES,
+    DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
+    STAGING_BYTES,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::PipelineCache;
@@ -144,10 +145,11 @@ impl Archive {
 }
 
 fn native_buffer(native: &NativeBuffer) -> &Arc<BufferResource> {
-    let NativeBuffer::Metal(buffer) = native else {
-        panic!("a Metal command cannot use another backend's buffer");
-    };
-    &buffer.resource
+    match native {
+        NativeBuffer::Metal(buffer) => &buffer.resource,
+        #[cfg(multiple_backends)]
+        _ => panic!("a Metal command cannot use another backend's buffer"),
+    }
 }
 
 fn buffer(gpu: &GpuBuffer) -> &Arc<BufferResource> {
@@ -155,10 +157,19 @@ fn buffer(gpu: &GpuBuffer) -> &Arc<BufferResource> {
 }
 
 fn pipeline(native: &NativePipeline) -> &Arc<PipelineResource> {
-    let NativePipeline::Metal(pipeline) = native else {
-        panic!("a Metal command cannot use another backend's pipeline");
-    };
-    &pipeline.resource
+    match native {
+        NativePipeline::Metal(pipeline) => &pipeline.resource,
+        #[cfg(multiple_backends)]
+        _ => panic!("a Metal command cannot use another backend's pipeline"),
+    }
+}
+
+fn claim_group(native: &NativeGroup) {
+    match native {
+        NativeGroup::Metal => {}
+        #[cfg(multiple_backends)]
+        _ => panic!("a Metal command cannot use another backend's bind group"),
+    }
 }
 
 fn device_type(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
@@ -442,6 +453,7 @@ impl Device {
                     offsets,
                     groups,
                 } => {
+                    claim_group(&group.native);
                     let pipeline = pipeline(&handle.slot.native);
                     let compiled = pipeline
                         .compiled

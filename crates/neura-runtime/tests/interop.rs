@@ -68,25 +68,12 @@ fn narrow_precision_inference(backends: Backends, element: Element) {
     );
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
-fn vulkan_runs_narrow_precision_rust_kernels() {
-    narrow_precision_inference(Backends::VULKAN, Element::Half);
-    narrow_precision_inference(Backends::VULKAN, Element::Bfloat16);
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn dx12_runs_narrow_precision_rust_kernels() {
-    narrow_precision_inference(Backends::DX12, Element::Half);
-    narrow_precision_inference(Backends::DX12, Element::Bfloat16);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metal_runs_narrow_precision_rust_kernels() {
-    narrow_precision_inference(Backends::METAL, Element::Half);
-    narrow_precision_inference(Backends::METAL, Element::Bfloat16);
+fn every_platform_backend_runs_narrow_precision_rust_kernels() {
+    for backends in Backends::PLATFORM {
+        narrow_precision_inference(backends, Element::Half);
+        narrow_precision_inference(backends, Element::Bfloat16);
+    }
 }
 
 fn training_tape(backends: Backends) {
@@ -128,20 +115,9 @@ fn training_tape(backends: Backends) {
     );
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
-fn vulkan_executes_a_complete_training_tape() {
-    training_tape(Backends::VULKAN);
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn dx12_executes_a_complete_training_tape() {
-    training_tape(Backends::DX12);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metal_executes_a_complete_training_tape() {
-    training_tape(Backends::METAL);
+fn every_platform_backend_executes_a_complete_training_tape() {
+    for backends in Backends::PLATFORM {
+        training_tape(backends);
+    }
 }

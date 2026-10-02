@@ -1,8 +1,8 @@
-#[cfg(target_os = "windows")]
+#[cfg(dx12_backend)]
 pub(crate) mod dx12;
-#[cfg(target_os = "macos")]
+#[cfg(metal_backend)]
 pub(crate) mod metal;
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(vulkan_backend)]
 pub(crate) mod vulkan;
 
 use crate::cache::PipelineCache;
@@ -41,40 +41,40 @@ impl From<String> for DeviceFailure {
 }
 
 pub(crate) enum NativeDevice {
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(vulkan_backend)]
     Vulkan(Arc<vulkan::Device>),
-    #[cfg(target_os = "windows")]
+    #[cfg(dx12_backend)]
     Dx12(Arc<dx12::Device>),
-    #[cfg(target_os = "macos")]
+    #[cfg(metal_backend)]
     Metal(Arc<metal::Device>),
 }
 
 #[derive(Clone)]
 pub(crate) enum NativeBuffer {
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(vulkan_backend)]
     Vulkan(vulkan::Buffer),
-    #[cfg(target_os = "windows")]
+    #[cfg(dx12_backend)]
     Dx12(dx12::Buffer),
-    #[cfg(target_os = "macos")]
+    #[cfg(metal_backend)]
     Metal(metal::Buffer),
 }
 
 pub(crate) enum NativePipeline {
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(vulkan_backend)]
     Vulkan(vulkan::Pipeline),
-    #[cfg(target_os = "windows")]
+    #[cfg(dx12_backend)]
     Dx12(dx12::Pipeline),
-    #[cfg(target_os = "macos")]
+    #[cfg(metal_backend)]
     Metal(metal::Pipeline),
 }
 
 #[derive(Clone)]
 pub(crate) enum NativeGroup {
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(vulkan_backend)]
     Vulkan(Arc<vulkan::Group>),
-    #[cfg(target_os = "windows")]
+    #[cfg(dx12_backend)]
     Dx12,
-    #[cfg(target_os = "macos")]
+    #[cfg(metal_backend)]
     Metal,
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn open(
     let mut reasons = Vec::new();
     let mut offered = Vec::new();
     let mut unsupported = None;
-    #[cfg(target_os = "windows")]
+    #[cfg(dx12_backend)]
     if request.backends.contains(Backends::DX12) {
         match dx12::Device::open(request.adapter, cache.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
@@ -96,7 +96,7 @@ pub(crate) fn open(
             Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("D3D12: {reason}")),
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(metal_backend)]
     if request.backends.contains(Backends::METAL) {
         match metal::Device::open(request.adapter, cache.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
@@ -107,7 +107,7 @@ pub(crate) fn open(
             Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Metal: {reason}")),
         }
     }
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+    #[cfg(vulkan_backend)]
     if request.backends.contains(Backends::VULKAN) {
         match vulkan::Device::open(request.adapter, cache.clone()) {
             Ok((device, info, limits)) if limits.supports(&Limits::BASELINE) => {
@@ -136,10 +136,11 @@ pub(crate) fn open(
 impl NativePipeline {
     pub(crate) fn is_compiled(&self) -> bool {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(pipeline) => pipeline.is_compiled(),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(pipeline) => pipeline.is_compiled(),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(pipeline) => pipeline.is_compiled(),
         }
     }
@@ -148,19 +149,19 @@ impl NativePipeline {
 impl NativeDevice {
     pub(crate) fn compile(&self, pipeline: &NativePipeline, program: &ComputeProgram) {
         match (self, pipeline) {
-            #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+            #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
                 device.compile(pipeline, program)
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             (Self::Dx12(device), NativePipeline::Dx12(pipeline)) => {
                 device.compile(pipeline, program)
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             (Self::Metal(device), NativePipeline::Metal(pipeline)) => {
                 device.compile(pipeline, program)
             }
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(multiple_backends)]
             _ => panic!("a pipeline belongs to another backend"),
         }
     }
@@ -172,20 +173,22 @@ impl NativeDevice {
         usage: BufferUsages,
     ) -> NativeBuffer {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativeBuffer::Vulkan(device.create_buffer(label, size, usage)),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => NativeBuffer::Dx12(device.create_buffer(label, size, usage)),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => NativeBuffer::Metal(device.create_buffer(label, size, usage)),
         }
     }
 
     pub(crate) fn create_pipeline(&self, program: &ComputeProgram) -> NativePipeline {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => NativePipeline::Vulkan(device.create_pipeline(program)),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => NativePipeline::Dx12(device.create_pipeline(program)),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => NativePipeline::Metal(device.create_pipeline(program)),
         }
     }
@@ -195,25 +198,29 @@ impl NativeDevice {
         pipeline: &NativePipeline,
         buffers: &[BoundBuffer],
     ) -> NativeGroup {
+        #[cfg(not(vulkan_backend))]
+        let _ = buffers;
         match (self, pipeline) {
+            #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
                 NativeGroup::Vulkan(Arc::new(device.create_group(pipeline, buffers)))
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             (Self::Dx12(_), NativePipeline::Dx12(_)) => NativeGroup::Dx12,
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             (Self::Metal(_), NativePipeline::Metal(_)) => NativeGroup::Metal,
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(multiple_backends)]
             _ => panic!("a pipeline belongs to another backend"),
         }
     }
 
     pub(crate) fn submit(&self, writes: &[Write], commands: &[Command]) -> u64 {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.submit(writes, commands),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => device.submit(writes, commands),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => device.submit(writes, commands),
         }
     }
@@ -221,42 +228,46 @@ impl NativeDevice {
     #[cfg(test)]
     pub(crate) fn frames(&self) -> usize {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.frames(),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => device.frames(),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => device.frames(),
         }
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.wait(index, timeout),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => device.wait(index, timeout),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => device.wait(index, timeout),
         }
     }
 
     pub(crate) fn read(&self, buffer: &NativeBuffer, bytes: u64) -> Vec<u8> {
         match (self, buffer) {
+            #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => device.read(buffer, bytes),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => device.read(buffer, bytes),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             (Self::Metal(device), NativeBuffer::Metal(buffer)) => device.read(buffer, bytes),
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(multiple_backends)]
             _ => panic!("a buffer belongs to another backend"),
         }
     }
 
     pub(crate) fn assert_alive(&self) {
         match self {
+            #[cfg(vulkan_backend)]
             Self::Vulkan(device) => device.assert_alive(),
-            #[cfg(target_os = "windows")]
+            #[cfg(dx12_backend)]
             Self::Dx12(device) => device.assert_alive(),
-            #[cfg(target_os = "macos")]
+            #[cfg(metal_backend)]
             Self::Metal(device) => device.assert_alive(),
         }
     }

@@ -18,7 +18,7 @@ neura-compiler = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 
-[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "android"))'.dependencies]
 ash = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -34,7 +34,7 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
-[target.'cfg(target_os = "macos")'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2 = { workspace = true }
 objc2-foundation = { workspace = true, features = ["NSArray", "NSError", "NSString"] }
 objc2-metal = { workspace = true, features = [

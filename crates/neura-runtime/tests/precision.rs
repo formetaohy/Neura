@@ -531,22 +531,11 @@ fn probes() -> Vec<f32> {
     probes
 }
 
-#[cfg(any(target_os = "windows", target_os = "linux"))]
 #[test]
-fn vulkan_rounds_the_numbers_the_host_would() {
-    rounding_contract(neura_gpu::Backends::VULKAN);
-}
-
-#[cfg(target_os = "windows")]
-#[test]
-fn dx12_rounds_the_numbers_the_host_would() {
-    rounding_contract(neura_gpu::Backends::DX12);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn metal_rounds_the_numbers_the_host_would() {
-    rounding_contract(neura_gpu::Backends::METAL);
+fn every_platform_backend_rounds_the_numbers_the_host_would() {
+    for backends in neura_gpu::Backends::PLATFORM {
+        rounding_contract(backends);
+    }
 }
 
 fn narrow_stack<'g>(graph: &Graph<'g>, element: Element, data: Shape) -> [Value<'g>; 6] {

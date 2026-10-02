@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{Backends, Runtime, RuntimeRequest};
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -12,7 +12,7 @@ mod softmax;
 #[path = "support/mod.rs"]
 mod support;
 
-use backend::{backends, open_with};
+use backend::open_with;
 use reference::{matmul_reference, random};
 use softmax::{log_softmax_reference, softmax_reference};
 use support::{assert_close, open};
@@ -225,7 +225,7 @@ fn every_backend_a_machine_offers_folds_a_row_the_same_way() {
     );
     let sums = graph.sum_rows(data);
     let values = vec![1.0f32; (rows * columns) as usize];
-    for backends in backends() {
+    for backends in Backends::PLATFORM {
         let runtime = open_with(backends);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
