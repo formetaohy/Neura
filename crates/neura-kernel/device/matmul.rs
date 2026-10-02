@@ -146,6 +146,92 @@ mod source {
         }
     }
 
+    fn template_run_matmul_stream(task: Task, lid: u32) {
+        let left = values[task.a];
+        let right = values[task.b];
+        let output = values[task.out];
+        let rows = left.dims.z;
+        let depth = left.dims.w;
+        let columns = right.dims.w;
+        let plane_columns = max(left.dims.y, right.dims.y);
+        let planes = max(left.dims.x, right.dims.x) * plane_columns;
+        let row_blocks = (rows + MATMUL_ROWS - 1u32) / MATMUL_ROWS;
+        let column_blocks = (columns + MATMUL_COLUMNS - 1u32) / MATMUL_COLUMNS;
+        let depth_blocks = (depth + MATMUL_DEPTH - 1u32) / MATMUL_DEPTH;
+        let tiles_per_plane = row_blocks * column_blocks;
+        let first_block = (task.slot * depth_blocks) / task.splits;
+        let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
+        let thread_row = (lid / MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_ROWS;
+        let thread_column = (lid % MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_COLUMNS;
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let plane = tile / tiles_per_plane;
+            let plane_row = plane / plane_columns;
+            let plane_column = plane % plane_columns;
+            let within = tile % tiles_per_plane;
+            let base_row = (within / column_blocks) * MATMUL_ROWS;
+            let base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
+            for block in stride(first_block, last_block, 1u32) {
+                for step in stride(
+                    block * MATMUL_DEPTH,
+                    min((block + 1u32) * MATMUL_DEPTH, depth),
+                    1u32,
+                ) {
+                    let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
+                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                        let at = base_row + thread_row + row;
+                        let inside = at < rows;
+                        let address = select(
+                            0u32,
+                            left_plane + at * left.strides.z + step * left.strides.w,
+                            inside,
+                        );
+                        left_registers[row] = select(0.0, fetch(left, address), inside);
+                    }
+                    let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
+                    for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                        let at = base_column + thread_column + column;
+                        let inside = at < columns;
+                        let address = select(
+                            0u32,
+                            right_plane + step * right.strides.z + at * right.strides.w,
+                            inside,
+                        );
+                        right_registers[column] = select(0.0, fetch(right, address), inside);
+                    }
+                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                        for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                            let register = row * MATMUL_REGISTER_COLUMNS + column;
+                            acc[register] =
+                                acc[register] + left_registers[row] * right_registers[column];
+                        }
+                    }
+                }
+            }
+            for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                    let out_row = base_row + thread_row + row;
+                    let out_column = base_column + thread_column + column;
+                    if out_row < rows && out_column < columns {
+                        let index = out_row * columns + out_column;
+                        publish(
+                            output,
+                            out_plane + index,
+                            chained(
+                                task,
+                                uvec4(plane_row, plane_column, out_row, out_column),
+                                acc[row * MATMUL_REGISTER_COLUMNS + column],
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn run_matmul_fold(task: Task, lid: u32) {
         let partials = values[task.a];
         let output = values[task.out];

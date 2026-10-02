@@ -97,6 +97,41 @@ fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
 }
 
 #[test]
+fn every_backend_a_machine_offers_streams_a_narrow_product() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(1, 512), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(512, 512), Init::Zero, Element::Single);
+    let out = graph.matmul(left, right);
+    graph.retain(out);
+    let left_data = random(512, 3);
+    let right_data = random(512 * 512, 7);
+    let expected = matmul_reference(&left_data, &right_data, 1, 512, 512);
+    for backends in Backends::PLATFORM {
+        let runtime = open_with(backends);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        assert!(
+            program
+                .matmul_geometries()
+                .iter()
+                .all(|(tile, _)| tile.strategy() == neura_runtime::MatmulStrategy::Streamed),
+            "a product of one row stages its operands through a workgroup instead of streaming them",
+        );
+        assert!(
+            program
+                .matmul_geometries()
+                .iter()
+                .all(|(tile, _)| tile.shared_bytes() == 0),
+            "a streamed product stages an operand beside the registers it accumulates in",
+        );
+        runtime.write(&program, left, &left_data);
+        runtime.write(&program, right, &right_data);
+        runtime.run(&program);
+        assert_close(&runtime.read(&program, out), &expected, 1e-4);
+    }
+}
+
+#[test]
 fn a_split_product_keeps_its_epilogue_and_its_planes() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::of([2, 1, 4, 512]), Init::Zero, Element::Single);

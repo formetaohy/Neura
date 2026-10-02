@@ -85,8 +85,12 @@ fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geomet
         Module::Matmul => matmul_device::define(compiler),
         Module::MatmulTiles => {
             let (left, right) = geometry.stage_lengths();
-            compiler.workgroup("matmul_left", "f32", left);
-            compiler.workgroup("matmul_right", "f32", right);
+            if left > 0 {
+                compiler.workgroup("matmul_left", "f32", left);
+            }
+            if right > 0 {
+                compiler.workgroup("matmul_right", "f32", right);
+            }
             matmul::specialize(compiler, geometry);
         }
         Module::Attention => attention::define(compiler, geometry),

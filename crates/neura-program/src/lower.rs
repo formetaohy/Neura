@@ -2,7 +2,7 @@ use crate::access::Reads;
 use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_op as op;
-use neura_profile::{AttentionTile, Geometry, MatmulTile, Profile};
+use neura_profile::{AttentionTile, Geometry, MatmulStrategy, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -520,7 +520,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let (rows, columns) = (dims[2], dims[3]);
     let depth = plan.shape(unit.inputs[0]).dims()[3];
     let planes = dims[0] * dims[1];
-    let tile = matmul_tile(profile, rows, columns, depth);
+    let tile = matmul_tile(profile, rows, columns, depth, planes);
     let geometry = plan.geometry(tile);
     let tiles = planes * rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns());
     let splits = matmul_splits(tile, rows, columns, depth, planes, profile);
@@ -558,11 +558,11 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
-fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32) -> MatmulTile {
+fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32, planes: u32) -> MatmulTile {
     let mut chosen = profile.tiles()[0];
     let mut cheapest = u128::MAX;
     for tile in profile.tiles() {
-        let cost = matmul_cost(*tile, rows, columns, depth);
+        let cost = matmul_cost(*tile, rows, columns, depth, planes, profile);
         if cost < cheapest {
             cheapest = cost;
             chosen = *tile;
@@ -572,8 +572,17 @@ fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32) -> MatmulT
 }
 
 const BARRIER_SLOTS: u128 = 16;
+const STREAMED_LOAD_WEIGHT: u128 = 6;
+const STREAMED_TRAFFIC_WEIGHT: u128 = 16;
 
-fn matmul_cost(tile: MatmulTile, rows: u32, columns: u32, depth: u32) -> u128 {
+fn matmul_cost(
+    tile: MatmulTile,
+    rows: u32,
+    columns: u32,
+    depth: u32,
+    planes: u32,
+    profile: Profile,
+) -> u128 {
     let block_rows = u128::from(tile.rows());
     let block_columns = u128::from(tile.columns());
     let tiles =
@@ -581,10 +590,30 @@ fn matmul_cost(tile: MatmulTile, rows: u32, columns: u32, depth: u32) -> u128 {
     let registers = u128::from(tile.registers());
     let blocks = u128::from(depth.div_ceil(tile.depth()));
     let threads = u128::from(tile.threads());
-    let shared_loads = registers + u128::from(tile.register_rows() + tile.register_columns());
-    tiles * block_rows * block_columns * u128::from(depth) * shared_loads / registers
-        + tiles * u128::from(depth) * (block_rows + block_columns) / threads
-        + tiles * blocks * threads * BARRIER_SLOTS
+    let operands = u128::from(tile.register_rows() + tile.register_columns());
+    let work = tiles * block_rows * block_columns * u128::from(depth);
+    match tile.strategy() {
+        MatmulStrategy::Staged => {
+            let staged = registers + operands;
+            work * staged / registers
+                + tiles * u128::from(depth) * (block_rows + block_columns) / threads
+                + tiles * blocks * threads * BARRIER_SLOTS
+        }
+        MatmulStrategy::Streamed => {
+            let bands = u128::from(rows.div_ceil(tile.rows()));
+            let reads = bands * u128::from(depth) * u128::from(columns)
+                + u128::from(columns.div_ceil(tile.columns()))
+                    * u128::from(depth)
+                    * u128::from(rows);
+            let splits = u128::from(matmul_splits(tile, rows, columns, depth, planes, profile));
+            let tasks = tiles * u128::from(planes) * splits;
+            let slots = u128::from(profile.workgroups());
+            let idle = slots.saturating_sub(tasks) * threads * BARRIER_SLOTS;
+            STREAMED_LOAD_WEIGHT * work * operands / registers
+                + STREAMED_TRAFFIC_WEIGHT * reads
+                + idle
+        }
+    }
 }
 
 fn matmul_splits(

@@ -1,5 +1,5 @@
 use neura_abi::WORD_BYTES;
-use neura_profile::{Budget, Geometry, MatmulTile, Profile};
+use neura_profile::{Budget, Geometry, MatmulStrategy, MatmulTile, Profile};
 use std::panic::AssertUnwindSafe;
 
 fn wide_device() -> Budget {
@@ -119,8 +119,8 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
     }));
     assert!(refuses(|| {
         static MIXED: &[MatmulTile] = &[
-            MatmulTile::new(16, 16, 16, 8, 8),
-            MatmulTile::new(32, 32, 16, 16, 16),
+            MatmulTile::new(MatmulStrategy::Staged, 16, 16, 16, 8, 8),
+            MatmulTile::new(MatmulStrategy::Staged, 32, 32, 16, 16, 16),
         ];
         let _ = Profile::of(MIXED);
     }));
@@ -175,7 +175,7 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
             let _ = geometry.tile(count);
         }));
         assert!(refuses(|| {
-            let _ = geometry.geometry(MatmulTile::new(24, 24, 16, 8, 8));
+            let _ = geometry.geometry(MatmulTile::new(MatmulStrategy::Staged, 24, 24, 16, 8, 8));
         }));
     }
 }
@@ -183,18 +183,78 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
 #[test]
 fn a_matmul_tile_refuses_a_geometry_its_workgroup_cannot_carry() {
     assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 16, 8, 0);
+        let _ = MatmulTile::new(MatmulStrategy::Staged, 16, 16, 16, 8, 0);
     }));
     assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 16, 5, 8);
+        let _ = MatmulTile::new(MatmulStrategy::Staged, 16, 16, 16, 5, 8);
     }));
     assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 24, 16, 8, 16);
+        let _ = MatmulTile::new(MatmulStrategy::Staged, 16, 24, 16, 8, 16);
     }));
     assert!(refuses(|| {
-        let _ = MatmulTile::new(0, 16, 16, 8, 8);
+        let _ = MatmulTile::new(MatmulStrategy::Staged, 0, 16, 16, 8, 8);
     }));
     assert!(refuses(|| {
-        let _ = MatmulTile::new(16, 16, 0, 8, 8);
+        let _ = MatmulTile::new(MatmulStrategy::Staged, 16, 16, 0, 8, 8);
     }));
+}
+
+#[test]
+fn a_streamed_tile_carries_no_operand_through_shared_memory() {
+    let tile = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, 8, 1, 256);
+    assert_eq!(tile.strategy(), MatmulStrategy::Streamed);
+    assert_eq!(tile.left_stage(), 0);
+    assert_eq!(tile.right_stage(), 0);
+    assert_eq!(tile.shared_bytes(), 0);
+    assert_eq!(tile.registers(), 1);
+    assert_eq!(tile.threads(), 256);
+}
+
+#[test]
+fn a_profile_offers_a_streamed_tile_for_the_narrowest_product() {
+    for profile in Profile::derive(wide_device()) {
+        let streamed = profile
+            .tiles()
+            .iter()
+            .filter(|tile| tile.strategy() == MatmulStrategy::Streamed)
+            .collect::<Vec<_>>();
+        assert!(
+            streamed.iter().any(|tile| tile.rows() == 1),
+            "{profile:?} offers no product a single row rides",
+        );
+        assert!(
+            streamed.iter().all(|tile| tile.shared_bytes() == 0),
+            "a streamed product stages an operand beside the registers it accumulates in",
+        );
+        assert!(
+            streamed
+                .iter()
+                .all(|tile| tile.columns().is_multiple_of(tile.thread_columns())),
+            "a streamed product hands its threads a column band its grid does not divide",
+        );
+        assert!(
+            profile
+                .tiles()
+                .iter()
+                .any(|tile| tile.strategy() == MatmulStrategy::Staged && tile.shared_bytes() > 0),
+            "{profile:?} offers no product that stages its operands",
+        );
+        let left = profile
+            .tiles()
+            .iter()
+            .map(|tile| tile.left_stage())
+            .max()
+            .expect("a profile offers a tile");
+        let right = profile
+            .tiles()
+            .iter()
+            .map(|tile| tile.right_stage())
+            .max()
+            .expect("a profile offers a tile");
+        assert_eq!(
+            profile.staging_bytes(),
+            2 * (left + right) * WORD_BYTES,
+            "a profile counts the staging of the tiles it does not carry",
+        );
+    }
 }

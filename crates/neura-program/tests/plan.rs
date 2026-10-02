@@ -1,7 +1,7 @@
 use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_op as op;
-use neura_profile::{AttentionTile, Budget, Profile};
+use neura_profile::{AttentionTile, Budget, MatmulStrategy, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
@@ -746,6 +746,52 @@ fn a_loss_that_derives_from_no_parameter_is_refused() {
             let _ = graph.backward(loss);
         }),
         "a loss without parameters was differentiated",
+    );
+}
+
+#[test]
+fn a_narrow_product_streams_the_operands_a_wide_one_stages() {
+    let narrow_graph = Graph::new();
+    let narrow_weight =
+        narrow_graph.parameter(Shape::matrix(512, 512), Init::Zero, Element::Single);
+    let narrow_data = narrow_graph.parameter(Shape::matrix(1, 512), Init::Zero, Element::Single);
+    narrow_graph.retain(narrow_graph.matmul(narrow_data, narrow_weight));
+    let narrow = encoding_with(&narrow_graph, wide());
+    assert!(!narrow.matmul_geometries().is_empty());
+    assert!(
+        narrow
+            .matmul_geometries()
+            .iter()
+            .all(|(tile, _)| tile.strategy() == MatmulStrategy::Streamed),
+        "a product of one row stages its operands through a workgroup instead of streaming them: {:?}",
+        narrow.matmul_geometries(),
+    );
+    assert!(
+        narrow
+            .matmul_geometries()
+            .iter()
+            .all(|(tile, _)| tile.shared_bytes() == 0),
+        "a streamed product stages an operand beside the registers it accumulates in",
+    );
+
+    let wide_graph = Graph::new();
+    let wide_weight = wide_graph.parameter(Shape::matrix(1024, 1024), Init::Zero, Element::Single);
+    let wide_data = wide_graph.parameter(Shape::matrix(64, 1024), Init::Zero, Element::Single);
+    wide_graph.retain(wide_graph.matmul(wide_data, wide_weight));
+    let wide = encoding_with(&wide_graph, wide());
+    assert!(!wide.matmul_geometries().is_empty());
+    assert!(
+        wide.matmul_geometries()
+            .iter()
+            .all(|(tile, _)| tile.strategy() == MatmulStrategy::Staged),
+        "a product of many rows reuses its operands through a workgroup of shared memory: {:?}",
+        wide.matmul_geometries(),
+    );
+    assert!(
+        wide.matmul_geometries()
+            .iter()
+            .all(|(tile, _)| tile.shared_bytes() > 0),
+        "a staged product stages nothing into the shared memory it asks the device for",
     );
 }
 

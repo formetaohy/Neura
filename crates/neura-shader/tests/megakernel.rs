@@ -384,9 +384,16 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
         let kernel = all(index);
         let program = kernel.program();
         let names = functions(&program);
-        for tile in 0..profile.tiles().len() {
+        for (tile, shape) in profile.tiles().iter().enumerate() {
             assert!(names.contains(format!("run_matmul_{tile}").as_str()));
-            assert!(names.contains(format!("matmul_load_{tile}").as_str()));
+            if shape.strategy() == neura_profile::MatmulStrategy::Staged {
+                assert!(names.contains(format!("matmul_load_{tile}").as_str()));
+            } else {
+                assert!(
+                    !names.contains(format!("matmul_load_{tile}").as_str()),
+                    "a streamed product stages nothing through the workgroup it never loads",
+                );
+            }
         }
     }
 }

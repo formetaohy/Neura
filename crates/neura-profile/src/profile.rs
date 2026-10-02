@@ -62,7 +62,14 @@ impl AttentionTile {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum MatmulStrategy {
+    Staged,
+    Streamed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct MatmulTile {
+    strategy: MatmulStrategy,
     rows: u32,
     columns: u32,
     depth: u32,
@@ -72,6 +79,7 @@ pub struct MatmulTile {
 
 impl MatmulTile {
     pub const fn new(
+        strategy: MatmulStrategy,
         rows: u32,
         columns: u32,
         depth: u32,
@@ -95,12 +103,17 @@ impl MatmulTile {
             "a matmul tile does not divide its columns by the threads along columns",
         );
         Self {
+            strategy,
             rows,
             columns,
             depth,
             thread_rows,
             thread_columns,
         }
+    }
+
+    pub const fn strategy(self) -> MatmulStrategy {
+        self.strategy
     }
 
     pub const fn rows(self) -> u32 {
@@ -144,11 +157,17 @@ impl MatmulTile {
     }
 
     pub const fn left_stage(self) -> u64 {
-        self.rows as u64 * self.depth as u64
+        match self.strategy {
+            MatmulStrategy::Staged => self.rows as u64 * self.depth as u64,
+            MatmulStrategy::Streamed => 0,
+        }
     }
 
     pub const fn right_stage(self) -> u64 {
-        self.depth as u64 * self.columns as u64
+        match self.strategy {
+            MatmulStrategy::Staged => self.depth as u64 * self.columns as u64,
+            MatmulStrategy::Streamed => 0,
+        }
     }
 
     pub const fn shared_bytes(self) -> u64 {
@@ -210,6 +229,7 @@ const BLOCKINGS: [(u32, u32); 8] = [
     (2, 1),
 ];
 const GRID_ASPECT: u32 = 4;
+const STREAMED_ASPECT: u32 = 4;
 const DEPTH: u32 = 8;
 const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
 
@@ -285,6 +305,7 @@ impl Profile {
                     budget.shared_bytes(),
                 ) {
                     let tile = MatmulTile::new(
+                        MatmulStrategy::Staged,
                         rows * register_rows,
                         columns * register_columns,
                         DEPTH,
@@ -295,6 +316,16 @@ impl Profile {
                     right_stage = right_stage.max(tile.right_stage());
                     tiles.push(tile);
                 }
+            }
+            for (rows, columns) in streamed_grids(workgroup) {
+                tiles.push(MatmulTile::new(
+                    MatmulStrategy::Streamed,
+                    rows,
+                    columns,
+                    DEPTH,
+                    rows,
+                    columns,
+                ));
             }
             if tiles.is_empty() {
                 continue;
@@ -375,6 +406,7 @@ fn widest(
 ) -> (u32, u32) {
     for (register_rows, register_columns) in BLOCKINGS {
         let tile = MatmulTile::new(
+            MatmulStrategy::Staged,
             rows * register_rows,
             columns * register_columns,
             DEPTH,
@@ -401,6 +433,21 @@ fn grids(workgroup: u32) -> Vec<(u32, u32)> {
                 grids.push((rows, columns));
             }
         }
+        rows *= 2;
+    }
+    grids
+}
+
+fn streamed_grids(workgroup: u32) -> Vec<(u32, u32)> {
+    let mut grids = Vec::new();
+    let mut rows = 1;
+    while rows <= STREAMED_ASPECT && rows < workgroup {
+        let columns = workgroup / rows;
+        assert!(
+            columns * rows == workgroup,
+            "a streamed tile hands its threads a grid that does not cover the workgroup",
+        );
+        grids.push((rows, columns));
         rows *= 2;
     }
     grids
