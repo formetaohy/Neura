@@ -141,7 +141,18 @@ fn accesses(
         }
         for (storage, region) in touches.writes {
             writers[storage as usize].push((index, region));
-            readers[storage as usize].clear();
+            if covers(values, storage, region) {
+                readers[storage as usize].clear();
+            }
+        }
+    }
+}
+
+fn covers(values: &[ValueInfo], storage: u32, region: Region) -> bool {
+    match region {
+        Region::Whole => true,
+        Region::Run { first, count } => {
+            first == 0 && count >= u64::from(values[storage as usize].shape.elements())
         }
     }
 }

@@ -1,7 +1,7 @@
 use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_op as op;
-use neura_profile::{Budget, Profile};
+use neura_profile::{AttentionTile, Budget, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
@@ -1628,5 +1628,103 @@ fn a_tape_never_writes_a_block_quantized_tensor() {
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| encoding(&graph))).is_err(),
         "a block quantized weight packs the quantum of every block out of the numbers it holds, and a tape carries none of them",
+    );
+}
+
+#[test]
+fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([2, 1, 8, 64]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([2, 1, 8, 64]), Init::Zero, Element::Single);
+    let out = graph.attention(
+        queries,
+        keys,
+        keys,
+        neura_graph::AttentionOptions {
+            scale: 0.125,
+            causal: true,
+            origin: None,
+        },
+    );
+    graph.retain(out);
+    let encoding = encoding(&graph);
+    let tile = encoding.attention()[0];
+    assert!(
+        tile.registers() <= AttentionTile::REGISTER_CEILING,
+        "a row of {} numbers and its gradient outrun the {} registers a device thread carries",
+        tile.width(),
+        AttentionTile::REGISTER_CEILING,
+    );
+    assert_eq!(
+        tile.keys(),
+        8,
+        "a row of {} numbers leaves room for the widest key span both budgets carry",
+        tile.width(),
+    );
+    assert_eq!(
+        tile.registers(),
+        AttentionTile::REGISTER_CEILING,
+        "a wide row spends the whole register budget its device thread carries",
+    );
+}
+
+#[test]
+fn a_head_too_wide_for_one_thread_is_refused() {
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([2, 1, 8, 80]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([2, 1, 8, 80]), Init::Zero, Element::Single);
+    let _ = graph.attention(
+        queries,
+        keys,
+        keys,
+        neura_graph::AttentionOptions {
+            scale: 0.125,
+            causal: true,
+            origin: None,
+        },
+    );
+    assert!(
+        refuses(|| {
+            let _ = encoding(&graph);
+        }),
+        "a query row of 80 numbers and its gradient outrun the registers of one device thread",
+    );
+}
+
+#[test]
+fn a_reader_of_one_span_stays_beside_every_write_of_that_span() {
+    let graph = Graph::new();
+    let state = graph.state(Shape::vector(100_000), Init::Zero, Element::Single);
+    let factor = graph.fill(Shape::vector(100_000), 0.5);
+    let addend = graph.fill(Shape::vector(100_000), 0.25);
+    graph.mul_into(state, factor);
+    let halfway = graph.relu(state);
+    graph.add_into(state, addend);
+    graph.retain(halfway);
+    let encoding = encoding(&graph);
+    let tasks = tape(&encoding);
+    let mut checked = 0;
+    for update in writers(&encoding, state.id()) {
+        for reader in readers(&encoding, state.id()) {
+            if update == reader {
+                continue;
+            }
+            let written = &tasks[update];
+            let read = &tasks[reader];
+            let overlap = written.first < read.first + read.count
+                && read.first < written.first + written.count;
+            if !overlap {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                follows(&encoding, reader, update) || follows(&encoding, update, reader),
+                "task {update} writes the span task {reader} reads, and neither rides a wave or a slot before the other",
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "a span of one tensor is read beside the writes of that span",
     );
 }

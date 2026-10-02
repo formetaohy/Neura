@@ -13,7 +13,6 @@ const FOLD_ROW_CEILING: u32 = 8;
 const MATMUL_SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
 const MATMUL_PARTIALS_CEILING: u32 = 1 << 20;
-const ATTENTION_KEYS_CEILING: u32 = 16;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -296,13 +295,14 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
             let tokens = rows[2];
             let planes = rows[0] * rows[1];
             let geometry = attention_geometry(plan, spare, rows[3]);
+            let tile = plan.attention[geometry as usize];
             for plane in 0..planes {
                 for (first, count) in spans(tokens, profile.workgroup()) {
                     let mut task = Task::span(
                         unit,
                         plane * tokens + first,
                         count,
-                        attention_work(count, tokens, rows[3], spare),
+                        attention_work(count, tokens, tile),
                     );
                     task.geometry = geometry;
                     plan.tasks.push(task);
@@ -314,13 +314,14 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
             let tokens = keys[2];
             let planes = keys[0] * keys[1];
             let geometry = attention_geometry(plan, spare, keys[3]);
+            let tile = plan.attention[geometry as usize];
             for plane in 0..planes {
                 for (first, count) in spans(tokens, profile.workgroup()) {
                     let mut task = Task::span(
                         unit,
                         plane * tokens + first,
                         count,
-                        attention_work(count, tokens, keys[3], spare),
+                        attention_work(count, tokens, tile),
                     );
                     task.geometry = geometry;
                     plan.tasks.push(task);
@@ -439,38 +440,18 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
     }
 }
 
-fn attention_work(count: u32, tokens: u32, width: u32, spare: u64) -> u64 {
-    let tile = attention_keys(spare, width);
-    let blocks = tokens.div_ceil(tile).max(1);
-    u64::from(count) * u64::from(tile) * u64::from(width) * u64::from(blocks)
+fn attention_work(count: u32, tokens: u32, tile: AttentionTile) -> u64 {
+    let keys = tile.keys();
+    let blocks = tokens.div_ceil(keys).max(1);
+    u64::from(count) * u64::from(keys) * u64::from(tile.width()) * u64::from(blocks)
 }
 
 fn attention_geometry(plan: &mut Plan, spare: u64, width: u32) -> u32 {
     if let Some(index) = plan.attention.iter().position(|tile| tile.width() == width) {
         return index as u32;
     }
-    let tile = AttentionTile::new(attention_keys(spare, width), width);
-    assert!(
-        tile.registers() <= AttentionTile::REGISTER_CEILING,
-        "an attention of width {width} holds {} numbers of a query row and its gradient in one thread, beyond the {} a device thread carries",
-        tile.registers(),
-        AttentionTile::REGISTER_CEILING,
-    );
-    assert!(
-        tile.shared_bytes() <= spare,
-        "an attention of width {width} stages {} bytes of keys and values, beyond the {spare} bytes its device leaves beside the rest of its tape",
-        tile.shared_bytes(),
-    );
-    plan.attention.push(tile);
+    plan.attention.push(AttentionTile::fit(spare, width));
     (plan.attention.len() - 1) as u32
-}
-
-fn attention_keys(spare: u64, width: u32) -> u32 {
-    let staged = neura_abi::WORD_BYTES * u64::from(width);
-    let keys = (spare / (2 * staged)).max(1);
-    u32::try_from(keys)
-        .unwrap_or(u32::MAX)
-        .clamp(1, ATTENTION_KEYS_CEILING)
 }
 
 fn device_workgroups(profile: Profile) -> u32 {

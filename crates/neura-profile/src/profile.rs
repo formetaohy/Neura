@@ -8,13 +8,36 @@ pub struct AttentionTile {
 
 impl AttentionTile {
     pub const REGISTER_CEILING: u32 = 200;
+    pub const KEYS_CEILING: u32 = 16;
 
     pub fn new(keys: u32, width: u32) -> Self {
         assert!(
-            keys > 0 && width > 0,
-            "an attention tile walks no key of no width"
+            keys > 0 && keys <= Self::KEYS_CEILING && width > 0,
+            "an attention tile walks no key of no width",
         );
         Self { keys, width }
+    }
+
+    pub fn fit(shared: u64, width: u32) -> Self {
+        let row = 3 * width + 1;
+        assert!(
+            row <= Self::REGISTER_CEILING,
+            "an attention of width {width} carries a query row of {} numbers and its gradient in one thread, beyond the {} a device thread holds",
+            row - 1,
+            Self::REGISTER_CEILING,
+        );
+        let staged = 2 * WORD_BYTES * u64::from(width);
+        let room = shared / staged;
+        let registers = u64::from(Self::REGISTER_CEILING - 3 * width);
+        let keys = u32::try_from(room.min(registers))
+            .unwrap_or(u32::MAX)
+            .clamp(1, Self::KEYS_CEILING);
+        assert!(
+            u64::from(keys) <= room,
+            "an attention of width {width} stages {} bytes of keys and values for one key, beyond the {shared} bytes its device leaves beside the rest of its tape",
+            2 * WORD_BYTES * u64::from(width),
+        );
+        Self::new(keys, width)
     }
 
     pub const fn keys(self) -> u32 {

@@ -5,7 +5,7 @@ use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 16,
+        readback_bytes: 1 << 20,
         ..Default::default()
     }))
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
@@ -43,28 +43,29 @@ const STREAM_HEADS: u32 = 1;
 const BATCH: u32 = 2;
 const TOKENS: u32 = 4;
 const WIDTH: u32 = 3;
+const WIDE_WIDTH: u32 = 64;
 
-fn block(heads: u32, key_heads: u32, input_heads: u32, causal: bool) -> Block {
+fn block(width: u32, heads: u32, key_heads: u32, input_heads: u32, causal: bool) -> Block {
     let graph = Graph::new();
     let model = MultiHeadAttention::new(
         &graph,
-        HeadShape::new(heads, key_heads, WIDTH),
+        HeadShape::new(heads, key_heads, width),
         Init::Uniform {
             low: -0.3,
             high: 0.3,
         },
         Element::Single,
         AttentionOptions {
-            scale: 1.0 / (WIDTH as f32).sqrt(),
+            scale: 1.0 / (width as f32).sqrt(),
             causal,
             origin: None,
         },
     );
     let input = graph.input(
-        Shape::of([input_heads, BATCH, TOKENS, WIDTH]),
+        Shape::of([input_heads, BATCH, TOKENS, width]),
         Element::Single,
     );
-    let target = graph.input(Shape::of([heads, BATCH, TOKENS, WIDTH]), Element::Single);
+    let target = graph.input(Shape::of([heads, BATCH, TOKENS, width]), Element::Single);
     let loss = mse_loss(&graph, model.forward(&graph, input), target);
     graph.retain(loss);
     Block {
@@ -74,8 +75,8 @@ fn block(heads: u32, key_heads: u32, input_heads: u32, causal: bool) -> Block {
         input,
         target,
         loss,
-        input_elements: input_heads * BATCH * TOKENS * WIDTH,
-        target_elements: heads * BATCH * TOKENS * WIDTH,
+        input_elements: input_heads * BATCH * TOKENS * width,
+        target_elements: heads * BATCH * TOKENS * width,
     }
 }
 
@@ -92,12 +93,13 @@ fn inputs(count: u32, seed: u32) -> Vec<f32> {
 }
 
 fn gradient_of_a_multi_head_attention_matches_finite_differences(
+    width: u32,
     heads: u32,
     key_heads: u32,
     input_heads: u32,
     causal: bool,
 ) {
-    let block = block(heads, key_heads, input_heads, causal);
+    let block = block(width, heads, key_heads, input_heads, causal);
     let gradients = block.graph.backward(block.loss);
     let parameters = block.model.parameters();
     for parameter in parameters {
@@ -139,15 +141,21 @@ fn gradient_of_a_multi_head_attention_matches_finite_differences(
 
 #[test]
 fn an_attention_gradient_matches_finite_differences() {
-    gradient_of_a_multi_head_attention_matches_finite_differences(HEADS, KEY_HEADS, HEADS, false);
-    gradient_of_a_multi_head_attention_matches_finite_differences(HEADS, KEY_HEADS, HEADS, true);
     gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDTH, HEADS, KEY_HEADS, HEADS, false,
+    );
+    gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDTH, HEADS, KEY_HEADS, HEADS, true,
+    );
+    gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDTH,
         GROUPED_HEADS,
         GROUPED_KEY_HEADS,
         STREAM_HEADS,
         true,
     );
     gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDTH,
         GROUPED_HEADS,
         1,
         STREAM_HEADS,
@@ -156,8 +164,22 @@ fn an_attention_gradient_matches_finite_differences() {
 }
 
 #[test]
+fn a_wide_head_attention_matches_finite_differences() {
+    gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDE_WIDTH, HEADS, KEY_HEADS, HEADS, true,
+    );
+    gradient_of_a_multi_head_attention_matches_finite_differences(
+        WIDE_WIDTH,
+        GROUPED_HEADS,
+        GROUPED_KEY_HEADS,
+        STREAM_HEADS,
+        false,
+    );
+}
+
+#[test]
 fn a_multi_head_attention_lowers_the_loss_it_was_shown() {
-    let block = block(HEADS, KEY_HEADS, HEADS, true);
+    let block = block(WIDTH, HEADS, KEY_HEADS, HEADS, true);
     let gradients = block.graph.backward(block.loss);
     let parameters = block.model.parameters();
     let mut optimizer = AdamW::new(&block.graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
@@ -266,7 +288,7 @@ fn a_rotary_attention_gradient_matches_finite_differences() {
 
 #[test]
 fn a_multi_head_attention_keeps_its_parameters_beside_its_tape() {
-    let block = block(HEADS, KEY_HEADS, HEADS, false);
+    let block = block(WIDTH, HEADS, KEY_HEADS, HEADS, false);
     let gradients = block.graph.backward(block.loss);
     for parameter in block.model.parameters() {
         block.graph.retain(gradients.of(parameter));
