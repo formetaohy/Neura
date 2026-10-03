@@ -1,9 +1,10 @@
 use crate::access::Reads;
+use crate::product::Product;
 use crate::span::{self, Measure, Split};
 use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
-use neura_profile::{AttentionTile, MatmulStrategy, MatmulTile, Profile};
+use neura_profile::{AttentionTile, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -11,10 +12,6 @@ const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
 const FOLD_ROW_CEILING: u32 = 8;
-const MATMUL_SPLITS_CEILING: u32 = 64;
-const MATMUL_SPLIT_BLOCKS: u32 = 4;
-const MATMUL_PARTIALS_CEILING: u32 = 1 << 20;
-const NARROW_ROWS: u32 = 2;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -97,16 +94,23 @@ pub(crate) struct Plan {
     pub(crate) values: Vec<ValueInfo>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) tiles: Vec<MatmulTile>,
+    pub(crate) products: Vec<Product>,
     pub(crate) attention: Vec<AttentionTile>,
     pub(crate) measures: Vec<Measure>,
     pub(crate) measured: Vec<(u32, u32)>,
 }
 
-pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
+pub(crate) fn lower(
+    values: &[ValueInfo],
+    units: &[TaskInfo],
+    profile: Profile,
+    chosen: &[(Product, MatmulTile)],
+) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
         tiles: profile.tiles().to_vec(),
+        products: Vec::new(),
         attention: Vec::new(),
         measures: Vec::new(),
         measured: Vec::new(),
@@ -114,9 +118,9 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
         if writes_narrow(&plan.values, task) {
-            schedule_narrow(&mut plan, task, profile);
+            schedule_narrow(&mut plan, task, profile, chosen);
         } else {
-            schedule_unit(&mut plan, task, profile);
+            schedule_unit(&mut plan, task, profile, chosen);
         }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
@@ -153,7 +157,12 @@ fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
     values[task.out as usize].element.narrow()
 }
 
-fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn schedule_narrow(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    profile: Profile,
+    chosen: &[(Product, MatmulTile)],
+) {
     if let Some((source, steps)) = pointwise_steps(plan, unit) {
         let tasks = convert(plan, unit, source, steps, profile);
         plan.tasks.extend(tasks);
@@ -190,7 +199,7 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         copy.chain.clear();
         plan.tasks.push(copy);
     }
-    schedule_unit(plan, &redirected(unit, image), profile);
+    schedule_unit(plan, &redirected(unit, image), profile, chosen);
     let tasks = convert(plan, unit, image, Vec::new(), profile);
     plan.tasks.extend(tasks);
 }
@@ -320,10 +329,15 @@ impl Plan {
     }
 }
 
-fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn schedule_unit(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    profile: Profile,
+    chosen: &[(Product, MatmulTile)],
+) {
     let target = device_workgroups(profile);
     match unit.kind {
-        Kind::Matmul => matmul(plan, unit, profile),
+        Kind::Matmul => matmul(plan, unit, profile, chosen),
         Kind::Attention | Kind::AttentionQueryGrad => {
             let rows = plan.shape(unit.out).dims();
             let tokens = rows[2];
@@ -614,15 +628,28 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     }
 }
 
-fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product, MatmulTile)]) {
     let dims = plan.shape(unit.out).dims();
     let (rows, columns) = (dims[2], dims[3]);
     let depth = plan.shape(unit.inputs[0]).dims()[3];
     let planes = dims[0] * dims[1];
-    let tile = matmul_tile(profile, rows, columns, depth, planes);
+    let product = Product::of(planes, rows, columns, depth);
+    if !plan.products.contains(&product) {
+        plan.products.push(product);
+    }
+    let tile = chosen
+        .iter()
+        .find(|(shape, _)| *shape == product)
+        .map(|(_, tile)| *tile)
+        .unwrap_or_else(|| product.planned(profile));
+    assert!(
+        profile.tiles().contains(&tile),
+        "a plan walks {tile:?} for {product:?} where its profile offers {:?}",
+        profile.tiles(),
+    );
     let geometry = plan.geometry(tile);
     let tiles = planes * rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns());
-    let splits = matmul_splits(tile, rows, columns, depth, planes, profile);
+    let splits = product.splits(tile, profile);
     let partials =
         (splits > 1).then(|| plan.publish(Shape::vector(splits * planes * rows * columns)));
     let measure = measured(plan, unit.out, |value| Measure::Tiles { value, geometry });
@@ -663,108 +690,6 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         task.split = split;
         plan.tasks.push(task);
     }
-}
-
-fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32, planes: u32) -> MatmulTile {
-    let narrow = rows <= NARROW_ROWS
-        && profile
-            .tiles()
-            .iter()
-            .any(|tile| tile.strategy() == MatmulStrategy::Streamed);
-    let mut chosen = profile.tiles()[0];
-    let mut cheapest = u128::MAX;
-    for tile in profile.tiles() {
-        if narrow && tile.strategy() == MatmulStrategy::Staged {
-            continue;
-        }
-        let cost = matmul_cost(*tile, rows, columns, depth, planes, profile);
-        if cost < cheapest {
-            cheapest = cost;
-            chosen = *tile;
-        }
-    }
-    chosen
-}
-
-const BARRIER_SLOTS: u128 = 16;
-const STREAMED_LOAD_WEIGHT: u128 = 6;
-const STREAMED_TRAFFIC_WEIGHT: u128 = 16;
-const COOPERATIVE_STAGE_INSTRUCTIONS: u128 = 3;
-const COOPERATIVE_TENSOR_INSTRUCTIONS: u128 = 1;
-const COOPERATIVE_COPY_INSTRUCTIONS: u128 = 3;
-
-fn matmul_cost(
-    tile: MatmulTile,
-    rows: u32,
-    columns: u32,
-    depth: u32,
-    planes: u32,
-    profile: Profile,
-) -> u128 {
-    let block_rows = u128::from(tile.rows());
-    let block_columns = u128::from(tile.columns());
-    let tiles = u128::from(planes)
-        * u128::from(rows.div_ceil(tile.rows()))
-        * u128::from(columns.div_ceil(tile.columns()));
-    let blocks = u128::from(depth).div_ceil(u128::from(tile.depth()));
-    let threads = u128::from(tile.threads());
-    let splits = u128::from(matmul_splits(tile, rows, columns, depth, planes, profile));
-    let work = tiles * block_rows * block_columns * u128::from(depth);
-    let cost = match tile.strategy() {
-        MatmulStrategy::Staged => {
-            let registers = u128::from(tile.registers());
-            let operands = u128::from(tile.register_rows() + tile.register_columns());
-            let staged = registers + operands;
-            let panels = tiles * blocks * (block_rows + block_columns) * u128::from(tile.depth());
-            work * staged / registers + panels + tiles * blocks * threads * BARRIER_SLOTS
-        }
-        MatmulStrategy::Streamed => {
-            let registers = u128::from(tile.registers());
-            let operands = u128::from(tile.register_rows() + tile.register_columns());
-            let bands = u128::from(rows.div_ceil(tile.rows()));
-            let reads = u128::from(planes)
-                * (bands * u128::from(depth) * u128::from(columns)
-                    + u128::from(columns.div_ceil(tile.columns()))
-                        * u128::from(depth)
-                        * u128::from(rows));
-            STREAMED_LOAD_WEIGHT * work * operands / registers + STREAMED_TRAFFIC_WEIGHT * reads
-        }
-        MatmulStrategy::Cooperative => {
-            let fragment = u128::from(tile.fragment_rows())
-                * u128::from(tile.fragment_columns())
-                * u128::from(tile.fragment_depth());
-            let staged = tiles * (block_rows + block_columns) * u128::from(depth);
-            let tensor = tiles * block_rows * block_columns * u128::from(depth) / fragment;
-            let copy = tiles * block_rows * block_columns;
-            COOPERATIVE_STAGE_INSTRUCTIONS * staged
-                + COOPERATIVE_TENSOR_INSTRUCTIONS * tensor
-                + COOPERATIVE_COPY_INSTRUCTIONS * copy
-                + tiles * blocks * threads * BARRIER_SLOTS
-        }
-    };
-    cost.div_ceil((tiles * splits).min(u128::from(profile.workgroups())))
-}
-
-fn matmul_splits(
-    tile: MatmulTile,
-    rows: u32,
-    columns: u32,
-    depth: u32,
-    planes: u32,
-    profile: Profile,
-) -> u32 {
-    let elements = u64::from(planes) * u64::from(rows) * u64::from(columns);
-    let tiles = u64::from(planes)
-        * u64::from(rows.div_ceil(tile.rows()))
-        * u64::from(columns.div_ceil(tile.columns()));
-    let splits = u64::from(device_workgroups(profile)).div_ceil(tiles);
-    let splits = splits.min(u64::from(
-        depth.div_ceil(tile.depth()) / MATMUL_SPLIT_BLOCKS,
-    ));
-    let splits = splits.min(u64::from(MATMUL_SPLITS_CEILING));
-    let splits = splits.min(u64::from(MATMUL_PARTIALS_CEILING) / elements);
-    let splits = splits.min(u64::from(depth) * u64::from(rows + columns) / elements);
-    splits.max(1) as u32
 }
 
 fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {

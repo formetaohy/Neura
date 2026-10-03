@@ -3,7 +3,7 @@ use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
 use neura_graph::GraphStamp;
 use neura_kernel::Kernel;
-use neura_plan::Plan;
+use neura_plan::{Plan, Product};
 use neura_profile::Geometry;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -85,11 +85,12 @@ struct KernelIdentity {
     geometry: Geometry,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct PlanIdentity {
     stamp: GraphStamp,
     profile: neura_profile::Profile,
     alignment: u64,
+    chosen: Vec<(Product, neura_profile::MatmulTile)>,
 }
 
 const ASSEMBLY_CEILING: usize = 8;
@@ -126,12 +127,14 @@ impl Artifacts {
         stamp: GraphStamp,
         profile: neura_profile::Profile,
         alignment: u64,
+        chosen: &[(Product, neura_profile::MatmulTile)],
         build: impl FnOnce() -> Assembly,
     ) -> Arc<Assembly> {
         let identity = PlanIdentity {
             stamp,
             profile,
             alignment,
+            chosen: chosen.to_vec(),
         };
         let mut assemblies = self
             .assemblies

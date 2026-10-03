@@ -10,13 +10,15 @@ use neura_gpu::{
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::Kernel;
-use neura_plan::{Layout, Plan, Span};
+use neura_plan::{Layout, Plan, Product, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
-use neura_profile::{Budget, Geometry, Profile};
+use neura_profile::{Budget, Geometry, MatmulTile, Profile};
 use std::marker::PhantomData;
 use std::sync::Arc;
+
+mod tune;
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
@@ -291,13 +293,23 @@ impl Runtime {
         weights: &Weights<'r>,
         profile: Profile,
     ) -> Program<'r> {
+        self.compile_chosen(graph, weights, profile, &[])
+    }
+
+    pub fn compile_chosen<'r>(
+        &'r self,
+        graph: &Graph,
+        weights: &Weights<'r>,
+        profile: Profile,
+        chosen: &[(Product, MatmulTile)],
+    ) -> Program<'r> {
         self.assert_profile(profile);
         assert!(
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
         let revision = graph.revision();
-        let (resident, plan) = self.assemble(graph, profile);
+        let (resident, plan) = self.assemble(graph, profile, chosen);
         assert!(
             resident.plan.task_count() > 0,
             "a program whose plan holds no task has nothing for the device to run",
@@ -326,12 +338,17 @@ impl Runtime {
         )
     }
 
-    fn assemble(&self, graph: &Graph, profile: Profile) -> (Arc<Resident>, Arc<Plan>) {
-        let assembly = self
-            .artifacts
-            .assemble(graph.stamp(), profile, self.alignment, || {
-                self.assembly(graph, profile)
-            });
+    fn assemble(
+        &self,
+        graph: &Graph,
+        profile: Profile,
+        chosen: &[(Product, MatmulTile)],
+    ) -> (Arc<Resident>, Arc<Plan>) {
+        let assembly =
+            self.artifacts
+                .assemble(graph.stamp(), profile, self.alignment, chosen, || {
+                    self.assembly(graph, profile, chosen)
+                });
         let resident = self
             .artifacts
             .resident(assembly.signature.clone(), |signature| {
@@ -346,8 +363,13 @@ impl Runtime {
         (resident, assembly.plan.clone())
     }
 
-    fn assembly(&self, graph: &Graph, profile: Profile) -> Assembly {
-        let plan = Arc::new(Plan::of(graph, self.alignment, profile));
+    fn assembly(
+        &self,
+        graph: &Graph,
+        profile: Profile,
+        chosen: &[(Product, MatmulTile)],
+    ) -> Assembly {
+        let plan = Arc::new(Plan::chosen(graph, self.alignment, profile, chosen));
         let signature = cache::signature(&plan, profile, self.alignment);
         let kernel = self.kernel(&plan, profile);
         Assembly {
@@ -371,27 +393,6 @@ impl Runtime {
             .kernel(&kinds, &elements, geometry.clone(), || {
                 Kernel::assemble(&kinds, &elements, geometry)
             })
-    }
-
-    pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
-        let scratch = graph.updates_weights().then(|| self.scratch_weights(graph));
-        let mut measured = self.profiles().into_iter().map(|profile| {
-            let measuring = scratch.as_ref().unwrap_or(weights);
-            (
-                profile,
-                self.measure(&self.compile_with(graph, measuring, profile)),
-            )
-        });
-        let (mut fastest, mut seconds) = measured
-            .next()
-            .expect("the device offers no workgroup the framework can schedule");
-        for (profile, elapsed) in measured {
-            if elapsed < seconds {
-                fastest = profile;
-                seconds = elapsed;
-            }
-        }
-        self.compile_with(graph, weights, fastest)
     }
 
     fn scratch_weights(&self, graph: &Graph) -> Weights<'_> {

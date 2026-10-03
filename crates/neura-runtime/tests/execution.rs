@@ -1207,10 +1207,16 @@ fn tuning_measures_every_profile_the_device_offers() {
         runtime.profiles().contains(&program.profile()),
         "a tuned program carries a profile the device offers",
     );
-    assert_eq!(
-        runtime.declared_kernels(),
-        runtime.profiles().len(),
-        "tuning declares one device program per profile it measures",
+    assert!(
+        runtime.declared_kernels() >= runtime.profiles().len(),
+        "tuning declares a device program for every profile it measures",
+    );
+    assert!(
+        program
+            .matmul_geometries()
+            .iter()
+            .all(|(tile, _)| program.tiles().contains(tile)),
+        "a tuned plan walks no tile its profile does not offer",
     );
     runtime.write(&program, left, &left_data);
     runtime.write(&program, right, &right_data);

@@ -1,7 +1,9 @@
 use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_pointwise as op;
-use neura_profile::{AttentionTile, Budget, MatmulStrategy, Profile};
+use neura_profile::{
+    AttentionTile, Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
+};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
@@ -18,7 +20,7 @@ fn wide() -> Profile {
 fn every_profile() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
 }
-use neura_plan::{Layout, Plan};
+use neura_plan::{Layout, Plan, Product};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
@@ -1745,5 +1747,82 @@ fn a_reader_of_one_span_stays_beside_every_write_of_that_span() {
     assert!(
         checked > 0,
         "a span of one tensor is read beside the writes of that span",
+    );
+}
+
+#[test]
+fn a_product_shortlists_the_tile_of_every_strategy_its_profile_offers() {
+    let staged = MatmulTile::new(MatmulStrategy::Staged, 64, 64, 8, 8, 8);
+    let cooperative = MatmulTile::cooperative(CooperativeTile::new(
+        CooperativeMatrix::new(32, 16, 16, 16),
+        (1, 2),
+        (1, 1),
+        16,
+    ));
+    let profile = Profile::of(&[staged, cooperative]);
+    let product = Product::of(1, 128, 128, 8);
+    assert_eq!(product.planned(profile), staged);
+    assert_eq!(product.gathered(profile), Some(cooperative));
+    assert_eq!(product.shortlist(profile), vec![staged, cooperative]);
+    let gathered_only = Profile::of(&[cooperative]);
+    assert_eq!(gathered_only.tiles(), &[cooperative]);
+    assert_eq!(product.planned(gathered_only), cooperative);
+    assert_eq!(product.shortlist(gathered_only), vec![cooperative]);
+}
+
+#[test]
+fn a_plan_walks_the_tile_a_measured_choice_names() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(32, 64), Init::Zero, Element::Single);
+    let out = graph.matmul(left, right);
+    graph.retain(out);
+    let profile = wide();
+    let product = Product::of(1, 64, 64, 32);
+    let planned = product.planned(profile);
+    let chosen = *profile
+        .tiles()
+        .iter()
+        .find(|tile| **tile != planned)
+        .expect("a profile offers a tile beside the one it plans");
+    let chosen_plan = Plan::chosen(&graph, ALIGNMENT, profile, &[(product, chosen)]);
+    assert_eq!(chosen_plan.products(), &[product]);
+    let chosen_tasks = tasks(&chosen_plan);
+    assert!(!chosen_tasks.is_empty(), "a measured plan holds no task");
+    for task in &chosen_tasks {
+        assert_eq!(
+            chosen_plan.tiles()[task.geometry as usize],
+            chosen,
+            "a measured plan walks another tile than the one it was handed",
+        );
+    }
+    let planned_plan = plan_with(&graph, profile);
+    for task in tasks(&planned_plan) {
+        assert_eq!(planned_plan.tiles()[task.geometry as usize], planned);
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_measured_tile_its_profile_does_not_offer() {
+    let graph = Graph::new();
+    let left = graph.parameter(Shape::matrix(64, 32), Init::Zero, Element::Single);
+    let right = graph.parameter(Shape::matrix(32, 64), Init::Zero, Element::Single);
+    graph.retain(graph.matmul(left, right));
+    let profile = narrow();
+    let foreign = *wide()
+        .tiles()
+        .iter()
+        .find(|tile| !profile.tiles().contains(tile))
+        .expect("a wider profile offers a tile the narrow one does not");
+    assert!(
+        refuses(|| {
+            let _ = Plan::chosen(
+                &graph,
+                ALIGNMENT,
+                profile,
+                &[(Product::of(1, 64, 64, 32), foreign)],
+            );
+        }),
+        "a plan walked a measured tile its profile does not offer",
     );
 }

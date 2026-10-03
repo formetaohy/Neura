@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
 use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile};
-use neura_runtime::Runtime;
+use neura_runtime::{Product, Runtime};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -107,7 +107,44 @@ fn a_cooperative_product_matches_a_cpu_reference() {
 }
 
 #[test]
-fn a_cooperative_profile_carries_cooperative_tiles() {
+fn a_product_shortlists_one_tile_of_every_strategy_its_profile_offers() {
+    let runtime = open();
+    let Some(capability) = runtime.capability().cooperative_matrix else {
+        return;
+    };
+    let fragment = CooperativeMatrix::new(
+        capability.subgroup,
+        capability.rows,
+        capability.columns,
+        capability.depth,
+    );
+    let tile = CooperativeTile::new(fragment, (4, 2), (2, 2), fragment.depth());
+    let profile = cooperative_profile(MatmulTile::cooperative(tile));
+    let product = Product::of(1, 512, 512, 512);
+    let shortlist = product.shortlist(profile);
+    assert_eq!(shortlist.len(), 2, "a product shortlists two tiles");
+    assert!(
+        shortlist
+            .iter()
+            .any(|tile| tile.strategy() == MatmulStrategy::Cooperative),
+        "a product shortlists no cooperative tile its profile offers",
+    );
+    assert!(
+        shortlist
+            .iter()
+            .any(|tile| tile.strategy() != MatmulStrategy::Cooperative),
+        "a product shortlists no plain tile its profile offers",
+    );
+    assert!(
+        shortlist.iter().all(|tile| profile.tiles().contains(tile)),
+        "a product shortlists a tile its profile does not offer",
+    );
+    assert_eq!(product.planned(profile), shortlist[0]);
+    assert_eq!(product.gathered(profile), Some(shortlist[1]));
+}
+
+#[test]
+fn a_product_walks_the_cooperative_tile_a_measured_choice_names() {
     let runtime = open();
     let Some(tiles) = cooperative_tiles(&runtime) else {
         return;
@@ -118,7 +155,13 @@ fn a_cooperative_profile_carries_cooperative_tiles() {
     let right = graph.parameter(Shape::matrix(64, 96), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let weights = runtime.weights(&graph);
-    let gathered = runtime.compile_with(&graph, &weights, cooperative_profile(tile));
+    let product = Product::of(1, 96, 96, 64);
+    let gathered = runtime.compile_chosen(
+        &graph,
+        &weights,
+        cooperative_profile(tile),
+        &[(product, tile)],
+    );
     let plain = runtime.compile_with(&graph, &weights, scalar_profile(&runtime));
     assert!(
         gathered
@@ -139,16 +182,16 @@ fn a_cooperative_profile_carries_cooperative_tiles() {
             .matmul_geometries()
             .iter()
             .any(|(used, _)| *used == tile),
-        "a product of 96 rows, 64 of depth and 96 columns walks the cooperative tile {tile:?} its profile costs least",
+        "a product of 96 rows, 64 of depth and 96 columns walks the cooperative tile {tile:?} a measured plan asks for",
     );
     let left_data = random(96 * 64, 7);
     let right_data = random(64 * 96, 13);
     runtime.write(&gathered, left, &left_data);
     runtime.write(&gathered, right, &right_data);
     runtime.run(&gathered);
-    let product = runtime.read(&gathered, out);
+    let measured = runtime.read(&gathered, out);
     assert_close(
-        &product,
+        &measured,
         &matmul_reference(&left_data, &right_data, 96, 64, 96),
         2e-2,
     );

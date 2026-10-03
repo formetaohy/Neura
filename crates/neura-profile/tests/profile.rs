@@ -147,6 +147,35 @@ fn a_cooperative_tile_takes_only_the_pool_the_staged_panels_leave() {
 }
 
 #[test]
+fn a_device_that_holds_cooperative_matrices_offers_them_beside_a_full_staged_menu() {
+    let cooperative = CooperativeMatrix::new(32, 16, 16, 16);
+    let budget = Budget::of(1024, 48 << 10);
+    let profiles = Profile::derive(budget, Some(cooperative));
+    let balanced = profiles
+        .iter()
+        .find(|profile| profile.workgroup() == Budget::BALANCED_THREADS)
+        .expect("a wide device derives the workgroup it balances on");
+    assert!(
+        balanced
+            .tiles()
+            .iter()
+            .any(|tile| matches!(tile.strategy(), MatmulStrategy::Staged)),
+        "a cooperative tile costs a profile the staged tiles it stages",
+    );
+    assert!(
+        balanced
+            .tiles()
+            .iter()
+            .any(|tile| matches!(tile.strategy(), MatmulStrategy::Cooperative)),
+        "a device that holds cooperative matrices derives no cooperative tile for the workgroup it balances on",
+    );
+    assert!(
+        balanced.shared_bytes() <= budget.shared_bytes(),
+        "a profile beside a cooperative tile outruns the pool its device offers",
+    );
+}
+
+#[test]
 fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
     assert!(refuses(|| {
         let _ = Profile::of(&[]);

@@ -3,6 +3,7 @@ use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
+use crate::product::Product;
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
@@ -128,6 +129,7 @@ pub struct Plan {
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     geometries: Vec<u32>,
+    products: Vec<Product>,
     attention: Vec<AttentionTile>,
     arena_bytes: u64,
     tensor_bytes: u64,
@@ -143,15 +145,29 @@ pub struct Plan {
 
 impl Plan {
     pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile) -> Self {
-        Self::compile(&graph.snapshot(), profile, alignment)
+        Self::chosen(graph, alignment, profile, &[])
     }
 
-    fn compile(state: &GraphSnapshot, profile: Profile, alignment: u64) -> Self {
+    pub fn chosen(
+        graph: &Graph<'_>,
+        alignment: u64,
+        profile: Profile,
+        chosen: &[(Product, MatmulTile)],
+    ) -> Self {
+        Self::compile(&graph.snapshot(), profile, alignment, chosen)
+    }
+
+    fn compile(
+        state: &GraphSnapshot,
+        profile: Profile,
+        alignment: u64,
+        chosen: &[(Product, MatmulTile)],
+    ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(state.values(), &fuse::fuse(state), profile);
+        let plan = lower::lower(state.values(), &fuse::fuse(state), profile, chosen);
         let values = &plan.values;
         let tasks = &plan.tasks;
         let tiles = &plan;
@@ -382,6 +398,7 @@ impl Plan {
             spans,
             readable,
             geometries,
+            products: tiles.products.clone(),
             attention: tiles.attention.clone(),
             arena_bytes,
             tensor_bytes,
@@ -414,6 +431,10 @@ impl Plan {
 
     pub fn attention(&self) -> &[AttentionTile] {
         &self.attention
+    }
+
+    pub fn products(&self) -> &[Product] {
+        &self.products
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {

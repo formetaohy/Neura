@@ -45,6 +45,15 @@ impl Heap {
         self.words * WORD_BYTES
     }
 
+    pub(crate) fn holds(&self, words: u64) -> bool {
+        let wanted = words.max(1).next_multiple_of(self.stride);
+        self.free
+            .lock()
+            .expect("a device heap is never poisoned")
+            .iter()
+            .any(|block| block.words >= wanted)
+    }
+
     pub(crate) fn allocate(self: &Arc<Self>, words: u64) -> Allocation {
         let wanted = words.max(1).next_multiple_of(self.stride);
         let claimed = {

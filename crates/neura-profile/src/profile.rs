@@ -716,7 +716,7 @@ impl Profile {
             if let Some(fragment) = cooperative {
                 tiles.extend(cooperative_tiles(
                     workgroup,
-                    pool,
+                    budget.shared_bytes(),
                     fragment,
                     left_stage,
                     right_stage,
