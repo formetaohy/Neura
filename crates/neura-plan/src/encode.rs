@@ -1,4 +1,5 @@
 use crate::access::{self, Access, Reads};
+use crate::authored;
 use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
@@ -7,8 +8,8 @@ use crate::product::Product;
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
-    Element, Geometry, Kind, NO_VALUE, Placement, SegmentRecord, StepRecord, Store, TaskFields,
-    TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    Element, Geometry, Kind, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord, Store,
+    TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -161,6 +162,7 @@ pub struct Plan {
     splits: Vec<Split>,
     order: Vec<u32>,
     slot_bounds: Vec<u32>,
+    authored: authored::Authored,
 }
 
 impl Plan {
@@ -187,23 +189,38 @@ impl Plan {
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let plan = lower::lower(state.values(), &fuse::fuse(state), profile, chosen);
-        let values = &plan.values;
-        let tasks = &plan.tasks;
-        let tiles = &plan;
+        let lowered = lower::lower(state.values(), &fuse::fuse(state), profile, chosen);
+        let lower::Plan {
+            values,
+            mut tasks,
+            tiles: menu,
+            products,
+            attention,
+            measures,
+        } = lowered;
+        let values = &values;
         let matmul_tiles = profile.tiles();
 
-        let kinds = carried_kinds(tasks);
+        let kinds = carried_kinds(&tasks);
         let elements = carried_elements(values);
         let layout = Layout::of_values(values, alignment);
-        assert_writes_match_their_element(values, tasks);
+        assert_writes_match_their_element(values, &tasks);
         assert_quantized_scales_reconstruct(values);
-        assert_writers_precede_readers(values, tasks);
-        assert_units_keep_their_order(tasks);
-        let schedule = schedule::Schedule::of(values, &plan.tiles, tasks, profile.workgroups());
+        assert_writers_precede_readers(values, &tasks);
+        assert_units_keep_their_order(&tasks);
+        let mut authored =
+            authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
+        let schedule = schedule::Schedule::of(values, &menu, &tasks, profile.workgroups());
+        authored::plan_patches(
+            &mut authored,
+            &mut tasks,
+            schedule.order(),
+            &measures,
+            &menu,
+        );
         let order = schedule.order();
         let waves = schedule.waves();
-        let live = storage_liveness(values, tasks, order);
+        let live = storage_liveness(values, &tasks, order);
         let reserved = layout.tensors().bytes();
         let (offsets, tensor_bytes) = allocate(values, &live, waves, alignment, reserved);
         let arena_bytes = tensor_bytes - reserved;
@@ -215,6 +232,16 @@ impl Plan {
         let mut records = Vec::new();
         for (id, info) in values.iter().enumerate() {
             let address = layout.address(values, &offsets, id as u32);
+            let mut free = [NO_SLOT; 4];
+            for axis in 0..neura_abi::MAX_RANK {
+                if let Some(slot) = info.shape.free(axis) {
+                    free[axis as usize] = slot;
+                }
+            }
+            let source = match info.strides_source {
+                Some(source) => source.map(u32::from),
+                None => [NO_SLOT; 4],
+            };
             let record = ValueRecord::of(ValueFields {
                 base: u32::try_from(address).unwrap_or_else(|_| {
                     panic!("value {id} lies at {address}, beyond the device address space")
@@ -222,6 +249,10 @@ impl Plan {
                 store: layout.store(values, id as u32).code(),
                 element: layout.element(values, id as u32).code(),
                 table: record_table(values, id as u32),
+                storage: info.storage,
+                bounds: info.shape.dims(),
+                free,
+                source,
                 dims: info.shape.dims(),
                 strides: info.strides,
             });
@@ -238,10 +269,10 @@ impl Plan {
             let geometry = match task.kind.geometry() {
                 Geometry::Attention => {
                     assert!(
-                        (task.geometry as usize) < tiles.attention.len(),
+                        (task.geometry as usize) < attention.len(),
                         "an attention names geometry {} beyond the {} tiles its plan carries",
                         task.geometry,
-                        tiles.attention.len(),
+                        attention.len(),
                     );
                     task.geometry
                 }
@@ -304,6 +335,28 @@ impl Plan {
             for step in &task.chain {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
             }
+            let (split_kind, split_measure, index, group, planes, plane) = match task.split {
+                Split::Range { .. } => (neura_abi::split::RANGE, NO_VALUE, 0, 0, 0, 0),
+                Split::Uniform {
+                    measure,
+                    index,
+                    group,
+                } => (neura_abi::split::UNIFORM, measure, index, group, 0, 0),
+                Split::Plane {
+                    measure,
+                    planes,
+                    plane,
+                    index,
+                    group,
+                } => (
+                    neura_abi::split::PLANE,
+                    measure,
+                    index,
+                    group,
+                    planes,
+                    plane,
+                ),
+            };
             let record = TaskRecord::of(TaskFields {
                 kind: task.kind.code(),
                 op: task.op,
@@ -335,6 +388,13 @@ impl Plan {
                 axis: task.axis,
                 offset: task.offset,
                 wave: waves[position],
+                split: split_kind,
+                measure: split_measure,
+                index,
+                group,
+                planes,
+                plane,
+                patch: task.patch,
             });
             if task.in_place
                 && task
@@ -391,7 +451,7 @@ impl Plan {
 
         let splits = tasks.iter().map(|task| task.split).collect::<Vec<_>>();
         let order = order.to_vec();
-        let extents = Extents::of(values, &plan.tiles, &plan.measures, &plan.measured);
+        let extents = Extents::of(values, &menu, &measures);
         let slot_bounds = {
             let mut bounds = Vec::new();
             for info in values {
@@ -419,8 +479,8 @@ impl Plan {
             spans,
             readable,
             geometries,
-            products: tiles.products.clone(),
-            attention: tiles.attention.clone(),
+            products: products.clone(),
+            attention: attention.clone(),
             arena_bytes,
             tensor_bytes,
             quanta: quanta(values, &offsets),
@@ -431,6 +491,7 @@ impl Plan {
             splits,
             order,
             slot_bounds,
+            authored,
         }
     }
 
@@ -485,6 +546,50 @@ impl Plan {
 
     pub fn slot_bounds(&self) -> &[u32] {
         &self.slot_bounds
+    }
+
+    pub fn carries_authored(&self) -> bool {
+        self.authored.carries()
+    }
+
+    pub fn authored_slots(&self) -> &[u32] {
+        self.authored.slots()
+    }
+
+    pub fn host_slots(&self) -> Vec<(u32, u32)> {
+        self.slot_bounds
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| {
+                self.authored
+                    .slots()
+                    .get(*slot)
+                    .copied()
+                    .unwrap_or(NO_VALUE)
+                    == NO_VALUE
+            })
+            .map(|(slot, bound)| (slot as u32, *bound))
+            .collect()
+    }
+
+    pub fn host_extents(&self) -> Vec<u32> {
+        self.slot_bounds.clone()
+    }
+
+    pub fn measures(&self) -> &[neura_abi::MeasureRecord] {
+        self.authored.measures()
+    }
+
+    pub fn patches(&self) -> &[neura_abi::PatchRecord] {
+        self.authored.patches()
+    }
+
+    pub fn patch_list(&self) -> &[u32] {
+        self.authored.patch_list()
+    }
+
+    pub fn authored_values(&self, value: u32) -> &[u32] {
+        self.authored.values_of(value)
     }
 
     pub fn encode(&self, extents: &[u32]) -> Encoding {

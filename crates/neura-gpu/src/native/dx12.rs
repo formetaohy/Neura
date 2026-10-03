@@ -10,7 +10,7 @@ use crate::capability::{
 };
 use crate::submission::{Command, Write};
 use libloading::Library;
-use neura_shader::{BindingKind, ComputeProgram, ShaderTranslation};
+use neura_shader::{ComputeProgram, ShaderTranslation};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::c_void;
@@ -527,7 +527,7 @@ impl Device {
             .bindings()
             .iter()
             .map(|spec| D3D12_ROOT_PARAMETER {
-                ParameterType: if spec.kind == BindingKind::ReadWriteStorage {
+                ParameterType: if spec.kind.writable() {
                     D3D12_ROOT_PARAMETER_TYPE_UAV
                 } else {
                     D3D12_ROOT_PARAMETER_TYPE_SRV
@@ -741,7 +741,7 @@ impl Device {
                     for (index, binding) in group.buffers.iter().enumerate() {
                         let target = buffer(&binding.buffer);
                         let kind = handle.slot.program.bindings()[index].kind;
-                        let state = if kind == BindingKind::ReadWriteStorage {
+                        let state = if kind.writable() {
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS
                         } else {
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
@@ -750,7 +750,7 @@ impl Device {
                         let offset = binding.offset;
                         let address = unsafe { target.raw.GetGPUVirtualAddress() } + offset;
                         unsafe {
-                            if kind == BindingKind::ReadWriteStorage {
+                            if kind.writable() {
                                 list.SetComputeRootUnorderedAccessView(index as u32, address);
                             } else {
                                 list.SetComputeRootShaderResourceView(index as u32, address);

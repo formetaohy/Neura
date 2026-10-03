@@ -1,3 +1,4 @@
+use crate::access::Reads;
 use crate::lower::Task;
 use neura_abi::{Kind, NO_VALUE};
 use neura_graph::ValueInfo;
@@ -53,10 +54,10 @@ pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -
         Kind::Convert => convert(values, task, &mut touches),
         Kind::Binary | Kind::Unary | Kind::Fill | Kind::Broadcast | Kind::Partial => {
             let range = Region::run(u64::from(task.first), u64::from(task.count));
-            for value in writes(task) {
+            for value in task.writes() {
                 touches.writes.push((values[value as usize].storage, range));
             }
-            for value in reads(task) {
+            for value in task.reads() {
                 let source = &values[value as usize];
                 let region = if source.shape == out.shape && dense(source) && owned(values, value) {
                     range
@@ -70,7 +71,7 @@ pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -
             let half = u64::from(out.shape.dims()[3] / 2);
             let first = u64::from(task.first);
             let count = u64::from(task.count);
-            for value in writes(task) {
+            for value in task.writes() {
                 touches
                     .writes
                     .push((values[value as usize].storage, Region::run(first, count)));
@@ -136,12 +137,12 @@ pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -
 }
 
 fn whole(values: &[ValueInfo], task: &Task, touches: &mut Touches) {
-    for value in writes(task) {
+    for value in task.writes() {
         touches
             .writes
             .push((values[value as usize].storage, Region::Whole));
     }
-    for value in reads(task) {
+    for value in task.reads() {
         touches
             .reads
             .push((values[value as usize].storage, Region::Whole));
@@ -154,22 +155,6 @@ fn owned(values: &[ValueInfo], value: u32) -> bool {
 
 fn dense(info: &ValueInfo) -> bool {
     info.strides == info.shape.strides()
-}
-
-fn writes(task: &Task) -> impl Iterator<Item = u32> + '_ {
-    [task.out, task.extra]
-        .into_iter()
-        .filter(|value| *value != NO_VALUE)
-}
-
-fn reads(task: &Task) -> impl Iterator<Item = u32> + '_ {
-    task.inputs
-        .iter()
-        .copied()
-        .chain([task.origin])
-        .chain(task.prelude.iter().map(|step| step.operand))
-        .chain(task.chain.iter().map(|step| step.operand))
-        .filter(|value| *value != NO_VALUE)
 }
 
 fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, touches: &mut Touches) {

@@ -142,6 +142,7 @@ pub(crate) struct GraphState {
     pub(crate) recomputations: Vec<Recomputation>,
     pub(crate) revisions: Vec<Weak<RevisionState>>,
     pub(crate) names: HashSet<Arc<str>>,
+    pub(crate) authored: Vec<u32>,
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
     pub(crate) version: u64,
@@ -151,6 +152,7 @@ pub(crate) struct GraphState {
 pub struct GraphSnapshot {
     values: Vec<ValueInfo>,
     tasks: Vec<TaskInfo>,
+    authored: Vec<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -197,6 +199,10 @@ impl GraphSnapshot {
     pub fn tasks(&self) -> &[TaskInfo] {
         &self.tasks
     }
+
+    pub fn authored(&self) -> &[u32] {
+        &self.authored
+    }
 }
 
 pub struct Graph<'g> {
@@ -214,6 +220,7 @@ impl<'g> Graph<'g> {
                 recomputations: Vec::new(),
                 revisions: Vec::new(),
                 names: HashSet::new(),
+                authored: Vec::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -258,7 +265,103 @@ impl<'g> Graph<'g> {
             "a graph names at most {} free extents",
             u8::MAX,
         );
+        state.authored.push(NO_VALUE);
         Free::of(slot, bound)
+    }
+
+    pub fn counted(&self, bound: u32, count: Value<'g>) -> Free {
+        let count = self.own(count);
+        let free = self.free(bound);
+        self.author(free, count);
+        free
+    }
+
+    pub fn trim(&self, value: Value<'g>, axis: u32, count: Value<'g>) -> Value<'g> {
+        let value = self.own(value);
+        let count = self.own(count);
+        assert!(
+            axis < MAX_RANK,
+            "a trim names one of the {MAX_RANK} axes, and {axis} is not one of them",
+        );
+        let (shape, strides, strides_source, storage, element, scale, tracked) = {
+            let state = self.state.borrow();
+            let info = &state.values[value.id() as usize];
+            assert!(
+                info.shape.free(axis).is_none(),
+                "axis {axis} of {:?} walks free extent {}, and a free extent already takes every length the axis holds",
+                info.shape.dims(),
+                info.shape.free(axis).unwrap_or_default(),
+            );
+            (
+                info.shape,
+                info.strides,
+                info.strides_source,
+                info.storage,
+                info.element,
+                info.scale,
+                info.requires_grad,
+            )
+        };
+        assert!(
+            storage == value.id(),
+            "a trim walks the rows of a tensor its storage lays out row by row, and value {} is a view of value {storage}",
+            value.id(),
+        );
+        assert!(
+            !tracked,
+            "a device authored extent walks a length no gradient knows, and value {} trains",
+            value.id(),
+        );
+        let free = self.counted(shape.dims()[axis as usize], count);
+        let mut frees = shape.frees();
+        frees[axis as usize] = Some(free.slot());
+        self.alias(
+            Shape::from_axes(shape.dims(), frees),
+            strides,
+            strides_source,
+            storage,
+            element,
+            scale,
+            false,
+        )
+    }
+
+    pub fn author(&self, free: Free, count: Value<'g>) {
+        let count = self.own(count);
+        let elements = self.shape(count).elements();
+        assert_eq!(
+            elements,
+            1,
+            "a device authored extent is one number, and value {} holds {elements}",
+            count.id(),
+        );
+        let produced = {
+            let state = self.state.borrow();
+            state
+                .tasks
+                .iter()
+                .any(|task| task.out == count.id() || task.extra == count.id())
+        };
+        let count = if produced {
+            count
+        } else {
+            self.materialized(count)
+        };
+        let mut state = self.state.borrow_mut();
+        assert!(
+            (free.slot() as usize) < state.authored.len(),
+            "free extent {} is authored by a value the graph declares no extent for",
+            free.slot(),
+        );
+        assert_eq!(
+            state.authored[free.slot() as usize],
+            NO_VALUE,
+            "free extent {} already walks the count of value {}",
+            free.slot(),
+            state.authored[free.slot() as usize],
+        );
+        state.authored[free.slot() as usize] = count.id();
+        advance(&mut state);
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -457,6 +560,13 @@ impl<'g> Graph<'g> {
         out
     }
 
+    fn materialized(&self, value: Value<'g>) -> Value<'g> {
+        let element = self.element(value);
+        let out = self.unary_as(op::IDENTITY, value, element);
+        self.retain(out);
+        out
+    }
+
     pub fn shape(&self, value: Value<'g>) -> Shape {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].shape
@@ -497,6 +607,7 @@ impl<'g> Graph<'g> {
         GraphSnapshot {
             values: state.values.clone(),
             tasks: state.tasks.clone(),
+            authored: state.authored.clone(),
         }
     }
 

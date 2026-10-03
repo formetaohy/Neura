@@ -1,3 +1,4 @@
+mod authored;
 mod element;
 mod pointwise;
 mod scheduler;
@@ -6,7 +7,7 @@ mod task;
 
 use neura_abi::{
     DeviceModule, Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR,
-    progress, refusal, store, strategy,
+    measure, progress, refusal, split, store, strategy,
 };
 use neura_compiler::{Compiler, ast};
 use neura_profile::{CLAIM_BYTES, Geometry};
@@ -20,7 +21,12 @@ pub const PROGRESS: u32 = 4;
 pub const STEPS: u32 = 5;
 pub const PLACEMENT: u32 = 6;
 pub const SEGMENTS: u32 = 7;
+pub const EXTENTS: u32 = 8;
+pub const MEASURES: u32 = 9;
+pub const PATCHES: u32 = 10;
+pub const PATCH_LIST: u32 = 11;
 
+#[derive(Clone, Copy)]
 pub struct KernelBinding {
     pub binding: u32,
     pub kind: BindingKind,
@@ -88,6 +94,55 @@ pub const BINDINGS: &[KernelBinding] = &[
     },
 ];
 
+pub const AUTHORED_BINDINGS: &[KernelBinding] = &[
+    KernelBinding {
+        binding: EXTENTS,
+        kind: BindingKind::ReadWriteStorage,
+        name: "extents",
+        element: "u32",
+        array: true,
+    },
+    KernelBinding {
+        binding: MEASURES,
+        kind: BindingKind::ReadOnlyStorage,
+        name: "measures",
+        element: "Measure",
+        array: true,
+    },
+    KernelBinding {
+        binding: PATCHES,
+        kind: BindingKind::ReadOnlyStorage,
+        name: "patches",
+        element: "Patch",
+        array: true,
+    },
+    KernelBinding {
+        binding: PATCH_LIST,
+        kind: BindingKind::ReadOnlyStorage,
+        name: "patch_list",
+        element: "u32",
+        array: true,
+    },
+];
+
+pub fn bindings(authored: bool) -> Vec<KernelBinding> {
+    BINDINGS
+        .iter()
+        .map(|binding| {
+            let patched = authored && matches!(binding.binding, TASKS | VALUES);
+            KernelBinding {
+                kind: if patched {
+                    BindingKind::TableStorage
+                } else {
+                    binding.kind
+                },
+                ..*binding
+            }
+        })
+        .chain(AUTHORED_BINDINGS.iter().copied().filter(|_| authored))
+        .collect()
+}
+
 pub struct Kernel {
     kinds: Vec<Kind>,
     geometry: Geometry,
@@ -95,7 +150,12 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    pub fn assemble(kinds: &[Kind], elements: &[Element], geometry: Geometry) -> Self {
+    pub fn assemble(
+        kinds: &[Kind],
+        elements: &[Element],
+        geometry: Geometry,
+        authored: bool,
+    ) -> Self {
         assert!(
             !kinds.is_empty(),
             "a device program with no task has nothing to run"
@@ -110,6 +170,7 @@ impl Kernel {
         }
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
         compiler.constant("NO_VALUE", NO_VALUE);
+        compiler.constant("NO_SLOT", neura_abi::NO_SLOT);
         compiler.constant("INT4_BLOCK", INT4_BLOCK);
         compiler.constant("FP4_BLOCK", FP4_BLOCK);
         compiler.constant("refusal::TENSOR", TENSOR);
@@ -138,6 +199,18 @@ impl Kernel {
             compiler.constant(name, value);
         }
         for (name, value) in [
+            ("measure::ELEMENTS", measure::ELEMENTS),
+            ("measure::ROWS", measure::ROWS),
+            ("measure::WORDS", measure::WORDS),
+            ("measure::TOKENS", measure::TOKENS),
+            ("measure::TILES", measure::TILES),
+            ("split::RANGE", split::RANGE),
+            ("split::UNIFORM", split::UNIFORM),
+            ("split::PLANE", split::PLANE),
+        ] {
+            compiler.constant(name, value);
+        }
+        for (name, value) in [
             ("progress::CURSOR", progress::CURSOR),
             ("progress::FRONTIER", progress::FRONTIER),
             ("progress::SEGMENTS", progress::SEGMENTS),
@@ -150,7 +223,7 @@ impl Kernel {
         for kind in Kind::ALL {
             compiler.constant(kind.symbol(), kind.code());
         }
-        for binding in BINDINGS {
+        for binding in bindings(authored) {
             let spec = BindingSpec {
                 binding: binding.binding,
                 kind: binding.kind,
@@ -170,6 +243,7 @@ impl Kernel {
         if half > 0 {
             compiler.workgroup_bytes("scratch_half", "f16", half);
         }
+        authored::install(&mut compiler, authored);
         scheduler::install(&mut compiler);
         substrate::install(&mut compiler);
         element::install(&mut compiler, elements);
@@ -220,7 +294,7 @@ impl Kernel {
             scheduler::ENTRY,
             geometry.workgroup(),
         );
-        for (expected, reflected) in BINDINGS.iter().zip(program.reflected()) {
+        for (expected, reflected) in bindings(authored).iter().zip(program.reflected()) {
             assert_eq!(
                 expected.name, reflected.name,
                 "a device binding has an incorrect name"

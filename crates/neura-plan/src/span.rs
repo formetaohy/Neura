@@ -10,7 +10,6 @@ pub(crate) enum Measure {
     Words(u32),
     Tiles { value: u32, geometry: u32 },
     Tokens(u32),
-    Chunks { source: u32, divisor: u32 },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,7 +37,6 @@ struct Extent {
     strides_source: Option<[u8; 4]>,
     storage: u32,
     element: Element,
-    measure: Option<u32>,
 }
 
 pub(crate) struct Extents {
@@ -48,25 +46,15 @@ pub(crate) struct Extents {
 }
 
 impl Extents {
-    pub(crate) fn of(
-        values: &[ValueInfo],
-        tiles: &[MatmulTile],
-        measures: &[Measure],
-        measured: &[(u32, u32)],
-    ) -> Self {
+    pub(crate) fn of(values: &[ValueInfo], tiles: &[MatmulTile], measures: &[Measure]) -> Self {
         Self {
             values: values
                 .iter()
-                .enumerate()
-                .map(|(id, info)| Extent {
+                .map(|info| Extent {
                     shape: info.shape,
                     strides_source: info.strides_source,
                     storage: info.storage,
                     element: info.element,
-                    measure: measured
-                        .iter()
-                        .find(|(value, _)| *value == id as u32)
-                        .map(|(_, measure)| *measure),
                 })
                 .collect(),
             measures: measures.to_vec(),
@@ -75,10 +63,7 @@ impl Extents {
     }
 
     pub(crate) fn dims(&self, value: u32, extents: &[u32]) -> [u32; 4] {
-        match self.values[value as usize].measure {
-            Some(measure) => [1, 1, 1, self.count(measure, extents)],
-            None => self.values[value as usize].shape.actual_dims(extents),
-        }
+        self.values[value as usize].shape.actual_dims(extents)
     }
 
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {
@@ -103,9 +88,6 @@ impl Extents {
             Measure::Words(value) => self.words(value, extents),
             Measure::Tokens(value) => self.dims(value, extents)[2],
             Measure::Tiles { value, geometry } => self.tiles(value, geometry, extents),
-            Measure::Chunks { source, divisor } => {
-                self.count(source, extents).div_ceil(divisor).max(1)
-            }
         }
     }
 

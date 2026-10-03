@@ -1,4 +1,5 @@
 mod access;
+mod authored;
 mod encode;
 mod fuse;
 mod layout;

@@ -1,0 +1,251 @@
+use crate::access::Reads;
+use crate::lower::Task;
+use crate::span::{Measure, Split};
+use neura_abi::{MeasureFields, MeasureRecord, NO_VALUE, PatchFields, PatchRecord, measure};
+use neura_graph::ValueInfo;
+use neura_profile::MatmulTile;
+
+pub(crate) struct Authored {
+    slots: Vec<u32>,
+    value_slots: Vec<Vec<u32>>,
+    measure_slots: Vec<Vec<u32>>,
+    measures: Vec<MeasureRecord>,
+    patches: Vec<PatchRecord>,
+    patch_list: Vec<u32>,
+}
+
+impl Authored {
+    pub(crate) fn carries(&self) -> bool {
+        self.slots.iter().any(|count| *count != NO_VALUE)
+    }
+
+    pub(crate) fn slots(&self) -> &[u32] {
+        &self.slots
+    }
+
+    pub(crate) fn values_of(&self, value: u32) -> &[u32] {
+        &self.value_slots[value as usize]
+    }
+
+    pub(crate) fn measures(&self) -> &[MeasureRecord] {
+        &self.measures
+    }
+
+    pub(crate) fn patches(&self) -> &[PatchRecord] {
+        &self.patches
+    }
+
+    pub(crate) fn patch_list(&self) -> &[u32] {
+        &self.patch_list
+    }
+
+    fn walks(&self, slot: u32) -> bool {
+        self.slots.get(slot as usize).copied().unwrap_or(NO_VALUE) != NO_VALUE
+    }
+
+    fn count_of(&self, slot: u32) -> u32 {
+        self.slots[slot as usize]
+    }
+}
+
+pub(crate) fn analyse(
+    slots: &[u32],
+    values: &[ValueInfo],
+    tasks: &mut [Task],
+    measures: &[Measure],
+    tiles: &[MatmulTile],
+) -> Authored {
+    let mut authored = Authored {
+        slots: slots.to_vec(),
+        value_slots: vec![Vec::new(); values.len()],
+        measure_slots: vec![Vec::new(); measures.len()],
+        measures: Vec::new(),
+        patches: Vec::new(),
+        patch_list: Vec::new(),
+    };
+    if !authored.carries() {
+        authored.measures = measure_records(measures, tiles);
+        return authored;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (index, measure) in measures.iter().enumerate() {
+            let mut slots = Vec::new();
+            match *measure {
+                Measure::Elements(value)
+                | Measure::Rows(value)
+                | Measure::Words(value)
+                | Measure::Tokens(value)
+                | Measure::Tiles { value, .. } => {
+                    slots.extend_from_slice(&authored.value_slots[value as usize])
+                }
+            }
+            changed |= merge(&mut authored.measure_slots[index], slots);
+        }
+        for (id, info) in values.iter().enumerate() {
+            let mut slots = Vec::new();
+            for axis in 0..neura_abi::MAX_RANK {
+                if let Some(slot) = info.shape.free(axis)
+                    && authored.walks(slot)
+                {
+                    slots.push(slot);
+                }
+            }
+            if info.strides_source.is_some() {
+                slots.extend_from_slice(&authored.value_slots[info.storage as usize]);
+            }
+            changed |= merge(&mut authored.value_slots[id], slots);
+        }
+    }
+    for task in tasks.iter_mut() {
+        let mut slots = touched(task)
+            .iter()
+            .flat_map(|value| authored.value_slots[*value as usize].iter().copied())
+            .collect::<Vec<u32>>();
+        if let Some(measure) = split_measure(task.split) {
+            slots.extend_from_slice(&authored.measure_slots[measure as usize]);
+        }
+        slots.sort_unstable();
+        slots.dedup();
+        task.depends = slots.iter().map(|slot| authored.count_of(*slot)).collect();
+        task.depends.sort_unstable();
+        task.depends.dedup();
+    }
+    authored.measures = measure_records(measures, tiles);
+    authored
+}
+
+pub(crate) fn plan_patches(
+    authored: &mut Authored,
+    tasks: &mut [Task],
+    order: &[u32],
+    measures: &[Measure],
+    tiles: &[MatmulTile],
+) {
+    if !authored.carries() {
+        return;
+    }
+    authored.measures = measure_records(measures, tiles);
+    let mut slots = (0..authored.slots.len() as u32)
+        .filter(|slot| authored.walks(*slot))
+        .collect::<Vec<u32>>();
+    slots.sort_unstable();
+    let mut seat = vec![NO_VALUE; tasks.len()];
+    for (position, task) in order.iter().enumerate() {
+        seat[*task as usize] = position as u32;
+    }
+    for slot in slots {
+        let count = authored.count_of(slot);
+        let writers = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| writes(task, count))
+            .map(|(index, _)| index)
+            .collect::<Vec<usize>>();
+        assert_eq!(
+            writers.len(),
+            1,
+            "free extent {slot} walks the count of value {count}, and {} tasks of the plan write it",
+            writers.len(),
+        );
+        let writer = writers[0];
+        assert!(
+            !tasks[writer].depends.contains(&count),
+            "free extent {slot} walks the count of value {count}, and the task that writes it walks a length it authors",
+        );
+        assert!(
+            order.contains(&(writer as u32)),
+            "the task that authors free extent {slot} stands in no segment of the plan",
+        );
+        let values_first = authored.patch_list.len() as u32;
+        for (id, slots) in authored.value_slots.iter().enumerate() {
+            if slots.contains(&slot) {
+                authored.patch_list.push(id as u32);
+            }
+        }
+        let values_count = authored.patch_list.len() as u32 - values_first;
+        let tasks_first = authored.patch_list.len() as u32;
+        for (index, task) in tasks.iter().enumerate() {
+            if let Some(measure) = split_measure(task.split)
+                && authored.measure_slots[measure as usize].contains(&slot)
+            {
+                assert_ne!(
+                    seat[index], NO_VALUE,
+                    "a task whose range a device count rules stands in no segment of the plan",
+                );
+                authored.patch_list.push(seat[index]);
+            }
+        }
+        let tasks_count = authored.patch_list.len() as u32 - tasks_first;
+        let patch = authored.patches.len() as u32;
+        authored.patches.push(PatchRecord::of(PatchFields {
+            slot,
+            count,
+            values: values_first,
+            values_count,
+            tasks: tasks_first,
+            tasks_count,
+        }));
+        assert_eq!(
+            tasks[writer].patch, NO_VALUE,
+            "one task authors two device extents, and a task patches one",
+        );
+        tasks[writer].patch = patch;
+    }
+}
+
+fn writes(task: &Task, value: u32) -> bool {
+    task.writes().any(|written| written == value)
+}
+
+fn measure_records(measures: &[Measure], tiles: &[MatmulTile]) -> Vec<MeasureRecord> {
+    measures
+        .iter()
+        .map(|measure| match *measure {
+            Measure::Elements(value) => record(measure::ELEMENTS, value, 0, 0),
+            Measure::Rows(value) => record(measure::ROWS, value, 0, 0),
+            Measure::Words(value) => record(measure::WORDS, value, 0, 0),
+            Measure::Tokens(value) => record(measure::TOKENS, value, 0, 0),
+            Measure::Tiles { value, geometry } => {
+                let tile = tiles[geometry as usize];
+                record(measure::TILES, value, tile.rows(), tile.columns())
+            }
+        })
+        .collect()
+}
+
+fn record(kind: u32, value: u32, rows: u32, columns: u32) -> MeasureRecord {
+    MeasureRecord::of(MeasureFields {
+        kind,
+        value,
+        rows,
+        columns,
+    })
+}
+
+fn merge(kept: &mut Vec<u32>, slots: Vec<u32>) -> bool {
+    let before = kept.len();
+    kept.extend(slots);
+    kept.sort_unstable();
+    kept.dedup();
+    kept.len() != before
+}
+
+fn touched(task: &Task) -> Vec<u32> {
+    let mut values = task
+        .reads()
+        .chain(task.writes())
+        .filter(|value| *value != NO_VALUE)
+        .collect::<Vec<u32>>();
+    values.sort_unstable();
+    values.dedup();
+    values
+}
+
+pub(crate) fn split_measure(split: Split) -> Option<u32> {
+    match split {
+        Split::Range { .. } => None,
+        Split::Uniform { measure, .. } | Split::Plane { measure, .. } => Some(measure),
+    }
+}

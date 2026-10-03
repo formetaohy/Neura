@@ -1842,3 +1842,87 @@ fn a_plan_refuses_a_measured_tile_its_profile_does_not_offer() {
         "a plan walked a measured tile its profile does not offer",
     );
 }
+
+#[test]
+fn a_plan_walks_the_extent_a_device_count_authors() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+    let tokens = graph.input(Shape::of([1, 1, 8, 4]), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let live = graph.trim(tokens, 2, count);
+    let out = graph.matmul(
+        live,
+        graph.parameter(Shape::matrix(4, 4), Init::Zero, Element::Single),
+    );
+    graph.retain(out);
+    let plan = plan(&graph);
+    assert!(
+        plan.carries_authored(),
+        "the plan walks a device counted extent"
+    );
+    assert_eq!(
+        plan.host_slots(),
+        Vec::new(),
+        "a device counted extent is bound by no host",
+    );
+    assert_eq!(plan.patches().len(), 1, "one task authors the extent");
+    assert_eq!(plan.patches()[0].count, count.id());
+    let author = tasks(&plan)
+        .iter()
+        .position(|task| task.patch == 0)
+        .expect("the task that authors the extent");
+    assert_eq!(
+        tasks(&plan)[author].out,
+        count.id(),
+        "the task that patches the extent is the task that counts it",
+    );
+    let patch = plan.patches()[0];
+    assert!(
+        plan.authored_values(live.id()).contains(&patch.slot),
+        "the trimmed tensor walks the extent its count authors",
+    );
+    let list = plan.patch_list();
+    let patched = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert!(
+        patched.contains(&live.id()) && patched.contains(&out.id()),
+        "the tensors whose rows the count rules are patched",
+    );
+    assert!(
+        patch.tasks_count > 0,
+        "the count rules the range of some task"
+    );
+    let patched_tasks = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    for at in patched_tasks {
+        let task = tasks(&plan)[*at as usize];
+        assert_ne!(
+            task.split,
+            neura_abi::split::RANGE,
+            "a task the device count rules computes its own range on the device",
+        );
+        assert!(
+            (task.measure as usize) < plan.measures().len(),
+            "a task the device count rules walks a measure of the plan",
+        );
+    }
+}
+
+#[test]
+fn a_count_that_walks_the_extent_it_authors_is_refused() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+    let counted = graph.free(8);
+    let masked = graph.input(
+        Shape::of([1, 1, 8, 1]).freed(&[(2, counted)]),
+        Element::Single,
+    );
+    let count = graph.sum(masked);
+    graph.author(counted, count);
+    let tokens = graph.input(Shape::of([1, 1, 8, 4]), Element::Single);
+    graph.retain(graph.mul(tokens, probe));
+    assert!(
+        refuses(|| {
+            plan(&graph);
+        }),
+        "a count that walks the extent it authors was planned",
+    );
+}

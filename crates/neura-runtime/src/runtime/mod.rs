@@ -389,9 +389,10 @@ impl Runtime {
             &walked,
             plan.attention(),
         );
+        let authored = plan.carries_authored();
         self.artifacts
-            .kernel(&kinds, &elements, geometry.clone(), || {
-                Kernel::assemble(&kinds, &elements, geometry)
+            .kernel(&kinds, &elements, geometry.clone(), authored, || {
+                Kernel::assemble(&kinds, &elements, geometry, authored)
             })
     }
 
@@ -428,12 +429,11 @@ impl Runtime {
             program.is_compiled(),
             "a device program compiles at the call that compiles it, and a run only runs what a compile has compiled",
         );
-        if program.dynamic() {
-            let extents = program.extents().to_vec();
-            if program.records_pending() {
-                program.write_records(self.context.queue(), &extents);
-                program.records_written();
-            }
+        program.write_extents(self.context.queue());
+        if program.dynamic() && program.records_pending() {
+            let extents = program.host_extents();
+            program.write_records(self.context.queue(), &extents);
+            program.records_written();
         }
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
@@ -502,9 +502,10 @@ impl Runtime {
         program.assert_current();
         self.context.assert_alive();
         assert!(!values.is_empty(), "a pull names at least one tensor");
+        let extents = self.walked_extents(program);
         let spans = values
             .iter()
-            .map(|value| program.span(*value))
+            .map(|value| program.span_with(*value, &extents))
             .collect::<Vec<_>>();
         for value in values {
             assert!(
@@ -553,6 +554,39 @@ impl Runtime {
             total,
             refusal: at,
         }
+    }
+
+    fn walked_extents(&self, program: &Program<'_>) -> Vec<u32> {
+        if !program.carries_authored() {
+            return program.host_extents();
+        }
+        if let Some(extents) = program.cached_extents() {
+            return extents;
+        }
+        let buffer = program.extents_buffer();
+        let bytes = buffer.size();
+        let staging = Recycled::claim(
+            &self.pool,
+            "neura extents",
+            bytes,
+            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        );
+        let mut submission = Submission::new(self.context.device(), "neura extents");
+        submission.copy(buffer, 0, staging.buffer(), 0, bytes);
+        let submission = submission.submit(self.context.queue());
+        let words = staging
+            .buffer()
+            .read(self.context.queue(), submission, bytes);
+        let mut extents = Vec::with_capacity(program.slot_count());
+        for at in 0..program.slot_count() {
+            extents.push(u32::from_ne_bytes(
+                words[at * 4..at * 4 + 4]
+                    .try_into()
+                    .expect("a device extent fills one word"),
+            ));
+        }
+        program.cache_extents(extents.clone());
+        extents
     }
 
     pub fn collect(&self, readout: Readout<'_>) -> Vec<Vec<f32>> {
@@ -675,6 +709,9 @@ fn refusal_message(word: u32) -> String {
         Refusal::Index => format!(
             "the device refused an index outside the rows the {} task names",
             kind.name(),
+        ),
+        Refusal::Extent => format!(
+            "the device refused an extent of {code} rows a device count authors, beyond the bound its graph declares",
         ),
         Refusal::Geometry => format!(
             "the device refused geometry {code} of the {} task",

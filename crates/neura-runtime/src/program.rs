@@ -5,10 +5,13 @@ use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD
 use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
-use neura_kernel::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_kernel::{
+    EXTENTS, HEAP, MEASURES, PATCH_LIST, PATCHES, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS,
+    TASKS, VALUES,
+};
 use neura_plan::{Plan, Region, Span};
 use neura_profile::{MatmulTile, Profile};
-use std::cell::{Ref, RefCell};
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -71,6 +74,8 @@ impl<'r> Weights<'r> {
 pub struct Program<'r> {
     brand: PhantomData<&'r ()>,
     pub(crate) resident: Arc<Resident>,
+    extents: Option<Recycled>,
+    cached: RefCell<Option<Vec<u32>>>,
     pub(crate) refusal: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
@@ -92,25 +97,12 @@ struct Bound {
 }
 
 impl Bound {
-    fn of(dynamic: bool) -> Self {
-        let fixed = !dynamic;
+    fn of(plan: &Plan) -> Self {
+        let ready = !plan.dynamic() || plan.host_slots().is_empty();
         Self {
-            extents: (!dynamic).then(Vec::new),
-            written: fixed,
+            extents: ready.then(|| plan.host_extents()),
+            written: ready,
         }
-    }
-
-    pub(crate) fn extents(&self) -> &[u32] {
-        self.extents.as_deref().unwrap_or_else(|| {
-            panic!(
-                "a program of free extents runs the binding a run names, and no run has named one yet",
-            )
-        })
-    }
-
-    pub(crate) fn bind(&mut self, extents: Vec<u32>, dynamic: bool) {
-        self.written = !dynamic;
-        self.extents = Some(extents);
     }
 }
 
@@ -185,7 +177,21 @@ impl<'r> Program<'r> {
         );
         tasks.buffer().write(queue, plan.tasks());
         values.buffer().write(queue, plan.values());
-        let group = resident.kernel.bind_group(&[
+        let extents = plan.carries_authored().then(|| {
+            Recycled::claim(
+                pool,
+                "neura extents",
+                (plan.slot_bounds().len() as u64 * WORD_BYTES).max(WORD_BYTES),
+                BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            )
+        });
+        if let Some(extents) = &extents {
+            extents
+                .buffer()
+                .write(queue, bytemuck::cast_slice(&plan.host_extents()));
+        }
+        let workgroups = segments.min(plan.profile().workgroups()).max(1);
+        let mut bindings = vec![
             Binding {
                 index: TASKS,
                 buffer: tasks.buffer().binding(0, tasks.buffer().size()),
@@ -226,12 +232,38 @@ impl<'r> Program<'r> {
                     .buffer()
                     .binding(0, resident.segments.buffer().size()),
             },
-        ]);
-        let dynamic = plan.dynamic();
-        let workgroups = segments.min(plan.profile().workgroups()).max(1);
+        ];
+        if let (Some(extents), Some(measures), Some(patches), Some(patch_list)) = (
+            extents.as_ref(),
+            resident.measures.as_ref(),
+            resident.patches.as_ref(),
+            resident.patch_list.as_ref(),
+        ) {
+            bindings.extend([
+                Binding {
+                    index: EXTENTS,
+                    buffer: extents.buffer().binding(0, extents.buffer().size()),
+                },
+                Binding {
+                    index: MEASURES,
+                    buffer: measures.buffer().binding(0, measures.buffer().size()),
+                },
+                Binding {
+                    index: PATCHES,
+                    buffer: patches.buffer().binding(0, patches.buffer().size()),
+                },
+                Binding {
+                    index: PATCH_LIST,
+                    buffer: patch_list.buffer().binding(0, patch_list.buffer().size()),
+                },
+            ]);
+        }
+        let group = resident.kernel.bind_group(&bindings);
         Self {
             brand: PhantomData,
             resident,
+            extents,
+            cached: RefCell::new(None),
             refusal,
             group,
             tensors,
@@ -243,33 +275,80 @@ impl<'r> Program<'r> {
             revision,
             tasks,
             values,
-            bound: RefCell::new(Bound::of(dynamic)),
+            bound: RefCell::new(Bound::of(&plan)),
             plan,
         }
     }
 
     pub(crate) fn bind(&self, extents: &[u32]) {
-        let bounds = self.plan.slot_bounds();
+        let host = self.plan.host_slots();
         assert_eq!(
             extents.len(),
-            bounds.len(),
-            "a program of {} free extents runs a binding of {} lengths",
-            bounds.len(),
+            host.len(),
+            "a program of {} free extents the host binds runs a binding of {} lengths",
+            host.len(),
             extents.len(),
         );
-        for (slot, (extent, bound)) in extents.iter().zip(bounds).enumerate() {
+        let mut bound = self.bound.borrow_mut();
+        let mut values = bound
+            .extents
+            .clone()
+            .unwrap_or_else(|| self.plan.host_extents());
+        for (extent, (slot, bound)) in extents.iter().zip(&host) {
             assert!(
                 extent <= bound,
                 "free extent {slot} of {extent} outruns the bound of {bound} the graph declares",
             );
+            values[*slot as usize] = *extent;
         }
-        self.bound
-            .borrow_mut()
-            .bind(extents.to_vec(), self.dynamic());
+        bound.extents = Some(values);
+        bound.written = false;
+        self.cached.borrow_mut().take();
     }
 
-    pub(crate) fn extents(&self) -> Ref<'_, [u32]> {
-        Ref::map(self.bound.borrow(), |bound| bound.extents())
+    pub fn carries_authored(&self) -> bool {
+        self.plan.carries_authored()
+    }
+
+    pub(crate) fn slot_count(&self) -> usize {
+        self.plan.slot_bounds().len()
+    }
+
+    pub(crate) fn extents_buffer(&self) -> &GpuBuffer {
+        self.extents
+            .as_ref()
+            .expect("a program of a device authored extent holds the lengths it walks")
+            .buffer()
+    }
+
+    pub(crate) fn cached_extents(&self) -> Option<Vec<u32>> {
+        self.cached.borrow().clone()
+    }
+
+    pub(crate) fn cache_extents(&self, extents: Vec<u32>) {
+        *self.cached.borrow_mut() = Some(extents);
+    }
+
+    pub(crate) fn write_extents(&self, queue: &Queue) {
+        if self.extents.is_none() {
+            return;
+        }
+        let extents = self.host_extents();
+        self.extents_buffer()
+            .write(queue, bytemuck::cast_slice(&extents));
+        self.cached.borrow_mut().take();
+    }
+
+    pub(crate) fn host_extents(&self) -> Vec<u32> {
+        self.bound.borrow().extents.clone().unwrap_or_else(|| {
+            panic!(
+                "a program of free extents runs the binding a run names, and no run has named one yet",
+            )
+        })
+    }
+
+    pub(crate) fn span_with(&self, value: Value, extents: &[u32]) -> Span {
+        self.plan.span_at(value, self.at(), extents)
     }
 
     pub(crate) fn write_records(&self, queue: &Queue, extents: &[u32]) {
@@ -398,7 +477,7 @@ impl<'r> Program<'r> {
     }
 
     pub fn span(&self, value: Value) -> Span {
-        let extents = self.extents();
-        self.plan.span_at(value, self.at(), extents.as_ref())
+        let host = self.host_extents();
+        self.span_with(value, &host)
     }
 }

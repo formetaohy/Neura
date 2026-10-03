@@ -59,6 +59,7 @@ impl Schedule {
             segments.push(SegmentRecord::of(SegmentFields {
                 first: order.len() as u32,
                 count: tasks.len() as u32,
+                wave,
             }));
             for task in tasks {
                 order.push(*task);

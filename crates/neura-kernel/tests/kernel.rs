@@ -41,6 +41,7 @@ fn all(profile: usize) -> &'static Kernel {
                         &walked(*profile),
                         &[],
                     ),
+                    false,
                 )
             })
             .collect()
@@ -58,6 +59,7 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
             &walked(profile),
             &[],
         ),
+        false,
     )
 }
 
@@ -388,7 +390,7 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             &walked(profile),
             &[],
         );
-        let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+        let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
         let program = kernel.program();
         assert_eq!(
             workgroup_bytes(&program),
@@ -422,7 +424,7 @@ fn a_device_program_carries_only_the_tiles_its_plan_walks() {
     let menu = walked(profile);
     let walked = &menu[..2];
     let geometry = Geometry::of(profile.workgroup(), profile.shared_bytes(), walked, &[]);
-    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
     let program = kernel.program();
     let names = functions(&program);
     for (index, _) in walked {
@@ -478,7 +480,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         &walked(profile),
         &attention,
     );
-    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
     let used = workgroup_bytes(&kernel.program());
     assert_eq!(
         used,
@@ -515,6 +517,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         ],
         &[Element::Single],
         Geometry::of(profile.workgroup(), profile.shared_bytes(), &[], &attention),
+        false,
     );
     let program = kernel.program();
     let names = functions(&program);

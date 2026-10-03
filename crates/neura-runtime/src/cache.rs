@@ -17,6 +17,9 @@ pub(crate) struct Resident {
     pub(crate) kernel: PipelineHandle,
     pub(crate) steps: Recycled,
     pub(crate) segments: Recycled,
+    pub(crate) measures: Option<Recycled>,
+    pub(crate) patches: Option<Recycled>,
+    pub(crate) patch_list: Option<Recycled>,
     pool: Arc<Pool>,
 }
 
@@ -50,12 +53,22 @@ impl Resident {
         let steps_bytes = (plan.steps().len() as u64).max(size_of::<StepRecord>() as u64);
         let segments_bytes = size_of_val(plan.segments()) as u64;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+        let carries = plan.carries_authored();
+        let owned = |label: &str, bytes: usize| {
+            carries.then(|| Recycled::claim(pool, label, (bytes as u64).max(4), storage))
+        };
+        let measures = owned("neura measures", std::mem::size_of_val(plan.measures()));
+        let patches = owned("neura patches", std::mem::size_of_val(plan.patches()));
+        let patch_list = owned("neura patch list", std::mem::size_of_val(plan.patch_list()));
         let resident = Self {
             signature,
             plan,
             kernel,
             steps: Recycled::claim(pool, "neura steps", steps_bytes, storage),
             segments: Recycled::claim(pool, "neura segments", segments_bytes, storage),
+            measures,
+            patches,
+            patch_list,
             pool: pool.clone(),
         };
         let queue = context.queue();
@@ -66,6 +79,21 @@ impl Resident {
             .segments
             .buffer()
             .write(queue, bytemuck::cast_slice(resident.plan.segments()));
+        if let (Some(measures), Some(patches), Some(patch_list)) = (
+            resident.measures.as_ref(),
+            resident.patches.as_ref(),
+            resident.patch_list.as_ref(),
+        ) {
+            measures
+                .buffer()
+                .write(queue, bytemuck::cast_slice(resident.plan.measures()));
+            patches
+                .buffer()
+                .write(queue, bytemuck::cast_slice(resident.plan.patches()));
+            patch_list
+                .buffer()
+                .write(queue, bytemuck::cast_slice(resident.plan.patch_list()));
+        }
         Arc::new(resident)
     }
 
@@ -83,6 +111,7 @@ struct KernelIdentity {
     kinds: Vec<Kind>,
     elements: Vec<Element>,
     geometry: Geometry,
+    authored: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -167,12 +196,14 @@ impl Artifacts {
         kinds: &[Kind],
         elements: &[Element],
         geometry: Geometry,
+        authored: bool,
         assemble: impl FnOnce() -> Kernel,
     ) -> Arc<Kernel> {
         let identity = KernelIdentity {
             kinds: kinds.to_vec(),
             elements: elements.to_vec(),
             geometry,
+            authored,
         };
         let mut kernels = self
             .kernels
@@ -264,5 +295,8 @@ pub(crate) fn signature(plan: &Plan, profile: neura_profile::Profile, alignment:
     bytes.extend(plan.values());
     bytes.extend(plan.steps());
     bytes.extend(bytemuck::cast_slice(plan.segments()));
+    bytes.extend(bytemuck::cast_slice(plan.measures()));
+    bytes.extend(bytemuck::cast_slice(plan.patches()));
+    bytes.extend(bytemuck::cast_slice(plan.patch_list()));
     bytes
 }

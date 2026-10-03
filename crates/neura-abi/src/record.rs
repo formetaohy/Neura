@@ -1,3 +1,5 @@
+use crate::NO_SLOT;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldType {
     U32,
@@ -61,6 +63,7 @@ record!(PlacementRecord, PlacementFields, PLACEMENT, "Placement" {
 record!(SegmentRecord, SegmentFields, SEGMENT, "Segment" {
     first: u32 => U32,
     count: u32 => U32,
+    wave: u32 => U32,
 });
 
 record!(StepRecord, StepFields, STEP, "Step" {
@@ -100,6 +103,29 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     axis: u32 => U32,
     offset: u32 => U32,
     wave: u32 => U32,
+    split: u32 => U32,
+    measure: u32 => U32,
+    index: u32 => U32,
+    group: u32 => U32,
+    planes: u32 => U32,
+    plane: u32 => U32,
+    patch: u32 => U32,
+});
+
+record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {
+    kind: u32 => U32,
+    value: u32 => U32,
+    rows: u32 => U32,
+    columns: u32 => U32,
+});
+
+record!(PatchRecord, PatchFields, PATCH, "Patch" {
+    slot: u32 => U32,
+    count: u32 => U32,
+    values: u32 => U32,
+    values_count: u32 => U32,
+    tasks: u32 => U32,
+    tasks_count: u32 => U32,
 });
 
 #[repr(C)]
@@ -109,6 +135,11 @@ pub struct ValueRecord {
     pub store: u32,
     pub element: u32,
     pub table: u32,
+    pub storage: u32,
+    pub free: u32,
+    pub source: u32,
+    pub pad: u32,
+    pub bounds: [u32; 4],
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
@@ -119,6 +150,10 @@ pub struct ValueFields {
     pub store: u32,
     pub element: u32,
     pub table: u32,
+    pub storage: u32,
+    pub free: [u32; 4],
+    pub source: [u32; 4],
+    pub bounds: [u32; 4],
     pub dims: [u32; 4],
     pub strides: [u32; 4],
 }
@@ -130,10 +165,27 @@ impl ValueRecord {
             store: fields.store,
             element: fields.element,
             table: fields.table,
+            storage: fields.storage,
+            free: pack_slots(fields.free),
+            source: pack_slots(fields.source),
+            pad: 0,
+            bounds: fields.bounds,
             dims: fields.dims,
             strides: fields.strides,
         }
     }
+}
+
+fn pack_slots(slots: [u32; 4]) -> u32 {
+    let mut packed = 0u32;
+    for (axis, slot) in slots.iter().enumerate() {
+        assert!(
+            *slot == NO_SLOT || *slot < 1 << 8,
+            "a free extent of slot {slot} outruns the byte axis {axis} of a value fills",
+        );
+        packed |= (*slot & 0xff) << (axis * 8);
+    }
+    packed
 }
 
 unsafe impl bytemuck::Zeroable for ValueRecord {
@@ -167,6 +219,31 @@ pub const VALUE: RecordLayout = RecordLayout {
             ty: FieldType::U32,
         },
         FieldLayout {
+            name: "storage",
+            offset: std::mem::offset_of!(ValueRecord, storage) as u32,
+            ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "free",
+            offset: std::mem::offset_of!(ValueRecord, free) as u32,
+            ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "source",
+            offset: std::mem::offset_of!(ValueRecord, source) as u32,
+            ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "pad",
+            offset: std::mem::offset_of!(ValueRecord, pad) as u32,
+            ty: FieldType::U32,
+        },
+        FieldLayout {
+            name: "bounds",
+            offset: std::mem::offset_of!(ValueRecord, bounds) as u32,
+            ty: FieldType::U32x4,
+        },
+        FieldLayout {
             name: "dims",
             offset: std::mem::offset_of!(ValueRecord, dims) as u32,
             ty: FieldType::U32x4,
@@ -179,4 +256,4 @@ pub const VALUE: RecordLayout = RecordLayout {
     ],
 };
 
-pub const RECORDS: &[RecordLayout] = &[PLACEMENT, SEGMENT, STEP, TASK, VALUE];
+pub const RECORDS: &[RecordLayout] = &[PLACEMENT, SEGMENT, STEP, TASK, MEASURE, PATCH, VALUE];

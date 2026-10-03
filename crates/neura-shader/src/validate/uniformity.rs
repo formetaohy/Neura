@@ -1,6 +1,6 @@
 use super::collect;
 use crate::instruction::{Address, Instruction};
-use crate::module::{Access, Function, Module, Space};
+use crate::module::{Function, Module, Space};
 use crate::ty::ValueId;
 use std::collections::HashMap;
 
@@ -126,7 +126,7 @@ impl<'m> Analysis<'m> {
                     Some(Root::Local(index)) => state.locals[index as usize],
                     Some(Root::Global(index)) => {
                         let global = self.module.global(index);
-                        global.space == Space::Storage && global.access == Access::Read
+                        global.space == Space::Storage && global.access.uniform()
                     }
                     None => false,
                 }

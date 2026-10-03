@@ -158,8 +158,9 @@ impl Compiler {
             access: match spec.kind {
                 BindingKind::ReadOnlyStorage => Access::Read,
                 BindingKind::ReadWriteStorage => Access::ReadWrite,
+                BindingKind::TableStorage => Access::Table,
             },
-            coherent: spec.kind == BindingKind::ReadWriteStorage,
+            coherent: spec.kind.writable(),
         });
         assert!(self.globals.insert(name.to_owned(), index).is_none());
         self.bindings.push(spec);

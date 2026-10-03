@@ -11,13 +11,17 @@ fn refuses(action: impl FnOnce() + std::panic::UnwindSafe) -> bool {
 
 #[test]
 fn records_follow_the_shader_layout() {
-    assert_eq!(size_of::<ValueRecord>(), 48);
+    assert_eq!(size_of::<ValueRecord>(), 80);
     assert_eq!(offset_of!(ValueRecord, base), 0);
     assert_eq!(offset_of!(ValueRecord, store), 4);
     assert_eq!(offset_of!(ValueRecord, table), 12);
-    assert_eq!(offset_of!(ValueRecord, dims), 16);
-    assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 120);
+    assert_eq!(offset_of!(ValueRecord, storage), 16);
+    assert_eq!(offset_of!(ValueRecord, free), 20);
+    assert_eq!(offset_of!(ValueRecord, source), 24);
+    assert_eq!(offset_of!(ValueRecord, bounds), 32);
+    assert_eq!(offset_of!(ValueRecord, dims), 48);
+    assert_eq!(offset_of!(ValueRecord, strides), 64);
+    assert_eq!(size_of::<TaskRecord>(), 148);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -49,9 +53,10 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
     assert_eq!(offset_of!(StepRecord, swapped), 8);
-    assert_eq!(size_of::<SegmentRecord>(), 8);
+    assert_eq!(size_of::<SegmentRecord>(), 12);
     assert_eq!(offset_of!(SegmentRecord, first), 0);
     assert_eq!(offset_of!(SegmentRecord, count), 4);
+    assert_eq!(offset_of!(SegmentRecord, wave), 8);
     assert_eq!(align_of::<ValueRecord>(), 4);
     assert_eq!(align_of::<TaskRecord>(), 4);
     assert_eq!(align_of::<StepRecord>(), 4);
@@ -253,11 +258,19 @@ fn a_record_declares_what_the_device_reads() {
         store: Store::Weights.code(),
         element: Element::Half.code(),
         table: 7,
+        storage: 3,
+        bounds: [4, 3, 2, 1],
+        free: [0, 1, 2, 3],
+        source: [3, 2, 1, 0],
         dims: [1, 2, 3, 4],
         strides: [12, 6, 2, 1],
     });
     let bytes = bytemuck::bytes_of(&value);
-    assert_eq!(bytes.len(), 48);
+    assert_eq!(
+        bytes.len(),
+        80,
+        "a value record pads its vectors to the grid the device reads"
+    );
     assert_eq!(u32::from_ne_bytes(bytes[0..4].try_into().unwrap()), 6);
     assert_eq!(
         u32::from_ne_bytes(bytes[4..8].try_into().unwrap()),
@@ -268,8 +281,21 @@ fn a_record_declares_what_the_device_reads() {
         Element::Half.code()
     );
     assert_eq!(u32::from_ne_bytes(bytes[12..16].try_into().unwrap()), 7);
-    assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 1);
-    assert_eq!(u32::from_ne_bytes(bytes[20..24].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[16..20].try_into().unwrap()), 3);
+    assert_eq!(
+        u32::from_ne_bytes(bytes[20..24].try_into().unwrap()),
+        0x0302_0100,
+        "the free extents of a value pack one byte an axis",
+    );
+    assert_eq!(
+        u32::from_ne_bytes(bytes[24..28].try_into().unwrap()),
+        0x0001_0203,
+        "the axes a view walks of its storage pack one byte an axis",
+    );
+    assert_eq!(u32::from_ne_bytes(bytes[28..32].try_into().unwrap()), 0);
+    assert_eq!(u32::from_ne_bytes(bytes[32..36].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[48..52].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[52..56].try_into().unwrap()), 2);
     let task = TaskRecord::of(TaskFields {
         kind: Kind::Matmul.code(),
         op: 2,
@@ -301,9 +327,16 @@ fn a_record_declares_what_the_device_reads() {
         axis: 2,
         offset: 9,
         wave: 4,
+        split: 1,
+        measure: 3,
+        index: 2,
+        group: 4,
+        planes: 5,
+        plane: 6,
+        patch: 7,
     });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 120);
+    assert_eq!(bytes.len(), 148);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -327,6 +360,13 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[108..112].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[112..116].try_into().unwrap()), 9);
     assert_eq!(u32::from_ne_bytes(bytes[116..120].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[120..124].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[124..128].try_into().unwrap()), 3);
+    assert_eq!(u32::from_ne_bytes(bytes[128..132].try_into().unwrap()), 2);
+    assert_eq!(u32::from_ne_bytes(bytes[132..136].try_into().unwrap()), 4);
+    assert_eq!(u32::from_ne_bytes(bytes[136..140].try_into().unwrap()), 5);
+    assert_eq!(u32::from_ne_bytes(bytes[140..144].try_into().unwrap()), 6);
+    assert_eq!(u32::from_ne_bytes(bytes[144..148].try_into().unwrap()), 7);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use crate::{Module, Target, element_name};
+use crate::{Access, Module, Target, element_name};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -16,6 +16,13 @@ pub enum Backend {
 pub enum BindingKind {
     ReadOnlyStorage,
     ReadWriteStorage,
+    TableStorage,
+}
+
+impl BindingKind {
+    pub const fn writable(self) -> bool {
+        matches!(self, Self::ReadWriteStorage | Self::TableStorage)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -36,6 +43,13 @@ impl BindingSpec {
         Self {
             binding,
             kind: BindingKind::ReadWriteStorage,
+        }
+    }
+
+    pub const fn table_storage(binding: u32) -> Self {
+        Self {
+            binding,
+            kind: BindingKind::TableStorage,
         }
     }
 }
@@ -72,10 +86,10 @@ pub fn reflect(module: &Module) -> Vec<ShaderBinding> {
                 group: binding.group,
                 binding: binding.binding,
                 name: global.name.clone(),
-                kind: if global.access.writable() {
-                    BindingKind::ReadWriteStorage
-                } else {
-                    BindingKind::ReadOnlyStorage
+                kind: match global.access {
+                    Access::Read => BindingKind::ReadOnlyStorage,
+                    Access::ReadWrite => BindingKind::ReadWriteStorage,
+                    Access::Table => BindingKind::TableStorage,
                 },
             })
         })

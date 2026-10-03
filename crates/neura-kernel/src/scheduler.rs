@@ -60,14 +60,17 @@ mod device {
             }
             let segment = segments[ticket];
             for index in stride(segment.first, segment.first + segment.count, 1u32) {
-                let task = tasks[index];
                 if lid == 0u32 {
-                    gate(task.wave);
+                    gate(segment.wave);
                 }
                 storage_barrier();
+                let task = tasks[index];
                 run_task(task, lid);
+                if task.patch != NO_VALUE {
+                    patch(task.patch, lid);
+                }
                 storage_barrier();
-                finish(task.wave, lid);
+                finish(segment.wave, lid);
             }
         }
     }

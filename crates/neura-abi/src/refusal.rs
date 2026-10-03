@@ -11,6 +11,7 @@ pub enum Refusal {
     Op,
     Partial,
     Index,
+    Extent,
     Geometry,
     Origin,
     Task,
@@ -22,6 +23,7 @@ impl Refusal {
         Self::Op,
         Self::Partial,
         Self::Index,
+        Self::Extent,
         Self::Geometry,
         Self::Origin,
         Self::Task,
@@ -45,6 +47,7 @@ impl Refusal {
             Self::Op => "op",
             Self::Partial => "partial",
             Self::Index => "index",
+            Self::Extent => "extent",
             Self::Geometry => "geometry",
             Self::Origin => "origin",
             Self::Task => "task",
@@ -86,6 +89,7 @@ const _: () = assert!(
 pub const OP: u32 = Refusal::Op as u32;
 pub const PARTIAL: u32 = Refusal::Partial as u32;
 pub const INDEX: u32 = Refusal::Index as u32;
+pub const EXTENT: u32 = Refusal::Extent as u32;
 pub const GEOMETRY: u32 = Refusal::Geometry as u32;
 pub const ORIGIN: u32 = Refusal::Origin as u32;
 pub const TASK: u32 = Refusal::Task as u32;

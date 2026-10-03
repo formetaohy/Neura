@@ -25,11 +25,16 @@ impl Space {
 pub enum Access {
     Read,
     ReadWrite,
+    Table,
 }
 
 impl Access {
     pub const fn writable(self) -> bool {
-        matches!(self, Self::ReadWrite)
+        matches!(self, Self::ReadWrite | Self::Table)
+    }
+
+    pub const fn uniform(self) -> bool {
+        matches!(self, Self::Read | Self::Table)
     }
 }
 

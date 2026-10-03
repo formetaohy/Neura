@@ -36,6 +36,8 @@ pub(crate) struct Task {
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) unit: u32,
     pub(crate) split: Split,
+    pub(crate) depends: Vec<u32>,
+    pub(crate) patch: u32,
 }
 
 impl Reads for Task {
@@ -58,6 +60,7 @@ impl Reads for Task {
             .chain([self.origin])
             .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
+            .chain(self.depends.iter().copied())
             .filter(|value| *value != NO_VALUE)
     }
 }
@@ -86,6 +89,8 @@ impl Task {
             chain: unit.chain.clone(),
             unit: 0,
             split: Split::Range { first, count },
+            depends: Vec::new(),
+            patch: NO_VALUE,
         }
     }
 }
@@ -97,7 +102,6 @@ pub(crate) struct Plan {
     pub(crate) products: Vec<Product>,
     pub(crate) attention: Vec<AttentionTile>,
     pub(crate) measures: Vec<Measure>,
-    pub(crate) measured: Vec<(u32, u32)>,
 }
 
 pub(crate) fn lower(
@@ -113,7 +117,6 @@ pub(crate) fn lower(
         products: Vec::new(),
         attention: Vec::new(),
         measures: Vec::new(),
-        measured: Vec::new(),
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
@@ -695,22 +698,26 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product
 fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
     let mut source = unit.inputs[0];
     let dynamic = plan.values[unit.inputs[0] as usize].shape.dynamic();
-    let mut extent = plan.measure(Measure::Elements(unit.inputs[0]));
+    let measure = plan.measure(Measure::Elements(unit.inputs[0]));
+    let mut opens = true;
     loop {
         let elements = plan.shape(source).elements();
         let per_reduction = reduction_elements(elements, target);
-        let opens = source == unit.inputs[0];
-        let measure = dynamic.then_some(extent);
+        let walked = (dynamic && opens).then_some(measure);
         if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
             task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
-            if let Some(measure) = measure {
-                task.split = Split::Uniform {
+            task.split = match walked {
+                Some(measure) => Split::Uniform {
                     measure,
                     index: 0,
                     group: 1,
-                };
-            }
+                },
+                None => Split::Range {
+                    first: 0,
+                    count: elements,
+                },
+            };
             if !opens {
                 task.prelude.clear();
             }
@@ -719,10 +726,7 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         }
         let chunks = elements.div_ceil(per_reduction);
         let partials = plan.publish(Shape::vector(chunks));
-        if dynamic {
-            plan.measured.push((partials, extent));
-        }
-        for (slot, (first, count, split)) in span::chunks(elements, per_reduction, measure)
+        for (slot, (first, count, split)) in span::chunks(elements, per_reduction, walked)
             .into_iter()
             .enumerate()
         {
@@ -736,11 +740,8 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
             task.split = split;
             plan.tasks.push(task);
         }
-        extent = plan.measure(Measure::Chunks {
-            source: extent,
-            divisor: per_reduction,
-        });
         source = partials;
+        opens = false;
     }
 }
 

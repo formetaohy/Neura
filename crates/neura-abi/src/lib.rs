@@ -4,6 +4,7 @@ mod placement;
 pub mod progress;
 mod record;
 pub mod refusal;
+pub mod span;
 pub mod store;
 pub mod strategy;
 
@@ -11,14 +12,17 @@ pub use element::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK};
 pub use kind::{DeviceModule, Geometry, KINDS, Kind, KindInfo};
 pub use placement::Placement;
 pub use record::{
-    FieldLayout, FieldType, PlacementFields, PlacementRecord, RECORDS, RecordLayout, SegmentFields,
-    SegmentRecord, StepFields, StepRecord, TaskFields, TaskRecord, ValueFields, ValueRecord,
+    FieldLayout, FieldType, MEASURE, MeasureFields, MeasureRecord, PATCH, PatchFields, PatchRecord,
+    PlacementFields, PlacementRecord, RECORDS, RecordLayout, SegmentFields, SegmentRecord,
+    StepFields, StepRecord, TASK, TaskFields, TaskRecord, VALUE, ValueFields, ValueRecord,
 };
 pub use refusal::{Refusal, TENSOR};
+pub use span::{measure, split};
 pub use store::Store;
 
 pub const MAX_RANK: u32 = 4;
 pub const REFUSAL_WORDS: u32 = 1;
 pub const NO_VALUE: u32 = u32::MAX;
+pub const NO_SLOT: u32 = u8::MAX as u32;
 pub const WORD_BYTES: u64 = 4;
 pub const REFUSAL_BYTES: u64 = REFUSAL_WORDS as u64 * WORD_BYTES;
