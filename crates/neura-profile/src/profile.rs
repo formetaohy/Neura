@@ -1073,6 +1073,7 @@ impl Geometry {
             DeviceModule::Attention => 2 * self.attention_stage_words(),
             DeviceModule::Reduce => self.workgroup,
             DeviceModule::Choice => 2 * self.workgroup,
+            DeviceModule::Scan => self.workgroup,
             _ => 0,
         }
     }

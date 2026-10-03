@@ -141,6 +141,27 @@ mod device {
         return (task.index + 1u32) * total / task.group - task.index * total / task.group;
     }
 
+    fn segment_keys(task: Task, bound: u32) -> u32 {
+        let offsets = values[task.segment];
+        let start = whole_index(
+            fetch(offsets, task.plane),
+            bound,
+            refusal::TENSOR,
+            refusal::EXTENT,
+        );
+        let end = whole_index(
+            fetch(offsets, task.plane + 1u32),
+            bound,
+            refusal::TENSOR,
+            refusal::EXTENT,
+        );
+        if end >= start {
+            return end - start;
+        }
+        refuse(refusal::TENSOR, refusal::EXTENT, 0u32);
+        return 0u32;
+    }
+
     fn patch_extents(patch: u32, lid: u32) {
         let record = patches[patch];
         let author = values[record.count];
@@ -162,6 +183,9 @@ mod device {
             let task = tasks[id];
             tasks[id].first = span_first(task);
             tasks[id].count = span_count(task);
+            if task.segment != NO_VALUE {
+                tasks[id].keys = segment_keys(task, live + 1u32);
+            }
         }
     }
 

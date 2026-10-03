@@ -21,7 +21,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, bounds), 32);
     assert_eq!(offset_of!(ValueRecord, dims), 48);
     assert_eq!(offset_of!(ValueRecord, strides), 64);
-    assert_eq!(size_of::<TaskRecord>(), 148);
+    assert_eq!(size_of::<TaskRecord>(), 156);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -49,6 +49,8 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(TaskRecord, axis), 108);
     assert_eq!(offset_of!(TaskRecord, offset), 112);
     assert_eq!(offset_of!(TaskRecord, wave), 116);
+    assert_eq!(offset_of!(TaskRecord, segment), 148);
+    assert_eq!(offset_of!(TaskRecord, keys), 152);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -334,9 +336,11 @@ fn a_record_declares_what_the_device_reads() {
         planes: 5,
         plane: 6,
         patch: 7,
+        segment: 8,
+        keys: 9,
     });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 148);
+    assert_eq!(bytes.len(), 156);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -367,6 +371,8 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[136..140].try_into().unwrap()), 5);
     assert_eq!(u32::from_ne_bytes(bytes[140..144].try_into().unwrap()), 6);
     assert_eq!(u32::from_ne_bytes(bytes[144..148].try_into().unwrap()), 7);
+    assert_eq!(u32::from_ne_bytes(bytes[148..152].try_into().unwrap()), 8);
+    assert_eq!(u32::from_ne_bytes(bytes[152..156].try_into().unwrap()), 9);
 }
 
 #[test]

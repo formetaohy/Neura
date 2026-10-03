@@ -167,9 +167,10 @@ pub(crate) fn plan_patches(
         let values_count = authored.patch_list.len() as u32 - values_first;
         let tasks_first = authored.patch_list.len() as u32;
         for (index, task) in tasks.iter().enumerate() {
-            if let Some(measure) = split_measure(task.split)
-                && authored.measure_slots[measure as usize].contains(&slot)
-            {
+            let walks_the_measure = split_measure(task.split)
+                .is_some_and(|measure| authored.measure_slots[measure as usize].contains(&slot));
+            let walks_a_segment = task.segments != NO_VALUE && task.depends.contains(&count);
+            if walks_the_measure || walks_a_segment {
                 assert_ne!(
                     seat[index], NO_VALUE,
                     "a task whose range a device count rules stands in no segment of the plan",

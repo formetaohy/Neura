@@ -1130,6 +1130,7 @@ fn one_pool_lets_a_plan_stage_every_body_it_runs() {
             scale: 0.5,
             causal: true,
             origin: None,
+            segments: None,
         },
     );
     let chosen = graph.argmax(graph.sum_rows(attended));

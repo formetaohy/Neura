@@ -54,6 +54,7 @@ fn graph_of(
             scale: shapes.scale,
             causal: shapes.causal,
             origin: None,
+            segments: None,
         },
     );
     graph.retain(out);
@@ -264,6 +265,7 @@ fn an_attention_refuses_values_of_another_width() {
                     scale: 0.5,
                     causal: false,
                     origin: None,
+                    segments: None,
                 },
             );
             graph.retain(out);
@@ -391,6 +393,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 scale: 0.5,
                 causal: true,
                 origin: None,
+                segments: None,
             },
         );
     }));
@@ -403,6 +406,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 scale: 0.0,
                 causal: false,
                 origin: None,
+                segments: None,
             },
         );
     }));
@@ -416,6 +420,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 scale: 0.5,
                 causal: false,
                 origin: None,
+                segments: None,
             },
         );
     }));
@@ -437,6 +442,7 @@ fn a_fused_attention_leaves_no_room_for_a_score_it_cannot_carry() {
             scale: 0.5,
             causal: false,
             origin: None,
+            segments: None,
         },
     );
     graph.retain(out);
@@ -491,6 +497,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
             scale: 1.0 / (width as f32).sqrt(),
             causal: true,
             origin: None,
+            segments: None,
         },
     );
     let loss = graph.sum(out);
@@ -603,6 +610,7 @@ fn block<'g>(
                 scale: shapes.scale,
                 causal: shapes.causal,
                 origin: None,
+                segments: None,
             },
         )
     };

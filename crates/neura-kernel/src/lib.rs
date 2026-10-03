@@ -347,5 +347,6 @@ fn install(
         DeviceModule::Layout => task::layout::install(compiler),
         DeviceModule::Pool => task::pool::install(compiler),
         DeviceModule::Convert => task::convert::install(compiler, elements),
+        DeviceModule::Scan => task::scan::install(compiler),
     }
 }

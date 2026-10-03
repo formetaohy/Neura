@@ -7,6 +7,7 @@ pub(crate) mod matmul;
 pub(crate) mod pool;
 pub(crate) mod reduce;
 pub(crate) mod rope;
+pub(crate) mod scan;
 pub(crate) mod scatter;
 pub(crate) mod select;
 pub(crate) mod softmax;

@@ -33,6 +33,7 @@ impl Reads for TaskInfo {
             .chain([self.origin])
             .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
+            .chain([self.segments])
             .filter(|value| *value != NO_VALUE)
     }
 }

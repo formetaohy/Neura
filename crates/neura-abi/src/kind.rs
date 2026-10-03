@@ -12,6 +12,7 @@ pub enum DeviceModule {
     Layout,
     Pool,
     Convert,
+    Scan,
 }
 
 impl DeviceModule {
@@ -28,6 +29,7 @@ impl DeviceModule {
         Self::Layout,
         Self::Pool,
         Self::Convert,
+        Self::Scan,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -44,6 +46,7 @@ impl DeviceModule {
             Self::Layout => "layout",
             Self::Pool => "pool",
             Self::Convert => "convert",
+            Self::Scan => "scan",
         }
     }
 }
@@ -231,6 +234,30 @@ kinds! {
         geometry: Access,
         prelude: false,
         chain: true,
+        origin: false,
+    };
+    PrefixChunk PREFIX_CHUNK = "prefix_chunk" {
+        entry: "run_prefix_chunk",
+        modules: [Scan],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    PrefixScan PREFIX_SCAN = "prefix_scan" {
+        entry: "run_prefix_scan",
+        modules: [Scan],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    PrefixClose PREFIX_CLOSE = "prefix_close" {
+        entry: "run_prefix_close",
+        modules: [Scan],
+        geometry: None,
+        prelude: false,
+        chain: false,
         origin: false,
     };
     Fill FILL = "fill" {

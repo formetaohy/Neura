@@ -110,6 +110,8 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     planes: u32 => U32,
     plane: u32 => U32,
     patch: u32 => U32,
+    segment: u32 => U32,
+    keys: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

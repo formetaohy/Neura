@@ -36,6 +36,7 @@ fn options(cursor: Value<'static>) -> AttentionOptions<'static> {
         scale: SCALE,
         causal: true,
         origin: Some(cursor),
+        segments: None,
     }
 }
 
@@ -295,6 +296,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
             scale: SCALE,
             causal: true,
             origin: Some(cursor),
+            segments: None,
         },
     );
     graph.retain(out);

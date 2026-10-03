@@ -67,6 +67,7 @@ mod device {
                 let task = tasks[index];
                 run_task(task, lid);
                 if task.patch != NO_VALUE {
+                    storage_barrier();
                     patch(task.patch, lid);
                 }
                 storage_barrier();

@@ -70,16 +70,46 @@ impl<'g> Graph<'g> {
             "an attention scaled by {} weighs every score to nothing",
             attention.scale,
         );
-        assert_eq!(
-            query_shape.dims()[1],
-            key_shape.dims()[1],
-            "an attention reads {query_shape:?} through keys of {key_shape:?}",
-        );
-        assert_eq!(
-            key_shape.dims()[1],
-            value_shape.dims()[1],
-            "an attention reads keys of {key_shape:?} through values of {value_shape:?}",
-        );
+        let segments = attention.segments.map(|segments| self.own(segments));
+        let tracked = self.tracked(&[query, key, value]);
+        if let Some(offsets) = segments {
+            let planes = query_shape.dims()[0] * query_shape.dims()[1];
+            assert_eq!(
+                self.shape(offsets).elements(),
+                planes + 1,
+                "a segmented attention of {planes} planes walks the {} offsets of value {}, and every plane carries the offset that opens it and the one that closes the last",
+                self.shape(offsets).elements(),
+                offsets.id(),
+            );
+            assert!(
+                key_shape.dims()[0] == 1
+                    && key_shape.dims()[1] == 1
+                    && value_shape.dims()[0] == 1
+                    && value_shape.dims()[1] == 1,
+                "a segmented attention packs the keys and values of every plane into their token axis, and keys of {key_shape:?} walk values of {value_shape:?}",
+            );
+            assert!(
+                key_shape.free(2).is_some() && value_shape.free(2).is_some(),
+                "a segmented attention walks the keys of a device authored token axis, and {key_shape:?} declares a fixed one",
+            );
+            let slot = key_shape
+                .free(2)
+                .expect("the token axis of a segmented key is free");
+            assert!(
+                self.state
+                    .borrow()
+                    .authored
+                    .get(slot as usize)
+                    .copied()
+                    .unwrap_or(NO_VALUE)
+                    != NO_VALUE,
+                "a segmented attention walks the offsets of a device authored axis: bind the packed token axis with the extent Graph::ragged returns",
+            );
+            assert!(
+                !tracked,
+                "a segmented attention carries no gradient: its offsets place the key planes a device fills, and only a host knows the lengths a backward pass walks",
+            );
+        }
         assert_eq!(
             key_shape.dims()[0],
             value_shape.dims()[0],
@@ -90,12 +120,6 @@ impl<'g> Graph<'g> {
         assert!(
             query_shape.free(0).is_none() && key_shape.free(0).is_none(),
             "an attention of {} query heads reads {} key heads, and the group every key head serves holds every length a free extent takes",
-            query_shape.dims()[0],
-            key_shape.dims()[0],
-        );
-        assert!(
-            query_shape.dims()[0].is_multiple_of(key_shape.dims()[0]),
-            "an attention of {} query heads reads {} key heads, and every key head serves a whole group of queries",
             query_shape.dims()[0],
             key_shape.dims()[0],
         );
@@ -117,23 +141,44 @@ impl<'g> Graph<'g> {
             key_shape.dims()[2],
             value_shape.dims()[2],
         );
-        assert!(
-            query_shape.free(2) == key_shape.free(2)
-                || (query_shape.free(2).is_none() && key_shape.free(2).is_none()),
-            "an attention walks {:?} queries over {:?} keys, and a free extent of one meets the bound of the other",
-            query_shape.dims(),
-            key_shape.dims(),
-        );
-        assert!(
-            query_shape.free(1) == key_shape.free(1) && key_shape.free(1) == value_shape.free(1),
-            "an attention reads keys of {key_shape:?} through values of {value_shape:?}, and a free extent of one meets the bound of the other",
-        );
-        if let Some(origin) = origin {
-            let positions = Shape::of([key_shape.dims()[0], key_shape.dims()[1], 1, 1]);
+        let planes = if segments.is_some() {
+            Shape::of([query_shape.dims()[0], query_shape.dims()[1], 1, 1])
+        } else {
+            assert_eq!(
+                query_shape.dims()[1],
+                key_shape.dims()[1],
+                "an attention reads {query_shape:?} through keys of {key_shape:?}",
+            );
+            assert_eq!(
+                key_shape.dims()[1],
+                value_shape.dims()[1],
+                "an attention reads keys of {key_shape:?} through values of {value_shape:?}",
+            );
             assert!(
-                self.shape(origin).fits_within(positions),
+                query_shape.dims()[0].is_multiple_of(key_shape.dims()[0]),
+                "an attention of {} query heads reads {} key heads, and every key head serves a whole group of queries",
+                query_shape.dims()[0],
+                key_shape.dims()[0],
+            );
+            assert!(
+                query_shape.free(2) == key_shape.free(2)
+                    || (query_shape.free(2).is_none() && key_shape.free(2).is_none()),
+                "an attention walks {:?} queries over {:?} keys, and a free extent of one meets the bound of the other",
+                query_shape.dims(),
+                key_shape.dims(),
+            );
+            assert!(
+                query_shape.free(1) == key_shape.free(1)
+                    && key_shape.free(1) == value_shape.free(1),
+                "an attention reads keys of {key_shape:?} through values of {value_shape:?}, and a free extent of one meets the bound of the other",
+            );
+            Shape::of([key_shape.dims()[0], key_shape.dims()[1], 1, 1])
+        };
+        if let Some(origin) = origin {
+            assert!(
+                self.shape(origin).fits_within(planes),
                 "a cursor holds one position per {:?} plane, and value {} walks {:?}",
-                positions.dims(),
+                planes.dims(),
                 origin.id(),
                 self.shape(origin).dims(),
             );
@@ -143,6 +188,17 @@ impl<'g> Graph<'g> {
                 query_shape.dims()[2],
                 key_shape.dims()[2],
             );
+            assert!(
+                segments.is_none() || query_shape.dims()[2] <= key_shape.dims()[2],
+                "a cursor walks {} queries over a packed key axis of {} tokens",
+                query_shape.dims()[2],
+                key_shape.dims()[2],
+            );
+        } else {
+            assert!(
+                !attention.causal || segments.is_none(),
+                "a segmented attention places the key of every plane by its offsets, and a causal mask of the queries needs the cursor that tells them where their keys end",
+            );
         }
         assert!(
             !attention.causal || origin.is_some() || query_shape.dims()[2] == key_shape.dims()[2],
@@ -150,7 +206,6 @@ impl<'g> Graph<'g> {
             query_shape.dims()[2],
             key_shape.dims()[2],
         );
-        let tracked = self.tracked(&[query, key, value]);
         let element = self
             .element(query)
             .promote(self.element(key))
@@ -209,6 +264,7 @@ impl<'g> Graph<'g> {
         );
         task.extra = log_sum_exp.id();
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
+        task.segments = segments.map_or(NO_VALUE, |offsets| offsets.id());
         task.param = attention.scale;
         task.slot = u32::from(attention.causal);
         self.push(task);

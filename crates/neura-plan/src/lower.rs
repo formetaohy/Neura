@@ -39,6 +39,9 @@ pub(crate) struct Task {
     pub(crate) split: Split,
     pub(crate) depends: Vec<u32>,
     pub(crate) patch: u32,
+    pub(crate) segments: u32,
+    pub(crate) keys: u32,
+    pub(crate) plane: u32,
 }
 
 impl Reads for Task {
@@ -62,6 +65,7 @@ impl Reads for Task {
             .chain(self.prelude.iter().map(|step| step.operand))
             .chain(self.chain.iter().map(|step| step.operand))
             .chain(self.depends.iter().copied())
+            .chain([self.segments])
             .filter(|value| *value != NO_VALUE)
     }
 }
@@ -92,6 +96,9 @@ impl Task {
             split: Split::Range { first, count },
             depends: Vec::new(),
             patch: NO_VALUE,
+            segments: unit.segments,
+            keys: 0,
+            plane: 0,
         }
     }
 }
@@ -349,10 +356,11 @@ fn schedule_unit(
             let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
             let measure = measured(plan, unit.out, Measure::Tokens);
-            for (first, count, split) in attention_spans(tokens, planes, profile, measure) {
+            for (plane, first, count, split) in attention_spans(tokens, planes, profile, measure) {
                 let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
                 task.geometry = geometry;
                 task.split = split;
+                task.plane = plane;
                 plan.tasks.push(task);
             }
         }
@@ -363,10 +371,11 @@ fn schedule_unit(
             let geometry = attention_geometry(plan, profile, keys[3]);
             let tile = plan.attention[geometry as usize];
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
-            for (first, count, split) in attention_spans(tokens, planes, profile, measure) {
+            for (plane, first, count, split) in attention_spans(tokens, planes, profile, measure) {
                 let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
                 task.geometry = geometry;
                 task.split = split;
+                task.plane = plane;
                 plan.tasks.push(task);
             }
         }
@@ -387,6 +396,7 @@ fn schedule_unit(
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::SumChunk => reduce(plan, unit, target),
         Kind::SumAxis => fold(plan, unit, profile),
+        Kind::PrefixChunk => prefix(plan, unit, profile),
         Kind::Conv2d => {
             let out = plan.shape(unit.out);
             let filter = plan.shape(unit.inputs[1]);
@@ -522,6 +532,14 @@ fn schedule_unit(
             );
         }
         Kind::Convert => panic!("a narrow tensor is written by the convert its task schedules"),
+        Kind::PrefixScan => {
+            panic!("the offsets of a ragged axis come from the two-level prefix of its lengths")
+        }
+        Kind::PrefixClose => {
+            panic!(
+                "the extent of a ragged axis closes the offsets of the two-level prefix it walks"
+            )
+        }
     }
 }
 
@@ -530,19 +548,32 @@ fn attention_spans(
     planes: u32,
     profile: Profile,
     measure: Option<u32>,
-) -> Vec<(u32, u32, Split)> {
+) -> Vec<(u32, u32, u32, Split)> {
     let per_task = profile.workgroup();
     match measure {
         None => {
             let mut spans = Vec::new();
             for plane in 0..planes {
                 spans.extend(spans_of(tokens, per_task).map(|(first, count)| {
-                    (plane * tokens + first, count, Split::Range { first, count })
+                    (
+                        plane,
+                        plane * tokens + first,
+                        count,
+                        Split::Range { first, count },
+                    )
                 }));
             }
             spans
         }
-        Some(measure) => span::plane_chunks(tokens, per_task, planes, measure),
+        Some(measure) => span::plane_chunks(tokens, per_task, planes, measure)
+            .into_iter()
+            .map(|(first, count, split)| {
+                let Split::Plane { plane, .. } = split else {
+                    panic!("a chunk of the tokens walks a plane")
+                };
+                (plane, first, count, split)
+            })
+            .collect(),
     }
 }
 
@@ -744,6 +775,37 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         source = partials;
         opens = false;
     }
+}
+
+fn prefix(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let lengths = unit.inputs[0];
+    let offsets = unit.extra;
+    let elements = plan.shape(lengths).elements();
+    let per_chunk = task_elements(elements, device_workgroups(profile));
+    let partials = plan.publish(Shape::vector(elements.div_ceil(per_chunk)));
+    let chunks = spans(elements, per_chunk).collect::<Vec<_>>();
+    for (slot, (first, count)) in chunks.iter().copied().enumerate() {
+        let mut task = Task::span(unit, first, count, u64::from(count));
+        task.slot = slot as u32;
+        task.out = partials;
+        task.extra = NO_VALUE;
+        plan.tasks.push(task);
+    }
+    for (slot, (first, count)) in chunks.iter().copied().enumerate() {
+        let mut task = Task::span(unit, first, count, u64::from(count));
+        task.kind = Kind::PrefixScan;
+        task.slot = slot as u32;
+        task.inputs = [lengths, partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.out = offsets;
+        task.extra = NO_VALUE;
+        plan.tasks.push(task);
+    }
+    let mut close = Task::span(unit, 0, 1, 1);
+    close.kind = Kind::PrefixClose;
+    close.inputs = [offsets, lengths, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+    close.out = unit.out;
+    close.extra = NO_VALUE;
+    plan.tasks.push(close);
 }
 
 fn task_elements(elements: u32, target: u32) -> u32 {

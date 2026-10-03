@@ -87,12 +87,14 @@ mod device {
         right_plane: u32,
         left: Value,
         right: Value,
+        left_bound: u32,
+        right_bound: u32,
     ) {
         for unit in stride(lid, ATTN_KEYS * ATTN_WIDTH, WORKGROUP_SIZE) {
             let column = unit / ATTN_WIDTH;
             let depth = unit % ATTN_WIDTH;
             let at = block * ATTN_KEYS + column;
-            let inside = at < left.dims.z;
+            let inside = at < left_bound;
             let address = select(
                 0u32,
                 left_plane + at * left.strides.z + depth * left.strides.w,
@@ -104,7 +106,7 @@ mod device {
             let column = unit / ATTN_WIDTH;
             let depth = unit % ATTN_WIDTH;
             let at = block * ATTN_KEYS + column;
-            let inside = at < right.dims.z;
+            let inside = at < right_bound;
             let address = select(
                 0u32,
                 right_plane + at * right.strides.z + depth * right.strides.w,
@@ -121,7 +123,8 @@ mod device {
         let output = values[task.out];
         let statistic = values[task.extra];
         let tokens = query.dims.z;
-        let keys = key.dims.z;
+        let segmented = task.segment != NO_VALUE;
+        let keys = select(key.dims.z, task.keys, segmented);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
@@ -129,14 +132,28 @@ mod device {
         );
         let head = plane.x / groups;
         let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
-        let key_plane = head * key.strides.x + plane.y * key.strides.y;
-        let value_plane = head * value.strides.x + plane.y * value.strides.y;
+        let mut key_plane = head * key.strides.x + plane.y * key.strides.y;
+        let mut value_plane = head * value.strides.x + plane.y * value.strides.y;
+        if segmented {
+            let offsets = values[task.segment];
+            let start = whole_index(
+                fetch(offsets, task.plane),
+                key.dims.z + 1u32,
+                kind::ATTENTION,
+                refusal::INDEX,
+            );
+            key_plane = start * key.strides.z;
+            value_plane = start * value.strides.z;
+        }
         let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let origin = block_origin(task, head, plane.y, keys, tokens);
+        let mut origin = 0u32;
+        if keys >= tokens {
+            origin = block_origin(task, head, plane.y, keys, tokens);
+        }
         let position = origin + row;
         let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
@@ -160,7 +177,7 @@ mod device {
         }
         for block in stride(0u32, walked, 1u32) {
             workgroup_barrier();
-            template_stage_attention(lid, block, key_plane, value_plane, key, value);
+            template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
             if inside {
                 let mut block_largest = -3.4028235e38;
@@ -199,7 +216,8 @@ mod device {
             }
         }
         if inside {
-            let normalized = 1.0 / total;
+            let carries_keys = total > 0.0;
+            let normalized = select(0.0, 1.0 / total, carries_keys);
             let at = uvec4(plane.x, plane.y, row, 0u32);
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                 publish(
@@ -215,12 +233,15 @@ mod device {
             publish(
                 statistic,
                 statistic_plane + row * statistic.strides.z,
-                largest + log(total),
+                select(0.0, largest + log(total), carries_keys),
             );
         }
     }
 
     fn template_attention_query_grad(task: Task, lid: u32) {
+        if task.segment != NO_VALUE {
+            refuse(kind::ATTENTION_QUERY_GRAD, refusal::TASK, 0u32);
+        }
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -283,7 +304,7 @@ mod device {
         }
         for block in stride(0u32, walked, 1u32) {
             workgroup_barrier();
-            template_stage_attention(lid, block, key_plane, value_plane, key, value);
+            template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
             if inside {
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {
@@ -328,6 +349,9 @@ mod device {
     }
 
     fn template_attention_key_grad(task: Task, lid: u32) {
+        if task.segment != NO_VALUE {
+            refuse(kind::ATTENTION_KEY_GRAD, refusal::TASK, 0u32);
+        }
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -374,7 +398,16 @@ mod device {
                 (plane.x * groups + group) * statistic.strides.x + plane.y * statistic.strides.y;
             for block in stride(first, blocks, 1u32) {
                 workgroup_barrier();
-                template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
+                template_stage_attention(
+                    lid,
+                    block,
+                    query_plane,
+                    gradient_plane,
+                    query,
+                    gradient,
+                    tokens,
+                    tokens,
+                );
                 workgroup_barrier();
                 if inside {
                     for step in unroll(0u32, ATTN_KEYS, 1u32) {
@@ -430,6 +463,9 @@ mod device {
     }
 
     fn template_attention_value_grad(task: Task, lid: u32) {
+        if task.segment != NO_VALUE {
+            refuse(kind::ATTENTION_VALUE_GRAD, refusal::TASK, 0u32);
+        }
         let query = values[task.a];
         let key = values[task.b];
         let gradient = values[task.d];
@@ -466,7 +502,16 @@ mod device {
                 (plane.x * groups + group) * statistic.strides.x + plane.y * statistic.strides.y;
             for block in stride(first, blocks, 1u32) {
                 workgroup_barrier();
-                template_stage_attention(lid, block, query_plane, gradient_plane, query, gradient);
+                template_stage_attention(
+                    lid,
+                    block,
+                    query_plane,
+                    gradient_plane,
+                    query,
+                    gradient,
+                    tokens,
+                    tokens,
+                );
                 workgroup_barrier();
                 if inside {
                     for step in unroll(0u32, ATTN_KEYS, 1u32) {

@@ -335,27 +335,20 @@ impl Plan {
             for step in &task.chain {
                 steps.extend_from_slice(bytemuck::bytes_of(step));
             }
-            let (split_kind, split_measure, index, group, planes, plane) = match task.split {
-                Split::Range { .. } => (neura_abi::split::RANGE, NO_VALUE, 0, 0, 0, 0),
+            let (split_kind, split_measure, index, group, planes) = match task.split {
+                Split::Range { .. } => (neura_abi::split::RANGE, NO_VALUE, 0, 0, 0),
                 Split::Uniform {
                     measure,
                     index,
                     group,
-                } => (neura_abi::split::UNIFORM, measure, index, group, 0, 0),
+                } => (neura_abi::split::UNIFORM, measure, index, group, 0),
                 Split::Plane {
                     measure,
                     planes,
-                    plane,
                     index,
                     group,
-                } => (
-                    neura_abi::split::PLANE,
-                    measure,
-                    index,
-                    group,
-                    planes,
-                    plane,
-                ),
+                    ..
+                } => (neura_abi::split::PLANE, measure, index, group, planes),
             };
             let record = TaskRecord::of(TaskFields {
                 kind: task.kind.code(),
@@ -393,8 +386,10 @@ impl Plan {
                 index,
                 group,
                 planes,
-                plane,
+                plane: task.plane,
                 patch: task.patch,
+                segment: task.segments,
+                keys: task.keys,
             });
             if task.in_place
                 && task

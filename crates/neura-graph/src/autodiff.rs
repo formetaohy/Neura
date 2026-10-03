@@ -704,6 +704,12 @@ impl<'g> Graph<'g> {
                     task.kind.name(),
                 )
             }
+            Kind::PrefixChunk | Kind::PrefixScan | Kind::PrefixClose => {
+                panic!(
+                    "the {} task rebuilds the offsets of a ragged axis, and the lengths it walks carry no gradient",
+                    task.kind.name(),
+                )
+            }
         }
     }
 

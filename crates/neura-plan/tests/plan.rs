@@ -1608,6 +1608,7 @@ fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
             scale: 0.5,
             causal: true,
             origin: Some(cursor),
+            segments: None,
         },
     );
     graph.retain(out);
@@ -1641,6 +1642,7 @@ fn a_cursor_holds_one_position_per_plane() {
         scale: 0.5,
         causal: true,
         origin,
+        segments: None,
     };
     let _ = graph.attention(queries, keys, keys, options(None));
     let _ = graph.attention(queries, keys, keys, options(Some(positions([1, 1, 1, 1]))));
@@ -1705,6 +1707,7 @@ fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
             scale: 0.125,
             causal: true,
             origin: None,
+            segments: None,
         },
     );
     graph.retain(out);
@@ -1742,6 +1745,7 @@ fn a_head_too_wide_for_one_thread_is_refused() {
             scale: 0.125,
             causal: true,
             origin: None,
+            segments: None,
         },
     );
     assert!(
@@ -1951,6 +1955,7 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
             scale: 0.125,
             causal: true,
             origin: None,
+            segments: None,
         },
     );
     let probabilities = graph.softmax(attended);
@@ -1973,15 +1978,24 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
     let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
     let steps = steps(&plan);
     for (index, task) in records.iter().enumerate() {
-        let reads = [task.a, task.b, task.c, task.d, task.e, task.f, task.origin]
-            .into_iter()
-            .chain(
-                (task.prelude..task.prelude + task.prelude_steps)
-                    .map(|step| steps[step as usize].operand),
-            )
-            .chain((task.chain..task.chain + task.steps).map(|step| steps[step as usize].operand))
-            .filter(|value| *value != neura_abi::NO_VALUE)
-            .collect::<Vec<u32>>();
+        let reads = [
+            task.a,
+            task.b,
+            task.c,
+            task.d,
+            task.e,
+            task.f,
+            task.origin,
+            task.segment,
+        ]
+        .into_iter()
+        .chain(
+            (task.prelude..task.prelude + task.prelude_steps)
+                .map(|step| steps[step as usize].operand),
+        )
+        .chain((task.chain..task.chain + task.steps).map(|step| steps[step as usize].operand))
+        .filter(|value| *value != neura_abi::NO_VALUE)
+        .collect::<Vec<u32>>();
         if reads.iter().any(|value| values.contains(value)) {
             assert!(
                 follows(&plan, author, index),
@@ -2021,4 +2035,72 @@ fn a_count_that_walks_the_extent_it_authors_is_refused() {
         }),
         "a count that walks the extent it authors was planned",
     );
+}
+
+#[test]
+fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    let cache = graph.resident(
+        Shape::of([1, 1, 16, 4]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(Shape::of([1, 4, 1, 4]), Element::Single);
+    let cursor = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
+    let out = graph.attention(
+        query,
+        cache,
+        cache,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: Some(cursor),
+            segments: Some(ragged.offsets),
+        },
+    );
+    graph.retain(out);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let names = kinds(&plan);
+    assert!(
+        names.contains(&Kind::PrefixChunk)
+            && names.contains(&Kind::PrefixScan)
+            && names.contains(&Kind::PrefixClose),
+        "a ragged axis walks a two-level prefix closed by the extent it authors: {names:?}",
+    );
+    assert!(plan.carries_authored());
+    assert_eq!(plan.authored_slots().len(), 1);
+    assert_eq!(plan.host_slots(), Vec::new());
+    let patches = plan.patches();
+    assert_eq!(patches.len(), 1, "one slot is authored");
+    let patch = patches[0];
+    assert_eq!(patch.slot, ragged.extent.slot());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert_eq!(
+        values,
+        [cache.id()],
+        "the packed tensor takes the live extent"
+    );
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    assert_eq!(patched.len(), 4, "every plane of the cache is patched");
+    let mut planes = Vec::new();
+    for at in patched {
+        let task = records[*at as usize];
+        assert_eq!(Kind::of(task.kind), Kind::Attention);
+        assert_eq!(task.segment, ragged.offsets.id());
+        assert!(
+            follows(&plan, author, *at as usize),
+            "task {at} walks the offsets the closing task authors",
+        );
+        planes.push(task.plane);
+    }
+    planes.sort_unstable();
+    assert_eq!(planes, [0, 1, 2, 3]);
 }

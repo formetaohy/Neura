@@ -13,6 +13,7 @@ use std::sync::{Arc, Weak};
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) const NORM_FLOOR: f32 = 1e-6;
+pub(crate) const RAGGED_LIMIT: u32 = 1 << 24;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Value<'g> {
@@ -46,6 +47,13 @@ pub struct AttentionOptions<'g> {
     pub scale: f32,
     pub causal: bool,
     pub origin: Option<Value<'g>>,
+    pub segments: Option<Value<'g>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Ragged<'g> {
+    pub extent: Free,
+    pub offsets: Value<'g>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,6 +81,7 @@ pub struct TaskInfo {
     pub in_place: bool,
     pub axis: u32,
     pub offset: u32,
+    pub segments: u32,
     pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
@@ -92,6 +101,7 @@ impl TaskInfo {
             in_place: false,
             axis: 0,
             offset: 0,
+            segments: NO_VALUE,
             prelude: Vec::new(),
             chain: Vec::new(),
         }
@@ -362,6 +372,55 @@ impl<'g> Graph<'g> {
         );
         state.authored[free.slot() as usize] = count.id();
         advance(&mut state);
+    }
+
+    pub fn ragged(&self, bound: u32, lengths: Value<'g>) -> Ragged<'g> {
+        let lengths = self.own(lengths);
+        assert!(
+            bound <= RAGGED_LIMIT,
+            "a ragged extent of {bound} numbers outruns the {RAGGED_LIMIT} numbers a device sums exactly",
+        );
+        assert!(
+            !self.element(lengths).narrow() && !self.element(lengths).per_block(),
+            "a ragged axis walks the lengths of {} storage, and a device sums only the exact numbers it reads",
+            self.element(lengths).name(),
+        );
+        assert!(
+            self.contiguous(lengths),
+            "a ragged axis reads its lengths in one walk, and value {} is a view",
+            lengths.id(),
+        );
+        let planes = self.shape(lengths).elements();
+        assert!(
+            planes < u32::MAX,
+            "a ragged axis of {planes} planes leaves no room for the offset that closes it",
+        );
+        let offsets = self.fresh(
+            Shape::vector(planes + 1),
+            Element::Single,
+            Residency::Derived,
+            false,
+        );
+        let total = self.fresh(Shape::scalar(), Element::Single, Residency::Derived, false);
+        let mut task = TaskInfo::of(
+            Kind::PrefixChunk,
+            op::NONE,
+            total.id(),
+            [
+                lengths.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.extra = offsets.id();
+        self.push(task);
+        Ragged {
+            extent: self.counted(bound, total),
+            offsets,
+        }
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
