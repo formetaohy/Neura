@@ -2,7 +2,7 @@
 name = "neura-runtime"
 version.workspace = true
 edition.workspace = true
-description = "Device execution of an encoded program: arena, tape buffers and wave dispatch"
+description = "Device execution of a tape: heap, resident tape buffers and programs"
 license.workspace = true
 repository.workspace = true
 
@@ -12,13 +12,13 @@ workspace = true
 [dependencies]
 bytemuck = { workspace = true }
 neura-abi = { workspace = true }
-neura-op = { workspace = true }
+neura-pointwise = { workspace = true }
 neura-profile = { workspace = true }
 neura-precision = { workspace = true }
 neura-graph = { workspace = true }
 neura-gpu = { workspace = true }
-neura-program = { workspace = true }
-neura-shader = { workspace = true }
+neura-tape = { workspace = true }
+neura-megakernel = { workspace = true }
 
 [dev-dependencies]
 neura-compiler = { workspace = true }

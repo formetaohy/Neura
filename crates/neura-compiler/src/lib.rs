@@ -1,22 +1,19 @@
 extern crate self as neura_compiler;
 
 mod lower;
-mod program;
 mod resource;
 pub use neura_abi as abi;
 use neura_abi::{FieldType, RecordLayout};
-pub use neura_ir as ir;
-pub use neura_shader_ir as shader;
-use neura_shader_ir::{Binding, Function, Global, Module, Scalar, Space, TypeId};
+pub use neura_rust_ir as ir;
+use neura_shader::{
+    Access, Binding, BindingKind, Function, Global, Instruction as DeviceInstruction, Member,
+    Module, Scalar, Space, TypeId, ValueId,
+};
+pub use neura_shader::{BindingSpec, ComputeProgram};
 use std::collections::{BTreeMap, HashMap};
 
 pub use neura_macro::{kernel, module};
-pub use program::{
-    Backend, BindingKind, BindingSpec, ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderBinding,
-    ShaderTranslation, describe, reflect,
-};
 pub use resource::{Read, ReadWrite, Uvec3};
-pub(crate) use shader::Instruction as DeviceInstruction;
 
 pub struct Compiler {
     module: Module,
@@ -99,7 +96,7 @@ impl Compiler {
         self.module.pointer(space, base)
     }
 
-    pub(crate) fn define(&mut self, ty: TypeId) -> shader::ValueId {
+    pub(crate) fn define(&mut self, ty: TypeId) -> ValueId {
         self.module.define(ty)
     }
 
@@ -122,7 +119,7 @@ impl Compiler {
                     FieldType::F32 => self.scalar("f32"),
                     FieldType::U32x4 => self.scalar("uvec4"),
                 };
-                shader::Member {
+                Member {
                     name: field.name.to_owned(),
                     ty,
                     offset: field.offset,
@@ -159,8 +156,8 @@ impl Compiler {
                 binding: spec.binding,
             }),
             access: match spec.kind {
-                BindingKind::ReadOnlyStorage => shader::Access::Read,
-                BindingKind::ReadWriteStorage => shader::Access::ReadWrite,
+                BindingKind::ReadOnlyStorage => Access::Read,
+                BindingKind::ReadWriteStorage => Access::ReadWrite,
             },
             coherent: spec.kind == BindingKind::ReadWriteStorage,
         });
@@ -176,7 +173,7 @@ impl Compiler {
             ty,
             space: Space::WorkGroup,
             binding: None,
-            access: shader::Access::ReadWrite,
+            access: Access::ReadWrite,
             coherent: false,
         });
         assert!(self.globals.insert(name.to_owned(), index).is_none());

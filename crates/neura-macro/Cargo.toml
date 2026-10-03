@@ -2,7 +2,7 @@
 name = "neura-macro"
 version.workspace = true
 edition.workspace = true
-description = "Compile-time Rust frontend for native compute kernels"
+description = "Macros that lower Rust device functions into the device DSL syntax tree"
 license.workspace = true
 repository.workspace = true
 

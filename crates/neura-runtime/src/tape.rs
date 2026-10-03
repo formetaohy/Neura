@@ -2,9 +2,9 @@ use crate::pool::{Pool, Recycled};
 use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
 use neura_graph::GraphStamp;
+use neura_megakernel::Megakernel;
 use neura_profile::Geometry;
-use neura_program::Encoding;
-use neura_shader::Megakernel;
+use neura_tape::Tape;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::mem::{size_of, size_of_val};
@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 pub(crate) struct DeviceTape {
     signature: Vec<u8>,
-    pub(crate) encoding: Arc<Encoding>,
+    pub(crate) image: Arc<Tape>,
     pub(crate) kernel: PipelineHandle,
     pub(crate) tasks: Recycled,
     pub(crate) values: Recycled,
@@ -26,37 +26,37 @@ impl DeviceTape {
     pub(crate) fn build(
         context: &GpuContext,
         pool: &Arc<Pool>,
-        encoding: Arc<Encoding>,
+        image: Arc<Tape>,
         kernel: Arc<Megakernel>,
         signature: Vec<u8>,
     ) -> Arc<Self> {
         let limits = context.limits();
         for (name, bytes) in [
-            ("tape", encoding.tasks().len() as u64),
-            ("values", encoding.values().len() as u64),
+            ("tape", image.tasks().len() as u64),
+            ("values", image.values().len() as u64),
         ] {
             assert!(
                 bytes <= limits.max_storage_buffer_binding_size,
                 "a tape of {} tasks binds {bytes} bytes of {name}, and the device binds at most {} bytes of storage",
-                encoding.task_count(),
+                image.task_count(),
                 limits.max_storage_buffer_binding_size,
             );
             assert!(
                 bytes <= limits.max_buffer_size,
                 "a tape of {} tasks binds {bytes} bytes of {name}, and the device holds buffers of at most {} bytes",
-                encoding.task_count(),
+                image.task_count(),
                 limits.max_buffer_size,
             );
         }
         let kernel = context.declare(kernel.program());
-        let tasks_bytes = encoding.tasks().len() as u64;
-        let values_bytes = encoding.values().len() as u64;
-        let steps_bytes = (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64);
-        let segments_bytes = size_of_val(encoding.segments()) as u64;
+        let tasks_bytes = image.tasks().len() as u64;
+        let values_bytes = image.values().len() as u64;
+        let steps_bytes = (image.steps().len() as u64).max(size_of::<StepRecord>() as u64);
+        let segments_bytes = size_of_val(image.segments()) as u64;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
         let tape = Self {
             signature,
-            encoding,
+            image,
             kernel,
             tasks: Recycled::claim(pool, "neura tape", tasks_bytes, storage),
             values: Recycled::claim(pool, "neura values", values_bytes, storage),
@@ -65,14 +65,14 @@ impl DeviceTape {
             pool: pool.clone(),
         };
         let queue = context.queue();
-        tape.tasks.buffer().write(queue, tape.encoding.tasks());
-        tape.values.buffer().write(queue, tape.encoding.values());
-        if !tape.encoding.steps().is_empty() {
-            tape.steps.buffer().write(queue, tape.encoding.steps());
+        tape.tasks.buffer().write(queue, tape.image.tasks());
+        tape.values.buffer().write(queue, tape.image.values());
+        if !tape.image.steps().is_empty() {
+            tape.steps.buffer().write(queue, tape.image.steps());
         }
         tape.segments
             .buffer()
-            .write(queue, bytemuck::cast_slice(tape.encoding.segments()));
+            .write(queue, bytemuck::cast_slice(tape.image.segments()));
         Arc::new(tape)
     }
 
@@ -103,7 +103,7 @@ const PLAN_CEILING: usize = 8;
 
 pub(crate) struct Plan {
     pub(crate) signature: Vec<u8>,
-    pub(crate) encoding: Arc<Encoding>,
+    pub(crate) image: Arc<Tape>,
     pub(crate) kernel: Arc<Megakernel>,
 }
 
@@ -239,14 +239,10 @@ impl Tapes {
     }
 }
 
-pub(crate) fn signature(
-    encoding: &Encoding,
-    profile: neura_profile::Profile,
-    alignment: u64,
-) -> Vec<u8> {
+pub(crate) fn signature(tape: &Tape, profile: neura_profile::Profile, alignment: u64) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend(profile.workgroup().to_le_bytes());
-    for (index, tile) in encoding.walked_tiles() {
+    for (index, tile) in tape.walked_tiles() {
         bytes.extend(index.to_le_bytes());
         bytes.extend(tile.rows().to_le_bytes());
         bytes.extend(tile.columns().to_le_bytes());
@@ -254,14 +250,14 @@ pub(crate) fn signature(
         bytes.extend(tile.thread_rows().to_le_bytes());
         bytes.extend(tile.thread_columns().to_le_bytes());
     }
-    for tile in encoding.attention() {
+    for tile in tape.attention() {
         bytes.extend(tile.keys().to_le_bytes());
         bytes.extend(tile.width().to_le_bytes());
     }
     bytes.extend(alignment.to_le_bytes());
-    bytes.extend(encoding.tasks());
-    bytes.extend(encoding.values());
-    bytes.extend(encoding.steps());
-    bytes.extend(bytemuck::cast_slice(encoding.segments()));
+    bytes.extend(tape.tasks());
+    bytes.extend(tape.values());
+    bytes.extend(tape.steps());
+    bytes.extend(bytemuck::cast_slice(tape.segments()));
     bytes
 }

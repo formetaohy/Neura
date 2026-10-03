@@ -1,6 +1,6 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::{DeviceInstruction, ir};
-use neura_shader_ir::{Barrier, BinaryOp, MatrixLayout};
+use neura_shader::{Barrier, BinaryOp, MatrixLayout};
 
 impl FunctionLower<'_> {
     pub(super) fn statements(&mut self, statements: &[ir::Statement]) {
@@ -163,7 +163,7 @@ impl FunctionLower<'_> {
                             lower.value_with_hint(condition, Some(lower.compiler.scalar("bool")));
                         let negated = lower.emit(lower.compiler.scalar("bool"), |result| {
                             DeviceInstruction::Unary {
-                                op: neura_shader_ir::UnaryOp::LogicalNot,
+                                op: neura_shader::UnaryOp::LogicalNot,
                                 value: condition.value,
                                 result,
                             }

@@ -2,19 +2,9 @@
 name = "neura-shader"
 version.workspace = true
 edition.workspace = true
-description = "Specialization and assembly of native Rust device programs"
+description = "Device shader modules, their native writers and the compiled compute programs"
 license.workspace = true
 repository.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
-neura-abi = { workspace = true }
-neura-compiler = { workspace = true }
-neura-profile = { workspace = true }
-neura-kernel = { workspace = true }
-
-[dev-dependencies]
-naga = { workspace = true }
-neura-op = { workspace = true }

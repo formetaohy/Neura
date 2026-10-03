@@ -2,7 +2,7 @@ mod statement;
 mod value;
 
 use crate::{Compiler, DeviceInstruction, ir};
-use neura_shader_ir::{Argument, Block, BuiltIn, Function, Local, Space, TypeId, ValueId};
+use neura_shader::{Argument, Block, BuiltIn, Function, Local, Space, TypeId, ValueId};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -108,7 +108,7 @@ impl<'a> FunctionLower<'a> {
         });
         let pointer = self.compiler.pointer(Space::Function, ty);
         let local = self.emit(pointer, |result| DeviceInstruction::Address {
-            address: neura_shader_ir::Address::Local(index),
+            address: neura_shader::Address::Local(index),
             result,
         });
         assert!(

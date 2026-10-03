@@ -1,42 +1,20 @@
 mod attention;
-#[path = "../device/attention.rs"]
-mod attention_device;
-#[path = "../device/choice.rs"]
 mod choice;
-#[path = "../device/conv.rs"]
 mod conv;
 mod convert;
-#[path = "../device/convert.rs"]
-mod convert_device;
 mod element;
-#[path = "../device/layout.rs"]
 mod layout;
 mod matmul;
-#[path = "../device/matmul_cooperative.rs"]
-mod matmul_cooperative;
-#[path = "../device/matmul.rs"]
-mod matmul_device;
 mod op;
-#[path = "../device/op.rs"]
-mod op_device;
-#[path = "../device/pointwise.rs"]
 mod pointwise;
-#[path = "../device/pool.rs"]
 mod pool;
 mod reduce;
-#[path = "../device/reduce.rs"]
-mod reduce_device;
 mod rope;
-#[path = "../device/rope.rs"]
-mod rope_device;
-#[path = "../device/scatter.rs"]
 mod scatter;
-#[path = "../device/select.rs"]
 mod select;
-#[path = "../device/softmax.rs"]
 mod softmax;
 
-use neura_abi::{Element, Kind, Module};
+use neura_abi::{DeviceModule, Element, Kind};
 use neura_compiler::{Compiler, ir};
 use neura_profile::Geometry;
 
@@ -50,7 +28,7 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
         compiler.workgroup("scratch_half", "f16", half / 2);
     }
     substrate(compiler, elements);
-    for module in Module::ALL {
+    for module in DeviceModule::ALL {
         if kinds.iter().any(|kind| kind.carries(*module)) {
             install(compiler, *module, elements, geometry);
         }
@@ -77,32 +55,30 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
 }
 
 fn substrate(compiler: &mut Compiler, elements: &[Element]) {
-    element::define(compiler, elements);
-    pointwise::define(compiler);
-    op::define(compiler);
-    rope::define(compiler);
+    element::install(compiler, elements);
+    pointwise::install(compiler);
+    op::install(compiler);
+    rope::install(compiler);
 }
 
-fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geometry: &Geometry) {
+fn install(
+    compiler: &mut Compiler,
+    module: DeviceModule,
+    elements: &[Element],
+    geometry: &Geometry,
+) {
     match module {
-        Module::Matmul => matmul_device::define(compiler),
-        Module::MatmulTiles => {
-            compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
-            matmul::define_cooperative(compiler);
-            matmul::specialize(compiler, geometry);
-        }
-        Module::Attention => attention::define(compiler, geometry),
-        Module::Reduce => reduce::define(compiler),
-        Module::Softmax => softmax::define(compiler),
-        Module::Choice => {
-            compiler.constant("SCRATCH_CHOICE", geometry.choice());
-            choice::define(compiler);
-        }
-        Module::Select => select::define(compiler),
-        Module::Conv => conv::define(compiler),
-        Module::Scatter => scatter::define(compiler),
-        Module::Layout => layout::define(compiler),
-        Module::Pool => pool::define(compiler),
-        Module::Convert => convert::define(compiler, elements),
+        DeviceModule::Matmul => matmul::install(compiler),
+        DeviceModule::MatmulTiles => matmul::install_tiles(compiler, geometry),
+        DeviceModule::Attention => attention::install(compiler, geometry),
+        DeviceModule::Reduce => reduce::install(compiler),
+        DeviceModule::Softmax => softmax::install(compiler),
+        DeviceModule::Choice => choice::install(compiler, geometry),
+        DeviceModule::Select => select::install(compiler),
+        DeviceModule::Conv => conv::install(compiler),
+        DeviceModule::Scatter => scatter::install(compiler),
+        DeviceModule::Layout => layout::install(compiler),
+        DeviceModule::Pool => pool::install(compiler),
+        DeviceModule::Convert => convert::install(compiler, elements),
     }
 }

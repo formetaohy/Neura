@@ -1,0 +1,17 @@
+[package]
+name = "neura-tape"
+version.workspace = true
+edition.workspace = true
+description = "Graph lowering, wave scheduling and device tape encoding"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytemuck = { workspace = true }
+neura-abi = { workspace = true }
+neura-profile = { workspace = true }
+neura-graph = { workspace = true }
+neura-pointwise = { workspace = true }

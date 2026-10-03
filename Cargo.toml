@@ -12,11 +12,9 @@ repository = "https://github.com/formetaohy/Neura"
 [workspace.dependencies]
 bytemuck = { version = "1", features = ["derive"] }
 half = "2"
-naga = { version = "30", default-features = false, features = ["spv-out", "hlsl-out", "msl-out"] }
 syn = { version = "2", features = ["full", "visit-mut", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-spirv = "0.4"
 pollster = "0.4"
 bitflags = "2"
 ash = "0.38"
@@ -27,20 +25,17 @@ windows = "0.62"
 libloading = "0.8"
 neura-abi = { version = "0.4.0", path = "crates/neura-abi" }
 neura-compiler = { version = "0.4.0", path = "crates/neura-compiler" }
-neura-ir = { version = "0.4.0", path = "crates/neura-ir" }
+neura-rust-ir = { version = "0.4.0", path = "crates/neura-rust-ir" }
 neura-macro = { version = "0.4.0", path = "crates/neura-macro" }
-neura-op = { version = "0.4.0", path = "crates/neura-op" }
+neura-pointwise = { version = "0.4.0", path = "crates/neura-pointwise" }
 neura-profile = { version = "0.4.0", path = "crates/neura-profile" }
 neura-precision = { version = "0.4.0", path = "crates/neura-precision" }
 neura-graph = { version = "0.4.0", path = "crates/neura-graph" }
 neura-kernel = { version = "0.4.0", path = "crates/neura-kernel" }
 neura-shader = { version = "0.4.0", path = "crates/neura-shader" }
-neura-shader-ir = { version = "0.4.0", path = "crates/neura-shader-ir" }
-neura-spirv = { version = "0.4.0", path = "crates/neura-spirv" }
-neura-hlsl = { version = "0.4.0", path = "crates/neura-hlsl" }
-neura-msl = { version = "0.4.0", path = "crates/neura-msl" }
+neura-megakernel = { version = "0.4.0", path = "crates/neura-megakernel" }
 neura-gpu = { version = "0.4.0", path = "crates/neura-gpu" }
-neura-program = { version = "0.4.0", path = "crates/neura-program" }
+neura-tape = { version = "0.4.0", path = "crates/neura-tape" }
 neura-runtime = { version = "0.4.0", path = "crates/neura-runtime" }
 neura-nn = { version = "0.4.0", path = "crates/neura-nn" }
 
@@ -62,7 +57,7 @@ repository.workspace = true
 [dependencies]
 neura-abi = { workspace = true }
 neura-graph = { workspace = true }
-neura-program = { workspace = true }
+neura-tape = { workspace = true }
 neura-runtime = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }

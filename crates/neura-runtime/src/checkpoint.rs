@@ -1,5 +1,5 @@
 use neura_abi::{Element, WORD_BYTES};
-use neura_program::Region;
+use neura_tape::Region;
 
 const MAGIC: [u8; 4] = *b"NRCP";
 const VERSION: u32 = 5;

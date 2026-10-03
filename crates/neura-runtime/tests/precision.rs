@@ -2,8 +2,8 @@ use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Pool, Shape, Value, Window};
 use neura_precision::{pack, unpack};
 use neura_profile::{Budget, Profile};
-use neura_program::{Encoding, Layout};
 use neura_runtime::{Runtime, RuntimeRequest};
+use neura_tape::{Layout, Tape};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -170,8 +170,8 @@ fn an_eight_bit_float_arena_holds_a_quarter_of_the_bytes_of_a_wide_one() {
     let narrow_graph = Graph::new();
     let data = narrow_graph.input(Shape::vector(1024), Element::Fp8E4M3);
     narrow_graph.retain(narrow_graph.relu(data));
-    let wide = Encoding::of(&wide_graph, 256, narrow());
-    let narrow = Encoding::of(&narrow_graph, 256, narrow());
+    let wide = Tape::of(&wide_graph, 256, narrow());
+    let narrow = Tape::of(&narrow_graph, 256, narrow());
     assert_eq!(wide.arena_bytes(), 8192);
     assert_eq!(narrow.arena_bytes(), 2048);
 }
@@ -184,8 +184,8 @@ fn a_narrow_arena_holds_half_the_bytes_of_a_wide_one() {
     let narrow_graph = Graph::new();
     let data = narrow_graph.input(Shape::vector(1024), Element::Half);
     narrow_graph.retain(narrow_graph.relu(data));
-    let wide = Encoding::of(&wide_graph, 256, narrow());
-    let narrow = Encoding::of(&narrow_graph, 256, narrow());
+    let wide = Tape::of(&wide_graph, 256, narrow());
+    let narrow = Tape::of(&narrow_graph, 256, narrow());
     assert_eq!(wide.arena_bytes(), 8192);
     assert_eq!(narrow.arena_bytes(), 4096);
 }

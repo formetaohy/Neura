@@ -1,6 +1,5 @@
-use neura_compiler::{
-    Backend, BindingSpec, Read, ReadWrite, ShaderTranslation, Uvec3, abi::ValueRecord, kernel,
-};
+use neura_compiler::{BindingSpec, Read, ReadWrite, Uvec3, abi::ValueRecord, kernel};
+use neura_shader::{Backend, ShaderTranslation};
 
 #[kernel(workgroup_size = 64)]
 fn by_group(group: Uvec3, output: ReadWrite<u32>) {

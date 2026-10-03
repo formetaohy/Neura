@@ -1,7 +1,7 @@
 use neura_abi::{Element, FloatFormat};
 use neura_compiler::{Compiler, ir};
 
-pub fn define(compiler: &mut Compiler, elements: &[Element]) {
+pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     if matches!(elements, [Element::Single]) {
         compiler.select("fetch_single", "fetch");
         return;

@@ -1,4 +1,4 @@
-use neura_abi::{Kind, Module, WORD_BYTES};
+use neura_abi::{DeviceModule, Kind, WORD_BYTES};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct AttentionTile {
@@ -731,7 +731,7 @@ impl Geometry {
     }
 
     pub fn scratch_words(&self, kinds: &[Kind]) -> u32 {
-        Module::ALL
+        DeviceModule::ALL
             .iter()
             .copied()
             .filter(|module| kinds.iter().any(|kind| kind.carries(*module)))
@@ -740,12 +740,14 @@ impl Geometry {
             .unwrap_or(0)
     }
 
-    fn module_scratch(&self, module: Module) -> u32 {
+    fn module_scratch(&self, module: DeviceModule) -> u32 {
         match module {
-            Module::MatmulTiles => (2 * (self.left_stage + self.right_stage)).max(self.copy) as u32,
-            Module::Attention => 2 * self.attention_stage_words(),
-            Module::Reduce => self.workgroup,
-            Module::Choice => 2 * self.workgroup,
+            DeviceModule::MatmulTiles => {
+                (2 * (self.left_stage + self.right_stage)).max(self.copy) as u32
+            }
+            DeviceModule::Attention => 2 * self.attention_stage_words(),
+            DeviceModule::Reduce => self.workgroup,
+            DeviceModule::Choice => 2 * self.workgroup,
             _ => 0,
         }
     }

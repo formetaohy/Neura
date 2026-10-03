@@ -2,7 +2,7 @@
 name = "neura-abi"
 version.workspace = true
 edition.workspace = true
-description = "Rust device records and numeric codes shared with the host"
+description = "Device records, element formats and task codes shared by host and device"
 license.workspace = true
 repository.workspace = true
 

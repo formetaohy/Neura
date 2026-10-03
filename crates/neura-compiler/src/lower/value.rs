@@ -1,6 +1,6 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::{Compiler, DeviceInstruction, ir};
-use neura_shader_ir::{
+use neura_shader::{
     AtomicOp, BinaryOp, Constant, MatrixLayout, MatrixUse, Scalar, Type, TypeId, UnaryOp,
 };
 
@@ -75,7 +75,7 @@ impl Compiler {
                 .unwrap_or_else(|| panic!("Rust device struct {name} has no field {field}")),
             other => panic!(
                 "a field of {} is not accessible",
-                neura_shader_ir::element_name(other)
+                neura_shader::element_name(other)
             ),
         }
     }
@@ -128,7 +128,7 @@ impl FunctionLower<'_> {
             }
             other => panic!(
                 "a field of {} is not accessible",
-                neura_shader_ir::element_name(&other)
+                neura_shader::element_name(&other)
             ),
         }
     }
@@ -143,7 +143,7 @@ impl FunctionLower<'_> {
                 .expect("a device vector lane exists"),
             other => panic!(
                 "a Rust device indexes {} instead of an array or vector",
-                neura_shader_ir::element_name(&other)
+                neura_shader::element_name(&other)
             ),
         }
     }
@@ -186,7 +186,7 @@ impl FunctionLower<'_> {
                     let space = self.compiler.module().global(global).space;
                     let pointer = self.compiler.pointer(space, ty);
                     Some(self.emit(pointer, |result| DeviceInstruction::Address {
-                        address: neura_shader_ir::Address::Global(global),
+                        address: neura_shader::Address::Global(global),
                         result,
                     }))
                 }
@@ -534,7 +534,7 @@ impl FunctionLower<'_> {
                 let source = self.value_with_hint(&args[0], Some(self.compiler.scalar("u32")));
                 let ty = self.compiler.ty("fvec2");
                 self.emit(ty, |result| DeviceInstruction::Math {
-                    fun: neura_shader_ir::MathFun::UnpackHalf2x16,
+                    fun: neura_shader::MathFun::UnpackHalf2x16,
                     arguments: vec![source.value],
                     result,
                 })
@@ -542,18 +542,18 @@ impl FunctionLower<'_> {
             "max" | "min" | "abs" | "sqrt" | "exp" | "log" | "tanh" | "trunc" | "sin" | "cos"
             | "pow" | "floor" => {
                 let fun = match name {
-                    "max" => neura_shader_ir::MathFun::Max,
-                    "min" => neura_shader_ir::MathFun::Min,
-                    "abs" => neura_shader_ir::MathFun::Abs,
-                    "sqrt" => neura_shader_ir::MathFun::Sqrt,
-                    "exp" => neura_shader_ir::MathFun::Exp,
-                    "log" => neura_shader_ir::MathFun::Log,
-                    "tanh" => neura_shader_ir::MathFun::Tanh,
-                    "trunc" => neura_shader_ir::MathFun::Trunc,
-                    "sin" => neura_shader_ir::MathFun::Sin,
-                    "cos" => neura_shader_ir::MathFun::Cos,
-                    "pow" => neura_shader_ir::MathFun::Pow,
-                    "floor" => neura_shader_ir::MathFun::Floor,
+                    "max" => neura_shader::MathFun::Max,
+                    "min" => neura_shader::MathFun::Min,
+                    "abs" => neura_shader::MathFun::Abs,
+                    "sqrt" => neura_shader::MathFun::Sqrt,
+                    "exp" => neura_shader::MathFun::Exp,
+                    "log" => neura_shader::MathFun::Log,
+                    "tanh" => neura_shader::MathFun::Tanh,
+                    "trunc" => neura_shader::MathFun::Trunc,
+                    "sin" => neura_shader::MathFun::Sin,
+                    "cos" => neura_shader::MathFun::Cos,
+                    "pow" => neura_shader::MathFun::Pow,
+                    "floor" => neura_shader::MathFun::Floor,
                     _ => unreachable!(),
                 };
                 assert_eq!(args.len(), fun.arity());
@@ -658,7 +658,7 @@ impl FunctionLower<'_> {
             }
             other => panic!(
                 "a device matrix load reads {}",
-                neura_shader_ir::element_name(other)
+                neura_shader::element_name(other)
             ),
         };
         let stride = self.value_with_hint(&args[1], Some(self.compiler.scalar("u32")));
@@ -694,7 +694,7 @@ impl FunctionLower<'_> {
     }
 }
 
-fn pointer_space(lower: &FunctionLower<'_>, ty: TypeId) -> neura_shader_ir::Space {
+fn pointer_space(lower: &FunctionLower<'_>, ty: TypeId) -> neura_shader::Space {
     lower.compiler.module().pointee(ty).0
 }
 

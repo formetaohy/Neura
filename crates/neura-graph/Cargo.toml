@@ -11,4 +11,4 @@ workspace = true
 
 [dependencies]
 neura-abi = { workspace = true }
-neura-op = { workspace = true }
+neura-pointwise = { workspace = true }

@@ -9,12 +9,12 @@ use neura_gpu::{
     SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
-use neura_op as op;
+use neura_megakernel::Megakernel;
+use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, Profile};
-use neura_program::{Encoding, Layout, Span};
-use neura_shader::Megakernel;
+use neura_tape::{Layout, Span, Tape};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -269,8 +269,8 @@ impl Runtime {
 
     pub fn precompile(&self, graph: &Graph, profile: Profile) {
         self.assert_profile(profile);
-        let encoding = Encoding::of(graph, self.alignment, profile);
-        let kernel = self.kernel(&encoding, profile);
+        let tape = Tape::of(graph, self.alignment, profile);
+        let kernel = self.kernel(&tape, profile);
         self.context.declare(kernel.program()).compile();
     }
 
@@ -299,25 +299,23 @@ impl Runtime {
         let revision = graph.revision();
         let tape = self.assemble(graph, profile);
         assert!(
-            tape.encoding.task_count() > 0,
+            tape.image.task_count() > 0,
             "a program whose tape holds no task has nothing for the device to run",
         );
         assert!(
-            tape.encoding.weights() == weights.region(),
+            tape.image.weights() == weights.region(),
             "this graph holds {} parameters where the weight store carries {}; one store serves every program of one model",
-            tape.encoding.weights().tensors(),
+            tape.image.weights().tensors(),
             weights.tensors(),
         );
         assert!(
-            tape.encoding.state().tensors() == 0 || tape.encoding.state() == weights.state(),
+            tape.image.state().tensors() == 0 || tape.image.state() == weights.state(),
             "this graph trains with {} tensors of state where the store carries {}; a store serves one training state",
-            tape.encoding.state().tensors(),
+            tape.image.state().tensors(),
             weights.state().tensors(),
         );
         tape.kernel.compile();
-        let tensors = self
-            .heap
-            .allocate(tape.encoding.tensor_bytes() / WORD_BYTES);
+        let tensors = self.heap.allocate(tape.image.tensor_bytes() / WORD_BYTES);
         Program::of(&self.context, tape, tensors, weights.clone(), revision)
     }
 
@@ -329,7 +327,7 @@ impl Runtime {
             DeviceTape::build(
                 &self.context,
                 &self.pool,
-                plan.encoding.clone(),
+                plan.image.clone(),
                 plan.kernel.clone(),
                 signature,
             )
@@ -337,24 +335,24 @@ impl Runtime {
     }
 
     fn plan(&self, graph: &Graph, profile: Profile) -> Plan {
-        let encoding = Arc::new(Encoding::of(graph, self.alignment, profile));
-        let signature = tape::signature(&encoding, profile, self.alignment);
-        let kernel = self.kernel(&encoding, profile);
+        let tape = Arc::new(Tape::of(graph, self.alignment, profile));
+        let signature = tape::signature(&tape, profile, self.alignment);
+        let kernel = self.kernel(&tape, profile);
         Plan {
             signature,
-            encoding,
+            image: tape,
             kernel,
         }
     }
 
-    fn kernel(&self, encoding: &Encoding, profile: Profile) -> Arc<Megakernel> {
-        let kinds = encoding.kinds().to_vec();
-        let elements = encoding.elements().to_vec();
+    fn kernel(&self, tape: &Tape, profile: Profile) -> Arc<Megakernel> {
+        let kinds = tape.kinds().to_vec();
+        let elements = tape.elements().to_vec();
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            encoding.tiles(),
-            encoding.attention(),
+            tape.tiles(),
+            tape.attention(),
         );
         self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
             Megakernel::assemble(&kinds, &elements, geometry)

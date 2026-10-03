@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-pub use neura_compiler::Backend;
+pub use neura_shader::Backend;
 use std::fmt::{self, Display, Formatter};
 
 bitflags! {

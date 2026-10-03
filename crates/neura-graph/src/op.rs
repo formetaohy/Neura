@@ -3,7 +3,7 @@ use crate::pool::Pool;
 use crate::shape::Shape;
 use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
-use neura_op as op;
+use neura_pointwise as op;
 
 impl<'g> Graph<'g> {
     pub fn matmul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {

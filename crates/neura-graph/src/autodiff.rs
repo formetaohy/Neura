@@ -1,7 +1,7 @@
 use crate::graph::{Graph, NORM_FLOOR, Residency, TaskInfo, Value, ValueInfo, advance};
 use crate::shape::Shape;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
-use neura_op as op;
+use neura_pointwise as op;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

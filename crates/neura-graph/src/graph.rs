@@ -3,7 +3,7 @@ use crate::init::Init;
 use crate::shape::Shape;
 use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
-use neura_op as op;
+use neura_pointwise as op;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

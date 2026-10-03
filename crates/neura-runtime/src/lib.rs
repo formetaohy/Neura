@@ -12,7 +12,7 @@ pub use neura_gpu::{
     GpuRequest, GpuUnavailable, Queue,
 };
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
-pub use neura_program::Span;
+pub use neura_tape::Span;
 pub use program::{Program, Weights};
 pub use runtime::{
     DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, READBACK_SLOTS, Readout, Run, Runtime,

@@ -11,10 +11,10 @@ workspace = true
 
 [dependencies]
 bitflags = { workspace = true }
-neura-abi = { workspace = true }
-neura-compiler = { workspace = true }
+neura-shader = { workspace = true }
 
 [dev-dependencies]
+neura-compiler = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 

@@ -1,0 +1,10 @@
+[package]
+name = "neura-rust-ir"
+version.workspace = true
+edition.workspace = true
+description = "The abstract syntax tree of the Rust device DSL"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

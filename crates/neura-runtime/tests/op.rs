@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_op::{self as op, OPS};
+use neura_pointwise::{self as op, OPS};
 
 #[path = "support/mod.rs"]
 mod support;

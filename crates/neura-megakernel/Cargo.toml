@@ -1,0 +1,20 @@
+[package]
+name = "neura-megakernel"
+version.workspace = true
+edition.workspace = true
+description = "Assembly of the device megakernel every task kind runs inside"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+neura-compiler = { workspace = true }
+neura-shader = { workspace = true }
+neura-profile = { workspace = true }
+neura-kernel = { workspace = true }
+
+[dev-dependencies]
+neura-pointwise = { workspace = true }

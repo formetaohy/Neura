@@ -1,5 +1,5 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Module {
+pub enum DeviceModule {
     Matmul,
     MatmulTiles,
     Attention,
@@ -14,8 +14,8 @@ pub enum Module {
     Convert,
 }
 
-impl Module {
-    pub const ALL: &'static [Module] = &[
+impl DeviceModule {
+    pub const ALL: &'static [DeviceModule] = &[
         Self::Matmul,
         Self::MatmulTiles,
         Self::Attention,
@@ -63,7 +63,7 @@ pub struct KindInfo {
     pub symbol: &'static str,
     pub name: &'static str,
     pub entry: &'static str,
-    pub modules: &'static [Module],
+    pub modules: &'static [DeviceModule],
     pub geometry: Geometry,
     pub prelude: bool,
     pub chain: bool,
@@ -71,7 +71,7 @@ pub struct KindInfo {
 }
 
 impl KindInfo {
-    pub fn carries(self, module: Module) -> bool {
+    pub fn carries(self, module: DeviceModule) -> bool {
         self.modules.contains(&module)
     }
 }
@@ -125,7 +125,7 @@ macro_rules! kinds {
                 self.info().entry
             }
 
-            pub fn carries(self, module: Module) -> bool {
+            pub fn carries(self, module: DeviceModule) -> bool {
                 self.info().carries(module)
             }
 
@@ -151,7 +151,7 @@ macro_rules! kinds {
             symbol: concat!("kind::", stringify!($symbol)),
             name: $label,
             entry: $entry,
-            modules: &[$(Module::$module),*],
+            modules: &[$(DeviceModule::$module),*],
             geometry: Geometry::$geometry,
             prelude: $prelude,
             chain: $chain,

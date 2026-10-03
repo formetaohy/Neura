@@ -38,6 +38,14 @@ fn expand_module(input: Tokens) -> syn::Result<Tokens> {
             "a kernel module is defined inline",
         ));
     };
+    if let Some(attribute) = module.attrs.first() {
+        return Err(syn::Error::new_spanned(
+            attribute,
+            "a kernel module carries no attribute of its own",
+        ));
+    }
+    let visibility = module.vis;
+    let name = module.ident;
     let mut definitions = Vec::new();
     let mut entry = None;
     for item in items {
@@ -88,11 +96,13 @@ fn expand_module(input: Tokens) -> syn::Result<Tokens> {
         )
     });
     Ok(quote! {
-        #entry
-        pub(crate) fn define(compiler: &mut ::neura_compiler::Compiler) {
-            use ::neura_compiler::ir as neura_ir;
-            #use_entry
-            #(compiler.function(#definitions);)*
+        #visibility mod #name {
+            #entry
+            pub(crate) fn define(compiler: &mut ::neura_compiler::Compiler) {
+                use ::neura_compiler::ir as neura_rust_ir;
+                #use_entry
+                #(compiler.function(#definitions);)*
+            }
         }
     })
 }
@@ -261,7 +271,7 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
             static PROGRAM: ::std::sync::OnceLock<::neura_compiler::ComputeProgram> =
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
-                use ::neura_compiler::ir as neura_ir;
+                use ::neura_compiler::ir as neura_rust_ir;
                 let mut compiler = ::neura_compiler::Compiler::empty();
                 #(#records)*
                 #(#bindings)*

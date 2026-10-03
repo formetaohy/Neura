@@ -4,9 +4,9 @@ use crate::tape::DeviceTape;
 use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
+use neura_megakernel::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
 use neura_profile::{MatmulTile, Profile};
-use neura_program::{Region, Span};
-use neura_shader::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_tape::{Region, Span};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -102,8 +102,8 @@ impl<'r> Program<'r> {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
-        let waves = tape.encoding.wave_count();
-        let segments = tape.encoding.segments().len() as u32;
+        let waves = tape.image.wave_count();
+        let segments = tape.image.segments().len() as u32;
         let header = progress::header(segments, waves);
         let progress_buffer = Recycled::claim(
             pool,
@@ -113,12 +113,12 @@ impl<'r> Program<'r> {
         );
         progress_buffer.buffer().write(
             queue,
-            bytemuck::cast_slice(&progress::words(segments, tape.encoding.wave_tasks())),
+            bytemuck::cast_slice(&progress::words(segments, tape.image.wave_tasks())),
         );
         let mut clearing = Submission::new(context.device(), "neura tensors");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
-        for quantum in tape.encoding.quanta() {
+        for quantum in tape.image.quanta() {
             tensors.buffer().write_at(
                 queue,
                 tensors.offset() + quantum.offset,
@@ -175,7 +175,7 @@ impl<'r> Program<'r> {
                     .binding(0, tape.segments.buffer().size()),
             },
         ]);
-        let workgroups = segments.min(tape.encoding.profile().workgroups()).max(1);
+        let workgroups = segments.min(tape.image.profile().workgroups()).max(1);
         Self {
             brand: PhantomData,
             tape,
@@ -223,15 +223,15 @@ impl<'r> Program<'r> {
     }
 
     pub fn tensor_bytes(&self) -> u64 {
-        self.tape.encoding.tensor_bytes()
+        self.tape.image.tensor_bytes()
     }
 
     pub fn arena_bytes(&self) -> u64 {
-        self.tape.encoding.arena_bytes()
+        self.tape.image.arena_bytes()
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        self.tape.encoding.resident_bytes()
+        self.tape.image.resident_bytes()
     }
 
     pub fn weights(&self) -> &Weights<'r> {
@@ -250,7 +250,7 @@ impl<'r> Program<'r> {
     }
 
     pub fn profile(&self) -> Profile {
-        self.tape.encoding.profile()
+        self.tape.image.profile()
     }
 
     pub fn is_compiled(&self) -> bool {
@@ -258,23 +258,23 @@ impl<'r> Program<'r> {
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        self.tape.encoding.tiles()
+        self.tape.image.tiles()
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
-        self.tape.encoding.matmul_geometries()
+        self.tape.image.matmul_geometries()
     }
 
     pub fn task_count(&self) -> u32 {
-        self.tape.encoding.task_count()
+        self.tape.image.task_count()
     }
 
     pub fn step_count(&self) -> u32 {
-        self.tape.encoding.step_count()
+        self.tape.image.step_count()
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.tape.encoding.wave_count()
+        self.tape.image.wave_count()
     }
 
     pub fn workgroups(&self) -> u32 {
@@ -282,22 +282,22 @@ impl<'r> Program<'r> {
     }
 
     pub fn value_count(&self) -> u32 {
-        self.tape.encoding.value_count()
+        self.tape.image.value_count()
     }
 
     pub fn work(&self) -> u64 {
-        self.tape.encoding.work()
+        self.tape.image.work()
     }
 
     pub fn readable(&self, value: Value) -> bool {
-        self.tape.encoding.readable(value)
+        self.tape.image.readable(value)
     }
 
     pub fn updates_weights(&self) -> bool {
-        self.tape.encoding.updates_weights()
+        self.tape.image.updates_weights()
     }
 
     pub fn span(&self, value: Value) -> Span {
-        self.tape.encoding.span(value, self.at())
+        self.tape.image.span(value, self.at())
     }
 }
