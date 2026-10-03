@@ -1,5 +1,6 @@
-use neura_abi::Element;
+use neura_abi::{Element, Kind};
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
+use neura_plan::Plan;
 use neura_runtime::Runtime;
 
 #[path = "support/mod.rs"]
@@ -321,4 +322,74 @@ fn a_host_extent_and_a_device_count_share_one_graph() {
         assembled,
         "one device program serves every count a graph walks",
     );
+}
+
+const SPLIT_TOKENS: u32 = 128;
+const SPLIT_DEPTH: u32 = 1024;
+const SPLIT_COLUMNS: u32 = 64;
+
+struct Split {
+    probe: Value<'static>,
+    tokens: Value<'static>,
+    out: Value<'static>,
+}
+
+fn split_product(graph: &Graph<'static>, bound: u32) -> Split {
+    let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
+    let tokens = graph.input(Shape::of([1, 1, bound, SPLIT_DEPTH]), Element::Single);
+    let weight = graph.parameter(
+        Shape::matrix(SPLIT_DEPTH, SPLIT_COLUMNS),
+        weights(),
+        Element::Single,
+    );
+    let count = graph.sum_axis(probe, 2);
+    let live = graph.trim(tokens, 2, count);
+    let out = graph.matmul(live, weight);
+    graph.retain(out);
+    Split { probe, tokens, out }
+}
+
+fn split_reference(runtime: &Runtime, rows: u32, tokens: &[f32]) -> Vec<f32> {
+    let graph = Graph::new();
+    let data = graph.input(Shape::of([1, 1, rows, SPLIT_DEPTH]), Element::Single);
+    let weight = graph.parameter(
+        Shape::matrix(SPLIT_DEPTH, SPLIT_COLUMNS),
+        weights(),
+        Element::Single,
+    );
+    let out = graph.matmul(data, weight);
+    graph.retain(out);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    runtime.write(&program, data, tokens);
+    runtime.run(&program);
+    runtime.read(&program, out)
+}
+
+#[test]
+fn a_device_count_rules_the_rows_a_depth_split_product_walks() {
+    let runtime = open();
+    let graph = Graph::new();
+    let model = split_product(&graph, SPLIT_TOKENS);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    let plan = Plan::of(&graph, runtime.alignment(), program.profile());
+    assert!(
+        plan.kinds().contains(&Kind::MatmulFold),
+        "the product splits its depth across tasks, and the layout of the partials the fold reads is the one the live rows give",
+    );
+    let tokens = data(SPLIT_TOKENS * SPLIT_DEPTH, 29);
+    runtime.write(&program, model.tokens, &tokens);
+    for live in [
+        SPLIT_TOKENS,
+        SPLIT_TOKENS * 3 / 4,
+        SPLIT_TOKENS / 2,
+        SPLIT_TOKENS / 4,
+    ] {
+        runtime.write(&program, model.probe, &live_probe(SPLIT_TOKENS, live));
+        runtime.run(&program);
+        let actual = runtime.read(&program, model.out);
+        let expected = split_reference(&runtime, live, &tokens[..(live * SPLIT_DEPTH) as usize]);
+        assert_close(&actual, &expected, 1e-3);
+    }
 }

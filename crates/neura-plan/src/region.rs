@@ -41,112 +41,81 @@ pub(crate) struct Touches {
     pub(crate) reads: Vec<(u32, Region)>,
 }
 
-pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
-    let mut touches = Touches::default();
-    let out = values[task.out as usize].clone();
-    if !owned(values, task.out) || !dense(&out) {
-        whole(values, task, &mut touches);
-        return touches;
-    }
-    match task.kind {
-        Kind::Matmul => product(values, tiles, task, &mut touches),
-        Kind::MatmulFold => fold(values, task, &mut touches),
-        Kind::Convert => convert(values, task, &mut touches),
-        Kind::Binary | Kind::Unary | Kind::Fill | Kind::Broadcast | Kind::Partial => {
-            let range = Region::run(u64::from(task.first), u64::from(task.count));
-            for value in task.writes() {
-                touches.writes.push((values[value as usize].storage, range));
-            }
-            for value in task.reads() {
-                let source = &values[value as usize];
-                let region = if source.shape == out.shape && dense(source) && owned(values, value) {
-                    range
-                } else {
-                    Region::Whole
-                };
-                touches.reads.push((source.storage, region));
-            }
-        }
-        Kind::Rope | Kind::RopeGrad => {
-            let half = u64::from(out.shape.dims()[3] / 2);
-            let first = u64::from(task.first);
-            let count = u64::from(task.count);
-            for value in task.writes() {
-                touches
-                    .writes
-                    .push((values[value as usize].storage, Region::run(first, count)));
-            }
-            for value in task
-                .inputs
-                .iter()
-                .copied()
-                .filter(|value| *value != NO_VALUE)
-            {
-                let source = &values[value as usize];
-                let region = if source.shape == out.shape && dense(source) && owned(values, value) {
-                    Region::run(first.saturating_sub(half), count + 2 * half)
-                } else {
-                    Region::Whole
-                };
-                touches.reads.push((source.storage, region));
-            }
-            for value in std::iter::once(task.origin)
-                .chain(task.prelude.iter().map(|step| step.operand))
-                .chain(task.chain.iter().map(|step| step.operand))
-                .filter(|value| *value != NO_VALUE)
-            {
-                touches
-                    .reads
-                    .push((values[value as usize].storage, Region::Whole));
-            }
-        }
-        Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
-            let columns = u64::from(out.shape.dims()[3]);
-            let range = Region::run(
-                u64::from(task.first) * columns,
-                u64::from(task.count) * columns,
-            );
-            touches.writes.push((out.storage, range));
-            for value in task
-                .inputs
-                .iter()
-                .copied()
-                .filter(|value| *value != NO_VALUE)
-            {
-                let source = &values[value as usize];
-                let region = if source.shape.dims()[3] == out.shape.dims()[3] {
-                    range
-                } else {
-                    Region::Whole
-                };
-                touches.reads.push((source.storage, region));
-            }
-            for value in std::iter::once(task.origin)
-                .chain(task.prelude.iter().map(|step| step.operand))
-                .chain(task.chain.iter().map(|step| step.operand))
-                .filter(|value| *value != NO_VALUE)
-            {
-                touches
-                    .reads
-                    .push((values[value as usize].storage, Region::Whole));
-            }
-        }
-        _ => whole(values, task, &mut touches),
-    }
-    touches
+#[derive(Default)]
+struct Narrowed {
+    writes: Vec<(u32, Region)>,
+    reads: Vec<(u32, Region)>,
 }
 
-fn whole(values: &[ValueInfo], task: &Task, touches: &mut Touches) {
-    for value in task.writes() {
-        touches
-            .writes
-            .push((values[value as usize].storage, Region::Whole));
+impl Narrowed {
+    fn narrow_write(&mut self, value: u32, region: Region) {
+        self.writes.push((value, region));
     }
-    for value in task.reads() {
-        touches
-            .reads
-            .push((values[value as usize].storage, Region::Whole));
+
+    fn narrow_read(&mut self, value: u32, region: Region) {
+        self.reads.push((value, region));
     }
+
+    fn read_whole(&mut self, value: u32) {
+        if value != NO_VALUE {
+            self.reads.push((value, Region::Whole));
+        }
+    }
+
+    fn region_of(regions: &[(u32, Region)], value: u32) -> Region {
+        regions
+            .iter()
+            .rev()
+            .find(|(kept, _)| *kept == value)
+            .map_or(Region::Whole, |(_, region)| *region)
+    }
+}
+
+pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
+    let narrowed = narrowed(values, tiles, task);
+    Touches {
+        writes: task
+            .writes()
+            .map(|value| {
+                (
+                    values[value as usize].storage,
+                    Narrowed::region_of(&narrowed.writes, value),
+                )
+            })
+            .collect(),
+        reads: task
+            .reads()
+            .map(|value| {
+                (
+                    values[value as usize].storage,
+                    Narrowed::region_of(&narrowed.reads, value),
+                )
+            })
+            .collect(),
+    }
+}
+
+fn narrowed(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Narrowed {
+    let mut narrowed = Narrowed::default();
+    if owned(values, task.out) && dense(&values[task.out as usize]) {
+        match task.kind {
+            Kind::Matmul => product(values, tiles, task, &mut narrowed),
+            Kind::MatmulFold => fold(values, task, &mut narrowed),
+            Kind::Convert => convert(values, task, &mut narrowed),
+            Kind::Rope | Kind::RopeGrad => rope(values, task, &mut narrowed),
+            Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
+                softmax(values, task, &mut narrowed)
+            }
+            Kind::Binary | Kind::Unary | Kind::Fill | Kind::Broadcast | Kind::Partial => {
+                elementwise(values, task, &mut narrowed)
+            }
+            _ => {}
+        }
+    }
+    for count in &task.depends {
+        narrowed.read_whole(*count);
+    }
+    narrowed
 }
 
 fn owned(values: &[ValueInfo], value: u32) -> bool {
@@ -157,9 +126,26 @@ fn dense(info: &ValueInfo) -> bool {
     info.strides == info.shape.strides()
 }
 
-fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, touches: &mut Touches) {
-    let left = values[task.inputs[0] as usize].clone();
-    let right = values[task.inputs[1] as usize].clone();
+fn elementwise(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
+    let out = &values[task.out as usize];
+    let range = Region::run(u64::from(task.first), u64::from(task.count));
+    for value in task.writes() {
+        narrowed.narrow_write(value, range);
+    }
+    for value in task.reads() {
+        let source = &values[value as usize];
+        let region = if source.shape == out.shape && dense(source) && owned(values, value) {
+            range
+        } else {
+            Region::Whole
+        };
+        narrowed.narrow_read(value, region);
+    }
+}
+
+fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, narrowed: &mut Narrowed) {
+    let left = &values[task.inputs[0] as usize];
+    let right = &values[task.inputs[1] as usize];
     let rows = u64::from(left.shape.dims()[2]);
     let columns = u64::from(right.shape.dims()[3]);
     let plane_columns = u64::from(left.shape.dims()[1].max(right.shape.dims()[1]));
@@ -172,24 +158,15 @@ fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, touches: &mu
     let within = u64::from(task.first) % tiles_per_plane;
     let base_row = (within / column_blocks) * u64::from(tile.rows());
     let band_rows = u64::from(tile.rows()).min(rows - base_row);
-    let write = if dense(&values[task.out as usize]) {
+    narrowed.narrow_write(
+        task.out,
         Region::run(
             (u64::from(task.slot) * planes + plane) * rows * columns + base_row * columns,
             band_rows * columns,
-        )
-    } else {
-        Region::Whole
-    };
-    touches
-        .writes
-        .push((values[task.out as usize].storage, write));
-    for extra in [task.extra].into_iter().filter(|value| *value != NO_VALUE) {
-        touches
-            .writes
-            .push((values[extra as usize].storage, Region::Whole));
-    }
+        ),
+    );
     let strides = left.shape.strides();
-    let band = if dense(&left) && left.shape.dims()[3] > 1 {
+    let band = if dense(left) && left.shape.dims()[3] > 1 {
         Region::run(
             (plane / plane_columns) * u64::from(strides[0])
                 + (plane % plane_columns) * u64::from(strides[1])
@@ -199,77 +176,78 @@ fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, touches: &mu
     } else {
         Region::Whole
     };
-    touches.reads.push((left.storage, band));
-    for value in task.inputs[1..].iter().copied() {
-        if value != NO_VALUE {
-            touches
-                .reads
-                .push((values[value as usize].storage, Region::Whole));
-        }
-    }
-    for value in std::iter::once(task.origin)
-        .chain(task.prelude.iter().map(|step| step.operand))
-        .chain(task.chain.iter().map(|step| step.operand))
-        .filter(|value| *value != NO_VALUE)
-    {
-        touches
-            .reads
-            .push((values[value as usize].storage, Region::Whole));
-    }
+    narrowed.narrow_read(task.inputs[0], band);
 }
 
-fn fold(values: &[ValueInfo], task: &Task, touches: &mut Touches) {
-    let out = values[task.out as usize].clone();
+fn fold(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
+    let out = &values[task.out as usize];
     let elements = u64::from(out.shape.elements());
     let partials = &values[task.inputs[0] as usize];
     let span = u64::from(task.splits) * elements;
-    touches.writes.push((
-        out.storage,
+    narrowed.narrow_write(
+        task.out,
         Region::run(u64::from(task.first), u64::from(task.count)),
-    ));
+    );
     let read = if dense(partials) {
         Region::run(u64::from(task.first), span - u64::from(task.first))
     } else {
         Region::Whole
     };
-    touches.reads.push((partials.storage, read));
-    for value in task
-        .chain
-        .iter()
-        .map(|step| step.operand)
-        .filter(|value| *value != NO_VALUE)
-    {
-        touches
-            .reads
-            .push((values[value as usize].storage, Region::Whole));
-    }
+    narrowed.narrow_read(task.inputs[0], read);
 }
 
-fn convert(values: &[ValueInfo], task: &Task, touches: &mut Touches) {
-    let out = values[task.out as usize].clone();
+fn convert(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
+    let out = &values[task.out as usize];
     let stride = out.element.elements_per_word();
     let first = u64::from(task.first) * stride;
     let count = u64::from(task.count) * stride;
-    let range = if dense(&out) {
-        Region::run(first, count)
-    } else {
-        Region::Whole
-    };
-    touches.writes.push((out.storage, range));
-    for value in task
-        .inputs
-        .iter()
-        .copied()
-        .chain(task.prelude.iter().map(|step| step.operand))
-        .chain(task.chain.iter().map(|step| step.operand))
-        .filter(|value| *value != NO_VALUE)
-    {
+    narrowed.narrow_write(task.out, Region::run(first, count));
+    for value in task.reads() {
         let source = &values[value as usize];
         let region = if source.shape == out.shape && dense(source) {
             Region::run(first, count)
         } else {
             Region::Whole
         };
-        touches.reads.push((source.storage, region));
+        narrowed.narrow_read(value, region);
+    }
+}
+
+fn rope(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
+    let out = &values[task.out as usize];
+    let half = u64::from(out.shape.dims()[3] / 2);
+    let first = u64::from(task.first);
+    let count = u64::from(task.count);
+    let range = Region::run(first, count);
+    for value in task.writes() {
+        narrowed.narrow_write(value, range);
+    }
+    for value in task.reads() {
+        let source = &values[value as usize];
+        let region = if source.shape == out.shape && dense(source) && owned(values, value) {
+            Region::run(first.saturating_sub(half), count + 2 * half)
+        } else {
+            Region::Whole
+        };
+        narrowed.narrow_read(value, region);
+    }
+}
+
+fn softmax(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
+    let out = &values[task.out as usize];
+    let columns = u64::from(out.shape.dims()[3]);
+    let range = Region::run(
+        u64::from(task.first) * columns,
+        u64::from(task.count) * columns,
+    );
+    narrowed.narrow_write(task.out, range);
+    for value in task.reads() {
+        let source = &values[value as usize];
+        let region = if source.shape.dims()[3] == out.shape.dims()[3] {
+            range
+        } else {
+            Region::Whole
+        };
+        narrowed.narrow_read(value, region);
     }
 }

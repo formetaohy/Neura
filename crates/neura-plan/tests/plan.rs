@@ -1,5 +1,5 @@
 use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
-use neura_graph::{Graph, Init, Shape};
+use neura_graph::{AttentionOptions, Graph, Init, Shape};
 use neura_pointwise as op;
 use neura_profile::{
     AttentionTile, Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
@@ -1902,6 +1902,78 @@ fn a_plan_walks_the_extent_a_device_count_authors() {
         assert!(
             (task.measure as usize) < plan.measures().len(),
             "a task the device count rules walks a measure of the plan",
+        );
+    }
+}
+
+#[test]
+fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() {
+    let graph = Graph::new();
+    let bound = 64u32;
+    let depth = 1024u32;
+    let columns = 64u32;
+    let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
+    let tokens = graph.input(Shape::of([1, 1, bound, depth]), Element::Single);
+    let weight = graph.parameter(Shape::matrix(depth, columns), Init::Zero, Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let live = graph.trim(tokens, 2, count);
+    let product = graph.matmul(live, weight);
+    let rotated = graph.rope(product, None, 10_000.0);
+    let attended = graph.attention(
+        rotated,
+        rotated,
+        rotated,
+        AttentionOptions {
+            scale: 0.125,
+            causal: true,
+            origin: None,
+        },
+    );
+    let probabilities = graph.softmax(attended);
+    let narrow = graph.cast(probabilities, Element::Half);
+    graph.retain(product);
+    graph.retain(narrow);
+    let plan = plan(&graph);
+    assert_eq!(plan.patches().len(), 1, "one task authors the extent");
+    assert!(
+        kinds(&plan).contains(&Kind::MatmulFold),
+        "the product splits its depth across tasks, and the fold reads the partials only the split laid out",
+    );
+    let records = tasks(&plan);
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the task that authors the extent");
+    let patch = plan.patches()[0];
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    let steps = steps(&plan);
+    for (index, task) in records.iter().enumerate() {
+        let reads = [task.a, task.b, task.c, task.d, task.e, task.f, task.origin]
+            .into_iter()
+            .chain(
+                (task.prelude..task.prelude + task.prelude_steps)
+                    .map(|step| steps[step as usize].operand),
+            )
+            .chain((task.chain..task.chain + task.steps).map(|step| steps[step as usize].operand))
+            .filter(|value| *value != neura_abi::NO_VALUE)
+            .collect::<Vec<u32>>();
+        if reads.iter().any(|value| values.contains(value)) {
+            assert!(
+                follows(&plan, author, index),
+                "task {index} walks the extent the task {author} authors, and the device only patches that extent after the authoring workgroup runs it",
+            );
+        }
+    }
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    assert!(
+        !patched.is_empty(),
+        "the count rules the range of some task",
+    );
+    for at in patched {
+        assert!(
+            follows(&plan, author, *at as usize),
+            "task {at} walks a range the task {author} authors, and the device only patches that range after the authoring workgroup runs it",
         );
     }
 }
