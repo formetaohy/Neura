@@ -1473,6 +1473,22 @@ fn a_quantized_image_packs_four_numbers_a_word() {
         half_precision.arena_bytes(),
         Element::Half.storage_words(300) * WORD_BYTES,
     );
+    let span = plan.span(quantized, PLACEMENT);
+    assert_eq!(
+        span.payload_bytes(),
+        Element::Int8.payload_words(300) * WORD_BYTES,
+        "a quantized image packs a word of every four numbers it holds",
+    );
+    assert_eq!(
+        span.table_offset(),
+        span.payload_bytes(),
+        "a tensor of the shape its bound declares stands quantum beside payload",
+    );
+    assert_eq!(span.table_bytes(), WORD_BYTES);
+    assert_eq!(
+        span.image_bytes(),
+        Element::Int8.storage_words(300) * WORD_BYTES,
+    );
 }
 
 #[test]

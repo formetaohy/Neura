@@ -279,6 +279,49 @@ fn a_convolution_and_a_view_follow_every_binding() {
 }
 
 #[test]
+fn a_quantized_image_reads_back_the_quantum_its_storage_holds() {
+    let runtime = open();
+    let graph = Graph::new();
+    let tokens = graph.free(6);
+    let observations = graph.input(
+        Shape::of([1, 1, 6, 4]).freed(&[(2, tokens)]),
+        Element::Single,
+    );
+    let quantized = graph.quantize(observations, 0.25);
+    let squared = graph.mul(quantized, quantized);
+    graph.retain(quantized);
+    graph.retain(squared);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    for tokens in [6u32, 4, 1, 3, 0] {
+        runtime.bind(&program, &[tokens]);
+        let source = data(tokens * 4, 17);
+        runtime.write(&program, observations, &source);
+        runtime.run(&program);
+        let span = program.span(quantized);
+        assert_eq!(
+            span.payload_bytes(),
+            Element::Int8.payload_words(u64::from(tokens * 4)) * 4,
+            "a quantized image packs one word of every four numbers the binding names",
+        );
+        assert_eq!(
+            span.table_offset(),
+            Element::Int8.payload_words(6 * 4) * 4,
+            "the quantum a quantized tensor reconstructs by stands where the layout its bound declares puts it, whatever the binding",
+        );
+        assert_eq!(span.image_bytes(), span.payload_bytes() + 4);
+        let packed = source
+            .iter()
+            .map(|value| (value / 0.25).round().clamp(-127.0, 127.0) * 0.25)
+            .collect::<Vec<_>>();
+        let expected = packed.iter().map(|value| value * value).collect::<Vec<_>>();
+        let produced = runtime.read_many(&program, &[quantized, squared]);
+        assert_close(&produced[0], &packed, 1e-6);
+        assert_close(&produced[1], &expected, 1e-6);
+    }
+}
+
+#[test]
 fn a_zero_extent_runs_the_tasks_that_remain() {
     let runtime = open();
     let graph = Graph::new();

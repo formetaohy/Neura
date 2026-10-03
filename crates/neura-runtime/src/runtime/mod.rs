@@ -472,10 +472,19 @@ impl Runtime {
             span.elements,
         );
         let bytes = pack(span.element, span.scale, data);
-        if !bytes.is_empty() {
+        let payload = span.payload_bytes() as usize;
+        if payload > 0 {
             program
                 .heap()
-                .write_at(self.context.queue(), span.offset, &bytes);
+                .write_at(self.context.queue(), span.offset, &bytes[..payload]);
+        }
+        let table = &bytes[payload..];
+        if !table.is_empty() {
+            program.heap().write_at(
+                self.context.queue(),
+                span.offset + span.table_offset(),
+                table,
+            );
         }
     }
 
@@ -504,7 +513,7 @@ impl Runtime {
                 value.id(),
             );
         }
-        let total = spans.iter().map(|span| span_bytes(*span)).sum::<u64>() + WORD_BYTES;
+        let total = spans.iter().map(|span| span.image_bytes()).sum::<u64>() + WORD_BYTES;
         assert!(
             total <= self.readback.capacity(),
             "pulling {total} bytes outruns the {} byte readback of this runtime",
@@ -517,12 +526,22 @@ impl Runtime {
         let mut collected = Vec::with_capacity(spans.len());
         let mut at = 0;
         for span in &spans {
-            let bytes = span_bytes(*span);
-            if bytes > 0 {
-                submission.copy(program.heap(), span.offset, staging, at, bytes);
+            let payload = span.payload_bytes();
+            let table = span.table_bytes();
+            if payload > 0 {
+                submission.copy(program.heap(), span.offset, staging, at, payload);
             }
-            collected.push((*span, at, bytes));
-            at += bytes;
+            if table > 0 {
+                submission.copy(
+                    program.heap(),
+                    span.offset + span.table_offset(),
+                    staging,
+                    at + payload,
+                    table,
+                );
+            }
+            collected.push((*span, at, payload + table));
+            at += payload + table;
         }
         submission.copy(program.refusal.buffer(), 0, staging, at, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
@@ -599,10 +618,6 @@ impl Runtime {
     pub fn built_plans(&self) -> usize {
         self.artifacts.built()
     }
-}
-
-fn span_bytes(span: Span) -> u64 {
-    span.element.storage_words(u64::from(span.elements)) * WORD_BYTES
 }
 
 fn stored<'s>(region: &'s Region, store: &'s [u8], section: &str) -> Vec<TensorData<'s>> {

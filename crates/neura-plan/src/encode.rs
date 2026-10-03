@@ -32,6 +32,25 @@ pub struct Span {
     pub elements: u32,
     pub element: Element,
     pub scale: f32,
+    table: u64,
+}
+
+impl Span {
+    pub fn payload_bytes(&self) -> u64 {
+        self.element.payload_words(u64::from(self.elements)) * WORD_BYTES
+    }
+
+    pub fn table_bytes(&self) -> u64 {
+        self.element.quanta(u64::from(self.elements)) * WORD_BYTES
+    }
+
+    pub fn table_offset(&self) -> u64 {
+        self.table * WORD_BYTES
+    }
+
+    pub fn image_bytes(&self) -> u64 {
+        self.payload_bytes() + self.table_bytes()
+    }
 }
 
 struct Block {
@@ -115,6 +134,7 @@ struct Placed {
     elements: u32,
     element: Element,
     scale: f32,
+    table: u64,
 }
 
 pub struct Plan {
@@ -201,7 +221,7 @@ impl Plan {
                 }),
                 store: layout.store(values, id as u32).code(),
                 element: layout.element(values, id as u32).code(),
-                table: table_of(values, id as u32),
+                table: record_table(values, id as u32),
                 dims: info.shape.dims(),
                 strides: info.strides,
             });
@@ -365,6 +385,7 @@ impl Plan {
                 elements: info.shape.elements(),
                 element: layout.element(values, id as u32),
                 scale: layout.scale(values, id as u32),
+                table: table_of(values, id as u32),
             });
         }
 
@@ -498,6 +519,13 @@ impl Plan {
     pub fn span_at(&self, value: Value<'_>, placement: Placement, extents: &[u32]) -> Span {
         let mut span = self.span(value, placement);
         span.elements = self.extents.dims(value.id(), extents).iter().product();
+        assert!(
+            span.table_offset() >= span.payload_bytes(),
+            "a binding of {} numbers walks {} bytes of payload past the quantum table its bound places at {}",
+            span.elements,
+            span.payload_bytes(),
+            span.table_offset(),
+        );
         span
     }
 
@@ -543,6 +571,7 @@ impl Plan {
             elements: placed.elements,
             element: placed.element,
             scale: placed.scale,
+            table: placed.table,
         }
     }
 
@@ -794,18 +823,18 @@ fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
     info.element.storage_words(u64::from(info.shape.elements())) * WORD_BYTES
 }
 
-fn table_of(values: &[ValueInfo], value: u32) -> u32 {
-    let info = &values[value as usize];
-    if !info.element.quantized() {
+fn table_of(values: &[ValueInfo], value: u32) -> u64 {
+    let owner = &values[values[value as usize].storage as usize];
+    owner
+        .element
+        .payload_words(u64::from(owner.shape.elements()))
+}
+
+fn record_table(values: &[ValueInfo], value: u32) -> u32 {
+    if !values[value as usize].element.quantized() {
         return NO_VALUE;
     }
-    let owner = &values[info.storage as usize];
-    u32::try_from(
-        owner
-            .element
-            .payload_words(u64::from(owner.shape.elements())),
-    )
-    .unwrap_or_else(|_| {
+    u32::try_from(table_of(values, value)).unwrap_or_else(|_| {
         panic!("the quantum table of value {value} lies beyond the device address space")
     })
 }
@@ -818,8 +847,7 @@ fn quanta(values: &[ValueInfo], offsets: &[u64]) -> Vec<Quantum> {
             info.storage as usize == *id && arena_resident(values, *id) && info.element.quantized()
         })
         .map(|(id, info)| Quantum {
-            offset: offsets[id]
-                + info.element.payload_words(u64::from(info.shape.elements())) * WORD_BYTES,
+            offset: offsets[id] + table_of(values, id as u32) * WORD_BYTES,
             scale: info.scale,
         })
         .collect()
