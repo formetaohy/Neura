@@ -149,9 +149,14 @@ impl Extents {
 }
 
 fn uniform(total: u32, index: u32, group: u32) -> (u32, u32) {
-    let first = index * total / group;
-    let end = (index + 1) * total / group;
-    (first, end - first)
+    let total = u64::from(total);
+    let group = u64::from(group);
+    let first = u64::from(index) * total / group;
+    let end = (u64::from(index) + 1) * total / group;
+    (
+        u32::try_from(first).expect("a split starts within the tensor it walks"),
+        u32::try_from(end - first).expect("a split walks no more than the tensor it names"),
+    )
 }
 
 pub(crate) fn chunks(total: u32, per_task: u32, measure: Option<u32>) -> Vec<(u32, u32, Split)> {

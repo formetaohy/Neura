@@ -98,55 +98,63 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
 }
 
 #[test]
-fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
+fn a_fold_walks_a_long_axis_in_stages_instead_of_one_lane() {
     let graph = Graph::new();
-    let short = graph.sum_rows(graph.input(Shape::matrix(64, 8), Element::Single));
-    let long = graph.sum_rows(graph.input(Shape::matrix(2, 200), Element::Single));
-    let view = graph.sum_rows(graph.permute(
-        graph.input(Shape::matrix(200, 2), Element::Single),
-        [0, 1, 3, 2],
-    ));
+    let short_input = graph.input(Shape::matrix(512, 8), Element::Single);
+    let short = graph.sum_rows(short_input);
+    let long_input = graph.input(Shape::matrix(2, 40000), Element::Single);
+    let long = graph.sum_rows(long_input);
+    let deep_input = graph.input(Shape::matrix(4096, 4096), Element::Single);
+    let deep = graph.sum_rows(deep_input);
+    let turned = graph.sum_axis(graph.input(Shape::of([4, 64, 1024, 4]), Element::Single), 1);
     graph.retain(short);
     graph.retain(long);
-    graph.retain(view);
-    for (profile, long_geometry) in [
-        (narrow(), strategy::WORKGROUP_ROW),
-        (wide(), strategy::THREAD_ROW),
-    ] {
+    graph.retain(deep);
+    graph.retain(turned);
+    for profile in [narrow(), wide()] {
         let plan = plan_with(&graph, profile);
+        let records = values_of(&plan);
         let short = tasks_of(&plan, short);
-        assert_eq!(short.len(), 64);
-        for (index, task) in short.into_iter().enumerate() {
-            assert_eq!(Kind::of(task.kind), Kind::SumAxis);
-            assert_eq!(task.slot, 3);
-            assert_eq!(
-                task.geometry,
-                strategy::THREAD_ROW,
-                "a row of eight elements folds through one thread",
-            );
-            assert_eq!(task.first, index as u32);
-            assert_eq!(task.count, 1);
-        }
-        let long = tasks_of(&plan, long);
-        assert_eq!(long.len(), 2);
-        for (index, task) in long.into_iter().enumerate() {
-            assert_eq!(
-                task.geometry, long_geometry,
-                "a row of 200 elements folds through {long_geometry} on {profile:?}",
-            );
-            assert_eq!(task.slot, 3);
-            assert_eq!(task.first, index as u32);
-            assert_eq!(task.count, 1);
-        }
-        let view = tasks_of(&plan, view);
-        assert_eq!(view.len(), 1);
-        assert_eq!(
-            view[0].geometry,
-            strategy::THREAD_ELEMENT,
-            "a row a view holds apart folds element by element",
+        assert!(
+            short
+                .iter()
+                .all(|task| task.geometry == strategy::THREAD_ELEMENT),
+            "a lane folds one element of the target, never a row of the workgroup",
         );
-        assert_eq!(view[0].slot, 3);
-        assert_eq!(view[0].count, 2);
+        assert_eq!(
+            short.iter().map(|task| task.count).sum::<u32>(),
+            512,
+            "a fold hands every element of its target a task",
+        );
+        assert!(
+            short.iter().all(|task| task.a == short_input.id()),
+            "an axis of eight elements folds out of the tensor itself",
+        );
+        let long = tasks_of(&plan, long);
+        assert_eq!(long.iter().map(|task| task.count).sum::<u32>(), 2);
+        assert!(
+            long.iter()
+                .all(|task| task.slot == 3 && records[task.a as usize].dims[3] < 40000),
+            "an axis of 40000 elements folds out of partials of its own",
+        );
+        let deep = tasks_of(&plan, deep);
+        assert_eq!(deep.iter().map(|task| task.count).sum::<u32>(), 4096);
+        assert!(
+            deep.iter()
+                .all(|task| task.slot == 3 && records[task.a as usize].dims[3] < 4096),
+            "a lane folds a bounded span of every axis it walks",
+        );
+        let turned = tasks_of(&plan, turned);
+        assert_eq!(
+            turned.iter().map(|task| task.count).sum::<u32>(),
+            4 * 1024 * 4
+        );
+        assert!(
+            turned
+                .iter()
+                .all(|task| task.slot == 1 && records[task.a as usize].dims[1] < 8),
+            "the axis a fold names decides the stage, not the place it stands in",
+        );
     }
 }
 

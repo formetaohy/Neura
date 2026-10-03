@@ -11,7 +11,8 @@ const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
-const FOLD_ROW_CEILING: u32 = 8;
+const FOLD_DEPTH: u32 = 16;
+const FOLD_TASKS: u32 = 1 << 15;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -385,7 +386,7 @@ fn schedule_unit(
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::SumChunk => reduce(plan, unit, target),
-        Kind::SumAxis => fold(plan, unit, profile, target),
+        Kind::SumAxis => fold(plan, unit, profile),
         Kind::Conv2d => {
             let out = plan.shape(unit.out);
             let filter = plan.shape(unit.inputs[1]);
@@ -751,36 +752,87 @@ fn task_elements(elements: u32, target: u32) -> u32 {
         .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
 }
 
-fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
-    let (shape, strides) = {
-        let source = &plan.values[unit.inputs[0] as usize];
-        (source.shape, source.strides)
-    };
-    let axis = unit.slot;
-    let folds = shape.dims()[axis as usize];
-    let out = plan.shape(unit.out);
-    if axis == MAX_RANK - 1 && strides == shape.strides() {
-        let columns = shape.columns();
-        let geometry = if columns <= profile.workgroup() {
-            strategy::THREAD_ROW
-        } else {
-            strategy::WORKGROUP_ROW
-        };
-        let measure = measured(plan, unit.out, Measure::Elements);
-        let per_task = fold_rows_per_task(out.elements(), target);
-        for (first, count, split) in span::chunks(out.elements(), per_task, measure) {
-            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
-            task.geometry = geometry;
-            task.split = split;
-            plan.tasks.push(task);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FoldBody {
+    Element,
+    Workgroup,
+}
+
+impl FoldBody {
+    fn geometry(self) -> u32 {
+        match self {
+            Self::Element => strategy::THREAD_ELEMENT,
+            Self::Workgroup => strategy::WORKGROUP_ROW,
         }
-        return;
     }
-    let measure = measured(plan, unit.out, Measure::Elements);
-    let per_task = task_elements(out.elements(), target);
-    for (first, count, split) in span::chunks(out.elements(), per_task, measure) {
-        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(folds));
-        task.geometry = strategy::THREAD_ELEMENT;
+
+    fn per_task(self, profile: Profile, elements: u32, depth: u32) -> u32 {
+        match self {
+            Self::Element => {
+                let lanes = profile.workgroup() * (FOLD_DEPTH / depth.max(1)).max(1);
+                lanes.max(elements.div_ceil(FOLD_TASKS))
+            }
+            Self::Workgroup => elements.div_ceil(profile.workgroups()).max(1),
+        }
+    }
+}
+
+fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let axis = unit.slot;
+    let folds = plan.shape(unit.inputs[0]).dims()[axis as usize];
+    let out = plan.shape(unit.out);
+    let rows = out.elements();
+    let body = if folds > FOLD_DEPTH && rows < profile.workgroups() {
+        FoldBody::Workgroup
+    } else {
+        FoldBody::Element
+    };
+    let pieces = fold_pieces(body, folds, rows, profile);
+    if pieces > 1 {
+        let partials = plan.publish(out.fixed_axis(axis, pieces));
+        let depth = folds.div_ceil(pieces);
+        let mut chunked = unit.clone();
+        chunked.out = partials;
+        chunked.chain.clear();
+        emit_fold(plan, &chunked, profile, partials, body, depth);
+        let mut leaf = unit.clone();
+        leaf.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        leaf.prelude.clear();
+        return fold(plan, &leaf, profile);
+    }
+    emit_fold(plan, unit, profile, unit.out, body, folds);
+}
+
+fn fold_pieces(body: FoldBody, folds: u32, rows: u32, profile: Profile) -> u32 {
+    if folds <= FOLD_DEPTH || rows * folds <= profile.workgroup() * profile.workgroups() {
+        return 1;
+    }
+    match body {
+        FoldBody::Element => folds.div_ceil(FOLD_DEPTH),
+        FoldBody::Workgroup => profile
+            .workgroups()
+            .div_ceil(rows)
+            .clamp(1, (folds / profile.workgroup()).max(1)),
+    }
+}
+
+fn emit_fold(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    profile: Profile,
+    target: u32,
+    body: FoldBody,
+    depth: u32,
+) {
+    let elements = plan.shape(target).elements();
+    let per_task = body.per_task(profile, elements, depth);
+    for (first, count, split) in span::chunks(
+        elements,
+        per_task,
+        measured(plan, target, Measure::Elements),
+    ) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(depth));
+        task.geometry = body.geometry();
         task.split = split;
         plan.tasks.push(task);
     }
@@ -794,10 +846,6 @@ fn reduction_elements(elements: u32, target: u32) -> u32 {
 
 fn softmax_rows_per_task(rows: u32, target: u32) -> u32 {
     rows.div_ceil(target).clamp(1, SOFTMAX_ROW_CEILING)
-}
-
-fn fold_rows_per_task(rows: u32, target: u32) -> u32 {
-    rows.div_ceil(target).clamp(1, FOLD_ROW_CEILING)
 }
 
 fn choice_rows_per_task(rows: u32, target: u32) -> u32 {

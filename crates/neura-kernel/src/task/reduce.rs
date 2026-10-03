@@ -59,89 +59,81 @@ mod device {
         }
     }
 
-    fn sum_row_with_workgroup(task: Task, lid: u32, source: Value, row: u32, columns: u32) -> f32 {
-        let mut local = 0.0;
-        for column in stride(lid, columns, WORKGROUP_SIZE) {
-            local = local + read_flat(task, source, row * columns + column);
-        }
-        return workgroup_sum(lid, local);
-    }
-
-    fn sum_row_with_thread(task: Task, source: Value, row: u32, columns: u32) -> f32 {
-        let mut local = 0.0;
-        for column in stride(0u32, columns, 1u32) {
-            local = local + read_flat(task, source, row * columns + column);
-        }
-        return local;
-    }
-
-    fn sum_rows_with_workgroup(task: Task, lid: u32, source: Value, columns: u32) {
-        let output = values[task.out];
-        for row in stride(task.first, task.first + task.count, 1u32) {
-            let total = sum_row_with_workgroup(task, lid, source, row, columns);
-            if lid == 0u32 {
-                publish(
-                    output,
-                    row,
-                    chained(task, coordinates(row, output.dims), total),
-                );
-            }
-            workgroup_barrier();
-        }
-    }
-
-    fn sum_rows_with_thread(task: Task, lid: u32, source: Value, columns: u32) {
-        let output = values[task.out];
-        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            publish(
-                output,
-                row,
-                chained(
-                    task,
-                    coordinates(row, output.dims),
-                    sum_row_with_thread(task, source, row, columns),
-                ),
-            );
-        }
-    }
-
-    fn sum_axis_element(task: Task, lid: u32, source: Value, output: Value, axis: u32) {
-        let step = uvec4(
+    fn unit_axis(axis: u32) -> uvec4 {
+        return uvec4(
             select(0u32, 1u32, axis == 0u32),
             select(0u32, 1u32, axis == 1u32),
             select(0u32, 1u32, axis == 2u32),
             select(0u32, 1u32, axis == 3u32),
         );
-        let folds = component(source.dims, axis);
+    }
+
+    fn sum_axis_chunk(task: Task, lid: u32, source: Value, target: Value, axis: u32) {
+        let step = unit_axis(axis);
+        let rate = component(source.strides, axis);
+        let walked = component(source.dims, axis);
+        let pieces = component(target.dims, axis);
+        let shared = walked / pieces;
+        let rest = walked % pieces;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, output.dims);
+            let at = coordinates(index, target.dims);
+            let chunk = component(at, axis);
+            let base = at - step * chunk;
+            let first = chunk * shared + min(chunk, rest);
+            let last = (chunk + 1u32) * shared + min(chunk + 1u32, rest);
+            let start = read_address(base, source.strides);
             let mut total = 0.0;
-            for fold in stride(0u32, folds, 1u32) {
-                total = total + read_frame(task, source, at + step * fold);
+            if task.prelude_steps == 0u32 {
+                for fold in stride(first, last, 1u32) {
+                    total = total + fetch(source, start + fold * rate);
+                }
+            } else {
+                for fold in stride(first, last, 1u32) {
+                    total = total + read_frame(task, source, base + step * fold);
+                }
             }
-            publish(output, index, chained(task, at, total));
+            publish(target, index, chained(task, base, total));
+        }
+    }
+
+    fn sum_axis_rows(task: Task, lid: u32, source: Value, target: Value, axis: u32) {
+        let step = unit_axis(axis);
+        let rate = component(source.strides, axis);
+        let walked = component(source.dims, axis);
+        let pieces = component(target.dims, axis);
+        let shared = walked / pieces;
+        let rest = walked % pieces;
+        for index in stride(task.first, task.first + task.count, 1u32) {
+            let at = coordinates(index, target.dims);
+            let chunk = component(at, axis);
+            let base = at - step * chunk;
+            let first = chunk * shared + min(chunk, rest);
+            let last = (chunk + 1u32) * shared + min(chunk + 1u32, rest);
+            let start = read_address(base, source.strides);
+            let mut local = 0.0;
+            if task.prelude_steps == 0u32 {
+                for fold in stride(first + lid, last, WORKGROUP_SIZE) {
+                    local = local + fetch(source, start + fold * rate);
+                }
+            } else {
+                for fold in stride(first + lid, last, WORKGROUP_SIZE) {
+                    local = local + read_frame(task, source, base + step * fold);
+                }
+            }
+            let total = workgroup_sum(lid, local);
+            if lid == 0u32 {
+                publish(target, index, chained(task, base, total));
+            }
+            workgroup_barrier();
         }
     }
 
     fn run_sum_axis(task: Task, lid: u32) {
         let source = values[task.a];
-        let output = values[task.out];
+        let target = values[task.out];
         match task.geometry {
-            strategy::THREAD_ELEMENT => sum_axis_element(task, lid, source, output, task.slot),
-            strategy::THREAD_ROW => {
-                if task.slot == 3u32 {
-                    sum_rows_with_thread(task, lid, source, source.dims.w);
-                } else {
-                    refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry);
-                }
-            }
-            strategy::WORKGROUP_ROW => {
-                if task.slot == 3u32 {
-                    sum_rows_with_workgroup(task, lid, source, source.dims.w);
-                } else {
-                    refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry);
-                }
-            }
+            strategy::THREAD_ELEMENT => sum_axis_chunk(task, lid, source, target, task.slot),
+            strategy::WORKGROUP_ROW => sum_axis_rows(task, lid, source, target, task.slot),
             _ => refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry),
         }
     }

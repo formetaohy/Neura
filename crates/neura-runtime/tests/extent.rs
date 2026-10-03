@@ -321,6 +321,50 @@ fn a_quantized_image_reads_back_the_quantum_its_storage_holds() {
     }
 }
 
+fn axis_reference(source: &[f32], live: u32, columns: u32) -> Vec<f32> {
+    (0..columns)
+        .map(|column| {
+            let mut total = 0.0;
+            for row in 0..live {
+                total += source[(row * columns + column) as usize];
+            }
+            total * total
+        })
+        .collect()
+}
+
+#[test]
+fn a_long_axis_folds_in_stages_under_every_binding() {
+    let runtime = open();
+    for (bound, columns, bindings) in [
+        (96u32, 512u32, vec![96u32, 40, 17, 3, 1]),
+        (5000, 4, vec![5000, 3000, 40, 1, 0]),
+    ] {
+        let graph = Graph::new();
+        let extent = graph.free(bound);
+        let input = graph.input(
+            Shape::of([1, bound, columns, 1]).freed(&[(1, extent)]),
+            Element::Single,
+        );
+        let folded = graph.sum_axis(input, 1);
+        let out = graph.mul(folded, folded);
+        graph.retain(out);
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        for live in bindings {
+            runtime.bind(&program, &[live]);
+            let source = data(live * columns, 23 + live);
+            runtime.write(&program, input, &source);
+            runtime.run(&program);
+            assert_close(
+                &runtime.read(&program, out),
+                &axis_reference(&source, live, columns),
+                1e-2,
+            );
+        }
+    }
+}
+
 #[test]
 fn a_zero_extent_runs_the_tasks_that_remain() {
     let runtime = open();

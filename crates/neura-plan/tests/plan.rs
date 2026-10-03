@@ -540,10 +540,19 @@ fn a_backward_pass_reaches_every_parameter() {
         kinds.contains(&Kind::Broadcast),
         "the loss gradient spreads the scalar over the tensor"
     );
-    assert_eq!(
-        kinds.iter().filter(|kind| **kind == Kind::SumAxis).count(),
-        1,
+    let gradient = grads.of(bias).id();
+    let folded = tasks(&plan(&graph))
+        .into_iter()
+        .filter(|task| Kind::of(task.kind) == Kind::SumAxis)
+        .collect::<Vec<_>>();
+    assert!(
+        !folded.is_empty() && folded.iter().all(|task| task.out == gradient),
         "the bias gradient folds the rows it was spread over",
+    );
+    assert_eq!(
+        folded.iter().map(|task| task.count).sum::<u32>(),
+        bias.shape().elements(),
+        "a fold hands every row of its gradient a task",
     );
 }
 
@@ -561,14 +570,21 @@ fn a_broadcast_product_folds_its_gradient_back_to_the_shape_of_its_operand() {
         "a gradient of a broadcast operand carries the shape of that operand",
     );
     assert_eq!(grads.of(right).shape(), right.shape());
-    assert_eq!(
-        kinds(&plan(&graph))
-            .iter()
-            .filter(|kind| **kind == Kind::SumAxis)
-            .count(),
-        2,
-        "one fold returns each operand to the rows its product spread",
-    );
+    let folded = tasks(&plan(&graph))
+        .into_iter()
+        .filter(|task| Kind::of(task.kind) == Kind::SumAxis)
+        .collect::<Vec<_>>();
+    for gradient in [grads.of(left), grads.of(right)] {
+        assert_eq!(
+            folded
+                .iter()
+                .filter(|task| task.out == gradient.id())
+                .map(|task| task.count)
+                .sum::<u32>(),
+            gradient.shape().elements(),
+            "one fold returns each operand to the rows its product spread",
+        );
+    }
 }
 
 #[test]
@@ -1235,7 +1251,15 @@ fn a_fold_keeps_the_storage_a_view_reads_written() {
         1,
         "the product a view reads kept the task that writes it",
     );
-    assert_eq!(plan.task_count(), 3);
+    assert_eq!(
+        tasks(&plan)
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::SumAxis)
+            .map(|task| task.count)
+            .sum::<u32>(),
+        rows.shape().elements(),
+        "a fold over a view covers every row it walks",
+    );
 }
 
 #[test]
