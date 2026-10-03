@@ -3,7 +3,7 @@ use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Plan, Tapes};
-use neura_abi::{Kind, MAX_DISPATCH_SEGMENTS, Placement, Refusal, WORD_BYTES};
+use neura_abi::{Kind, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
     SubmissionIndex,
@@ -86,11 +86,6 @@ impl Runtime {
             heap_bytes <= context.limits().max_storage_buffer_binding_size,
             "a device heap of {heap_bytes} bytes outruns the {} bytes one storage binding holds",
             context.limits().max_storage_buffer_binding_size,
-        );
-        assert!(
-            MAX_DISPATCH_SEGMENTS <= context.limits().max_compute_workgroups_per_dimension,
-            "one dispatch addresses {MAX_DISPATCH_SEGMENTS} segments where the device launches workgroups in steps of {}",
-            context.limits().max_compute_workgroups_per_dimension,
         );
         Self {
             alignment: context.binding_alignment(),
@@ -392,16 +387,15 @@ impl Runtime {
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
         submission.clear(program.refusal.buffer(), 0, program.refusal.buffer().size());
-        for (index, dispatch) in program.tape.encoding.dispatches().iter().enumerate() {
-            let offset = u32::try_from(index as u64 * self.alignment)
-                .expect("a dispatch bounds offset fits in the native binding range");
-            submission.dispatch(
-                &program.tape.kernel,
-                &program.group,
-                &[offset],
-                [dispatch.segments, 1, 1],
-            );
-        }
+        program
+            .progress
+            .buffer()
+            .write_at(self.context.queue(), 0, &program.header);
+        submission.dispatch(
+            &program.tape.kernel,
+            &program.group,
+            [program.workgroups, 1, 1],
+        );
         submission.submit(self.context.queue());
     }
 

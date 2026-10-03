@@ -9,7 +9,7 @@ use std::sync::Arc;
 pub const METAL_SIZE_BUFFER_SLOT: u8 = 30;
 
 fn capabilities() -> Capabilities {
-    Capabilities::SHADER_FLOAT16_IN_FLOAT32
+    Capabilities::SHADER_FLOAT16_IN_FLOAT32 | Capabilities::MEMORY_DECORATION_COHERENT
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -29,7 +29,6 @@ pub enum BindingKind {
 pub struct BindingSpec {
     pub binding: u32,
     pub kind: BindingKind,
-    pub dynamic_offset: bool,
 }
 
 impl BindingSpec {
@@ -37,7 +36,6 @@ impl BindingSpec {
         Self {
             binding,
             kind: BindingKind::ReadOnlyStorage,
-            dynamic_offset: false,
         }
     }
 
@@ -45,15 +43,6 @@ impl BindingSpec {
         Self {
             binding,
             kind: BindingKind::ReadWriteStorage,
-            dynamic_offset: false,
-        }
-    }
-
-    pub const fn dynamic_storage(binding: u32) -> Self {
-        Self {
-            binding,
-            kind: BindingKind::ReadOnlyStorage,
-            dynamic_offset: true,
         }
     }
 }

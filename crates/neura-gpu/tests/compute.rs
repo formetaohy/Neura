@@ -1,8 +1,8 @@
-use neura_compiler::{DynamicRead, ReadWrite, kernel};
+use neura_compiler::{Read, ReadWrite, kernel};
 use neura_gpu::{Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission};
 
 #[kernel(workgroup_size = 64)]
-fn double(lid: u32, input: DynamicRead<u32>, output: ReadWrite<u32>) {
+fn double(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
     output[lid] = input[lid] * 2u32;
 }
 
@@ -45,7 +45,7 @@ fn compute(backends: Backends) {
     let first = pipeline.bind_group(&[
         Binding {
             index: 0,
-            buffer: source.binding(0, 256),
+            buffer: source.binding(alignment, 256),
         },
         Binding {
             index: 1,
@@ -65,8 +65,8 @@ fn compute(backends: Backends) {
     let values = (1..=64u32).collect::<Vec<_>>();
     source.write_at(&queue, alignment, bytemuck::cast_slice(&values));
     let mut submission = Submission::new(&device, "native compute chain");
-    submission.dispatch(&pipeline, &first, &[alignment as u32], [1, 1, 1]);
-    submission.dispatch(&pipeline, &second, &[0], [1, 1, 1]);
+    submission.dispatch(&pipeline, &first, [1, 1, 1]);
+    submission.dispatch(&pipeline, &second, [1, 1, 1]);
     submission.submit(&queue);
     let mut transfer = Submission::new(&device, "native transfer");
     transfer.copy(&output, 0, &readback, 0, 256);

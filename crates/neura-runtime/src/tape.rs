@@ -17,7 +17,6 @@ pub(crate) struct DeviceTape {
     pub(crate) kernel: PipelineHandle,
     pub(crate) tasks: Recycled,
     pub(crate) values: Recycled,
-    pub(crate) bounds: Recycled,
     pub(crate) steps: Recycled,
     pub(crate) segments: Recycled,
     pool: Arc<Pool>,
@@ -52,7 +51,6 @@ impl DeviceTape {
         let kernel = context.declare(kernel.program());
         let tasks_bytes = encoding.tasks().len() as u64;
         let values_bytes = encoding.values().len() as u64;
-        let bounds_bytes = encoding.bounds().len() as u64;
         let steps_bytes = (encoding.steps().len() as u64).max(size_of::<StepRecord>() as u64);
         let segments_bytes = size_of_val(encoding.segments()) as u64;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -62,7 +60,6 @@ impl DeviceTape {
             kernel,
             tasks: Recycled::claim(pool, "neura tape", tasks_bytes, storage),
             values: Recycled::claim(pool, "neura values", values_bytes, storage),
-            bounds: Recycled::claim(pool, "neura bounds", bounds_bytes, storage),
             steps: Recycled::claim(pool, "neura steps", steps_bytes, storage),
             segments: Recycled::claim(pool, "neura segments", segments_bytes, storage),
             pool: pool.clone(),
@@ -70,7 +67,6 @@ impl DeviceTape {
         let queue = context.queue();
         tape.tasks.buffer().write(queue, tape.encoding.tasks());
         tape.values.buffer().write(queue, tape.encoding.values());
-        tape.bounds.buffer().write(queue, tape.encoding.bounds());
         if !tape.encoding.steps().is_empty() {
             tape.steps.buffer().write(queue, tape.encoding.steps());
         }
@@ -265,7 +261,6 @@ pub(crate) fn signature(
     bytes.extend(alignment.to_le_bytes());
     bytes.extend(encoding.tasks());
     bytes.extend(encoding.values());
-    bytes.extend(encoding.bounds());
     bytes.extend(encoding.steps());
     bytes.extend(bytemuck::cast_slice(encoding.segments()));
     bytes

@@ -686,7 +686,6 @@ impl Device {
                 Command::Dispatch {
                     pipeline: handle,
                     group,
-                    offsets,
                     groups,
                 } => {
                     claim_group(&group.native);
@@ -700,7 +699,6 @@ impl Device {
                                 .expect("a D3D12 pipeline is compiled before dispatch"),
                         );
                     }
-                    let mut dynamic = offsets.iter();
                     for (index, binding) in group.buffers.iter().enumerate() {
                         let target = buffer(&binding.buffer);
                         let kind = handle.slot.program.bindings()[index].kind;
@@ -710,12 +708,7 @@ impl Device {
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
                         };
                         self.transition(&list, target, state);
-                        let offset = binding.offset
-                            + if binding.dynamic {
-                                u64::from(*dynamic.next().expect("one dynamic offset"))
-                            } else {
-                                0
-                            };
+                        let offset = binding.offset;
                         let address = unsafe { target.raw.GetGPUVirtualAddress() } + offset;
                         unsafe {
                             if kind == BindingKind::ReadWriteStorage {

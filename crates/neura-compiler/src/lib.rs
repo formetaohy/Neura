@@ -21,7 +21,7 @@ pub use program::{
     Backend, BindingKind, BindingSpec, ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderBinding,
     ShaderTranslation, describe, reflect,
 };
-pub use resource::{DynamicRead, Read, ReadWrite, Uvec3};
+pub use resource::{Read, ReadWrite, Uvec3};
 
 #[derive(Clone, Copy)]
 struct Global {
@@ -180,11 +180,12 @@ impl Compiler {
             self.bindings.len(),
             "storage slots are dense"
         );
-        let access = match spec.kind {
-            BindingKind::ReadOnlyStorage => StorageAccess::LOAD,
-            BindingKind::ReadWriteStorage => {
-                StorageAccess::LOAD | StorageAccess::STORE | StorageAccess::ATOMIC
-            }
+        let (access, decorations) = match spec.kind {
+            BindingKind::ReadOnlyStorage => (StorageAccess::LOAD, MemoryDecorations::empty()),
+            BindingKind::ReadWriteStorage => (
+                StorageAccess::LOAD | StorageAccess::STORE | StorageAccess::ATOMIC,
+                MemoryDecorations::COHERENT,
+            ),
         };
         let handle = self.module.global_variables.append(
             GlobalVariable {
@@ -196,7 +197,7 @@ impl Compiler {
                 }),
                 ty,
                 init: None,
-                memory_decorations: MemoryDecorations::empty(),
+                memory_decorations: decorations,
             },
             naga::Span::UNDEFINED,
         );

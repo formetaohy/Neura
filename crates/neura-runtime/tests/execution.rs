@@ -22,7 +22,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 }
 
 #[test]
-fn independent_tasks_collapse_into_one_dispatch() {
+fn independent_tasks_ride_one_wave() {
     let graph = Graph::new();
     let wide = graph.parameter(Shape::vector(65_536), Init::Zero, Element::Single);
     let activated = graph.relu(wide);
@@ -34,7 +34,7 @@ fn independent_tasks_collapse_into_one_dispatch() {
         32,
         "a rectifier this wide is handed to the device in bounded chunks",
     );
-    assert_eq!(program.dispatch_count(), 1);
+    assert_eq!(program.wave_count(), 1);
     runtime.run(&program);
     let out = runtime.read(&program, activated);
     assert_eq!(out.len(), 65_536);
@@ -80,7 +80,7 @@ fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
         "a product of four by eight tiles none of the device's breadth, so its depth splits",
     );
     assert_eq!(
-        program.dispatch_count(),
+        program.wave_count(),
         2,
         "a fold reads every slot of the depth"
     );
@@ -667,7 +667,7 @@ fn a_wide_update_in_place_lands_every_span_once() {
 }
 
 #[test]
-fn a_chain_of_updates_rides_one_dispatch() {
+fn a_chain_of_updates_rides_one_wave() {
     let graph = Graph::new();
     let source = graph.input(Shape::vector(2048), Element::Single);
     let mut value = source;
@@ -681,9 +681,9 @@ fn a_chain_of_updates_rides_one_dispatch() {
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     assert_eq!(
-        program.dispatch_count(),
+        program.wave_count(),
         1,
-        "a chain of dependent work is dispatched once",
+        "a chain of dependent work is fused into one wave",
     );
     runtime.write(&program, source, &vec![0.5; 2048]);
     runtime.run(&program);
@@ -728,10 +728,10 @@ fn a_tape_runs_a_whole_training_step_in_one_submission() {
     );
     assert_ne!(second.1, first.1, "the step moved the weights");
     assert!(
-        program.dispatch_count() < program.task_count(),
-        "{} tasks were dispatched in {} dispatches",
+        program.wave_count() < program.task_count(),
+        "{} tasks stand in {} waves",
         program.task_count(),
-        program.dispatch_count(),
+        program.wave_count(),
     );
 }
 

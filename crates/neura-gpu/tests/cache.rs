@@ -1,4 +1,4 @@
-use neura_compiler::{DynamicRead, ReadWrite, kernel};
+use neura_compiler::{Read, ReadWrite, kernel};
 use neura_gpu::{
     ArtifactCache, Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest,
     Submission,
@@ -6,7 +6,7 @@ use neura_gpu::{
 use std::path::{Path, PathBuf};
 
 #[kernel(workgroup_size = 64)]
-fn scale(lid: u32, input: DynamicRead<u32>, output: ReadWrite<u32>) {
+fn scale(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
     output[lid] = input[lid] * 3u32;
 }
 
@@ -62,7 +62,7 @@ fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
         bytemuck::cast_slice(&(1..=64u32).collect::<Vec<_>>()),
     );
     let mut submission = Submission::new(&device, "native cache");
-    submission.dispatch(&pipeline, &group, &[0], [1, 1, 1]);
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
     submission.submit(&queue);
     let mut transfer = Submission::new(&device, "native cache transfer");
     transfer.copy(&output, 0, &readback, 0, 256);

@@ -29,7 +29,7 @@ fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
         buffer: program.heap().binding(program.span(observation).offset, 16),
     }]);
     let mut submission = Submission::new(runtime.context().device(), "engine frame");
-    submission.dispatch(&engine, &group, &[], [1, 1, 1]);
+    submission.dispatch(&engine, &group, [1, 1, 1]);
     submission.submit(runtime.context().queue());
     runtime.run(&program);
     assert_eq!(runtime.read(&program, action), [3.0, 6.0, 9.0, 12.0]);

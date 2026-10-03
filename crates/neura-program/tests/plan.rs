@@ -61,28 +61,14 @@ fn segment_of(encoding: &Encoding, task: usize) -> usize {
 
 fn follows(encoding: &Encoding, before: usize, after: usize) -> bool {
     let segment = segment_of(encoding, before);
-    let dispatch_before = dispatch_of(encoding, before);
-    let dispatch_after = dispatch_of(encoding, after);
-    dispatch_before < dispatch_after
+    wave_of(encoding, before) < wave_of(encoding, after)
         || (segment == segment_of(encoding, after)
             && before as u32 - encoding.segments()[segment].first
                 < after as u32 - encoding.segments()[segment].first)
 }
 
-fn dispatch_of(encoding: &Encoding, task: usize) -> u32 {
-    let mut at = 0usize;
-    for (dispatch, record) in encoding.dispatches().iter().enumerate() {
-        let count = encoding.segments()
-            [record.first_segment as usize..(record.first_segment + record.segments) as usize]
-            .iter()
-            .map(|segment| segment.count as usize)
-            .sum::<usize>();
-        if task < at + count {
-            return dispatch as u32;
-        }
-        at += count;
-    }
-    panic!("every task belongs to a dispatch")
+fn wave_of(encoding: &Encoding, task: usize) -> u32 {
+    tape(encoding)[task].wave
 }
 
 fn writers(encoding: &Encoding, value: u32) -> Vec<usize> {
@@ -125,7 +111,7 @@ fn a_chain_of_rectifiers_fuses_into_one_task() {
     assert_eq!(graph.task_count(), 4);
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
-    assert_eq!(encoding.dispatch_count(), 1);
+    assert_eq!(encoding.wave_count(), 1);
     assert_eq!(encoding.step_count(), 3);
     assert_eq!(value.shape().elements(), 4);
 }
@@ -139,7 +125,7 @@ fn a_dense_layer_fuses_its_epilogue_into_the_product() {
     let activated = graph.relu(graph.add(graph.matmul(data, weight), bias));
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 1);
-    assert_eq!(encoding.dispatch_count(), 1);
+    assert_eq!(encoding.wave_count(), 1);
     assert_eq!(kinds(&encoding), vec![Kind::Matmul]);
     let tape = tape(&encoding);
     assert_eq!(
@@ -178,14 +164,14 @@ fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
     let reader = writers(&encoding, negated.id())[0];
     let taker = writers(&encoding, squared.id())[0];
     assert_eq!(
-        dispatch_of(&encoding, reader),
-        dispatch_of(&encoding, taker),
-        "both readers of a value share a dispatch",
+        wave_of(&encoding, reader),
+        wave_of(&encoding, taker),
+        "both readers of a value share a wave",
     );
     assert_ne!(
         encoding.span(product, PLACEMENT).offset,
         encoding.span(squared, PLACEMENT).offset,
-        "the storage of a value a second task reads in the same dispatch was handed to its reader",
+        "the storage of a value a second task reads in the same wave was handed to its reader",
     );
 }
 
@@ -235,11 +221,10 @@ fn a_consumer_closes_the_producers_it_reads_into_one_segment() {
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 3);
     assert_eq!(
-        encoding.dispatch_count(),
+        encoding.wave_count(),
         1,
         "a wave the device cannot fill hands its work to the wave it reads",
     );
-    assert_eq!(encoding.dispatches()[0].segments, 1);
     assert_eq!(encoding.segments().len(), 1);
     let sum_task = writers(&encoding, sum.id())[0];
     let product_task = writers(&encoding, product.id())[0];
@@ -364,7 +349,7 @@ fn a_product_takes_the_tile_that_spends_the_least_on_the_workgroups_it_fills() {
     assert_eq!(
         encoding.work(),
         u64::from(products + ragged_products) * balanced_tile.tile_work(),
-        "a plan accounts the tile work it dispatches",
+        "a plan accounts the tile work it schedules",
     );
     assert_eq!(
         encoding.tiles(),
@@ -430,8 +415,8 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         "the fold writes one element per task",
     );
     assert_eq!(
-        dispatch_of(&encoding, tape.len() - 1),
-        encoding.dispatch_count() - 1,
+        wave_of(&encoding, tape.len() - 1),
+        encoding.wave_count() - 1,
         "the fold reads every slot after the last slot is written",
     );
 }
@@ -450,8 +435,8 @@ fn a_fold_leaves_the_wave_that_already_fills_the_device() {
         .position(|task| Kind::of(task.kind) == Kind::MatmulFold)
         .expect("a product that splits its depth carries a fold");
     assert_ne!(
-        dispatch_of(&encoding, fold),
-        dispatch_of(&encoding, 0),
+        wave_of(&encoding, fold),
+        wave_of(&encoding, 0),
         "a fold never lengthens the wave its own partials already fill",
     );
 }
@@ -601,9 +586,9 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
         "a sum folds a chunk of 8192 elements at a time until one scalar stands",
     );
     assert_eq!(
-        encoding.dispatch_count(),
+        encoding.wave_count(),
         2,
-        "every level of the fold is a dispatch"
+        "every level of the fold is a wave"
     );
     assert_eq!(loss.shape(), Shape::scalar());
     assert!(
@@ -1045,16 +1030,14 @@ fn an_update_in_place_spreads_the_spans_it_names_over_workgroups() {
         "one update in place of one tensor spans the work its decomposition names",
     );
     assert_eq!(
-        encoding.dispatch_count(),
+        encoding.wave_count(),
         2,
         "the constant the update reads is a wave of its own",
     );
-    let dispatch = dispatch_of(&encoding, updates[0]);
+    let wave = wave_of(&encoding, updates[0]);
     assert!(
-        updates
-            .iter()
-            .all(|task| dispatch_of(&encoding, *task) == dispatch),
-        "the spans of one update in place meet in one dispatch",
+        updates.iter().all(|task| wave_of(&encoding, *task) == wave),
+        "the spans of one update in place meet in one wave",
     );
     let mut workgroups = updates
         .iter()
@@ -1081,19 +1064,18 @@ fn a_chain_of_single_task_levels_rides_one_segment() {
     let encoding = encoding(&graph);
     assert_eq!(encoding.task_count(), 7);
     assert_eq!(
-        encoding.dispatch_count(),
+        encoding.wave_count(),
         1,
-        "a chain of single task levels leaves one dispatch",
+        "a chain of single task levels leaves one wave",
     );
     assert_eq!(
-        encoding.dispatches()[0].segments,
+        encoding.segments().len(),
         1,
         "one workgroup carries the whole chain",
     );
-    assert_eq!(encoding.segments().len(), 1);
     for task in 0..encoding.task_count() as usize {
         assert_eq!(segment_of(&encoding, task), 0);
-        assert_eq!(dispatch_of(&encoding, task), 0);
+        assert_eq!(wave_of(&encoding, task), 0);
     }
 }
 
@@ -1364,12 +1346,10 @@ fn a_wide_narrow_update_in_place_spreads_the_words_it_packs() {
         packs.len() > 1,
         "a wide narrow write packs the words its decomposition names",
     );
-    let dispatch = dispatch_of(&encoding, packs[0]);
+    let wave = wave_of(&encoding, packs[0]);
     assert!(
-        packs
-            .iter()
-            .all(|task| dispatch_of(&encoding, *task) == dispatch),
-        "the words of one narrow write meet in one dispatch",
+        packs.iter().all(|task| wave_of(&encoding, *task) == wave),
+        "the words of one narrow write meet in one wave",
     );
     let mut workgroups = packs
         .iter()

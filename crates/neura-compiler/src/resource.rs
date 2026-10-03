@@ -2,7 +2,6 @@ use std::marker::PhantomData;
 use std::ops::{Index, IndexMut};
 
 pub struct Read<T>(PhantomData<T>);
-pub struct DynamicRead<T>(PhantomData<T>);
 pub struct ReadWrite<T>(PhantomData<T>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,14 +12,6 @@ pub struct Uvec3 {
 }
 
 impl<T> Index<u32> for Read<T> {
-    type Output = T;
-
-    fn index(&self, _: u32) -> &Self::Output {
-        unreachable!("a kernel resource exists only on the device")
-    }
-}
-
-impl<T> Index<u32> for DynamicRead<T> {
     type Output = T;
 
     fn index(&self, _: u32) -> &Self::Output {

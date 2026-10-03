@@ -1,7 +1,7 @@
 use bytemuck::Zeroable;
 use neura_abi::{
-    BoundsRecord, Element, Kind, PlacementRecord, Scratch, SegmentRecord, StepFields, StepRecord,
-    Store, TaskFields, TaskRecord, ValueFields, ValueRecord,
+    Element, Kind, PlacementRecord, Scratch, SegmentRecord, StepFields, StepRecord, Store,
+    TaskFields, TaskRecord, ValueFields, ValueRecord,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -17,7 +17,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, table), 12);
     assert_eq!(offset_of!(ValueRecord, dims), 16);
     assert_eq!(offset_of!(ValueRecord, strides), 32);
-    assert_eq!(size_of::<TaskRecord>(), 116);
+    assert_eq!(size_of::<TaskRecord>(), 120);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -44,12 +44,11 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(TaskRecord, pad_columns), 104);
     assert_eq!(offset_of!(TaskRecord, axis), 108);
     assert_eq!(offset_of!(TaskRecord, offset), 112);
+    assert_eq!(offset_of!(TaskRecord, wave), 116);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
     assert_eq!(offset_of!(StepRecord, swapped), 8);
-    assert_eq!(size_of::<BoundsRecord>(), 4);
-    assert_eq!(offset_of!(BoundsRecord, first_segment), 0);
     assert_eq!(size_of::<SegmentRecord>(), 8);
     assert_eq!(offset_of!(SegmentRecord, first), 0);
     assert_eq!(offset_of!(SegmentRecord, count), 4);
@@ -312,9 +311,10 @@ fn a_record_declares_what_the_device_reads() {
         pad_columns: 4,
         axis: 2,
         offset: 9,
+        wave: 4,
     });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 116);
+    assert_eq!(bytes.len(), 120);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -337,6 +337,7 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[104..108].try_into().unwrap()), 4);
     assert_eq!(u32::from_ne_bytes(bytes[108..112].try_into().unwrap()), 2);
     assert_eq!(u32::from_ne_bytes(bytes[112..116].try_into().unwrap()), 9);
+    assert_eq!(u32::from_ne_bytes(bytes[116..120].try_into().unwrap()), 4);
 }
 
 #[test]
@@ -369,14 +370,12 @@ fn every_value_lives_in_one_declared_store() {
 
 #[test]
 fn a_zeroed_record_holds_no_number_the_shader_could_read() {
-    let bounds = BoundsRecord::zeroed();
     let placement = PlacementRecord::zeroed();
     let segment = SegmentRecord::zeroed();
     let step = StepRecord::zeroed();
     let task = TaskRecord::zeroed();
     let value = ValueRecord::zeroed();
-    let records: [&[u8]; 6] = [
-        bytemuck::bytes_of(&bounds),
+    let records: [&[u8]; 5] = [
         bytemuck::bytes_of(&placement),
         bytemuck::bytes_of(&segment),
         bytemuck::bytes_of(&step),

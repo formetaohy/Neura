@@ -184,7 +184,6 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
         };
         let spec = match segment.ident.to_string().as_str() {
             "Read" => quote!(::neura_compiler::BindingSpec::storage(#slot)),
-            "DynamicRead" => quote!(::neura_compiler::BindingSpec::dynamic_storage(#slot)),
             "ReadWrite" => quote!(::neura_compiler::BindingSpec::writable_storage(#slot)),
             other => {
                 return Err(syn::Error::new_spanned(

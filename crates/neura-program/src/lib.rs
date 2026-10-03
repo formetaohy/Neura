@@ -8,4 +8,3 @@ mod schedule;
 
 pub use encode::{Encoding, Quantum, Span};
 pub use layout::{Layout, Region, Seed};
-pub use schedule::Dispatch;

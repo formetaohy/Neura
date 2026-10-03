@@ -552,11 +552,7 @@ impl Device {
             .map(|spec| {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(spec.binding)
-                    .descriptor_type(if spec.dynamic_offset {
-                        vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
-                    } else {
-                        vk::DescriptorType::STORAGE_BUFFER
-                    })
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
             })
@@ -591,23 +587,10 @@ impl Device {
         pipeline: &Pipeline,
         buffers: &[BoundBuffer],
     ) -> Group {
-        let regular = buffers.iter().filter(|binding| !binding.dynamic).count() as u32;
-        let dynamic = buffers.len() as u32 - regular;
-        let sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: regular,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
-                descriptor_count: dynamic,
-            },
-        ];
-        let sizes = sizes
-            .iter()
-            .copied()
-            .filter(|size| size.descriptor_count > 0)
-            .collect::<Vec<_>>();
+        let sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: buffers.len() as u32,
+        }];
         let pool = unsafe {
             self.raw.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -639,15 +622,11 @@ impl Device {
             .iter()
             .zip(&infos)
             .enumerate()
-            .map(|(index, (binding, info))| {
+            .map(|(index, (_, info))| {
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
                     .dst_binding(index as u32)
-                    .descriptor_type(if binding.dynamic {
-                        vk::DescriptorType::STORAGE_BUFFER_DYNAMIC
-                    } else {
-                        vk::DescriptorType::STORAGE_BUFFER
-                    })
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(std::slice::from_ref(info))
             })
             .collect::<Vec<_>>();
@@ -758,7 +737,6 @@ impl Device {
                 Command::Dispatch {
                     pipeline: handle,
                     group: bindings,
-                    offsets,
                     groups,
                 } => {
                     let compiled = pipeline(&handle.slot.native);
@@ -779,7 +757,7 @@ impl Device {
                             compiled.layout,
                             0,
                             &[group.set],
-                            offsets,
+                            &[],
                         );
                         self.raw
                             .cmd_dispatch(command, groups[0], groups[1], groups[2]);

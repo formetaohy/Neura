@@ -53,10 +53,6 @@ macro_rules! record {
     };
 }
 
-record!(BoundsRecord, BoundsFields, BOUNDS, "Bounds" {
-    first_segment: u32 => U32,
-});
-
 record!(PlacementRecord, PlacementFields, PLACEMENT, "Placement" {
     tensors: u32 => U32,
     weights: u32 => U32,
@@ -103,6 +99,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     pad_columns: u32 => U32,
     axis: u32 => U32,
     offset: u32 => U32,
+    wave: u32 => U32,
 });
 
 #[repr(C)]
@@ -182,4 +179,4 @@ pub const VALUE: RecordLayout = RecordLayout {
     ],
 };
 
-pub const RECORDS: &[RecordLayout] = &[BOUNDS, PLACEMENT, SEGMENT, STEP, TASK, VALUE];
+pub const RECORDS: &[RecordLayout] = &[PLACEMENT, SEGMENT, STEP, TASK, VALUE];

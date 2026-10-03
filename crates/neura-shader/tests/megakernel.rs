@@ -76,7 +76,8 @@ fn rust_source_compiles_into_three_native_shader_formats() {
         };
         assert!(!entry.is_empty());
         assert!(source.contains("register(u2)"));
-        assert!(source.contains("register(t4)"));
+        assert!(source.contains("register(u4)"));
+        assert!(source.contains("register(t5)"));
         let ShaderTranslation::Msl {
             source,
             entry,
@@ -127,7 +128,6 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
                 assert_eq!(binding.binding, reflected.binding);
                 assert_eq!(binding.kind, reflected.kind);
             }
-            assert!(program.bindings()[4].dynamic_offset);
             assert_eq!(program.reflected()[2].kind, BindingKind::ReadWriteStorage);
             for layout in RECORDS {
                 let (_, ty) = program
@@ -168,12 +168,17 @@ fn specialization_includes_only_reachable_rust_functions() {
             "a fill kernel compiles unused function {absent}"
         );
     }
-    assert!(
-        !program
-            .module()
-            .global_variables
-            .iter()
-            .any(|(_, global)| global.space == AddressSpace::WorkGroup)
+    let scratch = program
+        .module()
+        .global_variables
+        .iter()
+        .filter(|(_, global)| global.space == AddressSpace::WorkGroup)
+        .map(|(_, global)| global.name.clone().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scratch,
+        vec!["claim".to_owned()],
+        "a fill kernel declares no workgroup scratch beside the megakernel's own claim",
     );
     let all = all(0).program();
     assert!(program.spirv().len() < all.spirv().len());

@@ -1,23 +1,17 @@
 use crate::access::Access;
 use crate::lower::Task;
 use crate::region::{self, Region};
-use neura_abi::{MAX_DISPATCH_SEGMENTS, SegmentFields, SegmentRecord};
+use neura_abi::{SegmentFields, SegmentRecord};
 use neura_graph::ValueInfo;
 use neura_profile::MatmulTile;
 
 const MERGE_SPREAD: u64 = 16;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Dispatch {
-    pub first_segment: u32,
-    pub segments: u32,
-}
-
 pub(crate) struct Schedule {
     order: Vec<u32>,
-    ends: Vec<u32>,
     segments: Vec<SegmentRecord>,
-    dispatches: Vec<Dispatch>,
+    waves: Vec<u32>,
+    count: u32,
 }
 
 struct Packed {
@@ -50,40 +44,33 @@ impl Schedule {
             )
         });
         let mut order = Vec::new();
-        let mut segments = Vec::with_capacity(packed.segments.len());
-        let mut ends = Vec::new();
-        let mut dispatches = Vec::new();
-        let mut cursor = 0;
-        while cursor < grouped.len() {
-            let wave = packed.waves[packed.segments[grouped[cursor]][0] as usize];
-            let mut last = cursor;
-            while last < grouped.len()
-                && packed.waves[packed.segments[grouped[last]][0] as usize] == wave
-            {
-                last += 1;
+        let mut segments = Vec::with_capacity(grouped.len());
+        let mut waves = Vec::new();
+        let mut count = 0;
+        for segment in grouped {
+            let tasks = &packed.segments[segment];
+            let wave = packed.waves[tasks[0] as usize];
+            assert!(
+                tasks
+                    .iter()
+                    .all(|task| packed.waves[*task as usize] == wave),
+                "a workgroup carries tasks of two waves the device gates apart",
+            );
+            segments.push(SegmentRecord::of(SegmentFields {
+                first: order.len() as u32,
+                count: tasks.len() as u32,
+            }));
+            for task in tasks {
+                order.push(*task);
+                waves.push(wave);
             }
-            for chunk in grouped[cursor..last].chunks(MAX_DISPATCH_SEGMENTS as usize) {
-                let first_segment = segments.len() as u32;
-                for segment in chunk {
-                    segments.push(SegmentRecord::of(SegmentFields {
-                        first: order.len() as u32,
-                        count: packed.segments[*segment].len() as u32,
-                    }));
-                    order.extend(packed.segments[*segment].iter().copied());
-                }
-                dispatches.push(Dispatch {
-                    first_segment,
-                    segments: chunk.len() as u32,
-                });
-                ends.push(order.len() as u32);
-            }
-            cursor = last;
+            count = count.max(wave + 1);
         }
         Self {
             order,
-            ends,
             segments,
-            dispatches,
+            waves,
+            count,
         }
     }
 
@@ -91,16 +78,20 @@ impl Schedule {
         &self.order
     }
 
-    pub(crate) fn ends(&self) -> &[u32] {
-        &self.ends
-    }
-
     pub(crate) fn segments(&self) -> &[SegmentRecord] {
         &self.segments
     }
 
-    pub(crate) fn dispatches(&self) -> &[Dispatch] {
-        &self.dispatches
+    pub(crate) fn waves(&self) -> &[u32] {
+        &self.waves
+    }
+
+    pub(crate) fn wave_tasks(&self) -> Vec<u32> {
+        let mut tasks = vec![0u32; self.count as usize];
+        for wave in &self.waves {
+            tasks[*wave as usize] += 1;
+        }
+        tasks
     }
 }
 
@@ -213,6 +204,7 @@ fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>], workgroups
     let mut created = Vec::<u32>::new();
     let mut rebuilt = Vec::<bool>::new();
     let mut segment_of = vec![0u32; tasks.len()];
+    let mut segment_wave = Vec::<u32>::new();
     let mut prefix = 0u32;
     let mut stage = 0u32;
     let mut in_recompute = false;
@@ -233,6 +225,7 @@ fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>], workgroups
             .then(|| {
                 let earliest = earliest?;
                 (0..segments.len())
+                    .filter(|segment| segment_wave[*segment] == earliest)
                     .filter(|segment| {
                         conflicts
                             .iter()
@@ -285,10 +278,12 @@ fn pack(values: &[ValueInfo], tasks: &[Task], conflicts: &[Vec<u32>], workgroups
                 segments.push(Vec::new());
                 work.push(0);
                 rebuilt.push(false);
+                segment_wave.push(wave);
                 (wave, (segments.len() - 1) as u32)
             }
         };
         let wave = if recomputed { wave.max(stage) } else { wave };
+        segment_wave[segment as usize] = segment_wave[segment as usize].max(wave);
         waves[index as usize] = wave;
         segment_of[index as usize] = segment;
         if segments[segment as usize].is_empty() {
@@ -376,30 +371,22 @@ fn lonely(conflicts: &[Vec<u32>]) -> Vec<bool> {
 }
 
 fn assert_ordered(values: &[ValueInfo], tiles: &[MatmulTile], tasks: &[Task], schedule: &Schedule) {
-    let mut dispatch_of = vec![0u32; schedule.segments.len()];
-    for (index, dispatch) in schedule.dispatches.iter().enumerate() {
-        for segment in dispatch.first_segment..dispatch.first_segment + dispatch.segments {
-            dispatch_of[segment as usize] = index as u32;
-        }
-    }
-    let mut dispatch = vec![0u32; tasks.len()];
-    let mut segment = vec![0u32; tasks.len()];
-    let mut position = vec![0u32; tasks.len()];
+    let mut seat = vec![(0u32, 0u32, 0u32); tasks.len()];
     for (index, record) in schedule.segments.iter().enumerate() {
-        for (within, task) in (record.first..record.first + record.count).enumerate() {
-            let task = schedule.order[task as usize] as usize;
-            dispatch[task] = dispatch_of[index];
-            segment[task] = index as u32;
-            position[task] = within as u32;
+        for (within, at) in (record.first..record.first + record.count).enumerate() {
+            let task = schedule.order[at as usize] as usize;
+            seat[task] = (index as u32, within as u32, schedule.waves[at as usize]);
         }
     }
     accesses(values, tiles, tasks, |before, after| {
         let (before, after) = (before as usize, after as usize);
-        let ordered = dispatch[before] < dispatch[after]
-            || (segment[before] == segment[after] && position[before] < position[after]);
+        let (_, before_position, before_wave) = seat[before];
+        let (after_segment, after_position, after_wave) = seat[after];
+        let ordered = before_wave < after_wave
+            || (seat[before].0 == after_segment && before_position < after_position);
         assert!(
             ordered,
-            "task {after} touches a tensor that task {before} only reaches later on the tape",
+            "task {after} touches a tensor that task {before} only reaches later on the tape, and the device gates two waves apart only what a segment orders",
         );
     });
 }

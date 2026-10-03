@@ -3,10 +3,10 @@ use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
-use crate::schedule::{self, Dispatch};
+use crate::schedule;
 use neura_abi::{
-    BoundsFields, BoundsRecord, Element, Geometry, Kind, NO_VALUE, Placement, SegmentRecord,
-    StepRecord, Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    Element, Geometry, Kind, NO_VALUE, Placement, SegmentRecord, StepRecord, Store, TaskFields,
+    TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -116,10 +116,9 @@ pub struct Encoding {
     elements: Vec<Element>,
     tasks: Vec<u8>,
     values: Vec<u8>,
-    bounds: Vec<u8>,
     steps: Vec<u8>,
     segments: Vec<SegmentRecord>,
-    dispatches: Vec<Dispatch>,
+    wave_tasks: Vec<u32>,
     spans: Vec<Option<Placed>>,
     readable: Vec<bool>,
     geometries: Vec<u32>,
@@ -157,10 +156,10 @@ impl Encoding {
         assert_units_keep_their_order(tasks);
         let schedule = schedule::Schedule::of(values, &plan.tiles, tasks, profile.workgroups());
         let order = schedule.order();
-        let ends = schedule.ends();
+        let waves = schedule.waves();
         let live = storage_liveness(values, tasks, order);
         let reserved = layout.tensors().bytes();
-        let (offsets, tensor_bytes) = allocate(values, &live, ends, alignment, reserved);
+        let (offsets, tensor_bytes) = allocate(values, &live, waves, alignment, reserved);
         let arena_bytes = tensor_bytes - reserved;
         assert!(
             tensor_bytes.is_multiple_of(WORD_BYTES),
@@ -188,7 +187,7 @@ impl Encoding {
         let mut updates_weights = false;
         let mut geometries = vec![0u32; matmul_tiles.len()];
         let mut work = 0;
-        for index in order {
+        for (position, index) in order.iter().enumerate() {
             let task = &tasks[*index as usize];
             let geometry = match task.kind.geometry() {
                 Geometry::Attention => {
@@ -289,6 +288,7 @@ impl Encoding {
                 pad_columns: task.window.pad_columns(),
                 axis: task.axis,
                 offset: task.offset,
+                wave: waves[position],
             });
             if task.in_place
                 && task
@@ -301,14 +301,6 @@ impl Encoding {
             tape.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
-        let mut bounds = Vec::new();
-        for dispatch in schedule.dispatches() {
-            let record = BoundsRecord::of(BoundsFields {
-                first_segment: dispatch.first_segment,
-            });
-            bounds.extend_from_slice(bytemuck::bytes_of(&record));
-            bounds.resize(bounds.len().next_multiple_of(alignment as usize), 0);
-        }
         let segments = schedule.segments().to_vec();
 
         let mut readable = vec![false; values.len()];
@@ -356,10 +348,9 @@ impl Encoding {
             elements,
             tasks: tape,
             values: records,
-            bounds,
             steps,
             segments,
-            dispatches: schedule.dispatches().to_vec(),
+            wave_tasks: schedule.wave_tasks(),
             spans,
             readable,
             geometries,
@@ -418,10 +409,6 @@ impl Encoding {
         &self.values
     }
 
-    pub fn bounds(&self) -> &[u8] {
-        &self.bounds
-    }
-
     pub fn steps(&self) -> &[u8] {
         &self.steps
     }
@@ -430,8 +417,12 @@ impl Encoding {
         &self.segments
     }
 
-    pub fn dispatches(&self) -> &[Dispatch] {
-        &self.dispatches
+    pub fn wave_tasks(&self) -> &[u32] {
+        &self.wave_tasks
+    }
+
+    pub fn wave_count(&self) -> u32 {
+        self.wave_tasks.len() as u32
     }
 
     pub fn span(&self, value: Value<'_>, placement: Placement) -> Span {
@@ -508,10 +499,6 @@ impl Encoding {
 
     pub fn value_count(&self) -> u32 {
         (self.values.len() / size_of::<ValueRecord>()) as u32
-    }
-
-    pub fn dispatch_count(&self) -> u32 {
-        self.dispatches.len() as u32
     }
 
     pub fn work(&self) -> u64 {
@@ -777,7 +764,7 @@ fn allocate(
     alignment: u64,
     reserved: u64,
 ) -> (Vec<u64>, u64) {
-    let wave_of = |position: usize| waves.partition_point(|end| *end <= position as u32) as u32;
+    let wave_of = |position: usize| waves[position];
     let mut arena = Blocks::with_base(reserved);
     let mut offsets = vec![0u64; live.len()];
     let owners = (0..values.len()).filter(|id| values[*id].storage as usize == *id);

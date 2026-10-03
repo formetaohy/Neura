@@ -101,6 +101,8 @@ impl<'a> FunctionLower<'a> {
                 | Expression::LocalVariable(_)
                 | Expression::GlobalVariable(_)
                 | Expression::CallResult(_)
+                | Expression::AtomicResult { .. }
+                | Expression::WorkGroupUniformLoadResult { .. }
         );
         let start = self.function.expressions.len();
         let expr = self

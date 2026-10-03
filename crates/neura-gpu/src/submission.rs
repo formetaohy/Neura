@@ -30,7 +30,6 @@ pub(crate) enum Command {
     Dispatch {
         pipeline: PipelineHandle,
         group: BindGroup,
-        offsets: Vec<u32>,
         groups: [u32; 3],
     },
 }
@@ -119,13 +118,7 @@ impl Submission {
         });
     }
 
-    pub fn dispatch(
-        &mut self,
-        pipeline: &PipelineHandle,
-        group: &BindGroup,
-        offsets: &[u32],
-        groups: [u32; 3],
-    ) {
+    pub fn dispatch(&mut self, pipeline: &PipelineHandle, group: &BindGroup, groups: [u32; 3]) {
         assert!(
             pipeline.slot.device.same(&self.device),
             "a pipeline crosses compute devices"
@@ -141,39 +134,10 @@ impl Submission {
                 .all(|count| *count > 0 && *count <= limits.max_compute_workgroups_per_dimension),
             "a dispatch exceeds the workgroup grid"
         );
-        assert_eq!(
-            offsets.len(),
-            group
-                .buffers
-                .iter()
-                .filter(|binding| binding.dynamic)
-                .count()
-        );
-        for (binding, offset) in group
-            .buffers
-            .iter()
-            .filter(|binding| binding.dynamic)
-            .zip(offsets)
-        {
-            let offset = u64::from(*offset);
-            assert!(
-                offset.is_multiple_of(limits.min_storage_buffer_offset_alignment),
-                "a dynamic binding is misaligned"
-            );
-            assert!(
-                binding
-                    .offset
-                    .checked_add(offset)
-                    .and_then(|start| start.checked_add(binding.size))
-                    .is_some_and(|end| end <= binding.buffer.size()),
-                "a dynamic binding outruns its buffer"
-            );
-        }
         pipeline.compile();
         self.commands.push(Command::Dispatch {
             pipeline: pipeline.clone(),
             group: group.clone(),
-            offsets: offsets.to_vec(),
             groups,
         });
     }

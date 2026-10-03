@@ -2,8 +2,8 @@
 mod core;
 
 use neura_abi::{
-    Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, refusal, store,
-    strategy,
+    Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR, progress, refusal,
+    store, strategy,
 };
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
 use neura_profile::Geometry;
@@ -14,7 +14,7 @@ pub const TASKS: u32 = 0;
 pub const VALUES: u32 = 1;
 pub const HEAP: u32 = 2;
 pub const REFUSAL: u32 = 3;
-pub const BOUNDS: u32 = 4;
+pub const PROGRESS: u32 = 4;
 pub const STEPS: u32 = 5;
 pub const PLACEMENT: u32 = 6;
 pub const SEGMENTS: u32 = 7;
@@ -22,7 +22,6 @@ pub const SEGMENTS: u32 = 7;
 pub struct KernelBinding {
     pub binding: u32,
     pub kind: BindingKind,
-    pub dynamic_offset: bool,
     pub name: &'static str,
     pub element: &'static str,
     pub array: bool,
@@ -32,7 +31,6 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: TASKS,
         kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: false,
         name: "tasks",
         element: "Task",
         array: true,
@@ -40,7 +38,6 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: VALUES,
         kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: false,
         name: "values",
         element: "Value",
         array: true,
@@ -48,7 +45,6 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: HEAP,
         kind: BindingKind::ReadWriteStorage,
-        dynamic_offset: false,
         name: "heap",
         element: "f32",
         array: true,
@@ -56,23 +52,20 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: REFUSAL,
         kind: BindingKind::ReadWriteStorage,
-        dynamic_offset: false,
         name: "refusal",
         element: "AtomicU32",
         array: true,
     },
     KernelBinding {
-        binding: BOUNDS,
-        kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: true,
-        name: "bounds",
-        element: "Bounds",
-        array: false,
+        binding: PROGRESS,
+        kind: BindingKind::ReadWriteStorage,
+        name: "progress",
+        element: "AtomicU32",
+        array: true,
     },
     KernelBinding {
         binding: STEPS,
         kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: false,
         name: "steps",
         element: "Step",
         array: true,
@@ -80,7 +73,6 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: PLACEMENT,
         kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: false,
         name: "placement",
         element: "Placement",
         array: false,
@@ -88,7 +80,6 @@ pub const BINDINGS: &[KernelBinding] = &[
     KernelBinding {
         binding: SEGMENTS,
         kind: BindingKind::ReadOnlyStorage,
-        dynamic_offset: false,
         name: "segments",
         element: "Segment",
         array: true,
@@ -144,6 +135,16 @@ impl Megakernel {
         ] {
             compiler.constant(name, value);
         }
+        for (name, value) in [
+            ("progress::CURSOR", progress::CURSOR),
+            ("progress::FRONTIER", progress::FRONTIER),
+            ("progress::SEGMENTS", progress::SEGMENTS),
+            ("progress::WAVES", progress::WAVES),
+            ("progress::COUNTERS", progress::COUNTERS),
+            ("progress::WAVE_STRIDE", progress::WAVE_STRIDE),
+        ] {
+            compiler.constant(name, value);
+        }
         for kind in Kind::ALL {
             compiler.constant(kind.symbol(), kind.code());
         }
@@ -151,7 +152,6 @@ impl Megakernel {
             let spec = BindingSpec {
                 binding: binding.binding,
                 kind: binding.kind,
-                dynamic_offset: binding.dynamic_offset,
             };
             if binding.array {
                 compiler.storage_array(binding.name, binding.element, spec);
@@ -159,6 +159,7 @@ impl Megakernel {
                 compiler.storage_record(binding.name, binding.element, spec);
             }
         }
+        compiler.workgroup("claim", "u32", 2);
         core::define(&mut compiler);
         neura_kernel::define(&mut compiler, kinds, elements, &geometry);
         let enabled = kinds

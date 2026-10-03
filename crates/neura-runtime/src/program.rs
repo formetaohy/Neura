@@ -1,14 +1,12 @@
 use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::tape::DeviceTape;
-use neura_abi::{
-    BoundsRecord, Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES,
-};
+use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_profile::{MatmulTile, Profile};
 use neura_program::{Region, Span};
-use neura_shader::{BOUNDS, HEAP, PLACEMENT, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_shader::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -75,6 +73,9 @@ pub struct Program<'r> {
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
     pub(crate) weights: Weights<'r>,
+    pub(crate) progress: Recycled,
+    pub(crate) header: Vec<u8>,
+    pub(crate) workgroups: u32,
     placement: Recycled,
     revision: Revision,
 }
@@ -101,6 +102,19 @@ impl<'r> Program<'r> {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
+        let waves = tape.encoding.wave_count();
+        let segments = tape.encoding.segments().len() as u32;
+        let header = progress::header(segments, waves);
+        let progress_buffer = Recycled::claim(
+            pool,
+            "neura progress",
+            progress::bytes(waves),
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        progress_buffer.buffer().write(
+            queue,
+            bytemuck::cast_slice(&progress::words(segments, tape.encoding.wave_tasks())),
+        );
         let mut clearing = Submission::new(context.device(), "neura tensors");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
@@ -140,11 +154,10 @@ impl<'r> Program<'r> {
                 buffer: refusal.buffer().binding(0, refusal.buffer().size()),
             },
             Binding {
-                index: BOUNDS,
-                buffer: tape
-                    .bounds
+                index: PROGRESS,
+                buffer: progress_buffer
                     .buffer()
-                    .binding(0, size_of::<BoundsRecord>() as u64),
+                    .binding(0, progress_buffer.buffer().size()),
             },
             Binding {
                 index: STEPS,
@@ -162,6 +175,7 @@ impl<'r> Program<'r> {
                     .binding(0, tape.segments.buffer().size()),
             },
         ]);
+        let workgroups = segments.min(tape.encoding.profile().workgroups()).max(1);
         Self {
             brand: PhantomData,
             tape,
@@ -169,6 +183,9 @@ impl<'r> Program<'r> {
             group,
             tensors,
             weights,
+            progress: progress_buffer,
+            header,
+            workgroups,
             placement,
             revision,
         }
@@ -225,10 +242,10 @@ impl<'r> Program<'r> {
         self.tensors.heap().bytes()
             + self.tape.tasks.buffer().size()
             + self.tape.values.buffer().size()
-            + self.tape.bounds.buffer().size()
             + self.tape.steps.buffer().size()
             + self.tape.segments.buffer().size()
             + self.refusal.buffer().size()
+            + self.progress.buffer().size()
             + self.placement.buffer().size()
     }
 
@@ -256,8 +273,12 @@ impl<'r> Program<'r> {
         self.tape.encoding.step_count()
     }
 
-    pub fn dispatch_count(&self) -> u32 {
-        self.tape.encoding.dispatch_count()
+    pub fn wave_count(&self) -> u32 {
+        self.tape.encoding.wave_count()
+    }
+
+    pub fn workgroups(&self) -> u32 {
+        self.workgroups
     }
 
     pub fn value_count(&self) -> u32 {

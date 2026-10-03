@@ -164,11 +164,19 @@ impl FunctionLower<'_> {
         if matches!(expr, E::Name(_) | E::Field { .. } | E::Index { .. })
             && let Some(place) = self.place(expr)
         {
+            let ty = match self.compiler.module.types[place.ty].inner.clone() {
+                naga::TypeInner::Atomic(naga::Scalar::U32) => self.compiler.ty("u32"),
+                naga::TypeInner::Atomic(naga::Scalar::I32) => self.compiler.ty("i32"),
+                naga::TypeInner::Atomic(scalar) => {
+                    panic!("a device atomic of {scalar:?} carries no scalar a load gives back")
+                }
+                _ => place.ty,
+            };
             let loaded = self.emit(
                 Expression::Load {
                     pointer: place.expr,
                 },
-                place.ty,
+                ty,
             );
             if let Some(ty) = hint {
                 assert_eq!(loaded.ty, ty, "device operand has a different type");
@@ -515,6 +523,8 @@ impl FunctionLower<'_> {
                     first.ty,
                 )
             }
+            "atomic_add" | "atomic_sub" => self.atomic(name, args),
+            "workgroup_uniform_load" => self.workgroup_uniform_load(args),
             "workgroup_barrier" | "storage_barrier" | "atomic_store" => {
                 panic!("a device synchronization or atomic store cannot yield a value")
             }

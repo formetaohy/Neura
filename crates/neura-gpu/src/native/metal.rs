@@ -456,7 +456,6 @@ impl Device {
                 Command::Dispatch {
                     pipeline: handle,
                     group,
-                    offsets,
                     groups,
                 } => {
                     claim_group(&group.native);
@@ -473,15 +472,9 @@ impl Device {
                         .computeCommandEncoder()
                         .expect("a Metal command buffer encodes compute");
                     compute.setComputePipelineState(compiled);
-                    let mut dynamic = offsets.iter();
                     for (index, binding) in group.buffers.iter().enumerate() {
                         let target = buffer(&binding.buffer);
-                        let offset = binding.offset
-                            + if binding.dynamic {
-                                u64::from(*dynamic.next().expect("one dynamic offset"))
-                            } else {
-                                0
-                            };
+                        let offset = binding.offset;
                         unsafe {
                             compute.setBuffer_offset_atIndex(
                                 Some(&target.raw),

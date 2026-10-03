@@ -265,6 +265,75 @@ impl FunctionLower<'_> {
         });
     }
 
+    pub(super) fn workgroup_uniform_load(&mut self, arguments: &[ir::Expression]) -> Typed {
+        use ir::Expression as E;
+        assert_eq!(
+            arguments.len(),
+            1,
+            "a workgroup uniform load takes one reference",
+        );
+        let E::Reference(reference) = &arguments[0] else {
+            panic!("a workgroup uniform load takes a reference");
+        };
+        let pointer = self
+            .place(reference)
+            .expect("a workgroup uniform load refers to a workgroup value");
+        let result = self.emit(
+            naga::Expression::WorkGroupUniformLoadResult { ty: pointer.ty },
+            pointer.ty,
+        );
+        self.push(naga::Statement::WorkGroupUniformLoad {
+            pointer: pointer.expr,
+            result: result.expr,
+        });
+        result
+    }
+
+    pub(super) fn atomic(&mut self, name: &str, arguments: &[ir::Expression]) -> Typed {
+        use ir::Expression as E;
+        assert_eq!(
+            arguments.len(),
+            2,
+            "a device atomic takes a reference and a value",
+        );
+        let E::Reference(reference) = &arguments[0] else {
+            panic!("a device atomic takes a reference");
+        };
+        let fun = match name {
+            "atomic_add" => naga::AtomicFunction::Add,
+            "atomic_sub" => naga::AtomicFunction::Subtract,
+            other => panic!("{other} is not a device atomic"),
+        };
+        let pointer = self
+            .place(reference)
+            .expect("a device atomic refers to a buffer");
+        let scalar = match self.compiler.module.types[pointer.ty].inner {
+            naga::TypeInner::Atomic(scalar) => scalar,
+            ref other => panic!("a device atomic refers to {other:?} where an atomic stands"),
+        };
+        assert_eq!(
+            scalar,
+            naga::Scalar::U32,
+            "a device atomic counts unsigned words",
+        );
+        let value = self.value_with_hint(&arguments[1], Some(self.compiler.ty("u32")));
+        let ty = self.compiler.ty("u32");
+        let result = self.emit(
+            naga::Expression::AtomicResult {
+                ty,
+                comparison: false,
+            },
+            ty,
+        );
+        self.push(naga::Statement::Atomic {
+            fun,
+            pointer: pointer.expr,
+            value: value.expr,
+            result: Some(result.expr),
+        });
+        result
+    }
+
     fn expression_statement(&mut self, expr: &ir::Expression) {
         use ir::Expression as E;
         if let E::Call { name, arguments } = expr {
@@ -292,6 +361,10 @@ impl FunctionLower<'_> {
                         pointer: pointer.expr,
                         value: value.expr,
                     });
+                    return;
+                }
+                "atomic_add" | "atomic_sub" => {
+                    self.atomic(name, arguments);
                     return;
                 }
                 _ => {}

@@ -223,6 +223,15 @@ impl Verifier<'_> {
                             state.control_uniform && effect.result_uniform;
                     }
                 }
+                Statement::Atomic { .. } => {}
+                Statement::WorkGroupUniformLoad { result, .. } => {
+                    assert!(
+                        state.control_uniform,
+                        "a workgroup uniform load is reached by different invocations"
+                    );
+                    state.barrier = true;
+                    state.values[result.index()] = true;
+                }
                 Statement::ControlBarrier(_) | Statement::MemoryBarrier(_) => {
                     assert!(
                         state.control_uniform,

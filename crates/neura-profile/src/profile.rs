@@ -247,6 +247,7 @@ const GRID_ASPECT: u32 = 4;
 const STREAMED_ASPECT: u32 = 4;
 const DEPTH: u32 = 8;
 const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
+const CLAIM_SCRATCH: u64 = 2 * WORD_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Profile {
@@ -295,7 +296,8 @@ impl Profile {
         Self {
             workgroup,
             shared_bytes: 2 * (left_stage + right_stage) * WORD_BYTES
-                + REDUCTION_SCRATCH * workgroup as u64,
+                + REDUCTION_SCRATCH * workgroup as u64
+                + CLAIM_SCRATCH,
             tiles: entries,
             count: tiles.len() as u8,
         }
@@ -431,7 +433,7 @@ fn blockings(
 
 fn carried(left_stage: u64, right_stage: u64, workgroup: u32, shared_bytes: u64) -> bool {
     let staged = 2 * (left_stage + right_stage) * WORD_BYTES;
-    staged + REDUCTION_SCRATCH * u64::from(workgroup) <= shared_bytes
+    staged + REDUCTION_SCRATCH * u64::from(workgroup) + CLAIM_SCRATCH <= shared_bytes
 }
 
 fn grids(workgroup: u32) -> Vec<(u32, u32)> {
@@ -595,10 +597,11 @@ impl Geometry {
     }
 
     pub fn declared_shared_bytes(&self, kinds: &[Kind]) -> u64 {
-        Scratch::ALL
-            .iter()
-            .filter(|scratch| kinds.iter().any(|kind| kind.stages(**scratch)))
-            .map(|scratch| self.scratch_bytes(*scratch))
-            .sum()
+        CLAIM_SCRATCH
+            + Scratch::ALL
+                .iter()
+                .filter(|scratch| kinds.iter().any(|kind| kind.stages(**scratch)))
+                .map(|scratch| self.scratch_bytes(*scratch))
+                .sum::<u64>()
     }
 }

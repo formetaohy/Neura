@@ -18,7 +18,6 @@ pub(crate) struct BoundBuffer {
     pub(crate) buffer: GpuBuffer,
     pub(crate) offset: u64,
     pub(crate) size: u64,
-    pub(crate) dynamic: bool,
 }
 
 pub(crate) struct Slot {
@@ -35,6 +34,7 @@ pub struct PipelineHandle {
 #[derive(Clone)]
 pub struct BindGroup {
     pub(crate) native: NativeGroup,
+    #[cfg(any(dx12_backend, metal_backend))]
     pub(crate) buffers: Vec<BoundBuffer>,
     pub(crate) slot: Arc<Slot>,
 }
@@ -99,7 +99,6 @@ impl PipelineHandle {
                     buffer: buffer.clone(),
                     offset: entry.buffer.offset,
                     size: entry.buffer.size,
-                    dynamic: spec.dynamic_offset,
                 }
             })
             .collect::<Vec<_>>();
@@ -110,6 +109,7 @@ impl PipelineHandle {
             .create_group(&self.slot.native, &buffers);
         BindGroup {
             slot: self.slot.clone(),
+            #[cfg(any(dx12_backend, metal_backend))]
             buffers,
             native,
         }
