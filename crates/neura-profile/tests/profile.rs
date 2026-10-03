@@ -1,5 +1,7 @@
 use neura_abi::{Kind, WORD_BYTES};
-use neura_profile::{AttentionTile, Budget, Geometry, MatmulStrategy, MatmulTile, Profile};
+use neura_profile::{
+    AttentionTile, Budget, CooperativeMatrix, Geometry, MatmulStrategy, MatmulTile, Profile,
+};
 use std::panic::AssertUnwindSafe;
 
 fn wide_device() -> Budget {
@@ -65,31 +67,33 @@ fn a_device_budget_fits_every_profile_it_derives() {
 }
 
 #[test]
-fn a_wider_device_derives_the_wider_tiles_it_can_stage() {
-    let narrow = Profile::derive(Budget::BASELINE, None);
-    let mid = Profile::derive(mid_device(), None);
-    let wide = Profile::derive(wide_device(), None);
-    assert!(narrow.len() <= mid.len() && mid.len() <= wide.len());
-    assert!(
-        narrow.iter().all(|profile| profile.workgroup() <= 256),
-        "the baseline derives a workgroup beyond the threads it schedules",
-    );
-    assert!(
-        wide.iter().any(|profile| profile.workgroup() == 1024),
-        "a device of a thousand threads derives no thousand thread workgroup",
-    );
-    let widest = |profiles: &[Profile]| {
-        profiles
-            .iter()
-            .flat_map(|profile| profile.tiles())
-            .map(|tile| tile.rows() * tile.columns())
-            .max()
-            .expect("a profile offers a tile")
-    };
-    assert!(
-        widest(&narrow) < widest(&mid) && widest(&mid) < widest(&wide),
-        "a wider device derives no wider tile",
-    );
+fn a_wider_device_derives_the_tiles_its_registers_and_pool_carry() {
+    let cooperative = CooperativeMatrix::new(32, 16, 16, 16);
+    for budget in [Budget::BASELINE, mid_device(), wide_device()] {
+        for profile in Profile::derive(budget, Some(cooperative)) {
+            assert!(
+                profile.shared_bytes() <= budget.shared_bytes().min(24 << 10),
+                "{profile:?} stages a pool beyond the one a device program hands its workgroups",
+            );
+            for tile in profile.tiles() {
+                assert!(
+                    (tile.registers() + tile.operands()) * profile.workgroup() <= 65_536,
+                    "{tile:?} asks a {}-thread workgroup for {} registers a thread",
+                    profile.workgroup(),
+                    tile.registers() + tile.operands(),
+                );
+            }
+        }
+        assert!(
+            Profile::derive(budget, Some(cooperative))
+                .iter()
+                .any(|profile| profile
+                    .tiles()
+                    .iter()
+                    .any(|tile| matches!(tile.strategy(), MatmulStrategy::Cooperative))),
+            "a device that holds cooperative matrices derives no cooperative tile for any workgroup",
+        );
+    }
     let holds = |profiles: &[Profile], rows: u32, columns: u32| {
         profiles.iter().any(|profile| {
             profile
@@ -98,18 +102,35 @@ fn a_wider_device_derives_the_wider_tiles_it_can_stage() {
                 .any(|tile| (tile.rows(), tile.columns()) == (rows, columns))
         })
     };
+    let wide = Profile::derive(wide_device(), None);
     assert!(
         holds(&wide, 128, 128),
         "a device that stages a four kilobyte block derives no 128x128 tile",
     );
     assert!(
-        !holds(&narrow, 128, 128),
-        "the baseline derives a tile beyond the pool it stages from",
-    );
-    assert!(
-        holds(&narrow, 16, 16) && holds(&wide, 16, 16),
+        holds(&wide, 16, 16),
         "a device derives no tile for the narrowest product",
     );
+}
+
+#[test]
+fn a_cooperative_tile_takes_only_the_pool_the_staged_tiles_leave() {
+    let cooperative = CooperativeMatrix::new(32, 16, 16, 16);
+    for budget in [Budget::BASELINE, mid_device(), wide_device()] {
+        let plain = Profile::derive(budget, None);
+        let gathered = Profile::derive(budget, Some(cooperative));
+        for (plain, gathered) in plain.iter().zip(&gathered) {
+            assert_eq!(
+                gathered.staging_bytes(),
+                plain.staging_bytes(),
+                "a cooperative tile narrows the staged panels a profile stages",
+            );
+            assert!(
+                gathered.shared_bytes() <= budget.shared_bytes(),
+                "{gathered:?} asks a device for more pool than it offers",
+            );
+        }
+    }
 }
 
 #[test]

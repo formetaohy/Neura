@@ -584,8 +584,11 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "coopmat_load_row" => self.matrix_load(args, MatrixLayout::RowMajor),
-            "coopmat_load_column" => self.matrix_load(args, MatrixLayout::ColumnMajor),
+            "coopmat_load_row" => self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::A),
+            "coopmat_load_b_row" => self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::B),
+            "coopmat_load_column" => {
+                self.matrix_load(args, MatrixLayout::ColumnMajor, MatrixUse::B)
+            }
             "coopmat_muladd" => {
                 assert_eq!(args.len(), 3);
                 let accumulate = self.value(&args[2]);
@@ -638,7 +641,12 @@ impl FunctionLower<'_> {
         self.compiler.rust_type(&ty)
     }
 
-    fn matrix_load(&mut self, args: &[ast::Expression], layout: MatrixLayout) -> Typed {
+    fn matrix_load(
+        &mut self,
+        args: &[ast::Expression],
+        layout: MatrixLayout,
+        usage: MatrixUse,
+    ) -> Typed {
         assert_eq!(
             args.len(),
             2,
@@ -654,13 +662,7 @@ impl FunctionLower<'_> {
         );
         let element = pointee(self, pointer.ty);
         let ty = match self.compiler.module().ty(element) {
-            Type::Scalar(Scalar::F16) => {
-                if matches!(layout, MatrixLayout::RowMajor) {
-                    self.coopmat(ast::Type::Named("coopmat_a".to_owned()))
-                } else {
-                    self.coopmat(ast::Type::Named("coopmat_b".to_owned()))
-                }
-            }
+            Type::Scalar(Scalar::F16) => self.compiler.cooperative(usage),
             other => panic!(
                 "a device matrix load reads {}",
                 neura_shader::element_name(other)

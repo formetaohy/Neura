@@ -322,15 +322,14 @@ fn a_product_takes_the_tile_that_spends_the_least_on_the_workgroups_it_fills() {
         .count() as u32;
     assert_eq!(
         (balanced_tile.rows(), balanced_tile.columns()),
-        (32, 16),
+        (16, 16),
         "a product fills every workgroup its profile offers with the tile that walks the fewest registers for it",
     );
-    assert_eq!(
-        products,
-        wide().workgroups(),
-        "a product hands the device one tile per workgroup its profile runs at once",
+    assert!(
+        products >= wide().workgroups(),
+        "a product fills every workgroup its profile runs at once with at least one tile",
     );
-    assert_eq!(balanced_tile.registers(), 2);
+    assert_eq!(balanced_tile.registers(), 1);
     let ragged_task = *tasks
         .iter()
         .find(|task| task.out == ragged.id())

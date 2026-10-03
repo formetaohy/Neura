@@ -7,6 +7,12 @@ pub(crate) fn install(compiler: &mut Compiler) {
 
 pub(crate) fn install_tiles(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
+    if let Some(cooperative) = geometry.cooperative() {
+        let fragment = cooperative.fragment();
+        compiler.constant("COOPMAT_ROWS", fragment.rows());
+        compiler.constant("COOPMAT_COLUMNS", fragment.columns());
+        compiler.constant("COOPMAT_DEPTH", fragment.depth());
+    }
     cooperative::define(compiler);
     specialize(compiler, geometry);
 }
@@ -54,20 +60,21 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                 );
             }
             MatmulStrategy::Cooperative => {
-                compiler.constant("COOPMAT_ROWS", tile.rows() / tile.subgroup_rows());
-                compiler.constant("COOPMAT_COLUMNS", tile.columns() / tile.subgroup_columns());
-                compiler.constant("COOPMAT_DEPTH", tile.depth());
                 constants.extend([
-                    ("MATMUL_LEFT_STRIDE", tile.depth()),
-                    ("COOPMAT_ROWS", tile.rows() / tile.subgroup_rows()),
-                    ("COOPMAT_COLUMNS", tile.columns() / tile.subgroup_columns()),
-                    ("COOPMAT_DEPTH", tile.depth()),
-                    ("COOPMAT_SUBGROUP", geometry.subgroup()),
-                    ("MATMUL_SUBGROUP_COLUMNS", tile.subgroup_columns()),
+                    ("MATMUL_LEFT_STRIDE", tile.left_stride()),
+                    ("MATMUL_STAGE_DEPTH", tile.depth()),
+                    ("MATMUL_FRAGMENT_ROWS", tile.fragment_grid().0),
+                    ("MATMUL_FRAGMENT_COLUMNS", tile.fragment_grid().1),
+                    ("MATMUL_ACCUMULATORS", tile.accumulators()),
+                    ("COOPMAT_ROWS", tile.fragment_rows()),
+                    ("COOPMAT_COLUMNS", tile.fragment_columns()),
+                    ("COOPMAT_DEPTH", tile.fragment_depth()),
+                    ("COOPMAT_SUBGROUP", tile.subgroup()),
                     ("MATMUL_SUBGROUP_ROWS", tile.subgroup_rows()),
+                    ("MATMUL_SUBGROUP_COLUMNS", tile.subgroup_columns()),
                     (
                         "SCRATCH_COOPERATIVE_RIGHT",
-                        u32::try_from(2 * tile.left_stage())
+                        u32::try_from(2 * tile.rows() as u64 * tile.depth() as u64)
                             .expect("a cooperative panel fits one device word address"),
                     ),
                 ]);
@@ -384,10 +391,10 @@ mod cooperative {
         depth: u32,
         columns: u32,
     ) {
-        let left_slot = buffer * MATMUL_ROWS * MATMUL_DEPTH;
-        for unit in stride(lid, MATMUL_ROWS * MATMUL_DEPTH, WORKGROUP_SIZE) {
-            let row = unit / MATMUL_DEPTH;
-            let column = unit % MATMUL_DEPTH;
+        let left_slot = buffer * MATMUL_ROWS * MATMUL_STAGE_DEPTH;
+        for unit in stride(lid, MATMUL_ROWS * MATMUL_STAGE_DEPTH, WORKGROUP_SIZE) {
+            let row = unit / MATMUL_STAGE_DEPTH;
+            let column = unit % MATMUL_STAGE_DEPTH;
             let at_row = base_row + row;
             let at_column = base_depth + column;
             let inside = at_row < rows && at_column < depth;
@@ -396,20 +403,20 @@ mod cooperative {
                 left_plane + at_row * left.strides.z + at_column * left.strides.w,
                 inside,
             );
-            scratch_half[left_slot + unit] = f16(select(0.0, fetch(left, address), inside));
+            scratch_half[left_slot + row * MATMUL_LEFT_STRIDE + column] =
+                f16(select(0.0, fetch(left, address), inside));
         }
-        let right_slot = buffer * MATMUL_COLUMNS * MATMUL_DEPTH;
-        for unit in stride(lid, MATMUL_COLUMNS * MATMUL_DEPTH, WORKGROUP_SIZE) {
-            let column = base_column + unit / MATMUL_DEPTH;
-            let row = base_depth + unit % MATMUL_DEPTH;
+        let right_slot = SCRATCH_COOPERATIVE_RIGHT + buffer * MATMUL_STAGE_DEPTH * MATMUL_COLUMNS;
+        for unit in stride(lid, MATMUL_STAGE_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
+            let row = base_depth + unit / MATMUL_COLUMNS;
+            let column = base_column + unit % MATMUL_COLUMNS;
             let inside = row < depth && column < columns;
             let address = select(
                 0u32,
                 right_plane + row * right.strides.z + column * right.strides.w,
                 inside,
             );
-            scratch_half[SCRATCH_COOPERATIVE_RIGHT + right_slot + unit] =
-                f16(select(0.0, fetch(right, address), inside));
+            scratch_half[right_slot + unit] = f16(select(0.0, fetch(right, address), inside));
         }
     }
 
@@ -424,13 +431,16 @@ mod cooperative {
         let planes = max(left.dims.x, right.dims.x) * plane_columns;
         let row_blocks = (rows + MATMUL_ROWS - 1u32) / MATMUL_ROWS;
         let column_blocks = (columns + MATMUL_COLUMNS - 1u32) / MATMUL_COLUMNS;
-        let depth_blocks = (depth + MATMUL_DEPTH - 1u32) / MATMUL_DEPTH;
+        let stage_blocks = (depth + MATMUL_STAGE_DEPTH - 1u32) / MATMUL_STAGE_DEPTH;
         let tiles_per_plane = row_blocks * column_blocks;
-        let first_block = (task.slot * depth_blocks) / task.splits;
-        let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
+        let first_block = (task.slot * stage_blocks) / task.splits;
+        let last_block = ((task.slot + 1u32) * stage_blocks) / task.splits;
         let subgroup = lid / COOPMAT_SUBGROUP;
         let subgroup_row = subgroup / MATMUL_SUBGROUP_COLUMNS;
         let subgroup_column = subgroup % MATMUL_SUBGROUP_COLUMNS;
+        let subgroup_slot = subgroup * COOPMAT_ROWS * COOPMAT_COLUMNS;
+        let copy_words =
+            MATMUL_SUBGROUP_ROWS * MATMUL_SUBGROUP_COLUMNS * COOPMAT_ROWS * COOPMAT_COLUMNS;
         for tile in stride(task.first, task.first + task.count, 1u32) {
             let plane = tile / tiles_per_plane;
             let plane_row = plane / plane_columns;
@@ -441,12 +451,13 @@ mod cooperative {
             let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
             let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
             let out_plane = (task.slot * planes + plane) * rows * columns;
-            let mut accumulator = coopmat_accumulator(0.0);
+            let mut accumulators = scalar_array(coopmat_accumulator(0.0), MATMUL_ACCUMULATORS);
+            let mut buffer = 0u32;
             template_matmul_cooperative_load(
                 lid,
                 base_row,
                 base_column,
-                first_block * MATMUL_DEPTH,
+                first_block * MATMUL_STAGE_DEPTH,
                 0u32,
                 left_plane,
                 right_plane,
@@ -457,14 +468,13 @@ mod cooperative {
                 columns,
             );
             workgroup_barrier();
-            let mut buffer = 0u32;
             for block in stride(first_block, last_block, 1u32) {
                 if block + 1u32 < last_block {
                     template_matmul_cooperative_load(
                         lid,
                         base_row,
                         base_column,
-                        (block + 1u32) * MATMUL_DEPTH,
+                        (block + 1u32) * MATMUL_STAGE_DEPTH,
                         1u32 - buffer,
                         left_plane,
                         right_plane,
@@ -475,39 +485,79 @@ mod cooperative {
                         columns,
                     );
                 }
-                let left_slot = buffer * MATMUL_ROWS * MATMUL_DEPTH
-                    + subgroup_row * COOPMAT_ROWS * MATMUL_DEPTH;
-                let right_slot = SCRATCH_COOPERATIVE_RIGHT
-                    + buffer * MATMUL_COLUMNS * MATMUL_DEPTH
-                    + subgroup_column * COOPMAT_COLUMNS * MATMUL_DEPTH;
-                let left_fragment = coopmat_load_row(&scratch_half[left_slot], MATMUL_DEPTH);
-                let right_fragment = coopmat_load_column(&scratch_half[right_slot], MATMUL_DEPTH);
-                accumulator = coopmat_muladd(left_fragment, right_fragment, accumulator);
+                let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
+                let right_slot =
+                    SCRATCH_COOPERATIVE_RIGHT + buffer * MATMUL_STAGE_DEPTH * MATMUL_COLUMNS;
+                for step in unroll(0u32, MATMUL_STAGE_DEPTH / COOPMAT_DEPTH, 1u32) {
+                    for fragment_row in unroll(0u32, MATMUL_FRAGMENT_ROWS, 1u32) {
+                        for fragment_column in unroll(0u32, MATMUL_FRAGMENT_COLUMNS, 1u32) {
+                            let left_fragment = coopmat_load_row(
+                                &scratch_half[left_slot
+                                    + (subgroup_row * MATMUL_FRAGMENT_ROWS + fragment_row)
+                                        * COOPMAT_ROWS
+                                        * MATMUL_LEFT_STRIDE
+                                    + step * COOPMAT_DEPTH],
+                                MATMUL_LEFT_STRIDE,
+                            );
+                            let right_fragment = coopmat_load_b_row(
+                                &scratch_half[right_slot
+                                    + step * COOPMAT_DEPTH * MATMUL_COLUMNS
+                                    + (subgroup_column * MATMUL_FRAGMENT_COLUMNS
+                                        + fragment_column)
+                                        * COOPMAT_COLUMNS],
+                                MATMUL_COLUMNS,
+                            );
+                            let register = fragment_row * MATMUL_FRAGMENT_COLUMNS + fragment_column;
+                            accumulators[register] = coopmat_muladd(
+                                left_fragment,
+                                right_fragment,
+                                accumulators[register],
+                            );
+                        }
+                    }
+                }
                 workgroup_barrier();
                 buffer = 1u32 - buffer;
             }
-            let copy_row =
-                subgroup_row * COOPMAT_ROWS * MATMUL_COLUMNS + subgroup_column * COOPMAT_COLUMNS;
-            coopmat_store(&scratch[copy_row], MATMUL_COLUMNS, accumulator);
-            workgroup_barrier();
-            for unit in stride(lid, MATMUL_ROWS * MATMUL_COLUMNS, WORKGROUP_SIZE) {
-                let row = unit / MATMUL_COLUMNS;
-                let column = unit % MATMUL_COLUMNS;
-                let out_row = base_row + row;
-                let out_column = base_column + column;
-                if out_row < rows && out_column < columns {
-                    publish(
-                        output,
-                        out_plane + out_row * columns + out_column,
-                        chained(
-                            task,
-                            uvec4(plane_row, plane_column, out_row, out_column),
-                            scratch[unit],
-                        ),
+            for fragment_row in unroll(0u32, MATMUL_FRAGMENT_ROWS, 1u32) {
+                for fragment_column in unroll(0u32, MATMUL_FRAGMENT_COLUMNS, 1u32) {
+                    let register = fragment_row * MATMUL_FRAGMENT_COLUMNS + fragment_column;
+                    coopmat_store(
+                        &scratch[subgroup_slot],
+                        COOPMAT_COLUMNS,
+                        accumulators[register],
                     );
+                    workgroup_barrier();
+                    for unit in stride(lid, copy_words, WORKGROUP_SIZE) {
+                        let slot = unit / (COOPMAT_ROWS * COOPMAT_COLUMNS);
+                        let within_slot = unit % (COOPMAT_ROWS * COOPMAT_COLUMNS);
+                        let out_row = base_row
+                            + (slot / MATMUL_SUBGROUP_COLUMNS)
+                                * MATMUL_FRAGMENT_ROWS
+                                * COOPMAT_ROWS
+                            + fragment_row * COOPMAT_ROWS
+                            + within_slot / COOPMAT_COLUMNS;
+                        let out_column = base_column
+                            + (slot % MATMUL_SUBGROUP_COLUMNS)
+                                * MATMUL_FRAGMENT_COLUMNS
+                                * COOPMAT_COLUMNS
+                            + fragment_column * COOPMAT_COLUMNS
+                            + within_slot % COOPMAT_COLUMNS;
+                        if out_row < rows && out_column < columns {
+                            publish(
+                                output,
+                                out_plane + out_row * columns + out_column,
+                                chained(
+                                    task,
+                                    uvec4(plane_row, plane_column, out_row, out_column),
+                                    scratch[unit],
+                                ),
+                            );
+                        }
+                    }
+                    workgroup_barrier();
                 }
             }
-            workgroup_barrier();
         }
     }
 }

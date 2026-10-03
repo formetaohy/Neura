@@ -689,8 +689,9 @@ fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32, planes: u3
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
 const STREAMED_TRAFFIC_WEIGHT: u128 = 16;
-const COOPERATIVE_STAGE_WEIGHT: u128 = 160;
-const COOPERATIVE_TENSOR_WEIGHT: u128 = 1;
+const COOPERATIVE_STAGE_INSTRUCTIONS: u128 = 3;
+const COOPERATIVE_TENSOR_INSTRUCTIONS: u128 = 1;
+const COOPERATIVE_COPY_INSTRUCTIONS: u128 = 3;
 
 fn matmul_cost(
     tile: MatmulTile,
@@ -729,24 +730,15 @@ fn matmul_cost(
             STREAMED_LOAD_WEIGHT * work * operands / registers + STREAMED_TRAFFIC_WEIGHT * reads
         }
         MatmulStrategy::Cooperative => {
-            let subgroups = u128::from(tile.subgroup_rows() * tile.subgroup_columns());
-            let fragment_rows = u128::from(tile.rows()) / u128::from(tile.subgroup_rows());
-            let fragment_columns = u128::from(tile.columns()) / u128::from(tile.subgroup_columns());
-            let fragment_depth = u128::from(tile.depth());
-            let panels = tiles
-                * u128::from(depth.div_ceil(tile.depth()))
-                * (block_rows + block_columns)
-                * u128::from(tile.depth());
-            let tensor = tiles * block_rows * block_columns * u128::from(depth)
-                / fragment_rows
-                / fragment_columns
-                / fragment_depth
-                * subgroups
-                * u128::from(tile.threads());
+            let fragment = u128::from(tile.fragment_rows())
+                * u128::from(tile.fragment_columns())
+                * u128::from(tile.fragment_depth());
+            let staged = tiles * (block_rows + block_columns) * u128::from(depth);
+            let tensor = tiles * block_rows * block_columns * u128::from(depth) / fragment;
             let copy = tiles * block_rows * block_columns;
-            COOPERATIVE_STAGE_WEIGHT * panels
-                + COOPERATIVE_TENSOR_WEIGHT * tensor
-                + copy
+            COOPERATIVE_STAGE_INSTRUCTIONS * staged
+                + COOPERATIVE_TENSOR_INSTRUCTIONS * tensor
+                + COOPERATIVE_COPY_INSTRUCTIONS * copy
                 + tiles * blocks * threads * BARRIER_SLOTS
         }
     };

@@ -1,4 +1,5 @@
 use neura_abi::{DeviceModule, Kind, WORD_BYTES};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct AttentionTile {
@@ -107,8 +108,130 @@ impl CooperativeMatrix {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct MatmulTile {
-    strategy: MatmulStrategy,
+pub struct CooperativeTile {
+    fragment: CooperativeMatrix,
+    subgroups: (u32, u32),
+    fragments: (u32, u32),
+    stage: u32,
+}
+
+impl CooperativeTile {
+    pub fn new(
+        fragment: CooperativeMatrix,
+        subgroups: (u32, u32),
+        fragments: (u32, u32),
+        stage: u32,
+    ) -> Self {
+        assert!(
+            subgroups.0 > 0 && subgroups.1 > 0,
+            "a cooperative tile hands its fragments to no subgroup",
+        );
+        assert!(
+            fragments.0 > 0 && fragments.1 > 0,
+            "a subgroup of a cooperative tile carries no fragment",
+        );
+        assert!(
+            stage > 0 && stage.is_multiple_of(fragment.depth()),
+            "a cooperative tile stages {stage} deep where a whole fragment of its device is {} deep",
+            fragment.depth(),
+        );
+        Self {
+            fragment,
+            subgroups,
+            fragments,
+            stage,
+        }
+    }
+
+    pub const fn fragment(self) -> CooperativeMatrix {
+        self.fragment
+    }
+
+    pub const fn fragments(self) -> (u32, u32) {
+        self.fragments
+    }
+
+    pub const fn stage(self) -> u32 {
+        self.stage
+    }
+
+    pub const fn subgroup(self) -> u32 {
+        self.fragment.subgroup()
+    }
+
+    pub const fn subgroup_rows(self) -> u32 {
+        self.subgroups.0
+    }
+
+    pub const fn subgroup_columns(self) -> u32 {
+        self.subgroups.1
+    }
+
+    pub const fn fragment_rows(self) -> u32 {
+        self.fragments.0
+    }
+
+    pub const fn fragment_columns(self) -> u32 {
+        self.fragments.1
+    }
+
+    pub const fn rows(self) -> u32 {
+        self.subgroups.0 * self.fragments.0 * self.fragment.rows()
+    }
+
+    pub const fn columns(self) -> u32 {
+        self.subgroups.1 * self.fragments.1 * self.fragment.columns()
+    }
+
+    pub const fn depth(self) -> u32 {
+        self.stage
+    }
+
+    pub const fn threads(self) -> u32 {
+        self.subgroups.0 * self.subgroups.1 * self.fragment.subgroup()
+    }
+
+    pub const fn accumulators(self) -> u32 {
+        self.fragments.0 * self.fragments.1
+    }
+
+    pub const fn registers(self) -> u32 {
+        let accumulator = self.accumulators() * self.fragment.rows() * self.fragment.columns();
+        let operands = self.fragment.rows() * self.fragment.depth()
+            + self.fragment.depth() * self.fragment.columns();
+        (accumulator + operands) / self.fragment.subgroup()
+    }
+
+    pub const fn left_stride(self) -> u32 {
+        self.stage
+    }
+
+    pub const fn left_stage(self) -> u64 {
+        self.rows() as u64 * self.stage as u64
+    }
+
+    pub const fn right_stage(self) -> u64 {
+        self.columns() as u64 * self.stage as u64
+    }
+
+    pub const fn half_panels(self) -> u64 {
+        2 * (self.left_stage() + self.right_stage())
+    }
+
+    pub const fn half_bytes(self) -> u64 {
+        self.half_panels() * 2
+    }
+
+    pub const fn copy(self) -> u64 {
+        self.subgroups.0 as u64
+            * self.subgroups.1 as u64
+            * self.fragment.rows() as u64
+            * self.fragment.columns() as u64
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct PlainTile {
     rows: u32,
     columns: u32,
     depth: u32,
@@ -116,49 +239,7 @@ pub struct MatmulTile {
     thread_columns: u32,
 }
 
-impl MatmulTile {
-    pub const fn new(
-        strategy: MatmulStrategy,
-        rows: u32,
-        columns: u32,
-        depth: u32,
-        thread_rows: u32,
-        thread_columns: u32,
-    ) -> Self {
-        assert!(
-            rows > 0 && columns > 0 && depth > 0,
-            "a matmul tile spans no element"
-        );
-        assert!(
-            thread_rows > 0 && thread_columns > 0,
-            "a matmul tile is carried by no thread",
-        );
-        assert!(
-            rows.is_multiple_of(thread_rows),
-            "a matmul tile does not divide its rows by the threads along rows",
-        );
-        assert!(
-            columns.is_multiple_of(thread_columns),
-            "a matmul tile does not divide its columns by the threads along columns",
-        );
-        assert!(
-            matches!(strategy, MatmulStrategy::Streamed) || depth.is_multiple_of(2),
-            "a staged tile walks two of its rows at one stride into the same bank of the workgroup scratch",
-        );
-        Self {
-            strategy,
-            rows,
-            columns,
-            depth,
-            thread_rows,
-            thread_columns,
-        }
-    }
-
-    pub const fn strategy(self) -> MatmulStrategy {
-        self.strategy
-    }
-
+impl PlainTile {
     pub const fn rows(self) -> u32 {
         self.rows
     }
@@ -192,91 +273,255 @@ impl MatmulTile {
     }
 
     pub const fn registers(self) -> u32 {
-        assert!(
-            !matches!(self.strategy, MatmulStrategy::Cooperative),
-            "a cooperative tile holds its fragment across a subgroup",
-        );
         self.register_rows() * self.register_columns()
+    }
+
+    pub const fn operands(self) -> u32 {
+        self.register_rows() + self.register_columns()
     }
 
     pub const fn tile_work(self) -> u64 {
         self.rows as u64 * self.columns as u64 * self.depth as u64
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum MatmulTile {
+    Staged(PlainTile),
+    Streamed(PlainTile),
+    Cooperative(CooperativeTile),
+}
+
+impl MatmulTile {
+    pub const fn new(
+        strategy: MatmulStrategy,
+        rows: u32,
+        columns: u32,
+        depth: u32,
+        thread_rows: u32,
+        thread_columns: u32,
+    ) -> Self {
+        assert!(
+            rows > 0 && columns > 0 && depth > 0,
+            "a matmul tile spans no element"
+        );
+        assert!(
+            thread_rows > 0 && thread_columns > 0,
+            "a matmul tile is carried by no thread",
+        );
+        assert!(
+            rows.is_multiple_of(thread_rows),
+            "a matmul tile does not divide its rows by the threads along rows",
+        );
+        assert!(
+            columns.is_multiple_of(thread_columns),
+            "a matmul tile does not divide its columns by the threads along columns",
+        );
+        assert!(
+            matches!(strategy, MatmulStrategy::Streamed) || depth.is_multiple_of(2),
+            "a staged tile walks two of its rows at one stride into the same bank of the workgroup scratch",
+        );
+        let tile = PlainTile {
+            rows,
+            columns,
+            depth,
+            thread_rows,
+            thread_columns,
+        };
+        match strategy {
+            MatmulStrategy::Staged => Self::Staged(tile),
+            MatmulStrategy::Streamed => Self::Streamed(tile),
+            MatmulStrategy::Cooperative => panic!(
+                "a cooperative tile divides the fragments of its device among subgroups instead of registers",
+            ),
+        }
+    }
+
+    pub const fn cooperative(tile: CooperativeTile) -> Self {
+        Self::Cooperative(tile)
+    }
+
+    pub const fn strategy(self) -> MatmulStrategy {
+        match self {
+            Self::Staged(_) => MatmulStrategy::Staged,
+            Self::Streamed(_) => MatmulStrategy::Streamed,
+            Self::Cooperative(_) => MatmulStrategy::Cooperative,
+        }
+    }
+
+    pub const fn rows(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.rows(),
+            Self::Cooperative(tile) => tile.rows(),
+        }
+    }
+
+    pub const fn columns(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.columns(),
+            Self::Cooperative(tile) => tile.columns(),
+        }
+    }
+
+    pub const fn depth(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.depth(),
+            Self::Cooperative(tile) => tile.depth(),
+        }
+    }
+
+    pub const fn thread_rows(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.thread_rows(),
+            Self::Cooperative(tile) => tile.subgroup_rows(),
+        }
+    }
+
+    pub const fn thread_columns(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.thread_columns(),
+            Self::Cooperative(tile) => tile.subgroup_columns(),
+        }
+    }
+
+    pub const fn threads(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.threads(),
+            Self::Cooperative(tile) => tile.threads(),
+        }
+    }
+
+    pub const fn registers(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.registers(),
+            Self::Cooperative(tile) => tile.registers(),
+        }
+    }
+
+    pub const fn operands(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.operands(),
+            Self::Cooperative(_) => 0,
+        }
+    }
+
+    pub const fn register_rows(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.register_rows(),
+            Self::Cooperative(_) => panic!("a cooperative tile accumulates across a subgroup"),
+        }
+    }
+
+    pub const fn register_columns(self) -> u32 {
+        match self {
+            Self::Staged(tile) | Self::Streamed(tile) => tile.register_columns(),
+            Self::Cooperative(_) => panic!("a cooperative tile accumulates across a subgroup"),
+        }
+    }
+
+    pub const fn tile_work(self) -> u64 {
+        self.rows() as u64 * self.columns() as u64 * self.depth() as u64
+    }
 
     pub const fn left_stride(self) -> u32 {
-        match self.strategy {
-            MatmulStrategy::Staged => self.depth + 1,
-            MatmulStrategy::Streamed | MatmulStrategy::Cooperative => 0,
+        match self {
+            Self::Staged(tile) => tile.depth() + 1,
+            Self::Streamed(_) => 0,
+            Self::Cooperative(tile) => tile.left_stride(),
         }
     }
 
     pub const fn left_stage(self) -> u64 {
-        match self.strategy {
-            MatmulStrategy::Staged => self.rows as u64 * self.left_stride() as u64,
-            MatmulStrategy::Streamed => 0,
-            MatmulStrategy::Cooperative => self.rows as u64 * self.depth as u64,
+        match self {
+            Self::Staged(tile) => tile.rows() as u64 * (tile.depth() + 1) as u64,
+            Self::Streamed(_) => 0,
+            Self::Cooperative(tile) => tile.left_stage(),
+        }
+    }
+
+    pub const fn right_stage(self) -> u64 {
+        match self {
+            Self::Staged(tile) => tile.depth() as u64 * tile.columns() as u64,
+            Self::Streamed(_) => 0,
+            Self::Cooperative(tile) => tile.right_stage(),
         }
     }
 
     pub const fn half_panels(self) -> u64 {
-        assert!(
-            matches!(self.strategy, MatmulStrategy::Cooperative),
-            "only a cooperative tile stages its panels on the half grid",
-        );
-        2 * (self.left_stage() + self.right_stage())
-    }
-
-    pub const fn right_stage(self) -> u64 {
-        match self.strategy {
-            MatmulStrategy::Staged => self.depth as u64 * self.columns as u64,
-            MatmulStrategy::Streamed => 0,
-            MatmulStrategy::Cooperative => self.columns as u64 * self.depth as u64,
+        match self {
+            Self::Cooperative(tile) => tile.half_panels(),
+            _ => panic!("only a cooperative tile stages its panels on the half grid"),
         }
     }
 
     pub const fn shared_bytes(self) -> u64 {
-        2 * (self.left_stage() + self.right_stage()) * WORD_BYTES
-    }
-
-    pub const fn cooperative(
-        rows: u32,
-        columns: u32,
-        depth: u32,
-        subgroup_rows: u32,
-        subgroup_columns: u32,
-    ) -> Self {
-        assert!(
-            rows > 0 && columns > 0 && depth > 0,
-            "a cooperative tile spans no element"
-        );
-        assert!(
-            subgroup_rows > 0 && subgroup_columns > 0,
-            "a cooperative tile is carried by no subgroup"
-        );
-        Self {
-            strategy: MatmulStrategy::Cooperative,
-            rows,
-            columns,
-            depth,
-            thread_rows: subgroup_rows,
-            thread_columns: subgroup_columns,
+        match self {
+            Self::Cooperative(tile) => tile.half_bytes(),
+            _ => 2 * (self.left_stage() + self.right_stage()) * WORD_BYTES,
         }
     }
 
     pub const fn subgroup_rows(self) -> u32 {
-        assert!(
-            matches!(self.strategy, MatmulStrategy::Cooperative),
-            "only a cooperative tile is carried by subgroups",
-        );
-        self.thread_rows
+        match self {
+            Self::Cooperative(tile) => tile.subgroup_rows(),
+            _ => panic!("only a cooperative tile is carried by subgroups"),
+        }
     }
 
     pub const fn subgroup_columns(self) -> u32 {
-        assert!(
-            matches!(self.strategy, MatmulStrategy::Cooperative),
-            "only a cooperative tile is carried by subgroups",
-        );
-        self.thread_columns
+        match self {
+            Self::Cooperative(tile) => tile.subgroup_columns(),
+            _ => panic!("only a cooperative tile is carried by subgroups"),
+        }
+    }
+
+    pub const fn subgroup(self) -> u32 {
+        match self {
+            Self::Cooperative(tile) => tile.subgroup(),
+            _ => panic!("only a cooperative tile is carried by subgroups"),
+        }
+    }
+
+    pub const fn fragment_rows(self) -> u32 {
+        match self {
+            Self::Cooperative(tile) => tile.fragment().rows(),
+            _ => panic!("only a cooperative tile holds the fragment of its device"),
+        }
+    }
+
+    pub const fn fragment_columns(self) -> u32 {
+        match self {
+            Self::Cooperative(tile) => tile.fragment().columns(),
+            _ => panic!("only a cooperative tile holds the fragment of its device"),
+        }
+    }
+
+    pub const fn fragment_depth(self) -> u32 {
+        match self {
+            Self::Cooperative(tile) => tile.fragment().depth(),
+            _ => panic!("only a cooperative tile holds the fragment of its device"),
+        }
+    }
+
+    pub const fn fragment_grid(self) -> (u32, u32) {
+        match self {
+            Self::Cooperative(tile) => tile.fragments(),
+            _ => panic!("only a cooperative tile holds the fragment of its device"),
+        }
+    }
+
+    pub const fn accumulators(self) -> u32 {
+        match self {
+            Self::Cooperative(tile) => tile.accumulators(),
+            _ => panic!("only a cooperative tile accumulates across a subgroup"),
+        }
+    }
+
+    pub const fn copy(self) -> u64 {
+        match self {
+            Self::Cooperative(tile) => tile.copy(),
+            _ => 0,
+        }
     }
 }
 
@@ -322,7 +567,6 @@ impl Budget {
 
 pub const MAX_TILES: usize = 32;
 const PLAINEST_BLOCKING: (u32, u32) = (1, 1);
-const WIDEST_BLOCKINGS: usize = 4;
 const WORKGROUP_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
 const BLOCKINGS: [(u32, u32); 11] = [
     (8, 8),
@@ -339,10 +583,24 @@ const BLOCKINGS: [(u32, u32); 11] = [
 ];
 const GRID_ASPECT: u32 = 4;
 const STREAMED_ASPECT: u32 = 4;
+const COOPERATIVE_ASPECT: u32 = 4;
+const COOPERATIVE_FRAGMENTS: [(u32, u32); 4] = [(2, 2), (2, 1), (1, 2), (1, 1)];
+const COOPERATIVE_STAGE_FRAGMENTS: u32 = 1;
+const COOPERATIVE_MENU: usize = 6;
+const POOL_BYTES: u64 = 21 << 10;
+const BLOCKINGS_PER_GRID: usize = 2;
 const DEPTH: u32 = 8;
 pub const CLAIM_WORDS: u32 = 2;
 pub const CLAIM_BYTES: u64 = CLAIM_WORDS as u64 * WORD_BYTES;
 const SCRATCH_WORDS_PER_THREAD: u64 = 2;
+const REGISTER_FILE: u32 = 65_536;
+const REGISTER_SLACK: u32 = 24;
+const THREAD_REGISTER_CEILING: u32 = 255;
+
+fn carries_registers(workgroup: u32, registers: u32) -> bool {
+    let per_thread = registers + REGISTER_SLACK;
+    per_thread <= THREAD_REGISTER_CEILING && per_thread.saturating_mul(workgroup) <= REGISTER_FILE
+}
 
 const fn scratch_budget(workgroup: u32, staging: u64, copy: u64) -> u64 {
     let floor = SCRATCH_WORDS_PER_THREAD * workgroup as u64 * WORD_BYTES;
@@ -352,14 +610,6 @@ const fn scratch_budget(workgroup: u32, staging: u64, copy: u64) -> u64 {
     } else {
         widest + CLAIM_BYTES
     }
-}
-
-const fn cooperative_panels(rows: u32, columns: u32, depth: u32) -> u64 {
-    2 * (rows as u64 * depth as u64 + columns as u64 * depth as u64) * 2
-}
-
-const fn cooperative_copy(rows: u32, columns: u32) -> u64 {
-    rows as u64 * columns as u64 * WORD_BYTES
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -381,23 +631,14 @@ impl std::fmt::Debug for Profile {
 }
 
 impl Profile {
-    pub const fn of(tiles: &[MatmulTile]) -> Self {
+    pub fn of(tiles: &[MatmulTile]) -> Self {
         assert!(
             !tiles.is_empty() && tiles.len() <= MAX_TILES,
             "a profile offers between one and thirty-two matmul tiles",
         );
-        let mut plainest = tiles[0];
-        let mut index = 0;
-        while index < tiles.len() {
-            if !matches!(tiles[index].strategy, MatmulStrategy::Cooperative) {
-                plainest = tiles[index];
-                index = tiles.len();
-            } else {
-                index += 1;
-            }
-        }
-        let workgroup = plainest.threads();
-        let mut entries = [plainest; MAX_TILES];
+        let workgroup = tiles[0].threads();
+        let mut entries = [tiles[0]; MAX_TILES];
+        let mut fragment = None;
         let mut left_stage = 0u64;
         let mut right_stage = 0u64;
         let mut panels = 0u64;
@@ -405,28 +646,30 @@ impl Profile {
         let mut index = 0;
         while index < tiles.len() {
             let tile = tiles[index];
-            if matches!(tile.strategy, MatmulStrategy::Cooperative) {
+            assert!(
+                tile.threads() == workgroup,
+                "a profile hands one device program two workgroup sizes",
+            );
+            assert!(
+                carries_registers(workgroup, tile.registers() + tile.operands()),
+                "a {workgroup} thread workgroup of {tile:?} carries {} registers a thread beside the {} a device holds for it",
+                tile.registers() + tile.operands(),
+                REGISTER_FILE,
+            );
+            if let MatmulTile::Cooperative(cooperative) = tile {
                 assert!(
-                    tile.rows().is_multiple_of(tile.subgroup_rows()),
-                    "a cooperative tile does not divide its rows by its subgroups"
+                    *fragment.get_or_insert(cooperative.fragment()) == cooperative.fragment(),
+                    "a device program holds one cooperative fragment shape, and {tile:?} holds another",
                 );
-                assert!(
-                    tile.columns().is_multiple_of(tile.subgroup_columns()),
-                    "a cooperative tile does not divide its columns by its subgroups"
-                );
-                let here = cooperative_panels(tile.rows(), tile.columns(), tile.depth());
+                let here = cooperative.half_bytes();
                 if here > panels {
                     panels = here;
                 }
-                let here = cooperative_copy(tile.rows(), tile.columns());
+                let here = cooperative.copy() * WORD_BYTES;
                 if here > copy {
                     copy = here;
                 }
             } else {
-                assert!(
-                    tile.threads() == workgroup,
-                    "a profile hands one device program two workgroup sizes"
-                );
                 if tile.left_stage() > left_stage {
                     left_stage = tile.left_stage();
                 }
@@ -448,35 +691,12 @@ impl Profile {
 
     pub fn derive(budget: Budget, cooperative: Option<CooperativeMatrix>) -> Vec<Self> {
         let mut profiles = Vec::new();
+        let pool = budget.shared_bytes().min(POOL_BYTES);
         for workgroup in WORKGROUP_SIZES {
             if workgroup > budget.threads() {
                 continue;
             }
-            let mut tiles: Vec<MatmulTile> = Vec::new();
-            let mut left_stage = 0u64;
-            let mut right_stage = 0u64;
-            for (rows, columns) in grids(workgroup) {
-                for (register_rows, register_columns) in blockings(
-                    rows,
-                    columns,
-                    left_stage,
-                    right_stage,
-                    workgroup,
-                    budget.shared_bytes(),
-                ) {
-                    let tile = MatmulTile::new(
-                        MatmulStrategy::Staged,
-                        rows * register_rows,
-                        columns * register_columns,
-                        DEPTH,
-                        rows,
-                        columns,
-                    );
-                    left_stage = left_stage.max(tile.left_stage());
-                    right_stage = right_stage.max(tile.right_stage());
-                    tiles.push(tile);
-                }
-            }
+            let mut tiles = staged_tiles(workgroup, pool);
             for (rows, columns) in streamed_grids(workgroup) {
                 tiles.push(MatmulTile::new(
                     MatmulStrategy::Streamed,
@@ -487,38 +707,31 @@ impl Profile {
                     columns,
                 ));
             }
-            if let Some(shape) = cooperative
-                && workgroup.is_multiple_of(shape.subgroup())
-                && panels_fit(
+            let mut left_stage = 0u64;
+            let mut right_stage = 0u64;
+            for tile in &tiles {
+                left_stage = left_stage.max(tile.left_stage());
+                right_stage = right_stage.max(tile.right_stage());
+            }
+            if let Some(fragment) = cooperative {
+                tiles.extend(cooperative_tiles(
                     workgroup,
-                    budget.shared_bytes(),
+                    pool,
+                    fragment,
                     left_stage,
                     right_stage,
-                    shape,
-                )
-            {
-                let subgroups = workgroup / shape.subgroup();
-                let subgroup_columns = if subgroups >= 2 { subgroups / 2 } else { 1 };
-                let subgroup_rows = subgroups / subgroup_columns;
-                let tile = MatmulTile::cooperative(
-                    subgroup_rows * shape.rows(),
-                    subgroup_columns * shape.columns(),
-                    shape.depth(),
-                    subgroup_rows,
-                    subgroup_columns,
-                );
-                assert!(
-                    tile.rows() / subgroup_rows == shape.rows()
-                        && tile.columns() / subgroup_columns == shape.columns(),
-                    "a cooperative tile carries the fragment of its device",
-                );
-                tiles.push(tile);
+                ));
             }
             if tiles.is_empty() {
                 continue;
             }
             tiles.sort_by_key(|tile| (tile.rows() * tile.columns(), tile.depth()));
             tiles.dedup();
+            assert!(
+                tiles.len() <= MAX_TILES,
+                "a device derives {} tiles for one workgroup of {workgroup} threads where a profile carries {MAX_TILES}",
+                tiles.len(),
+            );
             profiles.push(Self::of(&tiles));
         }
         profiles
@@ -554,7 +767,7 @@ impl Profile {
         let mut right = 0u64;
         let mut index = 0;
         while index < self.count as usize {
-            if !matches!(self.tiles[index].strategy, MatmulStrategy::Cooperative) {
+            if !matches!(self.tiles[index], MatmulTile::Cooperative(_)) {
                 if self.tiles[index].left_stage() > left {
                     left = self.tiles[index].left_stage();
                 }
@@ -572,8 +785,8 @@ impl Profile {
         let mut index = 0;
         while index < self.count as usize {
             let tile = self.tiles[index];
-            if matches!(tile.strategy, MatmulStrategy::Cooperative) {
-                let here = cooperative_panels(tile.rows(), tile.columns(), tile.depth());
+            if let MatmulTile::Cooperative(cooperative) = tile {
+                let here = cooperative.half_bytes();
                 if here > panels {
                     panels = here;
                 }
@@ -584,62 +797,156 @@ impl Profile {
     }
 }
 
-fn blockings(
-    rows: u32,
-    columns: u32,
-    left_stage: u64,
-    right_stage: u64,
-    workgroup: u32,
-    shared_bytes: u64,
-) -> Vec<(u32, u32)> {
-    let mut chosen = vec![PLAINEST_BLOCKING];
-    let mut left = left_stage;
-    let mut right = right_stage;
-    for blocking in BLOCKINGS {
-        if chosen.len() > WIDEST_BLOCKINGS {
-            break;
+fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
+    let mut candidates = Vec::new();
+    for (rows, columns) in grids(workgroup) {
+        for (register_rows, register_columns) in BLOCKINGS.into_iter().chain([PLAINEST_BLOCKING]) {
+            let tile = MatmulTile::new(
+                MatmulStrategy::Staged,
+                rows * register_rows,
+                columns * register_columns,
+                DEPTH,
+                rows,
+                columns,
+            );
+            if !carries_registers(workgroup, tile.registers() + tile.operands()) {
+                continue;
+            }
+            if !carried(tile.left_stage(), tile.right_stage(), workgroup, budget) {
+                continue;
+            }
+            candidates.push(tile);
         }
-        let (register_rows, register_columns) = blocking;
-        let tile = MatmulTile::new(
-            MatmulStrategy::Staged,
-            rows * register_rows,
-            columns * register_columns,
-            DEPTH,
-            rows,
-            columns,
-        );
+    }
+    candidates.sort_by_key(|tile| {
+        (
+            std::cmp::Reverse(tile.rows() * tile.columns()),
+            tile.left_stage() + tile.right_stage(),
+        )
+    });
+    candidates.dedup();
+    let mut chosen: Vec<MatmulTile> = Vec::new();
+    let mut held = HashMap::<(u32, u32), usize>::new();
+    for tile in &candidates {
+        let grid = (tile.thread_rows(), tile.thread_columns());
+        let count = held.entry(grid).or_insert(0);
+        if *count >= BLOCKINGS_PER_GRID {
+            continue;
+        }
         if !carried(
-            left.max(tile.left_stage()),
-            right.max(tile.right_stage()),
+            joint_stage(&chosen, *tile).0,
+            joint_stage(&chosen, *tile).1,
             workgroup,
-            shared_bytes,
+            budget,
         ) {
             continue;
         }
-        left = left.max(tile.left_stage());
-        right = right.max(tile.right_stage());
-        chosen.push(blocking);
+        *count += 1;
+        chosen.push(*tile);
+    }
+    for tile in &candidates {
+        if tile.register_rows() * tile.register_columns() != 1 {
+            continue;
+        }
+
+        if !carried(
+            joint_stage(&chosen, *tile).0,
+            joint_stage(&chosen, *tile).1,
+            workgroup,
+            budget,
+        ) {
+            continue;
+        }
+        chosen.push(*tile);
     }
     chosen
+}
+
+fn joint_stage(held: &[MatmulTile], tile: MatmulTile) -> (u64, u64) {
+    let mut left = tile.left_stage();
+    let mut right = tile.right_stage();
+    for held in held {
+        left = left.max(held.left_stage());
+        right = right.max(held.right_stage());
+    }
+    (left, right)
 }
 
 fn carried(left_stage: u64, right_stage: u64, workgroup: u32, shared_bytes: u64) -> bool {
     scratch_budget(workgroup, 2 * (left_stage + right_stage) * WORD_BYTES, 0) <= shared_bytes
 }
 
-fn panels_fit(
+fn cooperative_tiles(
+    workgroup: u32,
+    shared_bytes: u64,
+    fragment: CooperativeMatrix,
+    left_stage: u64,
+    right_stage: u64,
+) -> Vec<MatmulTile> {
+    if !workgroup.is_multiple_of(fragment.subgroup()) {
+        return Vec::new();
+    }
+    let mut tiles: Vec<CooperativeTile> = Vec::new();
+    for (subgroup_rows, subgroup_columns) in cooperative_subgroups(workgroup / fragment.subgroup())
+    {
+        for (fragments_rows, fragments_columns) in COOPERATIVE_FRAGMENTS {
+            let fragments = (fragments_rows, fragments_columns);
+            let mut stage = fragment.depth();
+            let mut staged = None;
+            while stage <= COOPERATIVE_STAGE_FRAGMENTS * fragment.depth() {
+                let tile = CooperativeTile::new(
+                    fragment,
+                    (subgroup_rows, subgroup_columns),
+                    fragments,
+                    stage,
+                );
+                if !carries_registers(workgroup, tile.registers())
+                    || !cooperative_fits(workgroup, shared_bytes, left_stage, right_stage, tile)
+                {
+                    break;
+                }
+                staged = Some(tile);
+                stage += fragment.depth();
+            }
+            if let Some(tile) = staged {
+                tiles.push(tile);
+            }
+        }
+    }
+    tiles.sort_by_key(|tile| std::cmp::Reverse((tile.rows() * tile.columns(), tile.stage())));
+    tiles.dedup();
+    tiles.truncate(COOPERATIVE_MENU);
+    tiles.into_iter().map(MatmulTile::cooperative).collect()
+}
+
+fn cooperative_subgroups(subgroups: u32) -> Vec<(u32, u32)> {
+    let mut grids = Vec::new();
+    let mut rows = 1;
+    while rows <= subgroups {
+        if subgroups.is_multiple_of(rows) {
+            let columns = subgroups / rows;
+            if rows <= COOPERATIVE_ASPECT * columns {
+                grids.push((rows, columns));
+            }
+        }
+        rows *= 2;
+    }
+    grids
+}
+
+fn cooperative_fits(
     workgroup: u32,
     shared_bytes: u64,
     left_stage: u64,
     right_stage: u64,
-    shape: CooperativeMatrix,
+    tile: CooperativeTile,
 ) -> bool {
-    let rows = shape.rows() * 2;
-    let columns = shape.columns() * 2;
-    let staging = scratch_budget(workgroup, 2 * (left_stage + right_stage) * WORD_BYTES, 0);
-    let cooperative =
-        cooperative_copy(rows, columns) + cooperative_panels(rows, columns, shape.depth());
-    staging + cooperative <= shared_bytes
+    let staging = scratch_budget(
+        workgroup,
+        2 * (left_stage + right_stage) * WORD_BYTES,
+        tile.copy() * WORD_BYTES,
+    );
+    staging + tile.half_bytes() <= shared_bytes
 }
 
 fn grids(workgroup: u32) -> Vec<(u32, u32)> {
@@ -692,9 +999,7 @@ impl Geometry {
         attention: &[AttentionTile],
     ) -> Self {
         assert!(
-            tiles.iter().all(|tile| {
-                matches!(tile.strategy, MatmulStrategy::Cooperative) || tile.threads() == workgroup
-            }),
+            tiles.iter().all(|tile| tile.threads() == workgroup),
             "a device program carries a tile another workgroup stages",
         );
         let mut left_stage = 0u64;
@@ -702,9 +1007,9 @@ impl Geometry {
         let mut half_stage = 0u64;
         let mut copy = 0u64;
         for tile in tiles {
-            if matches!(tile.strategy, MatmulStrategy::Cooperative) {
-                half_stage = half_stage.max(tile.half_panels());
-                copy = copy.max(tile.rows() as u64 * tile.columns() as u64);
+            if let MatmulTile::Cooperative(cooperative) = tile {
+                half_stage = half_stage.max(cooperative.half_panels());
+                copy = copy.max(cooperative.copy());
             } else {
                 left_stage = left_stage.max(tile.left_stage());
                 right_stage = right_stage.max(tile.right_stage());
@@ -768,13 +1073,11 @@ impl Geometry {
         }
     }
 
-    pub fn subgroup(&self) -> u32 {
-        let tile = self
-            .tiles
-            .iter()
-            .find(|tile| matches!(tile.strategy, MatmulStrategy::Cooperative))
-            .unwrap_or_else(|| panic!("a device program carries no cooperative tile"));
-        self.workgroup / (tile.subgroup_rows() * tile.subgroup_columns())
+    pub fn cooperative(&self) -> Option<CooperativeTile> {
+        self.tiles.iter().find_map(|tile| match tile {
+            MatmulTile::Cooperative(cooperative) => Some(*cooperative),
+            _ => None,
+        })
     }
 
     pub const fn half_panels(&self) -> u64 {
