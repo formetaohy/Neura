@@ -360,10 +360,11 @@ impl Runtime {
     fn kernel(&self, plan: &Plan, profile: Profile) -> Arc<Kernel> {
         let kinds = plan.kinds().to_vec();
         let elements = plan.elements().to_vec();
+        let walked = plan.walked_tiles().collect::<Vec<_>>();
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            plan.tiles(),
+            &walked,
             plan.attention(),
         );
         self.artifacts

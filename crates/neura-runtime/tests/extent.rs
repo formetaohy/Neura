@@ -228,6 +228,7 @@ fn family_runs_every_binding(
     for (batch, tokens) in bindings {
         let seed = batch * 31 + tokens;
         let (expected, parameter) = reference(&runtime, build, *batch, *tokens, seed);
+        let assembled = runtime.assembled_kernels();
         let binding = model.binding(*batch, *tokens);
         runtime.bind(&program, &binding);
         for input in &model.inputs {
@@ -241,6 +242,11 @@ fn family_runs_every_binding(
         runtime.run(&program);
         let produced = runtime.read(&program, model.output);
         assert_eq!(
+            runtime.assembled_kernels(),
+            assembled,
+            "a binding of {batch} by {tokens} assembles a device program of its own",
+        );
+        assert_eq!(
             produced.len(),
             expected.len(),
             "a binding of {batch} by {tokens} came back with {} numbers where {} were expected",
@@ -249,10 +255,11 @@ fn family_runs_every_binding(
         );
         assert_close(&produced, &expected, 2e-3);
     }
-    assert_eq!(
-        runtime.declared_kernels(),
-        1,
-        "a shape family and every shape its references walk run one device program",
+    assert!(
+        program.matmul_geometries().len() < program.tiles().len(),
+        "a plan that walks {} product tiles compiles the {} of the menu its plan never walks",
+        program.matmul_geometries().len(),
+        program.tiles().len(),
     );
 }
 

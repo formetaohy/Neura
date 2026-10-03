@@ -214,7 +214,7 @@ impl Kernel {
             &format!(
                 "neura kernel {} threads over {} tiles and {} kinds",
                 geometry.workgroup(),
-                geometry.tiles().len(),
+                geometry.walked().len(),
                 kinds.len()
             ),
             scheduler::ENTRY,

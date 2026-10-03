@@ -18,7 +18,7 @@ pub(crate) fn install_tiles(compiler: &mut Compiler, geometry: &Geometry) {
 }
 
 fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
-    for (index, tile) in geometry.tiles().iter().enumerate() {
+    for (index, tile) in geometry.walked() {
         let suffix = index.to_string();
         let mut constants = vec![
             ("MATMUL_ROWS", tile.rows()),
@@ -93,11 +93,7 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
         compiler.insert_case(
             "run_matmul",
             ast::Arm {
-                pattern: ast::Pattern::Integer(
-                    index
-                        .try_into()
-                        .expect("a geometry fits in one device word"),
-                ),
+                pattern: ast::Pattern::Integer(*index),
                 body: vec![ast::Statement::Expression(ast::Expression::call(
                     format!("run_matmul_{index}"),
                     vec![ast::Expression::name("task"), ast::Expression::name("lid")],

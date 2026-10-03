@@ -536,9 +536,9 @@ fn a_square_root_and_its_reciprocal_ride_the_same_tape() {
 }
 
 #[test]
-fn a_device_program_carries_every_tile_of_its_profile_whatever_the_batch() {
+fn a_device_program_is_assembled_once_per_set_of_walked_product_tiles() {
     let runtime = open();
-    let mut menus: Vec<Vec<neura_profile::MatmulTile>> = Vec::new();
+    let mut walked: Vec<Vec<neura_profile::MatmulTile>> = Vec::new();
     let mut results = Vec::new();
     let mut programs = Vec::new();
     for batch in [8u32, 64, 8, 17, 512] {
@@ -555,18 +555,24 @@ fn a_device_program_carries_every_tile_of_its_profile_whatever_the_batch() {
         let out = graph.softmax(graph.matmul(data, weight));
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        if !menus.contains(&program.tiles().to_vec()) {
-            menus.push(program.tiles().to_vec());
+        let geometries = program
+            .matmul_geometries()
+            .into_iter()
+            .map(|(tile, _)| tile)
+            .collect::<Vec<_>>();
+        assert!(
+            geometries
+                .iter()
+                .all(|tile| program.profile().tiles().contains(tile)),
+            "a plan walks a product tile its profile never offers",
+        );
+        if !walked.contains(&geometries) {
+            walked.push(geometries);
         }
         assert_eq!(
-            program.tiles(),
-            program.profile().tiles(),
-            "a device program carries the whole menu of the profile it compiles for",
-        );
-        assert_eq!(
-            runtime.declared_kernels(),
-            menus.len(),
-            "a device program is assembled once per menu, not once per shape",
+            runtime.assembled_kernels(),
+            walked.len(),
+            "a device program is assembled once per set of walked product tiles, not once per shape",
         );
         let data_values = random(batch * 5, batch);
         runtime.write(&program, data, &data_values);
@@ -577,14 +583,14 @@ fn a_device_program_carries_every_tile_of_its_profile_whatever_the_batch() {
     assert_eq!(results[0].len(), 8 * 3);
     assert_eq!(results[1].len(), 64 * 3);
     assert_eq!(
-        menus.len(),
+        walked.len(),
         1,
-        "every batch of one model walks the menu of one device program",
+        "every batch of one model walks one set of product tiles, and shares its device program",
     );
     assert_eq!(
         runtime.assembled_kernels(),
         1,
-        "a shape never assembles a second device program",
+        "a batch that walks the product tiles of another batch assembles a second device program",
     );
     for (index, (program, out)) in programs.iter().enumerate() {
         runtime.run(program);
@@ -1083,7 +1089,7 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
 }
 
 #[test]
-fn a_product_that_splits_its_depth_keeps_the_menu_of_one_program() {
+fn a_product_that_splits_its_depth_shares_the_program_of_its_shape() {
     let runtime = open();
     for depth in [8u32, 4096] {
         let graph = Graph::new();

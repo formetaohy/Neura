@@ -187,19 +187,24 @@ fn tuning_leaves_the_parameter_store_untouched() {
 fn one_device_program_serves_every_batch_of_one_model() {
     let runtime = open();
     assert_eq!(runtime.assembled_kernels(), 0);
-    let mut menus: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
+    let mut walked: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
     for samples in [8, 32, 96, 128, 8, 32] {
         let graph = Graph::new();
         let model = trained(&graph, samples, 5);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        if !menus.contains(&program.tiles().to_vec()) {
-            menus.push(program.tiles().to_vec());
+        let geometries = program
+            .matmul_geometries()
+            .into_iter()
+            .map(|(tile, _)| tile)
+            .collect::<Vec<_>>();
+        if !walked.contains(&geometries) {
+            walked.push(geometries);
         }
         assert_eq!(
             runtime.assembled_kernels(),
-            menus.len(),
-            "a batch never assembles a device program of its own",
+            walked.len(),
+            "a batch assembles a device program its product tiles do not ask for",
         );
         let (observations, targets) = batch(samples, samples);
         runtime.write(&program, model.observations, &observations);
@@ -208,8 +213,8 @@ fn one_device_program_serves_every_batch_of_one_model() {
         assert!(runtime.read(&program, model.loss)[0].is_finite());
     }
     assert_eq!(
-        menus.len(),
+        walked.len(),
         1,
-        "every batch of one model walks the menu of one device program",
+        "every batch of one model walks one set of product tiles, and shares its device program",
     );
 }

@@ -1,7 +1,8 @@
 use neura_abi::{Element, Kind, RECORDS, WORD_BYTES};
 use neura_pointwise::OPS;
 use neura_profile::{
-    AttentionTile, Budget, CLAIM_BYTES, CooperativeMatrix, Geometry, MatmulStrategy, Profile,
+    AttentionTile, Budget, CLAIM_BYTES, CooperativeMatrix, Geometry, MatmulStrategy, MatmulTile,
+    Profile,
 };
 use neura_shader::{
     Backend, BindingKind, ComputeProgram, Instruction, ShaderTranslation, Space, Type,
@@ -11,6 +12,15 @@ const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
 fn profiles() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
+}
+
+fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
+    profile
+        .tiles()
+        .iter()
+        .enumerate()
+        .map(|(index, tile)| (index as u32, *tile))
+        .collect()
 }
 use neura_kernel::{BINDINGS, Kernel};
 use std::collections::{BTreeSet, HashSet};
@@ -28,7 +38,7 @@ fn all(profile: usize) -> &'static Kernel {
                     Geometry::of(
                         profile.workgroup(),
                         profile.shared_bytes(),
-                        profile.tiles(),
+                        &walked(*profile),
                         &[],
                     ),
                 )
@@ -45,7 +55,7 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
         Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            profile.tiles(),
+            &walked(profile),
             &[],
         ),
     )
@@ -137,7 +147,7 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
             let kernel = all(index);
             let program = kernel.program();
             assert_eq!(kernel.workgroup_size(), profile.workgroup());
-            assert_eq!(kernel.geometry().tiles(), profile.tiles());
+            assert_eq!(kernel.geometry().walked(), &walked(*profile)[..]);
             assert_eq!(kernel.bindings().len(), BINDINGS.len());
             assert_eq!(program.bindings().len(), BINDINGS.len());
             for (binding, reflected) in BINDINGS.iter().zip(kernel.bindings()) {
@@ -375,7 +385,7 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            profile.tiles(),
+            &walked(profile),
             &[],
         );
         let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
@@ -386,10 +396,10 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             "{profile:?} declares workgroup memory its geometry does not account for",
         );
         let panels = geometry
-            .tiles()
+            .walked()
             .iter()
-            .filter(|tile| matches!(tile.strategy(), MatmulStrategy::Cooperative))
-            .map(|tile| tile.half_panels())
+            .filter(|(_, tile)| matches!(tile.strategy(), MatmulStrategy::Cooperative))
+            .map(|(_, tile)| tile.half_panels())
             .max()
             .expect("a cooperative tile stages its panels on the half grid");
         assert_eq!(
@@ -403,6 +413,46 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             "a device program stages {panels} half panels in workgroup memory it declares for another count",
         );
     }
+}
+
+#[test]
+fn a_device_program_carries_only_the_tiles_its_plan_walks() {
+    let profile = *profiles().last().expect("a profile");
+    assert!(profile.tiles().len() > 2, "a profile carries a menu");
+    let menu = walked(profile);
+    let walked = &menu[..2];
+    let geometry = Geometry::of(profile.workgroup(), profile.shared_bytes(), walked, &[]);
+    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+    let program = kernel.program();
+    let names = functions(&program);
+    for (index, _) in walked {
+        assert!(names.contains(format!("run_matmul_{index}").as_str()));
+    }
+    for (index, _) in &menu[2..] {
+        assert!(
+            !names.contains(format!("run_matmul_{index}").as_str()),
+            "a device program compiles the body of tile {index} its plan never walks",
+        );
+    }
+    let (cases, _) = switch_cases(&program, "run_matmul");
+    assert_eq!(
+        cases,
+        walked.iter().map(|(index, _)| *index).collect::<Vec<_>>()
+    );
+    let whole = all(profiles().len() - 1).program();
+    assert!(
+        program.spirv().len() < whole.spirv().len(),
+        "a plan that walks two tiles of {profile:?} compiles the module of the whole menu",
+    );
+    assert!(
+        workgroup_bytes(&program) < workgroup_bytes(&whole),
+        "a plan that walks two tiles of {profile:?} declares the pool of the whole menu",
+    );
+    assert_eq!(
+        workgroup_bytes(&program),
+        geometry.workgroup_bytes(Kind::ALL),
+        "a device program declares the pool of the tiles its plan walks",
+    );
 }
 
 #[test]
@@ -425,7 +475,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
     let geometry = Geometry::of(
         profile.workgroup(),
         profile.shared_bytes(),
-        profile.tiles(),
+        &walked(profile),
         &attention,
     );
     let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());

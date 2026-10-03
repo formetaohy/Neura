@@ -983,7 +983,7 @@ fn streamed_grids(workgroup: u32) -> Vec<(u32, u32)> {
 pub struct Geometry {
     workgroup: u32,
     budget: u64,
-    tiles: Vec<MatmulTile>,
+    walked: Vec<(u32, MatmulTile)>,
     attention: Vec<AttentionTile>,
     left_stage: u64,
     right_stage: u64,
@@ -995,18 +995,22 @@ impl Geometry {
     pub fn of(
         workgroup: u32,
         budget: u64,
-        tiles: &[MatmulTile],
+        walked: &[(u32, MatmulTile)],
         attention: &[AttentionTile],
     ) -> Self {
         assert!(
-            tiles.iter().all(|tile| tile.threads() == workgroup),
+            walked.iter().all(|(_, tile)| tile.threads() == workgroup),
             "a device program carries a tile another workgroup stages",
+        );
+        assert!(
+            walked.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "a device program walks its tiles in the order its profile carries them",
         );
         let mut left_stage = 0u64;
         let mut right_stage = 0u64;
         let mut half_stage = 0u64;
         let mut copy = 0u64;
-        for tile in tiles {
+        for (_, tile) in walked {
             if let MatmulTile::Cooperative(cooperative) = tile {
                 half_stage = half_stage.max(cooperative.half_panels());
                 copy = copy.max(cooperative.copy());
@@ -1018,7 +1022,7 @@ impl Geometry {
         Self {
             workgroup,
             budget,
-            tiles: tiles.to_vec(),
+            walked: walked.to_vec(),
             attention: attention.to_vec(),
             left_stage,
             right_stage,
@@ -1074,7 +1078,7 @@ impl Geometry {
     }
 
     pub fn cooperative(&self) -> Option<CooperativeTile> {
-        self.tiles.iter().find_map(|tile| match tile {
+        self.walked.iter().find_map(|(_, tile)| match tile {
             MatmulTile::Cooperative(cooperative) => Some(*cooperative),
             _ => None,
         })
@@ -1125,28 +1129,7 @@ impl Geometry {
             .unwrap_or(0)
     }
 
-    pub fn tiles(&self) -> &[MatmulTile] {
-        &self.tiles
-    }
-
-    pub fn geometry(&self, tile: MatmulTile) -> u32 {
-        self.tiles
-            .iter()
-            .position(|candidate| *candidate == tile)
-            .unwrap_or_else(|| panic!("a device program carries no {tile:?}"))
-            .try_into()
-            .expect("a device program carries fewer tiles than a word holds")
-    }
-
-    pub fn tile(&self, geometry: u32) -> MatmulTile {
-        self.tiles
-            .get(geometry as usize)
-            .copied()
-            .unwrap_or_else(|| {
-                panic!(
-                    "geometry {geometry} lies outside the {} a device program carries",
-                    self.tiles.len(),
-                )
-            })
+    pub fn walked(&self) -> &[(u32, MatmulTile)] {
+        &self.walked
     }
 }

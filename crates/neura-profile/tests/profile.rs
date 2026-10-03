@@ -16,6 +16,15 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(AssertUnwindSafe(action)).is_err()
 }
 
+fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
+    profile
+        .tiles()
+        .iter()
+        .enumerate()
+        .map(|(index, tile)| (index as u32, *tile))
+        .collect()
+}
+
 #[test]
 fn a_device_budget_fits_every_profile_it_derives() {
     for budget in [Budget::BASELINE, mid_device(), wide_device()] {
@@ -72,8 +81,12 @@ fn a_wider_device_derives_the_tiles_its_registers_and_pool_carry() {
     for budget in [Budget::BASELINE, mid_device(), wide_device()] {
         for profile in Profile::derive(budget, Some(cooperative)) {
             assert!(
-                profile.shared_bytes() <= budget.shared_bytes().min(24 << 10),
+                profile.shared_bytes() <= budget.shared_bytes(),
                 "{profile:?} stages a pool beyond the one a device program hands its workgroups",
+            );
+            assert!(
+                profile.staging_bytes() + neura_profile::CLAIM_BYTES <= 21 << 10,
+                "{profile:?} derives a staged menu beyond the pool one candidate stages from",
             );
             for tile in profile.tiles() {
                 assert!(
@@ -114,7 +127,7 @@ fn a_wider_device_derives_the_tiles_its_registers_and_pool_carry() {
 }
 
 #[test]
-fn a_cooperative_tile_takes_only_the_pool_the_staged_tiles_leave() {
+fn a_cooperative_tile_takes_only_the_pool_the_staged_panels_leave() {
     let cooperative = CooperativeMatrix::new(32, 16, 16, 16);
     for budget in [Budget::BASELINE, mid_device(), wide_device()] {
         let plain = Profile::derive(budget, None);
@@ -154,24 +167,25 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
 }
 
 #[test]
-fn a_geometry_declares_every_tile_its_profile_offers() {
+fn a_geometry_declares_only_the_tiles_its_plan_walks() {
     for profile in Profile::derive(wide_device(), None) {
-        let geometry = Geometry::of(
-            profile.workgroup(),
-            profile.shared_bytes(),
-            profile.tiles(),
-            &[],
-        );
+        let all = walked(profile);
+        let walked = &all[..2];
+        let geometry = Geometry::of(profile.workgroup(), profile.shared_bytes(), walked, &[]);
         let (left, right) = (
-            profile.tiles().iter().map(|tile| tile.left_stage()).max(),
-            profile.tiles().iter().map(|tile| tile.right_stage()).max(),
+            walked.iter().map(|(_, tile)| tile.left_stage()).max(),
+            walked.iter().map(|(_, tile)| tile.right_stage()).max(),
         );
         assert_eq!(geometry.workgroup(), profile.workgroup());
-        assert_eq!(geometry.tiles(), profile.tiles());
+        assert_eq!(geometry.walked(), walked);
         assert_eq!(
             geometry.staging_bytes(),
             2 * (left.unwrap_or(0) + right.unwrap_or(0)) * WORD_BYTES,
-            "a geometry stages the panels of the widest tiles its profile offers",
+            "a geometry stages the panels of the tiles its plan walks",
+        );
+        assert!(
+            geometry.staging_bytes() < profile.staging_bytes(),
+            "a plan that walks the narrow tiles of {profile:?} stages the panels of the wide ones",
         );
         assert_eq!(
             geometry.scratch_bytes(&[Kind::Matmul]),
@@ -179,20 +193,40 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
             "a pool reserves exactly the panels a product stages",
         );
         assert!(
-            profile.shared_bytes() >= geometry.staging_bytes() + neura_profile::CLAIM_BYTES,
-            "a profile offers less pool than the panels it stages",
+            geometry.workgroup_bytes(&[Kind::Matmul]) <= profile.shared_bytes(),
+            "a geometry of two walked tiles outruns the profile that offers them",
         );
-        for (index, tile) in profile.tiles().iter().enumerate() {
-            assert_eq!(geometry.geometry(*tile), index as u32);
-            assert_eq!(geometry.tile(index as u32), *tile);
+        let one = Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            &walked[..1],
+            &[],
+        );
+        assert!(
+            one.staging_bytes() <= geometry.staging_bytes(),
+            "a plan that walks one tile stages more than a plan that walks two",
+        );
+    }
+}
+
+#[test]
+fn every_tile_of_a_profile_is_affordable_on_its_own() {
+    let cooperative = CooperativeMatrix::new(32, 16, 16, 16);
+    for budget in [Budget::BASELINE, mid_device(), wide_device()] {
+        for profile in Profile::derive(budget, Some(cooperative)) {
+            for (index, tile) in profile.tiles().iter().enumerate() {
+                let geometry = Geometry::of(
+                    profile.workgroup(),
+                    profile.shared_bytes(),
+                    &[(index as u32, *tile)],
+                    &[],
+                );
+                assert!(
+                    geometry.workgroup_bytes(&[Kind::Matmul]) <= profile.shared_bytes(),
+                    "a plan that walks {tile:?} alone outruns the profile that offers it",
+                );
+            }
         }
-        let count = profile.tiles().len() as u32;
-        assert!(refuses(|| {
-            let _ = geometry.tile(count);
-        }));
-        assert!(refuses(|| {
-            let _ = geometry.geometry(MatmulTile::new(MatmulStrategy::Staged, 24, 24, 16, 8, 8));
-        }));
     }
 }
 
@@ -202,7 +236,7 @@ fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            profile.tiles(),
+            &walked(profile)[..],
             &[AttentionTile::new(4, 8)],
         );
         let bodies = [Kind::Matmul, Kind::Attention, Kind::SumAxis, Kind::Argmax];
