@@ -1,6 +1,6 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
-    STAGING_BYTES,
+    STAGING_BYTES, TIME_SLOTS,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::ArtifactCache;
@@ -81,11 +81,22 @@ impl Frame {
     }
 }
 
-#[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
     frames: Vec<Frame>,
+    times: [Option<(u64, f64)>; TIME_SLOTS],
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            completed: 0,
+            frames: Vec::new(),
+            times: [None; TIME_SLOTS],
+        }
+    }
 }
 
 pub(crate) struct Device {
@@ -571,7 +582,12 @@ impl Device {
                 .as_ref()
                 .expect("a submitted Metal command owns its command buffer");
             match command.status() {
-                MTLCommandBufferStatus::Completed => completed += 1,
+                MTLCommandBufferStatus::Completed => {
+                    let index = state.frames[slot].index;
+                    let seconds = command.GPUEndTime() - command.GPUStartTime();
+                    state.times[index as usize % TIME_SLOTS] = Some((index, seconds));
+                    completed += 1;
+                }
                 MTLCommandBufferStatus::Error => {
                     return Err(format!("Metal compute failed: {:?}", command.error()));
                 }
@@ -580,6 +596,21 @@ impl Device {
         }
         state.completed = completed;
         Ok(())
+    }
+
+    pub(crate) fn seconds(&self, index: u64) -> f64 {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the Metal compute queue is never poisoned");
+        self.await_completion(&mut state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        match state.times[index as usize % TIME_SLOTS] {
+            Some((kept, seconds)) if kept == index => seconds,
+            _ => panic!(
+                "the device time of submission {index} has left the last {TIME_SLOTS} of this queue"
+            ),
+        }
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {

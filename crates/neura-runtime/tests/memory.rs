@@ -495,7 +495,9 @@ fn a_store_of_another_runtime_is_refused() {
     );
     let program = first.compile(&graph, &weights);
     assert!(
-        refuses(|| second.run(&program)),
+        refuses(|| {
+            second.run(&program);
+        }),
         "a program of another runtime's heap was run",
     );
     assert!(

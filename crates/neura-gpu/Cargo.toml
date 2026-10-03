@@ -50,4 +50,5 @@ objc2-metal = { workspace = true, features = [
     "MTLLibrary",
     "MTLResource",
     "MTLTypes",
+    "objc2-core-foundation",
 ] }

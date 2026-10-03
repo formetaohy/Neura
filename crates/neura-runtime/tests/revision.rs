@@ -47,7 +47,9 @@ fn a_program_refuses_a_graph_that_moved_on() {
     graph.retain(rectified);
     assert!(!program.is_current());
     assert!(program.stamp() != graph.stamp());
-    assert!(refuses(|| runtime.run(&program)));
+    assert!(refuses(|| {
+        runtime.run(&program);
+    }));
     assert!(refuses(|| runtime.write(&program, data, &[1.0; 8])));
     assert!(refuses(|| {
         let _ = runtime.read(&program, out);

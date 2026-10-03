@@ -5,7 +5,7 @@ use crate::program::{Program, Weights};
 use crate::tape::{self, DeviceTape, Plan, Tapes};
 use neura_abi::{Kind, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
-    BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Readback, Submission,
+    BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback, Submission,
     SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
@@ -16,7 +16,6 @@ use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
@@ -32,6 +31,18 @@ pub struct Readout<'r> {
     spans: Vec<(Span, u64, u64)>,
     total: u64,
     refusal: u64,
+}
+
+pub struct Run<'r> {
+    brand: PhantomData<&'r ()>,
+    queue: Queue,
+    submission: SubmissionIndex,
+}
+
+impl Run<'_> {
+    pub fn seconds(self) -> f64 {
+        self.queue.seconds(self.submission)
+    }
 }
 
 pub struct RuntimeRequest {
@@ -363,20 +374,18 @@ impl Runtime {
         scratch
     }
 
-    fn measure(&self, program: &Program<'_>) -> f64 {
+    pub fn measure(&self, program: &Program<'_>) -> f64 {
         for _ in 0..TUNE_WARMUP {
             self.run(program);
         }
-        self.context.drain();
-        let started = Instant::now();
+        let mut measured = 0.0;
         for _ in 0..TUNE_ROUNDS {
-            self.run(program);
+            measured += self.run(program).seconds();
         }
-        self.context.drain();
-        started.elapsed().as_secs_f64() / f64::from(TUNE_ROUNDS)
+        measured / f64::from(TUNE_ROUNDS)
     }
 
-    pub fn run(&self, program: &Program<'_>) {
+    pub fn run(&self, program: &Program<'_>) -> Run<'_> {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
@@ -396,7 +405,12 @@ impl Runtime {
             &program.group,
             [program.workgroups, 1, 1],
         );
-        submission.submit(self.context.queue());
+        let submission = submission.submit(self.context.queue());
+        Run {
+            brand: PhantomData,
+            queue: self.context.queue().clone(),
+            submission,
+        }
     }
 
     pub fn write(&self, program: &Program<'_>, value: Value<'_>, data: &[f32]) {

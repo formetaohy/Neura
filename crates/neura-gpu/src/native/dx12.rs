@@ -1,6 +1,6 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
-    STAGING_BYTES,
+    STAGING_BYTES, TIME_SLOTS,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
@@ -123,11 +123,22 @@ impl Frame {
     }
 }
 
-#[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
     frames: Vec<Frame>,
+    times: [Option<(u64, f64)>; TIME_SLOTS],
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            completed: 0,
+            frames: Vec::new(),
+            times: [None; TIME_SLOTS],
+        }
+    }
 }
 
 pub(crate) struct Device {
@@ -136,6 +147,9 @@ pub(crate) struct Device {
     fence: ID3D12Fence,
     event: CompletionEvent,
     zero: Arc<BufferResource>,
+    stamps: ID3D12QueryHeap,
+    clock: Arc<BufferResource>,
+    frequency: u64,
     state: Mutex<QueueState>,
     artifacts: ArtifactCache,
 }
@@ -416,12 +430,36 @@ impl Device {
                 }),
             );
         }
+        let clock = allocate(
+            &raw,
+            16 * FRAMES_IN_FLIGHT as u64,
+            D3D12_HEAP_TYPE_READBACK,
+            false,
+        );
+        let mut stamps = None;
+        unsafe {
+            raw.CreateQueryHeap(
+                &D3D12_QUERY_HEAP_DESC {
+                    Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
+                    Count: 2 * FRAMES_IN_FLIGHT as u32,
+                    NodeMask: 0,
+                },
+                &raw mut stamps,
+            )
+        }
+        .map_err(|error| format!("creating the D3D12 timestamp heap: {error}"))?;
+        let stamps = stamps.expect("a created D3D12 timestamp heap exists");
+        let frequency = unsafe { queue.GetTimestampFrequency() }
+            .map_err(|error| format!("reading the D3D12 timestamp frequency: {error}"))?;
         Ok(Arc::new(Device {
             raw,
             queue,
             fence,
             event,
             zero,
+            stamps,
+            clock,
+            frequency,
             state: Mutex::new(QueueState::default()),
             artifacts,
         }))
@@ -620,6 +658,7 @@ impl Device {
         frame.begin();
         frame.index = index;
         let list = frame.list.clone();
+        unsafe { list.EndQuery(&self.stamps, D3D12_QUERY_TYPE_TIMESTAMP, (slot * 2) as u32) };
         for write in writes {
             let (upload, offset) = frame.stage(&self.raw, &write.bytes);
             let target = native_buffer(&write.buffer);
@@ -725,8 +764,23 @@ impl Device {
                 }
             }
         }
-        unsafe { list.Close() }
-            .unwrap_or_else(|error| panic!("closing a D3D12 compute command list: {error}"));
+        unsafe {
+            list.EndQuery(
+                &self.stamps,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                (slot * 2 + 1) as u32,
+            );
+            list.ResolveQueryData(
+                &self.stamps,
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                (slot * 2) as u32,
+                2,
+                &self.clock.raw,
+                (slot * 16) as u64,
+            );
+            list.Close()
+        }
+        .unwrap_or_else(|error| panic!("closing a D3D12 compute command list: {error}"));
         let command: ID3D12CommandList = list
             .cast()
             .expect("a compute command list is a D3D12 command list");
@@ -779,6 +833,50 @@ impl Device {
             panic!("D3D12 compute fence failed");
         }
         state.completed = state.completed.max(completed.min(state.next));
+        self.record(state);
+    }
+
+    fn record(&self, state: &mut QueueState) {
+        for slot in 0..state.frames.len() {
+            let index = state.frames[slot].index;
+            if index == 0 || index > state.completed {
+                continue;
+            }
+            let key = index as usize % TIME_SLOTS;
+            if state.times[key].is_some_and(|(kept, _)| kept == index) {
+                continue;
+            }
+            state.times[key] = Some((index, self.read_clock(slot)));
+        }
+    }
+
+    fn read_clock(&self, slot: usize) -> f64 {
+        let mut mapped = ptr::null_mut();
+        let range = D3D12_RANGE {
+            Begin: slot * 16,
+            End: slot * 16 + 16,
+        };
+        unsafe { self.clock.raw.Map(0, Some(&range), Some(&raw mut mapped)) }
+            .unwrap_or_else(|error| panic!("mapping the D3D12 timestamp readback: {error}"));
+        let stamps = unsafe { std::slice::from_raw_parts(mapped.cast::<u64>(), 2) };
+        let seconds = stamps[1].wrapping_sub(stamps[0]) as f64 / self.frequency as f64;
+        unsafe { self.clock.raw.Unmap(0, None) };
+        seconds
+    }
+
+    pub(crate) fn seconds(&self, index: u64) -> f64 {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the D3D12 compute queue is never poisoned");
+        self.await_completion(&mut state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        match state.times[index as usize % TIME_SLOTS] {
+            Some((kept, seconds)) if kept == index => seconds,
+            _ => panic!(
+                "the device time of submission {index} has left the last {TIME_SLOTS} of this queue"
+            ),
+        }
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {

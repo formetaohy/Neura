@@ -206,6 +206,10 @@ impl Queue {
         self.device.native().wait(submission.0, timeout);
     }
 
+    pub fn seconds(&self, submission: SubmissionIndex) -> f64 {
+        self.device.native().seconds(submission.0)
+    }
+
     pub(crate) fn read(
         &self,
         buffer: &GpuBuffer,

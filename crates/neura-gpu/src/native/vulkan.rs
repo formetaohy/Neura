@@ -1,6 +1,6 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
-    STAGING_BYTES,
+    STAGING_BYTES, TIME_SLOTS,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
@@ -108,11 +108,22 @@ impl Frame {
     }
 }
 
-#[derive(Default)]
 struct QueueState {
     next: u64,
     completed: u64,
     frames: Vec<Frame>,
+    times: [Option<(u64, f64)>; TIME_SLOTS],
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            completed: 0,
+            frames: Vec::new(),
+            times: [None; TIME_SLOTS],
+        }
+    }
 }
 
 pub(crate) struct Device {
@@ -121,6 +132,9 @@ pub(crate) struct Device {
     memory: vk::PhysicalDeviceMemoryProperties,
     queue: vk::Queue,
     pool: vk::CommandPool,
+    stamps: vk::QueryPool,
+    ticks: f64,
+    bits: u32,
     uuid: [u8; vk::UUID_SIZE],
     artifacts: ArtifactCache,
     state: Mutex<QueueState>,
@@ -394,6 +408,43 @@ impl Device {
                 }
             };
             let adapter_info = describe(&props, ty);
+            let bits = unsafe {
+                owner
+                    .raw
+                    .get_physical_device_queue_family_properties(physical)
+            }[family as usize]
+                .timestamp_valid_bits;
+            let ticks = f64::from(props.limits.timestamp_period);
+            if bits == 0 || ticks == 0.0 {
+                failures.push(format!(
+                    "{name}: its compute queue carries no timestamp of {bits} valid bits over {ticks} nanoseconds"
+                ));
+                unsafe {
+                    raw.destroy_command_pool(pool, None);
+                    raw.destroy_device(None);
+                };
+                continue;
+            }
+            let stamps = match unsafe {
+                raw.create_query_pool(
+                    &vk::QueryPoolCreateInfo::default()
+                        .query_type(vk::QueryType::TIMESTAMP)
+                        .query_count(2 * FRAMES_IN_FLIGHT as u32),
+                    None,
+                )
+            } {
+                Ok(stamps) => stamps,
+                Err(error) => {
+                    failures.push(format!(
+                        "{name}: creating a timestamp pool failed: {error:?}"
+                    ));
+                    unsafe {
+                        raw.destroy_command_pool(pool, None);
+                        raw.destroy_device(None);
+                    };
+                    continue;
+                }
+            };
             return Ok((
                 Arc::new(Self {
                     _owner: owner,
@@ -401,6 +452,9 @@ impl Device {
                     memory,
                     queue,
                     pool,
+                    stamps,
+                    ticks,
+                    bits,
                     uuid: props.pipeline_cache_uuid,
                     artifacts,
                     state: Mutex::new(QueueState::default()),
@@ -681,6 +735,16 @@ impl Device {
         frame.begin(&self.raw);
         frame.index = index;
         let command = frame.command;
+        unsafe {
+            self.raw
+                .cmd_reset_query_pool(command, self.stamps, (slot * 2) as u32, 2);
+            self.raw.cmd_write_timestamp(
+                command,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                self.stamps,
+                (slot * 2) as u32,
+            );
+        }
         for write in writes {
             let (staging, offset) = frame.stage(self, &write.bytes);
             self.barrier(command);
@@ -767,8 +831,16 @@ impl Device {
                 }
             }
         }
-        unsafe { self.raw.end_command_buffer(command) }
-            .unwrap_or_else(|error| panic!("closing a Vulkan compute submission: {error:?}"));
+        unsafe {
+            self.raw.cmd_write_timestamp(
+                command,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                self.stamps,
+                (slot * 2 + 1) as u32,
+            );
+            self.raw.end_command_buffer(command)
+        }
+        .unwrap_or_else(|error| panic!("closing a Vulkan compute submission: {error:?}"));
         let buffers = [command];
         let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
         unsafe { self.raw.queue_submit(self.queue, &submits, frame.fence) }
@@ -826,6 +898,54 @@ impl Device {
             completed += 1;
         }
         state.completed = completed;
+        self.record(state);
+    }
+
+    fn record(&self, state: &mut QueueState) {
+        for slot in 0..state.frames.len() {
+            let index = state.frames[slot].index;
+            if index == 0 || index > state.completed {
+                continue;
+            }
+            let key = index as usize % TIME_SLOTS;
+            if state.times[key].is_some_and(|(kept, _)| kept == index) {
+                continue;
+            }
+            let mut stamps = [0u64; 2];
+            unsafe {
+                self.raw.get_query_pool_results(
+                    self.stamps,
+                    (slot * 2) as u32,
+                    &mut stamps,
+                    vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+                )
+            }
+            .unwrap_or_else(|error| {
+                panic!("reading the Vulkan timestamp of submission {index}: {error:?}")
+            });
+            let mask = if self.bits >= 64 {
+                u64::MAX
+            } else {
+                (1u64 << self.bits) - 1
+            };
+            let elapsed = stamps[1].wrapping_sub(stamps[0]) & mask;
+            state.times[key] = Some((index, elapsed as f64 * self.ticks / 1e9));
+        }
+    }
+
+    pub(crate) fn seconds(&self, index: u64) -> f64 {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the Vulkan queue is never poisoned");
+        self.await_completion(&mut state, index, FRAME_TIMEOUT)
+            .unwrap_or_else(|error| panic!("{error}"));
+        match state.times[index as usize % TIME_SLOTS] {
+            Some((kept, seconds)) if kept == index => seconds,
+            _ => panic!(
+                "the device time of submission {index} has left the last {TIME_SLOTS} of this queue"
+            ),
+        }
     }
 
     pub(crate) fn wait(&self, index: u64, timeout: Duration) {
@@ -993,6 +1113,7 @@ impl Drop for Device {
         self.release();
         self.discard();
         unsafe {
+            self.raw.destroy_query_pool(self.stamps, None);
             self.raw.destroy_command_pool(self.pool, None);
             self.raw.destroy_device(None);
         }

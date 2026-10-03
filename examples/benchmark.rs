@@ -27,21 +27,23 @@ fn time(runtime: &Runtime, program: &Program, rounds: u32) -> Timing {
     for _ in 0..8 {
         runtime.run(program);
     }
+    drain(runtime);
     let mut submit = 0.0;
     for _ in 0..rounds {
-        drain(runtime);
         let started = Instant::now();
         runtime.run(program);
         submit += started.elapsed().as_secs_f64() * 1e6;
-    }
-    let submit = submit / f64::from(rounds);
-    let started = Instant::now();
-    for _ in 0..rounds {
-        runtime.run(program);
         drain(runtime);
     }
-    let step = started.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
-    Timing { submit, step }
+    let submit = submit / f64::from(rounds);
+    let mut step = 0.0;
+    for _ in 0..rounds {
+        step += runtime.run(program).seconds();
+    }
+    Timing {
+        submit,
+        step: step * 1e6 / f64::from(rounds),
+    }
 }
 
 fn drain(runtime: &Runtime) {

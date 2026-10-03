@@ -16,6 +16,7 @@ use std::time::Duration;
 pub(crate) const FRAMES_IN_FLIGHT: usize = 4;
 pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const STAGING_BYTES: u64 = 256 << 10;
+pub(crate) const TIME_SLOTS: usize = 4096;
 
 pub(crate) enum DeviceFailure {
     Missing { offered: Vec<AdapterInfo> },
@@ -245,6 +246,17 @@ impl NativeDevice {
             Self::Dx12(device) => device.wait(index, timeout),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.wait(index, timeout),
+        }
+    }
+
+    pub(crate) fn seconds(&self, index: u64) -> f64 {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(device) => device.seconds(index),
+            #[cfg(dx12_backend)]
+            Self::Dx12(device) => device.seconds(index),
+            #[cfg(metal_backend)]
+            Self::Metal(device) => device.seconds(index),
         }
     }
 
