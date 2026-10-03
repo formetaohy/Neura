@@ -9,7 +9,7 @@ use neura_abi::{
     progress, refusal, store, strategy,
 };
 use neura_compiler::{Compiler, ast};
-use neura_profile::{CLAIM_WORDS, Geometry};
+use neura_profile::{CLAIM_BYTES, Geometry};
 use neura_shader::{BindingKind, BindingSpec, ComputeProgram, ShaderBinding};
 
 pub const TASKS: u32 = 0;
@@ -161,14 +161,14 @@ impl Kernel {
                 compiler.storage_record(binding.name, binding.element, spec);
             }
         }
-        compiler.workgroup("claim", "u32", CLAIM_WORDS);
-        let scratch = geometry.scratch_words(kinds);
+        compiler.workgroup_bytes("claim", "u32", CLAIM_BYTES);
+        let scratch = geometry.scratch_bytes(kinds);
         if scratch > 0 {
-            compiler.workgroup("scratch", "f32", scratch);
+            compiler.workgroup_bytes("scratch", "f32", scratch);
         }
-        let half = geometry.half_stage_words();
+        let half = geometry.scratch_half_bytes();
         if half > 0 {
-            compiler.workgroup("scratch_half", "f16", half / 2);
+            compiler.workgroup_bytes("scratch_half", "f16", half);
         }
         scheduler::install(&mut compiler);
         substrate::install(&mut compiler);
@@ -197,11 +197,17 @@ impl Kernel {
             .map(|kind| kind.symbol().to_owned())
             .collect::<Vec<_>>();
         compiler.retain_cases("run_task", &enabled);
+        let declared = compiler.declared_workgroup_bytes();
+        assert_eq!(
+            declared,
+            geometry.workgroup_bytes(kinds),
+            "a device program declares {declared} bytes of workgroup scratch where its geometry accounts for {}",
+            geometry.workgroup_bytes(kinds),
+        );
         assert!(
-            compiler.workgroup_bytes() <= geometry.budget(),
-            "a device program of {} kinds declares {} bytes of workgroup scratch beyond the {} its profile offers",
+            declared <= geometry.budget(),
+            "a device program of {} kinds declares {declared} bytes of workgroup scratch beyond the {} its profile offers",
             kinds.len(),
-            compiler.workgroup_bytes(),
             geometry.budget(),
         );
         let program = compiler.finish(

@@ -179,6 +179,22 @@ impl Compiler {
         assert!(self.globals.insert(name.to_owned(), index).is_none());
     }
 
+    pub fn workgroup_bytes(&mut self, name: &str, element: &str, bytes: u64) {
+        let ty = self.ty(element);
+        let width = u64::from(self.module.size(ty));
+        assert!(
+            bytes.is_multiple_of(width),
+            "a workgroup array of {name} holds {bytes} bytes, and {element} of it spans {width}",
+        );
+        let count = u32::try_from(bytes / width).unwrap_or_else(|_| {
+            panic!(
+                "a workgroup array of {name} spans {} elements",
+                bytes / width
+            )
+        });
+        self.workgroup(name, element, count);
+    }
+
     pub(crate) fn declares_global(&self, name: &str) -> bool {
         self.globals.contains_key(name)
     }
@@ -190,7 +206,7 @@ impl Compiler {
             .unwrap_or_else(|| panic!("the Rust device name {name} is not declared"))
     }
 
-    pub fn workgroup_bytes(&self) -> u64 {
+    pub fn declared_workgroup_bytes(&self) -> u64 {
         self.module
             .globals()
             .iter()

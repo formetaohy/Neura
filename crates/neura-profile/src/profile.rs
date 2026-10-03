@@ -218,6 +218,14 @@ impl MatmulTile {
         }
     }
 
+    pub const fn half_panels(self) -> u64 {
+        assert!(
+            matches!(self.strategy, MatmulStrategy::Cooperative),
+            "only a cooperative tile stages its panels on the half grid",
+        );
+        2 * (self.left_stage() + self.right_stage())
+    }
+
     pub const fn right_stage(self) -> u64 {
         match self.strategy {
             MatmulStrategy::Staged => self.depth as u64 * self.columns as u64,
@@ -695,7 +703,7 @@ impl Geometry {
         let mut copy = 0u64;
         for tile in tiles {
             if matches!(tile.strategy, MatmulStrategy::Cooperative) {
-                half_stage = half_stage.max(2 * (tile.left_stage() + tile.right_stage()));
+                half_stage = half_stage.max(tile.half_panels());
                 copy = copy.max(tile.rows() as u64 * tile.columns() as u64);
             } else {
                 left_stage = left_stage.max(tile.left_stage());
@@ -730,7 +738,15 @@ impl Geometry {
         u64::from(self.scratch_words(kinds)) * WORD_BYTES
     }
 
-    pub fn scratch_words(&self, kinds: &[Kind]) -> u32 {
+    pub const fn scratch_half_bytes(&self) -> u64 {
+        self.half_stage * 2
+    }
+
+    pub fn workgroup_bytes(&self, kinds: &[Kind]) -> u64 {
+        CLAIM_BYTES + self.scratch_bytes(kinds) + self.scratch_half_bytes()
+    }
+
+    fn scratch_words(&self, kinds: &[Kind]) -> u32 {
         DeviceModule::ALL
             .iter()
             .copied()
@@ -761,8 +777,8 @@ impl Geometry {
         self.workgroup / (tile.subgroup_rows() * tile.subgroup_columns())
     }
 
-    pub const fn half_stage_words(&self) -> u32 {
-        self.half_stage as u32
+    pub const fn half_panels(&self) -> u64 {
+        self.half_stage
     }
 
     pub const fn matmul_right(&self) -> u32 {

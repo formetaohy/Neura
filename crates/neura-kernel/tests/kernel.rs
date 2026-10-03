@@ -1,6 +1,8 @@
 use neura_abi::{Element, Kind, RECORDS, WORD_BYTES};
 use neura_pointwise::OPS;
-use neura_profile::{AttentionTile, Budget, CLAIM_BYTES, Geometry, Profile};
+use neura_profile::{
+    AttentionTile, Budget, CLAIM_BYTES, CooperativeMatrix, Geometry, MatmulStrategy, Profile,
+};
 use neura_shader::{
     Backend, BindingKind, ComputeProgram, Instruction, ShaderTranslation, Space, Type,
 };
@@ -341,6 +343,66 @@ fn workgroup_bytes(program: &ComputeProgram) -> u64 {
         .filter(|global| global.space == Space::WorkGroup)
         .map(|global| u64::from(program.module().size(global.ty)))
         .sum()
+}
+
+fn workgroup_global_bytes(program: &ComputeProgram, name: &str) -> u64 {
+    program
+        .module()
+        .globals()
+        .iter()
+        .filter(|global| global.space == Space::WorkGroup && global.name == name)
+        .map(|global| u64::from(program.module().size(global.ty)))
+        .sum()
+}
+
+#[test]
+fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
+    let shape = CooperativeMatrix::new(32, 16, 16, 16);
+    let staged = Profile::derive(Budget::of(1024, 48 << 10), Some(shape))
+        .into_iter()
+        .filter(|profile| {
+            profile
+                .tiles()
+                .iter()
+                .any(|tile| matches!(tile.strategy(), MatmulStrategy::Cooperative))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !staged.is_empty(),
+        "a device of 16 by 16 fragments derives no profile a cooperative tile fits",
+    );
+    for profile in staged {
+        let geometry = Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            profile.tiles(),
+            &[],
+        );
+        let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+        let program = kernel.program();
+        assert_eq!(
+            workgroup_bytes(&program),
+            geometry.workgroup_bytes(Kind::ALL),
+            "{profile:?} declares workgroup memory its geometry does not account for",
+        );
+        let panels = geometry
+            .tiles()
+            .iter()
+            .filter(|tile| matches!(tile.strategy(), MatmulStrategy::Cooperative))
+            .map(|tile| tile.half_panels())
+            .max()
+            .expect("a cooperative tile stages its panels on the half grid");
+        assert_eq!(
+            geometry.half_panels(),
+            panels,
+            "a geometry sizes its half grid by another tile than the widest one it carries",
+        );
+        assert_eq!(
+            workgroup_global_bytes(&program, "scratch_half"),
+            2 * panels,
+            "a device program stages {panels} half panels in workgroup memory it declares for another count",
+        );
+    }
 }
 
 #[test]

@@ -65,7 +65,11 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                     ("COOPMAT_SUBGROUP", geometry.subgroup()),
                     ("MATMUL_SUBGROUP_COLUMNS", tile.subgroup_columns()),
                     ("MATMUL_SUBGROUP_ROWS", tile.subgroup_rows()),
-                    ("SCRATCH_COOPERATIVE_RIGHT", 2 * tile.rows() * tile.depth()),
+                    (
+                        "SCRATCH_COOPERATIVE_RIGHT",
+                        u32::try_from(2 * tile.left_stage())
+                            .expect("a cooperative panel fits one device word address"),
+                    ),
                 ]);
                 compiler.specialize(
                     "template_matmul_cooperative_load",
