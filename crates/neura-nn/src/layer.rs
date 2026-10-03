@@ -10,13 +10,14 @@ pub struct Adapter<'g> {
 impl<'g> Adapter<'g> {
     pub fn new(
         graph: &Graph<'g>,
-        inputs: u32,
-        outputs: u32,
+        name: &str,
+        planes: [u32; 2],
         rank: u32,
         init: Init,
         element: Element,
         scale: f32,
     ) -> Self {
+        let [inputs, outputs] = planes;
         assert!(
             inputs > 0 && outputs > 0 && rank > 0,
             "an adapter of {inputs} by {outputs} over {rank} ranks carries no bypass",
@@ -26,8 +27,18 @@ impl<'g> Adapter<'g> {
             "an adapter scaled by {scale} contributes nothing",
         );
         Self {
-            down: graph.parameter(Shape::matrix(inputs, rank), init, element),
-            up: graph.parameter(Shape::matrix(rank, outputs), Init::Zero, element),
+            down: graph.named_parameter(
+                &format!("{name}.down"),
+                Shape::matrix(inputs, rank),
+                init,
+                element,
+            ),
+            up: graph.named_parameter(
+                &format!("{name}.up"),
+                Shape::matrix(rank, outputs),
+                Init::Zero,
+                element,
+            ),
             scale,
         }
     }
@@ -63,17 +74,25 @@ pub struct Linear<'g> {
 }
 
 impl<'g> Linear<'g> {
-    pub fn new(graph: &Graph<'g>, inputs: u32, outputs: u32, init: Init, element: Element) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        inputs: u32,
+        outputs: u32,
+        init: Init,
+        element: Element,
+    ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.parameter(weight, init, element),
-                graph.parameter(bias, Init::Zero, element),
+                graph.named_parameter(&format!("{name}.weight"), weight, init, element),
+                graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
             )
         })
     }
 
     pub fn quantized(
         graph: &Graph<'g>,
+        name: &str,
         inputs: u32,
         outputs: u32,
         quantum: f32,
@@ -82,14 +101,15 @@ impl<'g> Linear<'g> {
     ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.quantized_parameter(weight, init, quantum),
-                graph.parameter(bias, Init::Zero, element),
+                graph.named_quantized_parameter(&format!("{name}.weight"), weight, init, quantum),
+                graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
             )
         })
     }
 
     pub fn block_quantized(
         graph: &Graph<'g>,
+        name: &str,
         inputs: u32,
         outputs: u32,
         init: Init,
@@ -98,8 +118,13 @@ impl<'g> Linear<'g> {
     ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.block_quantized_parameter(weight, init, storage),
-                graph.parameter(bias, Init::Zero, element),
+                graph.named_block_quantized_parameter(
+                    &format!("{name}.weight"),
+                    weight,
+                    init,
+                    storage,
+                ),
+                graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
             )
         })
     }
@@ -154,6 +179,7 @@ pub struct Conv2d<'g> {
 impl<'g> Conv2d<'g> {
     pub fn new(
         graph: &Graph<'g>,
+        name: &str,
         channels: [u32; 2],
         groups: u32,
         window: Window,
@@ -170,7 +196,8 @@ impl<'g> Conv2d<'g> {
             "a convolution of {inputs} channels into {outputs} cuts {groups} groups",
         );
         Self {
-            filter: graph.parameter(
+            filter: graph.named_parameter(
+                &format!("{name}.filter"),
                 Shape::of([
                     outputs,
                     inputs / groups,
@@ -180,7 +207,12 @@ impl<'g> Conv2d<'g> {
                 init,
                 element,
             ),
-            bias: graph.parameter(Shape::of([1, outputs, 1, 1]), Init::Zero, element),
+            bias: graph.named_parameter(
+                &format!("{name}.bias"),
+                Shape::of([1, outputs, 1, 1]),
+                Init::Zero,
+                element,
+            ),
             window,
         }
     }
@@ -211,7 +243,14 @@ pub struct LayerNorm<'g> {
 }
 
 impl<'g> LayerNorm<'g> {
-    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32, element: Element) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        columns: u32,
+        init: Init,
+        floor: f32,
+        element: Element,
+    ) -> Self {
         assert!(
             columns > 0,
             "a layer of {columns} columns normalizes nothing"
@@ -219,8 +258,18 @@ impl<'g> LayerNorm<'g> {
         assert!(floor > 0.0, "a floor of {floor} divides by zero");
         Self {
             columns,
-            scale: graph.parameter(Shape::vector(columns), init, element),
-            shift: graph.parameter(Shape::vector(columns), Init::Zero, element),
+            scale: graph.named_parameter(
+                &format!("{name}.scale"),
+                Shape::vector(columns),
+                init,
+                element,
+            ),
+            shift: graph.named_parameter(
+                &format!("{name}.shift"),
+                Shape::vector(columns),
+                Init::Zero,
+                element,
+            ),
             share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
             floor: graph.fill(Shape::scalar(), floor),
         }
@@ -260,13 +309,25 @@ pub struct Embedding<'g> {
 }
 
 impl<'g> Embedding<'g> {
-    pub fn new(graph: &Graph<'g>, rows: u32, width: u32, init: Init, element: Element) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        rows: u32,
+        width: u32,
+        init: Init,
+        element: Element,
+    ) -> Self {
         assert!(
             rows > 0 && width > 0,
             "an embedding of {rows} rows of {width} numbers holds nothing",
         );
         Self {
-            table: graph.parameter(Shape::matrix(rows, width), init, element),
+            table: graph.named_parameter(
+                &format!("{name}.table"),
+                Shape::matrix(rows, width),
+                init,
+                element,
+            ),
         }
     }
 
@@ -337,16 +398,18 @@ pub struct MultiHeadAttention<'g> {
 impl<'g> MultiHeadAttention<'g> {
     pub fn new(
         graph: &Graph<'g>,
+        name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
     ) -> Self {
-        Self::declared(graph, head, init, element, options, None)
+        Self::declared(graph, name, head, init, element, options, None)
     }
 
     pub fn rotary(
         graph: &Graph<'g>,
+        name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
@@ -357,33 +420,44 @@ impl<'g> MultiHeadAttention<'g> {
             base.is_finite() && base > 1.0,
             "an attention rotated by a base of {base} places every position on the same angle",
         );
-        Self::declared(graph, head, init, element, options, Some(base))
+        Self::declared(graph, name, head, init, element, options, Some(base))
     }
 
     fn declared(
         graph: &Graph<'g>,
+        name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
         rotary: Option<f32>,
     ) -> Self {
-        let projection = |heads: u32, columns: u32| {
-            graph.parameter(Shape::of([heads, 1, columns, columns]), init, element)
+        let projection = |heads: u32, columns: u32, what: &str| {
+            graph.named_parameter(
+                &format!("{name}.{what}.weight"),
+                Shape::of([heads, 1, columns, columns]),
+                init,
+                element,
+            )
         };
-        let shift = |heads: u32, columns: u32| {
-            graph.parameter(Shape::of([heads, 1, 1, columns]), Init::Zero, element)
+        let shift = |heads: u32, columns: u32, what: &str| {
+            graph.named_parameter(
+                &format!("{name}.{what}.bias"),
+                Shape::of([heads, 1, 1, columns]),
+                Init::Zero,
+                element,
+            )
         };
         Self {
             head,
-            queries: projection(head.heads(), head.width()),
-            keys: projection(head.key_heads(), head.width()),
-            values: projection(head.key_heads(), head.width()),
-            output: projection(head.heads(), head.width()),
-            query_bias: shift(head.heads(), head.width()),
-            key_bias: shift(head.key_heads(), head.width()),
-            value_bias: shift(head.key_heads(), head.width()),
-            output_bias: shift(head.heads(), head.width()),
+            queries: projection(head.heads(), head.width(), "query"),
+            keys: projection(head.key_heads(), head.width(), "key"),
+            values: projection(head.key_heads(), head.width(), "value"),
+            output: projection(head.heads(), head.width(), "output"),
+            query_bias: shift(head.heads(), head.width(), "query"),
+            key_bias: shift(head.key_heads(), head.width(), "key"),
+            value_bias: shift(head.key_heads(), head.width(), "value"),
+            output_bias: shift(head.heads(), head.width(), "output"),
             options,
             rotary,
         }
@@ -466,14 +540,30 @@ pub struct Mlp<'g> {
 }
 
 impl<'g> Mlp<'g> {
-    pub fn new(graph: &Graph<'g>, widths: &[u32], init: Init, element: Element) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        widths: &[u32],
+        init: Init,
+        element: Element,
+    ) -> Self {
         assert!(
             widths.len() >= 2,
             "a multilayer perceptron spans at least two widths",
         );
         let layers = widths
             .windows(2)
-            .map(|pair| Linear::new(graph, pair[0], pair[1], init, element))
+            .enumerate()
+            .map(|(index, pair)| {
+                Linear::new(
+                    graph,
+                    &format!("{name}.layers.{index}"),
+                    pair[0],
+                    pair[1],
+                    init,
+                    element,
+                )
+            })
             .collect();
         Self { layers }
     }
@@ -511,7 +601,14 @@ pub struct RmsNorm<'g> {
 }
 
 impl<'g> RmsNorm<'g> {
-    pub fn new(graph: &Graph<'g>, columns: u32, init: Init, floor: f32, element: Element) -> Self {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        columns: u32,
+        init: Init,
+        floor: f32,
+        element: Element,
+    ) -> Self {
         assert!(
             columns > 0,
             "a root mean square of {columns} columns scales nothing",
@@ -519,7 +616,12 @@ impl<'g> RmsNorm<'g> {
         assert!(floor > 0.0, "a floor of {floor} divides by zero");
         Self {
             columns,
-            scale: graph.parameter(Shape::vector(columns), init, element),
+            scale: graph.named_parameter(
+                &format!("{name}.scale"),
+                Shape::vector(columns),
+                init,
+                element,
+            ),
             share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
             floor: graph.fill(Shape::scalar(), floor),
         }
@@ -559,6 +661,7 @@ pub struct GroupNorm<'g> {
 impl<'g> GroupNorm<'g> {
     pub fn new(
         graph: &Graph<'g>,
+        name: &str,
         channels: u32,
         groups: u32,
         init: Init,
@@ -573,8 +676,18 @@ impl<'g> GroupNorm<'g> {
         Self {
             channels,
             groups,
-            scale: graph.parameter(Shape::of([1, channels, 1, 1]), init, element),
-            shift: graph.parameter(Shape::of([1, channels, 1, 1]), Init::Zero, element),
+            scale: graph.named_parameter(
+                &format!("{name}.scale"),
+                Shape::of([1, channels, 1, 1]),
+                init,
+                element,
+            ),
+            shift: graph.named_parameter(
+                &format!("{name}.shift"),
+                Shape::of([1, channels, 1, 1]),
+                Init::Zero,
+                element,
+            ),
             floor: graph.fill(Shape::scalar(), floor),
         }
     }

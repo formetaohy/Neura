@@ -5,6 +5,7 @@ use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_pointwise as op;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -112,6 +113,7 @@ pub struct ValueInfo {
     pub written_in_place: bool,
     pub recomputes: Option<u32>,
     pub seed: Option<Init>,
+    pub name: Option<Arc<str>>,
 }
 
 impl ValueInfo {
@@ -129,6 +131,7 @@ impl ValueInfo {
             written_in_place: false,
             recomputes: None,
             seed: None,
+            name: None,
         }
     }
 }
@@ -138,6 +141,7 @@ pub(crate) struct GraphState {
     pub(crate) tasks: Vec<TaskInfo>,
     pub(crate) recomputations: Vec<Recomputation>,
     pub(crate) revisions: Vec<Weak<RevisionState>>,
+    pub(crate) names: HashSet<Arc<str>>,
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
     pub(crate) version: u64,
@@ -209,6 +213,7 @@ impl<'g> Graph<'g> {
                 tasks: Vec::new(),
                 recomputations: Vec::new(),
                 revisions: Vec::new(),
+                names: HashSet::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -262,7 +267,7 @@ impl<'g> Graph<'g> {
             "an input of {} storage is declared with the quantum it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(shape, Residency::Input, element, 1.0, None, false)
+        self.hold(None, shape, Residency::Input, element, 1.0, None, false)
     }
 
     pub fn gradient_input(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -271,7 +276,7 @@ impl<'g> Graph<'g> {
             "a gradient input of {} storage is declared with the quantum it reconstructs by, and a gradient input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(shape, Residency::Input, element, 1.0, None, true)
+        self.hold(None, shape, Residency::Input, element, 1.0, None, true)
     }
 
     pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -280,7 +285,7 @@ impl<'g> Graph<'g> {
             "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(shape, Residency::Resident, element, 1.0, None, false)
+        self.hold(None, shape, Residency::Resident, element, 1.0, None, false)
     }
 
     pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -289,7 +294,38 @@ impl<'g> Graph<'g> {
             "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
             element.name(),
         );
-        self.hold(shape, Residency::Parameter, element, 1.0, Some(init), true)
+        self.hold(
+            None,
+            shape,
+            Residency::Parameter,
+            element,
+            1.0,
+            Some(init),
+            true,
+        )
+    }
+
+    pub fn named_parameter(
+        &self,
+        name: &str,
+        shape: Shape,
+        init: Init,
+        element: Element,
+    ) -> Value<'g> {
+        assert!(
+            !element.quantized(),
+            "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
+            element.name(),
+        );
+        self.hold(
+            Some(name),
+            shape,
+            Residency::Parameter,
+            element,
+            1.0,
+            Some(init),
+            true,
+        )
     }
 
     pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -298,11 +334,55 @@ impl<'g> Graph<'g> {
             "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
             element.name(),
         );
-        self.hold(shape, Residency::State, element, 1.0, Some(init), false)
+        self.hold(
+            None,
+            shape,
+            Residency::State,
+            element,
+            1.0,
+            Some(init),
+            false,
+        )
+    }
+
+    pub fn named_state(&self, name: &str, shape: Shape, init: Init, element: Element) -> Value<'g> {
+        assert!(
+            !element.quantized(),
+            "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
+            element.name(),
+        );
+        self.hold(
+            Some(name),
+            shape,
+            Residency::State,
+            element,
+            1.0,
+            Some(init),
+            false,
+        )
     }
 
     pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
         self.hold(
+            None,
+            shape,
+            Residency::Parameter,
+            Element::Int8,
+            scale,
+            Some(init),
+            false,
+        )
+    }
+
+    pub fn named_quantized_parameter(
+        &self,
+        name: &str,
+        shape: Shape,
+        init: Init,
+        scale: f32,
+    ) -> Value<'g> {
+        self.hold(
+            Some(name),
             shape,
             Residency::Parameter,
             Element::Int8,
@@ -323,7 +403,38 @@ impl<'g> Graph<'g> {
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
             element.name(),
         );
-        self.hold(shape, Residency::Parameter, element, 1.0, Some(init), false)
+        self.hold(
+            None,
+            shape,
+            Residency::Parameter,
+            element,
+            1.0,
+            Some(init),
+            false,
+        )
+    }
+
+    pub fn named_block_quantized_parameter(
+        &self,
+        name: &str,
+        shape: Shape,
+        init: Init,
+        element: Element,
+    ) -> Value<'g> {
+        assert!(
+            element.per_block(),
+            "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
+            element.name(),
+        );
+        self.hold(
+            Some(name),
+            shape,
+            Residency::Parameter,
+            element,
+            1.0,
+            Some(init),
+            false,
+        )
     }
 
     pub fn quantize(&self, value: Value<'g>, scale: f32) -> Value<'g> {
@@ -802,12 +913,21 @@ impl<'g> Graph<'g> {
         )
     }
 
+    pub fn name_of(&self, value: Value<'g>) -> Option<Arc<str>> {
+        let value = self.own(value);
+        let state = self.state.borrow();
+        let info = &state.values[value.id() as usize];
+        state.values[info.storage as usize].name.clone()
+    }
+
     pub(crate) fn task(&self, index: usize) -> TaskInfo {
         self.state.borrow().tasks[index].clone()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn hold(
         &self,
+        name: Option<&str>,
         shape: Shape,
         residency: Residency,
         element: Element,
@@ -821,6 +941,7 @@ impl<'g> Graph<'g> {
             shape.dims(),
         );
         let mut state = self.state.borrow_mut();
+        let name = name.map(|name| intern(&mut state, name));
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
@@ -835,6 +956,7 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             recomputes: None,
             seed,
+            name,
         });
         advance(&mut state);
         Value::of(self.instance, id, shape)
@@ -887,6 +1009,7 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             recomputes: None,
             seed: None,
+            name: None,
         });
         advance(&mut state);
         Value::of(self.instance, id, shape)
@@ -918,6 +1041,7 @@ impl<'g> Graph<'g> {
             written_in_place: false,
             recomputes: None,
             seed: None,
+            name: None,
         });
         advance(&mut state);
         Value::of(self.instance, id, shape)
@@ -941,4 +1065,17 @@ fn reads(task: &TaskInfo, value: u32) -> bool {
         || task.origin == value
         || task.prelude.iter().any(|step| step.operand == value)
         || task.chain.iter().any(|step| step.operand == value)
+}
+
+fn intern(state: &mut GraphState, name: &str) -> Arc<str> {
+    assert!(
+        !name.is_empty(),
+        "a tensor is named by a non-empty name alone",
+    );
+    let name: Arc<str> = Arc::from(name);
+    assert!(
+        state.names.insert(name.clone()),
+        "two tensors of this graph carry the name {name}, and a name identifies one tensor",
+    );
+    name
 }

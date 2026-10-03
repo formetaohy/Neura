@@ -23,10 +23,10 @@ fn refuses(action: impl FnOnce()) -> bool {
 fn a_corrected_adam_takes_its_rate_on_the_first_step() {
     let runtime = open();
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let weight = graph.named_parameter("weight", Shape::scalar(), Init::Zero, Element::Single);
     let loss = graph.sum(graph.mul(weight, constant(&graph, 5.0)));
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track(&graph, weight);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -45,10 +45,15 @@ fn adam_matches_a_reference_with_bias_correction_and_decay() {
     let graph = Graph::new();
     let rate = 0.05f32;
     let decay = 0.01f32;
-    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0), Element::Single);
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::vector(4),
+        Init::Constant(1.0),
+        Element::Single,
+    );
     let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(4), 0.5)));
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, rate, 0.9, 0.999, 1e-8, decay);
+    let mut optimizer = AdamW::new(&graph, "optimizer", rate, 0.9, 0.999, 1e-8, decay);
     optimizer.track(&graph, weight);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -88,10 +93,15 @@ fn adam_matches_a_reference_with_bias_correction_and_decay() {
 fn a_weight_decays_at_its_rate_without_a_gradient() {
     let runtime = open();
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::scalar(), Init::Constant(1.0), Element::Single);
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::scalar(),
+        Init::Constant(1.0),
+        Element::Single,
+    );
     let loss = graph.sum(graph.mul(weight, constant(&graph, 0.0)));
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.1);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.1);
     optimizer.track(&graph, weight);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -110,7 +120,7 @@ fn a_momentum_descent_matches_a_reference() {
     let graph = Graph::new();
     let rate = 0.1f32;
     let momentum_decay = 0.9f32;
-    let weight = graph.parameter(Shape::vector(2), Init::Zero, Element::Single);
+    let weight = graph.named_parameter("weight", Shape::vector(2), Init::Zero, Element::Single);
     let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(2), 1.0)));
     let gradients = graph.backward(loss);
     let mut optimizer = Sgd::momentum(&graph, rate, momentum_decay, 0.0);
@@ -149,7 +159,12 @@ fn a_decay_enters_a_momentum_before_its_velocity() {
     let rate = 0.1f32;
     let momentum_decay = 0.9f32;
     let decay = 0.1f32;
-    let weight = graph.parameter(Shape::vector(2), Init::Constant(1.0), Element::Single);
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::vector(2),
+        Init::Constant(1.0),
+        Element::Single,
+    );
     let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(2), 0.0)));
     let gradients = graph.backward(loss);
     let mut optimizer = Sgd::momentum(&graph, rate, momentum_decay, decay);
@@ -185,8 +200,8 @@ fn a_decay_enters_a_momentum_before_its_velocity() {
 fn clipping_scales_a_gradient_set_by_its_global_norm() {
     let runtime = open();
     let graph = Graph::new();
-    let first = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
-    let second = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let first = graph.named_parameter("first", Shape::scalar(), Init::Zero, Element::Single);
+    let second = graph.named_parameter("second", Shape::scalar(), Init::Zero, Element::Single);
     let loss = graph.sum(graph.add(
         graph.mul(first, constant(&graph, 3.0)),
         graph.mul(second, constant(&graph, 4.0)),
@@ -216,10 +231,10 @@ fn clipping_scales_a_gradient_set_by_its_global_norm() {
 fn a_checkpoint_carries_the_optimizer_clock() {
     let runtime = open();
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let weight = graph.named_parameter("weight", Shape::scalar(), Init::Zero, Element::Single);
     let loss = graph.sum(graph.mul(weight, constant(&graph, 1.0)));
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track(&graph, weight);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -230,11 +245,12 @@ fn a_checkpoint_carries_the_optimizer_clock() {
     let checkpoint = runtime.checkpoint(&weights);
 
     let resumed_graph = Graph::new();
-    let resumed_weight = resumed_graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let resumed_weight =
+        resumed_graph.named_parameter("weight", Shape::scalar(), Init::Zero, Element::Single);
     let resumed_loss =
         resumed_graph.sum(resumed_graph.mul(resumed_weight, constant(&resumed_graph, 1.0)));
     let resumed_gradients = resumed_graph.backward(resumed_loss);
-    let mut resumed_optimizer = AdamW::new(&resumed_graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+    let mut resumed_optimizer = AdamW::new(&resumed_graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.0);
     resumed_optimizer.track(&resumed_graph, resumed_weight);
     resumed_optimizer.step(&resumed_graph, &resumed_gradients);
     let weights = runtime.load(&resumed_graph, &checkpoint);
@@ -245,11 +261,13 @@ fn a_checkpoint_carries_the_optimizer_clock() {
     let resumed = runtime.read(&program, resumed_weight)[0];
 
     let straight_graph = Graph::new();
-    let straight_weight = straight_graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let straight_weight =
+        straight_graph.named_parameter("weight", Shape::scalar(), Init::Zero, Element::Single);
     let straight_loss =
         straight_graph.sum(straight_graph.mul(straight_weight, constant(&straight_graph, 1.0)));
     let straight_gradients = straight_graph.backward(straight_loss);
-    let mut straight_optimizer = AdamW::new(&straight_graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+    let mut straight_optimizer =
+        AdamW::new(&straight_graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.0);
     straight_optimizer.track(&straight_graph, straight_weight);
     straight_optimizer.step(&straight_graph, &straight_gradients);
     let weights = runtime.weights(&straight_graph);
@@ -267,7 +285,12 @@ fn a_checkpoint_carries_the_optimizer_clock() {
 #[test]
 fn a_frozen_parameter_enters_no_descent() {
     let graph = Graph::new();
-    let weight = graph.parameter(Shape::vector(4), Init::Constant(1.0), Element::Single);
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::vector(4),
+        Init::Constant(1.0),
+        Element::Single,
+    );
     graph.freeze(&[weight]);
     assert!(refuses(|| {
         let mut descent = Sgd::new(&graph, 0.1, 0.0);
@@ -278,11 +301,11 @@ fn a_frozen_parameter_enters_no_descent() {
         momentum.track(&graph, weight);
     }));
     assert!(refuses(|| {
-        let mut adam = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+        let mut adam = AdamW::new(&graph, "adam", 0.1, 0.9, 0.999, 1e-8, 0.0);
         adam.track(&graph, weight);
     }));
     assert!(refuses(|| {
-        let mut adam = AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+        let mut adam = AdamW::new(&graph, "later", 0.1, 0.9, 0.999, 1e-8, 0.0);
         adam.track_all(&graph, &[weight]);
     }));
 }

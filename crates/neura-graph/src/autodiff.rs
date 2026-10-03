@@ -404,6 +404,7 @@ impl<'g> Graph<'g> {
             storage: id,
             retained: false,
             recomputes: Some(value),
+            name: None,
             ..info
         });
         advance(&mut state);

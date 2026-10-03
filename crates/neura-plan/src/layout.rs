@@ -1,8 +1,11 @@
 use neura_abi::{Element, Placement, Store, WORD_BYTES};
 use neura_graph::{Graph, Init, Residency, ValueInfo};
+use std::sync::Arc;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Entry {
+    pub name: Option<Arc<str>>,
+    pub shape: [u32; 4],
     pub word: u64,
     pub elements: u64,
     pub element: Element,
@@ -35,6 +38,8 @@ impl Region {
             words = words.next_multiple_of(stride);
             placed[id] = Some((words, info.element, info.scale));
             entries.push(Entry {
+                name: info.name.clone(),
+                shape: info.shape.dims(),
                 word: words,
                 elements,
                 element: info.element,

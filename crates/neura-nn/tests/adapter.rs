@@ -30,14 +30,14 @@ fn plane(samples: u32) -> (Vec<f32>, Vec<f32>) {
 
 fn step<'r>(runtime: &'r Runtime, frozen: bool) -> Program<'r> {
     let graph = Graph::new();
-    let base = Linear::new(&graph, 8, 8, Init::Constant(0.5), Element::Single);
+    let base = Linear::new(&graph, "base", 8, 8, Init::Constant(0.5), Element::Single);
     if frozen {
         graph.freeze(&base.parameters());
     }
     let adapter = Adapter::new(
         &graph,
-        8,
-        8,
+        "adapter",
+        [8, 8],
         2,
         Init::Uniform {
             low: -0.2,
@@ -50,7 +50,7 @@ fn step<'r>(runtime: &'r Runtime, frozen: bool) -> Program<'r> {
     let prediction = adapter.forward(&graph, inputs, base.forward(&graph, inputs));
     let loss = mse_loss(&graph, prediction, inputs);
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.01, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.01, 0.9, 0.999, 1e-8, 0.0);
     if !frozen {
         optimizer.track_all(&graph, &base.parameters());
     }
@@ -91,8 +91,8 @@ fn an_adapter_begins_as_a_bypass_of_zero() {
     let graph = Graph::new();
     let adapter = Adapter::new(
         &graph,
-        2,
-        1,
+        "adapter",
+        [2, 1],
         2,
         Init::Uniform {
             low: -0.4,
@@ -120,12 +120,12 @@ fn an_adapter_begins_as_a_bypass_of_zero() {
 fn a_frozen_base_trains_only_the_bypass_it_carries() {
     let runtime = open();
     let graph = Graph::new();
-    let base = Linear::new(&graph, 2, 1, Init::Constant(1.0), Element::Single);
+    let base = Linear::new(&graph, "base", 2, 1, Init::Constant(1.0), Element::Single);
     graph.freeze(&base.parameters());
     let adapter = Adapter::new(
         &graph,
-        2,
-        1,
+        "adapter",
+        [2, 1],
         2,
         Init::Uniform {
             low: -0.4,
@@ -144,9 +144,9 @@ fn a_frozen_base_trains_only_the_bypass_it_carries() {
     assert!(refuses(|| {
         let _ = gradients.of(base.weight());
     }));
-    let mut optimizer = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     assert!(refuses(|| {
-        let mut refused = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+        let mut refused = AdamW::new(&graph, "refused", 0.02, 0.9, 0.999, 1e-8, 0.0);
         refused.track(&graph, base.weight());
     }));
     optimizer.track_all(&graph, &adapter.parameters());
@@ -200,6 +200,7 @@ fn a_four_bit_base_trains_the_bypass_it_carries() {
     let graph = Graph::new();
     let base = Linear::block_quantized(
         &graph,
+        "base",
         2,
         1,
         Init::Constant(1.0),
@@ -208,8 +209,8 @@ fn a_four_bit_base_trains_the_bypass_it_carries() {
     );
     let adapter = Adapter::new(
         &graph,
-        2,
-        1,
+        "adapter",
+        [2, 1],
         2,
         Init::Uniform {
             low: -0.4,
@@ -235,7 +236,7 @@ fn a_four_bit_base_trains_the_bypass_it_carries() {
     assert!(refuses(|| {
         let _ = gradients.of(base.weight());
     }));
-    let mut optimizer = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &adapter.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);

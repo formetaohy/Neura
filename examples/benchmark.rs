@@ -100,6 +100,7 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     let graph = Graph::new();
     let model = Mlp::new(
         &graph,
+        "model",
         widths,
         Init::Uniform {
             low: -0.2,
@@ -112,7 +113,7 @@ fn step(runtime: &Runtime, widths: &[u32], samples: u32) -> Measured {
     let targets = graph.input(Shape::matrix(samples, outputs), Element::Single);
     let loss = mse_loss(&graph, model.forward(&graph, observations), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.005, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.005, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -136,6 +137,7 @@ fn act(runtime: &Runtime, widths: &[u32], agents: u32) -> Measured {
     let graph = Graph::new();
     let model = Mlp::new(
         &graph,
+        "model",
         widths,
         Init::Uniform {
             low: -0.2,

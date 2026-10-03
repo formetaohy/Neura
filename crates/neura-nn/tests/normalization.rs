@@ -103,7 +103,7 @@ fn a_root_mean_square_normalizes_every_row() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::matrix(4, 6), Element::Single);
-    let layer = RmsNorm::new(&graph, 6, Init::Zero, 1e-6, Element::Single);
+    let layer = RmsNorm::new(&graph, "layer", 6, Init::Zero, 1e-6, Element::Single);
     let out = layer.forward(&graph, input);
     graph.retain(out);
     let weights = runtime.weights(&graph);
@@ -125,7 +125,7 @@ fn a_root_mean_square_gradient_matches_finite_differences() {
     let graph = Graph::new();
     let input = graph.input(Shape::matrix(4, 6), Element::Single);
     let target = graph.input(Shape::matrix(4, 6), Element::Single);
-    let layer = RmsNorm::new(&graph, 6, Init::Zero, 1e-6, Element::Single);
+    let layer = RmsNorm::new(&graph, "layer", 6, Init::Zero, 1e-6, Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, input), target);
     let gradient = graph.backward(loss).of(layer.scale());
     graph.retain(gradient);
@@ -164,7 +164,7 @@ fn a_group_normalization_normalizes_each_group_of_channels() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 4, 3, 3]), Element::Single);
-    let layer = GroupNorm::new(&graph, 4, 2, Init::Zero, 1e-5, Element::Single);
+    let layer = GroupNorm::new(&graph, "layer", 4, 2, Init::Zero, 1e-5, Element::Single);
     let out = layer.forward(&graph, input);
     graph.retain(out);
     let weights = runtime.weights(&graph);
@@ -188,7 +188,7 @@ fn a_group_normalization_gradient_matches_finite_differences() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 4, 3, 3]), Element::Single);
     let target = graph.input(Shape::of([2, 4, 3, 3]), Element::Single);
-    let layer = GroupNorm::new(&graph, 4, 2, Init::Zero, 1e-5, Element::Single);
+    let layer = GroupNorm::new(&graph, "layer", 4, 2, Init::Zero, 1e-5, Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, input), target);
     let gradients = graph.backward(loss);
     let scaled = gradients.of(layer.scale());
@@ -230,7 +230,7 @@ fn a_group_normalization_gradient_matches_finite_differences() {
 #[test]
 fn a_group_normalization_keeps_its_scale_beside_its_shift() {
     let graph = Graph::new();
-    let layer = GroupNorm::new(&graph, 4, 2, Init::Zero, 1e-5, Element::Single);
+    let layer = GroupNorm::new(&graph, "layer", 4, 2, Init::Zero, 1e-5, Element::Single);
     assert_eq!(layer.parameters().len(), 2);
     assert_eq!(graph.shape(layer.scale()).dims(), [1, 4, 1, 1]);
     assert_eq!(graph.shape(layer.shift()).dims(), [1, 4, 1, 1]);

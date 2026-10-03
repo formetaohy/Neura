@@ -52,8 +52,8 @@ fn network<'g>(graph: &Graph<'g>, hidden: u32) -> Model<'g> {
         low: -0.3,
         high: 0.3,
     };
-    let first = Linear::new(graph, WIDTH, hidden, spread, Element::Single);
-    let second = Linear::new(graph, hidden, OUTPUT, spread, Element::Single);
+    let first = Linear::new(graph, "first", WIDTH, hidden, spread, Element::Single);
+    let second = Linear::new(graph, "second", hidden, OUTPUT, spread, Element::Single);
     let prediction = second.forward(graph, graph.relu(first.forward(graph, observations)));
     graph.retain(prediction);
     let loss = mse_loss(graph, prediction, targets);
@@ -74,7 +74,7 @@ fn network<'g>(graph: &Graph<'g>, hidden: u32) -> Model<'g> {
 
 fn descend<'g>(graph: &Graph<'g>, model: &Model<'g>) {
     let gradients = graph.backward(model.loss);
-    let mut optimizer = AdamW::new(graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(graph, &model.parameters);
     optimizer.step(graph, &gradients);
 }
@@ -132,12 +132,14 @@ fn a_training_graph_keeps_its_state_beside_the_model_it_learns() {
         "the model carries four tensors while the moments of the descent ride beside them",
     );
     let checkpoint = runtime.checkpoint(&weights);
-    assert_eq!(checkpoint.tensors(), 4);
     assert_eq!(
-        checkpoint.state_tensors(),
-        9,
-        "four pairs of moments beside the clock the descent counts its steps with",
+        checkpoint.tensors(),
+        13,
+        "four parameters ride beside four pairs of moments and the clock a descent counts its steps with",
     );
+    assert!(checkpoint.tensor("first.weight").is_some());
+    assert!(checkpoint.tensor("second.bias").is_some());
+    assert!(checkpoint.tensor("optimizer.step").is_some());
 }
 
 #[test]

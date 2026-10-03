@@ -22,6 +22,7 @@ fn main() {
     let graph = Graph::new();
     let model = Mlp::new(
         &graph,
+        "model",
         &[4, 32, 32, 2],
         Init::Uniform {
             low: -0.25,
@@ -36,7 +37,7 @@ fn main() {
     graph.retain(prediction);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.005, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.005, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);

@@ -49,6 +49,7 @@ fn block(width: u32, heads: u32, key_heads: u32, input_heads: u32, causal: bool)
     let graph = Graph::new();
     let model = MultiHeadAttention::new(
         &graph,
+        "model",
         HeadShape::new(heads, key_heads, width),
         Init::Uniform {
             low: -0.3,
@@ -182,7 +183,7 @@ fn a_multi_head_attention_lowers_the_loss_it_was_shown() {
     let block = block(WIDTH, HEADS, KEY_HEADS, HEADS, true);
     let gradients = block.graph.backward(block.loss);
     let parameters = block.model.parameters();
-    let mut optimizer = AdamW::new(&block.graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&block.graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&block.graph, &parameters);
     optimizer.step(&block.graph, &gradients);
     let weights = block.runtime.weights(&block.graph);
@@ -214,6 +215,7 @@ fn rotary_block() -> Block {
     let width = WIDTH + 1;
     let model = MultiHeadAttention::rotary(
         &graph,
+        "model",
         HeadShape::new(HEADS, KEY_HEADS, width),
         Init::Uniform {
             low: -0.3,

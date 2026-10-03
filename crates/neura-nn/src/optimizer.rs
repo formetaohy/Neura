@@ -68,7 +68,12 @@ impl<'g> Sgd<'g> {
                         .any(|velocity| velocity.parameter == parameter),
                     "a parameter carries one velocity",
                 );
-                let velocity = graph.state(graph.shape(parameter), Init::Zero, Element::Single);
+                let velocity = graph.named_state(
+                    &state_name(graph, parameter, ".velocity"),
+                    graph.shape(parameter),
+                    Init::Zero,
+                    Element::Single,
+                );
                 velocities.push(Velocity {
                     parameter,
                     velocity,
@@ -154,6 +159,7 @@ pub struct AdamW<'g> {
 impl<'g> AdamW<'g> {
     pub fn new(
         graph: &Graph<'g>,
+        name: &str,
         rate: f32,
         mean_decay: f32,
         variance_decay: f32,
@@ -182,7 +188,12 @@ impl<'g> AdamW<'g> {
             variance_freshness: graph.fill(Shape::scalar(), 1.0 - variance_decay),
             floor: graph.fill(Shape::scalar(), floor),
             decay: (weight_decay > 0.0).then(|| graph.fill(Shape::scalar(), weight_decay)),
-            clock: graph.state(Shape::scalar(), Init::Zero, Element::Single),
+            clock: graph.named_state(
+                &format!("{name}.step"),
+                Shape::scalar(),
+                Init::Zero,
+                Element::Single,
+            ),
             one: graph.fill(Shape::scalar(), 1.0),
             moments: Vec::new(),
         }
@@ -203,8 +214,18 @@ impl<'g> AdamW<'g> {
         );
         let moments = Moments {
             parameter,
-            mean: graph.state(graph.shape(parameter), Init::Zero, Element::Single),
-            variance: graph.state(graph.shape(parameter), Init::Zero, Element::Single),
+            mean: graph.named_state(
+                &state_name(graph, parameter, ".mean"),
+                graph.shape(parameter),
+                Init::Zero,
+                Element::Single,
+            ),
+            variance: graph.named_state(
+                &state_name(graph, parameter, ".variance"),
+                graph.shape(parameter),
+                Init::Zero,
+                Element::Single,
+            ),
         };
         self.moments.push(moments);
         moments
@@ -255,4 +276,14 @@ impl<'g> AdamW<'g> {
             graph.add_into(moments.parameter, update);
         }
     }
+}
+
+fn state_name<'g>(graph: &Graph<'g>, parameter: Value<'g>, suffix: &str) -> String {
+    let name = graph.name_of(parameter).unwrap_or_else(|| {
+        panic!(
+            "value {} carries no name, and a descent names the state it keeps of every parameter it follows; declare the parameter with a named parameter",
+            parameter.id(),
+        )
+    });
+    format!("{name}{suffix}")
 }

@@ -105,6 +105,7 @@ fn a_normalized_row_gradient_matches_finite_differences() {
     );
     let layer = LayerNorm::new(
         &graph,
+        "layer",
         5,
         Init::Uniform {
             low: -0.5,
@@ -158,6 +159,7 @@ fn analytic_gradients_match_finite_differences() {
     let graph = Graph::new();
     let first = Linear::new(
         &graph,
+        "first",
         2,
         4,
         Init::Uniform {
@@ -168,6 +170,7 @@ fn analytic_gradients_match_finite_differences() {
     );
     let second = Linear::new(
         &graph,
+        "second",
         4,
         1,
         Init::Uniform {
@@ -225,6 +228,7 @@ fn analytic_gradients_of_a_deep_stack_match_finite_differences() {
     let graph = Graph::new();
     let model = neura_nn::Mlp::new(
         &graph,
+        "model",
         &[3, 5, 4, 2],
         Init::Uniform {
             low: -0.6,
@@ -282,6 +286,7 @@ fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences()
     let graph = Graph::new();
     let first = Linear::new(
         &graph,
+        "first",
         64,
         32,
         Init::Uniform {
@@ -292,6 +297,7 @@ fn analytic_gradients_of_a_tensor_wider_than_one_task_match_finite_differences()
     );
     let second = Linear::new(
         &graph,
+        "second",
         32,
         16,
         Init::Uniform {
@@ -357,6 +363,7 @@ fn one_step_of_adam_moves_a_weight_against_its_gradient() {
     let graph = Graph::new();
     let layer = Linear::new(
         &graph,
+        "layer",
         2,
         1,
         Init::Uniform {
@@ -369,7 +376,7 @@ fn one_step_of_adam_moves_a_weight_against_its_gradient() {
     let targets = graph.input(Shape::matrix(4, 1), Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = neura_nn::AdamW::new(&graph, 0.1, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = neura_nn::AdamW::new(&graph, "optimizer", 0.1, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     graph.retain(loss);
@@ -447,6 +454,7 @@ fn an_embedding_gradient_matches_finite_differences() {
     let graph = Graph::new();
     let embedding = Embedding::new(
         &graph,
+        "embedding",
         6,
         4,
         Init::Uniform {
@@ -504,6 +512,7 @@ fn a_convolution_gradient_matches_finite_differences() {
     );
     let conv = Conv2d::new(
         &graph,
+        "conv",
         [16, 16],
         1,
         Window::new([3, 3], [1, 1], [1, 1]),
@@ -569,6 +578,7 @@ fn a_depthwise_convolution_gradient_matches_finite_differences() {
     );
     let conv = Conv2d::new(
         &graph,
+        "conv",
         [channels, channels],
         channels,
         Window::new([3, 3], [1, 1], [1, 1]),
@@ -632,6 +642,7 @@ fn a_policy_gradient_matches_finite_differences() {
     let graph = Graph::new();
     let layer = Linear::new(
         &graph,
+        "layer",
         3,
         4,
         Init::Uniform {

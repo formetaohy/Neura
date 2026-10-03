@@ -35,6 +35,7 @@ fn half_precision_activations_train_a_model() {
     let graph = Graph::new();
     let first = Linear::new(
         &graph,
+        "first",
         2,
         24,
         Init::Uniform {
@@ -45,6 +46,7 @@ fn half_precision_activations_train_a_model() {
     );
     let second = Linear::new(
         &graph,
+        "second",
         24,
         1,
         Init::Uniform {
@@ -61,7 +63,7 @@ fn half_precision_activations_train_a_model() {
     assert_eq!(graph.element(prediction), Element::Half);
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = AdamW::new(&graph, 0.02, 0.9, 0.999, 1e-8, 0.0);
+    let mut optimizer = AdamW::new(&graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(&graph, &first.parameters());
     optimizer.track_all(&graph, &second.parameters());
     optimizer.step(&graph, &gradients);
@@ -90,9 +92,9 @@ fn half_precision_activations_train_a_model() {
 fn a_narrow_layer_halves_the_weights_it_carries() {
     let runtime = open();
     let graph = Graph::new();
-    let layer = Linear::new(&graph, 512, 512, Init::Zero, Element::Half);
+    let layer = Linear::new(&graph, "layer", 512, 512, Init::Zero, Element::Half);
     let wide = Graph::new();
-    let twin = Linear::new(&wide, 512, 512, Init::Zero, Element::Single);
+    let twin = Linear::new(&wide, "twin", 512, 512, Init::Zero, Element::Single);
     let input = graph.input(Shape::matrix(8, 512), Element::Half);
     let halved = layer.forward(&graph, input);
     let wide_input = wide.input(Shape::matrix(8, 512), Element::Single);
@@ -123,6 +125,7 @@ fn a_narrow_step_runs_beside_a_wide_one() {
     let graph = Graph::new();
     let model = Linear::new(
         &graph,
+        "model",
         256,
         256,
         Init::Uniform {
@@ -164,6 +167,7 @@ fn a_quantized_layer_keeps_a_bias_of_its_own_format() {
     let graph = Graph::new();
     let layer = Linear::quantized(
         &graph,
+        "layer",
         512,
         8,
         0.03125,
@@ -195,6 +199,7 @@ fn a_four_bit_float_layer_keeps_its_bias_in_the_numbers_it_adds() {
     let graph = Graph::new();
     let layer = Linear::block_quantized(
         &graph,
+        "layer",
         4,
         4,
         Init::Uniform {
@@ -215,7 +220,7 @@ fn a_quantized_layer_refuses_a_quantized_bias() {
     let graph = Graph::new();
     assert!(
         refuses(|| {
-            Linear::quantized(&graph, 4, 4, 0.25, Init::Zero, Element::Int8);
+            Linear::quantized(&graph, "bias", 4, 4, 0.25, Init::Zero, Element::Int8);
         }),
         "the bias a quantized weight adds lands in the format the layer declares",
     );
@@ -223,6 +228,7 @@ fn a_quantized_layer_refuses_a_quantized_bias() {
         refuses(|| {
             Linear::block_quantized(
                 &graph,
+                "bias",
                 4,
                 4,
                 Init::Uniform {
