@@ -6,7 +6,7 @@ use neura_abi::{
     store, strategy,
 };
 use neura_compiler::{BindingKind, BindingSpec, Compiler, ComputeProgram, ShaderBinding};
-use neura_profile::Geometry;
+use neura_profile::{CLAIM_WORDS, Geometry};
 
 pub use core::ENTRY;
 
@@ -159,7 +159,7 @@ impl Megakernel {
                 compiler.storage_record(binding.name, binding.element, spec);
             }
         }
-        compiler.workgroup("claim", "u32", 2);
+        compiler.workgroup("claim", "u32", CLAIM_WORDS);
         core::define(&mut compiler);
         neura_kernel::define(&mut compiler, kinds, elements, &geometry);
         let enabled = kinds

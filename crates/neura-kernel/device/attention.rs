@@ -54,7 +54,7 @@ mod source {
                 left_plane + at * left.strides.z + depth * left.strides.w,
                 inside,
             );
-            attention_left[unit] = select(0.0, fetch(left, address), inside);
+            scratch[unit] = select(0.0, fetch(left, address), inside);
         }
         for unit in stride(lid, ATTN_KEYS * ATTN_WIDTH, WORKGROUP_SIZE) {
             let column = unit / ATTN_WIDTH;
@@ -66,7 +66,7 @@ mod source {
                 right_plane + at * right.strides.z + depth * right.strides.w,
                 inside,
             );
-            attention_right[unit] = select(0.0, fetch(right, address), inside);
+            scratch[SCRATCH_ATTENTION_RIGHT + unit] = select(0.0, fetch(right, address), inside);
         }
     }
 
@@ -124,8 +124,7 @@ mod source {
                     let at = block * ATTN_KEYS + column;
                     let mut score = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        score =
-                            score + queries[depth] * attention_left[column * ATTN_WIDTH + depth];
+                        score = score + queries[depth] * scratch[column * ATTN_WIDTH + depth];
                     }
                     weights[column] = select(
                         -3.4028235e38,
@@ -148,7 +147,8 @@ mod source {
                     let mut carried = accumulated[depth] * rescale;
                     for column in unroll(0u32, ATTN_KEYS, 1u32) {
                         carried = carried
-                            + weights[column] * attention_right[column * ATTN_WIDTH + depth];
+                            + weights[column]
+                                * scratch[SCRATCH_ATTENTION_RIGHT + column * ATTN_WIDTH + depth];
                     }
                     accumulated[depth] = carried;
                 }
@@ -246,8 +246,7 @@ mod source {
                     let at = block * ATTN_KEYS + column;
                     let mut score = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        score =
-                            score + queries[depth] * attention_left[column * ATTN_WIDTH + depth];
+                        score = score + queries[depth] * scratch[column * ATTN_WIDTH + depth];
                     }
                     let weight = select(
                         0.0,
@@ -257,12 +256,13 @@ mod source {
                     let mut weighted = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                         weighted = weighted
-                            + gradients[depth] * attention_right[column * ATTN_WIDTH + depth];
+                            + gradients[depth]
+                                * scratch[SCRATCH_ATTENTION_RIGHT + column * ATTN_WIDTH + depth];
                     }
                     let scored = weight * (weighted - row_dot) * task.param;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                        accumulated[depth] = accumulated[depth]
-                            + scored * attention_left[column * ATTN_WIDTH + depth];
+                        accumulated[depth] =
+                            accumulated[depth] + scored * scratch[column * ATTN_WIDTH + depth];
                     }
                 }
             }
@@ -337,8 +337,7 @@ mod source {
                         let at = block * ATTN_KEYS + step;
                         let mut score = 0.0;
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            score =
-                                score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
+                            score = score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
                         }
                         let weight = select(
                             0.0,
@@ -350,9 +349,10 @@ mod source {
                         let mut row_dot = 0.0;
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                             weighted = weighted
-                                + attention_right[step * ATTN_WIDTH + depth] * values_row[depth];
+                                + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
+                                    * values_row[depth];
                             row_dot = row_dot
-                                + attention_right[step * ATTN_WIDTH + depth]
+                                + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
                                     * fetch(
                                         output_grad,
                                         output_grad_plane
@@ -362,8 +362,8 @@ mod source {
                         }
                         let scored = weight * (weighted - row_dot) * task.param;
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            accumulated[depth] = accumulated[depth]
-                                + scored * attention_left[step * ATTN_WIDTH + depth];
+                            accumulated[depth] =
+                                accumulated[depth] + scored * scratch[step * ATTN_WIDTH + depth];
                         }
                     }
                 }
@@ -429,8 +429,7 @@ mod source {
                         let at = block * ATTN_KEYS + step;
                         let mut score = 0.0;
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            score =
-                                score + attention_left[step * ATTN_WIDTH + depth] * keys_row[depth];
+                            score = score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
                         }
                         let weight = select(
                             0.0,
@@ -440,7 +439,8 @@ mod source {
                         );
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                             accumulated[depth] = accumulated[depth]
-                                + weight * attention_right[step * ATTN_WIDTH + depth];
+                                + weight
+                                    * scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth];
                         }
                     }
                 }

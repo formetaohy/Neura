@@ -1,6 +1,6 @@
 use neura_abi::{Element, Kind, Placement, TaskRecord, ValueRecord, strategy};
 use neura_graph::{Graph, Init, Shape, Value, Window};
-use neura_profile::{Budget, Profile};
+use neura_profile::{AttentionTile, Budget, Profile};
 
 fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE)[0]
@@ -547,9 +547,9 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
 }
 
 #[test]
-fn an_attention_keeps_the_shared_pool_its_products_stage_from() {
+fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
     let tokens = 64u32;
-    let width = 8u32;
+    let width = 64u32;
     let graph = Graph::new();
     let data = graph.parameter(
         Shape::of([1, 1, tokens, width]),
@@ -572,14 +572,10 @@ fn an_attention_keeps_the_shared_pool_its_products_stage_from() {
     graph.retain(out);
     let profile = wide();
     let encoding = encoding_with(&graph, profile);
-    let spare = profile.shared_bytes() - profile.staging_bytes();
-    assert!(
-        encoding.attention()[0].shared_bytes() <= spare,
-        "an attention beside a product stages within what the product leaves",
-    );
-    assert!(
-        u64::from(encoding.attention()[0].keys()) * 2 * u64::from(width) * 4 <= spare,
-        "an attention keys within the pool the products leave",
+    assert_eq!(
+        encoding.attention(),
+        [AttentionTile::fit(profile.scratch_bytes(), width)],
+        "an attention keys as deep as the pool its profile offers, while the products beside it stage from that same pool",
     );
 }
 

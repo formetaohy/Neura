@@ -1101,6 +1101,51 @@ fn a_product_that_splits_its_depth_keeps_the_menu_of_one_program() {
 }
 
 #[test]
+fn one_pool_lets_a_tape_stage_every_body_it_runs() {
+    let runtime = open();
+    let width = 8u32;
+    let tokens = 4u32;
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, tokens, width]), Element::Single);
+    let weight = graph.parameter(
+        Shape::matrix(width, width),
+        Init::Uniform {
+            low: -0.4,
+            high: 0.4,
+        },
+        Element::Single,
+    );
+    let projected = graph.matmul(input, weight);
+    let attended = graph.attention(
+        projected,
+        projected,
+        projected,
+        neura_graph::AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: None,
+        },
+    );
+    let chosen = graph.argmax(graph.sum_rows(attended));
+    graph.retain(chosen);
+    let weights = runtime.weights(&graph);
+    let data = random(tokens * width, 5);
+    let mut sampled = Vec::new();
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, &weights, profile);
+        runtime.write(&program, input, &data);
+        runtime.run(&program);
+        sampled.push(runtime.read(&program, chosen));
+    }
+    for window in sampled.windows(2) {
+        assert_eq!(
+            window[0], window[1],
+            "a tape that stages a product, an attention, a row fold and a sampling head in one pool samples another index through another profile",
+        );
+    }
+}
+
+#[test]
 fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest::default().minimum_limits(),

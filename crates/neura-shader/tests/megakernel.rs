@@ -1,8 +1,8 @@
 use naga::{AddressSpace, Expression, MathFunction, Statement, SwitchValue, TypeInner};
-use neura_abi::{Element, Kind, RECORDS};
+use neura_abi::{Element, Kind, RECORDS, WORD_BYTES};
 use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
-use neura_profile::{AttentionTile, Budget, Geometry, Profile};
+use neura_profile::{AttentionTile, Budget, CLAIM_BYTES, Geometry, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
@@ -403,32 +403,62 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
     }
 }
 
+fn workgroup_bytes(program: &ComputeProgram) -> u64 {
+    program
+        .module()
+        .global_variables
+        .iter()
+        .filter(|(_, variable)| variable.space == AddressSpace::WorkGroup)
+        .map(
+            |(_, variable)| match &program.module().types[variable.ty].inner {
+                TypeInner::Array {
+                    stride,
+                    size: naga::ArraySize::Constant(count),
+                    ..
+                } => u64::from(*stride) * u64::from(count.get()),
+                other => panic!("workgroup buffer {other:?} has no static size"),
+            },
+        )
+        .sum()
+}
+
 #[test]
 fn workgroup_allocation_fits_the_advertised_profile() {
     for (index, profile) in profiles().iter().enumerate() {
         let program = all(index).program();
-        let used = program
-            .module()
-            .global_variables
-            .iter()
-            .filter(|(_, variable)| variable.space == AddressSpace::WorkGroup)
-            .map(
-                |(_, variable)| match &program.module().types[variable.ty].inner {
-                    TypeInner::Array {
-                        stride,
-                        size: naga::ArraySize::Constant(count),
-                        ..
-                    } => u64::from(*stride) * u64::from(count.get()),
-                    other => panic!("workgroup buffer {other:?} has no static size"),
-                },
-            )
-            .sum::<u64>();
+        let used = workgroup_bytes(&program);
         assert!(used > 0);
         assert!(
             used <= profile.shared_bytes(),
             "{profile:?} reserves {used} workgroup bytes"
         );
     }
+}
+
+#[test]
+fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
+    let profile = *profiles().last().expect("a profile");
+    let attention = [AttentionTile::new(4, 8)];
+    let geometry = Geometry::of(
+        profile.workgroup(),
+        profile.shared_bytes(),
+        profile.tiles(),
+        &attention,
+    );
+    let kernel = Megakernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+    let used = workgroup_bytes(&kernel.program());
+    assert_eq!(
+        used,
+        geometry.scratch_bytes(Kind::ALL) + CLAIM_BYTES,
+        "a device program declares the pool its widest body stages beside the word its workgroups claim with",
+    );
+    let partitioned = geometry.staging_bytes()
+        + 2 * u64::from(attention[0].stage_words()) * WORD_BYTES
+        + 2 * u64::from(profile.workgroup()) * WORD_BYTES;
+    assert!(
+        used < partitioned,
+        "a device program lets every body stage from one pool instead of partitioning {partitioned} bytes among them",
+    );
 }
 
 #[test]
@@ -471,31 +501,15 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
             "a device program carries the tile its geometry names",
         );
     }
-    let staged = program
-        .module()
-        .global_variables
-        .iter()
-        .filter(|(_, variable)| variable.name.as_deref() == Some("attention_left"))
-        .map(
-            |(_, variable)| match &program.module().types[variable.ty].inner {
-                TypeInner::Array {
-                    stride,
-                    size: naga::ArraySize::Constant(count),
-                    ..
-                } => u64::from(*stride) * u64::from(count.get()),
-                other => panic!("an attention stage {other:?} has no static size"),
-            },
-        )
-        .sum::<u64>();
     assert_eq!(
-        staged,
-        u64::from(
+        kernel.geometry().scratch_bytes(&[Kind::Attention]),
+        2 * u64::from(
             attention
                 .iter()
                 .map(|tile| tile.stage_words())
                 .max()
                 .expect("an attention stage"),
-        ) * 4,
+        ) * WORD_BYTES,
         "a device program stages the widest attention tile it carries",
     );
 }

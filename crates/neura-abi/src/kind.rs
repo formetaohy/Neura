@@ -1,30 +1,4 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub enum Scratch {
-    Staging,
-    Reduction,
-    Choice,
-    Attention,
-}
-
-impl Scratch {
-    pub const ALL: &'static [Scratch] = &[
-        Self::Staging,
-        Self::Reduction,
-        Self::Choice,
-        Self::Attention,
-    ];
-
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Staging => "staging",
-            Self::Reduction => "reduction",
-            Self::Choice => "choice",
-            Self::Attention => "attention",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Module {
     Matmul,
     MatmulTiles,
@@ -72,16 +46,6 @@ impl Module {
             Self::Convert => "convert",
         }
     }
-
-    pub const fn scratch(self) -> &'static [Scratch] {
-        match self {
-            Self::MatmulTiles => &[Scratch::Staging],
-            Self::Attention => &[Scratch::Attention],
-            Self::Reduce => &[Scratch::Reduction],
-            Self::Choice => &[Scratch::Choice],
-            _ => &[],
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -109,12 +73,6 @@ pub struct KindInfo {
 impl KindInfo {
     pub fn carries(self, module: Module) -> bool {
         self.modules.contains(&module)
-    }
-
-    pub fn stages(self, scratch: Scratch) -> bool {
-        self.modules
-            .iter()
-            .any(|module| module.scratch().contains(&scratch))
     }
 }
 
@@ -169,10 +127,6 @@ macro_rules! kinds {
 
             pub fn carries(self, module: Module) -> bool {
                 self.info().carries(module)
-            }
-
-            pub fn stages(self, scratch: Scratch) -> bool {
-                self.info().stages(scratch)
             }
 
             pub fn geometry(self) -> Geometry {

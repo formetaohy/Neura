@@ -1,4 +1,4 @@
-use neura_abi::{Kind, Scratch, WORD_BYTES};
+use neura_abi::{Kind, Module, WORD_BYTES};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct AttentionTile {
@@ -18,7 +18,7 @@ impl AttentionTile {
         Self { keys, width }
     }
 
-    pub fn fit(shared: u64, width: u32) -> Self {
+    pub fn fit(pool: u64, width: u32) -> Self {
         let row = 3 * width + 1;
         assert!(
             row <= Self::REGISTER_CEILING,
@@ -27,15 +27,14 @@ impl AttentionTile {
             Self::REGISTER_CEILING,
         );
         let staged = 2 * WORD_BYTES * u64::from(width);
-        let room = shared / staged;
+        let room = pool / staged;
         let registers = u64::from(Self::REGISTER_CEILING - 3 * width);
         let keys = u32::try_from(room.min(registers))
             .unwrap_or(u32::MAX)
             .clamp(1, Self::KEYS_CEILING);
         assert!(
             u64::from(keys) <= room,
-            "an attention of width {width} stages {} bytes of keys and values for one key, beyond the {shared} bytes its device leaves beside the rest of its tape",
-            2 * WORD_BYTES * u64::from(width),
+            "an attention of width {width} stages {staged} bytes of keys and values for one key, beyond the {pool} bytes of workgroup scratch its profile offers",
         );
         Self::new(keys, width)
     }
@@ -246,8 +245,18 @@ const BLOCKINGS: [(u32, u32); 11] = [
 const GRID_ASPECT: u32 = 4;
 const STREAMED_ASPECT: u32 = 4;
 const DEPTH: u32 = 8;
-const REDUCTION_SCRATCH: u64 = 2 * WORD_BYTES;
-const CLAIM_SCRATCH: u64 = 2 * WORD_BYTES;
+pub const CLAIM_WORDS: u32 = 2;
+pub const CLAIM_BYTES: u64 = CLAIM_WORDS as u64 * WORD_BYTES;
+const SCRATCH_WORDS_PER_THREAD: u64 = 2;
+
+const fn scratch_budget(workgroup: u32, staging: u64) -> u64 {
+    let floor = SCRATCH_WORDS_PER_THREAD * workgroup as u64 * WORD_BYTES;
+    if staging > floor {
+        staging + CLAIM_BYTES
+    } else {
+        floor + CLAIM_BYTES
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Profile {
@@ -295,9 +304,7 @@ impl Profile {
         }
         Self {
             workgroup,
-            shared_bytes: 2 * (left_stage + right_stage) * WORD_BYTES
-                + REDUCTION_SCRATCH * workgroup as u64
-                + CLAIM_SCRATCH,
+            shared_bytes: scratch_budget(workgroup, 2 * (left_stage + right_stage) * WORD_BYTES),
             tiles: entries,
             count: tiles.len() as u8,
         }
@@ -366,6 +373,10 @@ impl Profile {
         self.shared_bytes
     }
 
+    pub const fn scratch_bytes(self) -> u64 {
+        self.shared_bytes - CLAIM_BYTES
+    }
+
     pub const fn workgroups(self) -> u32 {
         let count = Budget::NOMINAL_RESIDENT_THREADS / self.workgroup;
         if count == 0 { 1 } else { count }
@@ -432,8 +443,7 @@ fn blockings(
 }
 
 fn carried(left_stage: u64, right_stage: u64, workgroup: u32, shared_bytes: u64) -> bool {
-    let staged = 2 * (left_stage + right_stage) * WORD_BYTES;
-    staged + REDUCTION_SCRATCH * u64::from(workgroup) + CLAIM_SCRATCH <= shared_bytes
+    scratch_budget(workgroup, 2 * (left_stage + right_stage) * WORD_BYTES) <= shared_bytes
 }
 
 fn grids(workgroup: u32) -> Vec<(u32, u32)> {
@@ -469,7 +479,7 @@ fn streamed_grids(workgroup: u32) -> Vec<(u32, u32)> {
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Geometry {
     workgroup: u32,
-    shared_bytes: u64,
+    budget: u64,
     tiles: Vec<MatmulTile>,
     attention: Vec<AttentionTile>,
     left_stage: u64,
@@ -479,7 +489,7 @@ pub struct Geometry {
 impl Geometry {
     pub fn of(
         workgroup: u32,
-        shared_bytes: u64,
+        budget: u64,
         tiles: &[MatmulTile],
         attention: &[AttentionTile],
     ) -> Self {
@@ -495,7 +505,7 @@ impl Geometry {
         }
         Self {
             workgroup,
-            shared_bytes,
+            budget,
             tiles: tiles.to_vec(),
             attention: attention.to_vec(),
             left_stage,
@@ -507,12 +517,44 @@ impl Geometry {
         self.workgroup
     }
 
-    pub const fn shared_bytes(&self) -> u64 {
-        self.shared_bytes
+    pub const fn budget(&self) -> u64 {
+        self.budget
     }
 
     pub const fn staging_bytes(&self) -> u64 {
         2 * (self.left_stage + self.right_stage) * WORD_BYTES
+    }
+
+    pub fn scratch_bytes(&self, kinds: &[Kind]) -> u64 {
+        u64::from(self.scratch_words(kinds)) * WORD_BYTES
+    }
+
+    pub fn scratch_words(&self, kinds: &[Kind]) -> u32 {
+        Module::ALL
+            .iter()
+            .copied()
+            .filter(|module| kinds.iter().any(|kind| kind.carries(*module)))
+            .map(|module| self.module_scratch(module))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn module_scratch(&self, module: Module) -> u32 {
+        match module {
+            Module::MatmulTiles => (2 * (self.left_stage + self.right_stage)) as u32,
+            Module::Attention => 2 * self.attention_stage_words(),
+            Module::Reduce => self.workgroup,
+            Module::Choice => 2 * self.workgroup,
+            _ => 0,
+        }
+    }
+
+    pub const fn matmul_right(&self) -> u32 {
+        (2 * self.left_stage) as u32
+    }
+
+    pub const fn choice(&self) -> u32 {
+        self.workgroup
     }
 
     pub fn attention(&self) -> &[AttentionTile] {
@@ -548,10 +590,6 @@ impl Geometry {
             .unwrap_or(0)
     }
 
-    pub fn attention_stage_bytes(&self) -> u64 {
-        2 * u64::from(self.attention_stage_words()) * WORD_BYTES
-    }
-
     pub fn tiles(&self) -> &[MatmulTile] {
         &self.tiles
     }
@@ -575,33 +613,5 @@ impl Geometry {
                     self.tiles.len(),
                 )
             })
-    }
-
-    pub fn stage_lengths(&self) -> (u32, u32) {
-        (
-            (2 * self.left_stage)
-                .try_into()
-                .expect("a left tile fits in device memory"),
-            (2 * self.right_stage)
-                .try_into()
-                .expect("a right tile fits in device memory"),
-        )
-    }
-
-    pub fn scratch_bytes(&self, scratch: Scratch) -> u64 {
-        match scratch {
-            Scratch::Staging => self.staging_bytes(),
-            Scratch::Reduction | Scratch::Choice => WORD_BYTES * u64::from(self.workgroup),
-            Scratch::Attention => self.attention_stage_bytes(),
-        }
-    }
-
-    pub fn declared_shared_bytes(&self, kinds: &[Kind]) -> u64 {
-        CLAIM_SCRATCH
-            + Scratch::ALL
-                .iter()
-                .filter(|scratch| kinds.iter().any(|kind| kind.stages(**scratch)))
-                .map(|scratch| self.scratch_bytes(*scratch))
-                .sum::<u64>()
     }
 }

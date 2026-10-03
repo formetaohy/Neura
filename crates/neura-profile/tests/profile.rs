@@ -1,5 +1,5 @@
-use neura_abi::WORD_BYTES;
-use neura_profile::{Budget, Geometry, MatmulStrategy, MatmulTile, Profile};
+use neura_abi::{Kind, WORD_BYTES};
+use neura_profile::{AttentionTile, Budget, Geometry, MatmulStrategy, MatmulTile, Profile};
 use std::panic::AssertUnwindSafe;
 
 fn wide_device() -> Budget {
@@ -141,30 +141,25 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
             profile.tiles(),
             &[],
         );
-        let (left, right) = geometry.stage_lengths();
+        let (left, right) = (
+            profile.tiles().iter().map(|tile| tile.left_stage()).max(),
+            profile.tiles().iter().map(|tile| tile.right_stage()).max(),
+        );
         assert_eq!(geometry.workgroup(), profile.workgroup());
         assert_eq!(geometry.tiles(), profile.tiles());
         assert_eq!(
-            left,
-            2 * profile
-                .tiles()
-                .iter()
-                .map(|tile| tile.left_stage())
-                .max()
-                .unwrap() as u32
+            geometry.staging_bytes(),
+            2 * (left.unwrap_or(0) + right.unwrap_or(0)) * WORD_BYTES,
+            "a geometry stages the panels of the widest tiles its profile offers",
         );
         assert_eq!(
-            right,
-            2 * profile
-                .tiles()
-                .iter()
-                .map(|tile| tile.right_stage())
-                .max()
-                .unwrap() as u32
+            geometry.scratch_bytes(&[Kind::Matmul]),
+            geometry.staging_bytes(),
+            "a pool reserves exactly the panels a product stages",
         );
         assert!(
-            profile.shared_bytes() >= (u64::from(left) + u64::from(right)) * WORD_BYTES,
-            "a profile stages more than the shared pool it asks the device for",
+            profile.shared_bytes() >= geometry.staging_bytes() + neura_profile::CLAIM_BYTES,
+            "a profile offers less pool than the panels it stages",
         );
         for (index, tile) in profile.tiles().iter().enumerate() {
             assert_eq!(geometry.geometry(*tile), index as u32);
@@ -177,6 +172,37 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
         assert!(refuses(|| {
             let _ = geometry.geometry(MatmulTile::new(MatmulStrategy::Staged, 24, 24, 16, 8, 8));
         }));
+    }
+}
+
+#[test]
+fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
+    for profile in Profile::derive(wide_device()) {
+        let geometry = Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            profile.tiles(),
+            &[AttentionTile::new(4, 8)],
+        );
+        let bodies = [Kind::Matmul, Kind::Attention, Kind::SumAxis, Kind::Argmax];
+        let demands = bodies.map(|kind| geometry.scratch_bytes(&[kind]));
+        assert!(
+            demands.iter().all(|bytes| *bytes > 0),
+            "a body that stages workgroup scratch declares none",
+        );
+        assert_eq!(
+            geometry.scratch_bytes(&bodies),
+            demands.iter().copied().max().expect("a body stages"),
+            "one pool stages the widest body instead of partitioning itself among them",
+        );
+        assert!(
+            geometry.scratch_bytes(&bodies) < demands.iter().sum(),
+            "a pool that holds every body at once is no pool",
+        );
+        assert!(
+            geometry.scratch_bytes(&bodies) + neura_profile::CLAIM_BYTES <= profile.shared_bytes(),
+            "a pool outruns the profile that offers it",
+        );
     }
 }
 

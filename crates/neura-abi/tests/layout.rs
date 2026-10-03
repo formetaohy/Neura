@@ -1,7 +1,7 @@
 use bytemuck::Zeroable;
 use neura_abi::{
-    Element, Kind, PlacementRecord, Scratch, SegmentRecord, StepFields, StepRecord, Store,
-    TaskFields, TaskRecord, ValueFields, ValueRecord,
+    Element, Kind, PlacementRecord, SegmentRecord, StepFields, StepRecord, Store, TaskFields,
+    TaskRecord, ValueFields, ValueRecord,
 };
 use std::mem::{align_of, offset_of, size_of};
 
@@ -224,17 +224,6 @@ fn every_task_kind_declares_the_device_code_it_runs() {
             "the {} kind installs the same device module twice",
             kind.name(),
         );
-        for scratch in Scratch::ALL {
-            assert_eq!(
-                kind.stages(*scratch),
-                info.modules
-                    .iter()
-                    .any(|module| module.scratch().contains(scratch)),
-                "the {} kind stages {} outside the device modules it installs",
-                kind.name(),
-                scratch.name(),
-            );
-        }
     }
 }
 

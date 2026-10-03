@@ -26,7 +26,7 @@ mod source {
                 left_plane + at_row * left.strides.z + at_column * left.strides.w,
                 inside,
             );
-            matmul_left[left_slot + row * MATMUL_LEFT_STRIDE + column] =
+            scratch[left_slot + row * MATMUL_LEFT_STRIDE + column] =
                 select(0.0, fetch(left, address), inside);
         }
         let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
@@ -39,7 +39,8 @@ mod source {
                 right_plane + row * right.strides.z + column * right.strides.w,
                 inside,
             );
-            matmul_right[right_slot + unit] = select(0.0, fetch(right, address), inside);
+            scratch[SCRATCH_MATMUL_RIGHT + right_slot + unit] =
+                select(0.0, fetch(right, address), inside);
         }
     }
 
@@ -114,10 +115,11 @@ mod source {
                 for step in stride(0u32, MATMUL_DEPTH, 1u32) {
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         left_registers[row] =
-                            matmul_left[left_slot + (thread_row + row) * MATMUL_LEFT_STRIDE + step];
+                            scratch[left_slot + (thread_row + row) * MATMUL_LEFT_STRIDE + step];
                     }
                     for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
-                        right_registers[column] = matmul_right[right_slot
+                        right_registers[column] = scratch[SCRATCH_MATMUL_RIGHT
+                            + right_slot
                             + step * MATMUL_COLUMNS
                             + thread_column
                             + column * MATMUL_THREAD_COLUMNS];

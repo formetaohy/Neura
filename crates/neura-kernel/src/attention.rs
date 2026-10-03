@@ -7,8 +7,7 @@ pub fn define(compiler: &mut Compiler, geometry: &Geometry) {
         return;
     }
     let stage = geometry.attention_stage_words();
-    compiler.workgroup("attention_left", "f32", stage);
-    compiler.workgroup("attention_right", "f32", stage);
+    compiler.constant("SCRATCH_ATTENTION_RIGHT", stage);
     for (index, tile) in geometry.attention().iter().enumerate() {
         let suffix = index.to_string();
         let constants = [("ATTN_KEYS", tile.keys()), ("ATTN_WIDTH", tile.width())];

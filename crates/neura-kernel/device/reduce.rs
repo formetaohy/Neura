@@ -1,7 +1,7 @@
 #[neura_compiler::module]
 mod source {
     fn workgroup_sum_tree(lid: u32, start: f32) -> f32 {
-        reduction_scratch[lid] = start;
+        scratch[lid] = start;
         workgroup_barrier();
         let mut stride = WORKGROUP_SIZE / 2u32;
         loop {
@@ -9,18 +9,18 @@ mod source {
                 break;
             }
             if lid < stride {
-                reduction_scratch[lid] = reduction_scratch[lid] + reduction_scratch[lid + stride];
+                scratch[lid] = scratch[lid] + scratch[lid + stride];
             }
             workgroup_barrier();
             stride = stride / 2u32;
         }
-        let total = reduction_scratch[0u32];
+        let total = scratch[0u32];
         workgroup_barrier();
         return total;
     }
 
     fn workgroup_max_tree(lid: u32, start: f32) -> f32 {
-        reduction_scratch[lid] = start;
+        scratch[lid] = start;
         workgroup_barrier();
         let mut stride = WORKGROUP_SIZE / 2u32;
         loop {
@@ -28,13 +28,12 @@ mod source {
                 break;
             }
             if lid < stride {
-                reduction_scratch[lid] =
-                    max(reduction_scratch[lid], reduction_scratch[lid + stride]);
+                scratch[lid] = max(scratch[lid], scratch[lid + stride]);
             }
             workgroup_barrier();
             stride = stride / 2u32;
         }
-        let total = reduction_scratch[0u32];
+        let total = scratch[0u32];
         workgroup_barrier();
         return total;
     }

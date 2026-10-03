@@ -2,7 +2,7 @@ use crate::access::Reads;
 use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_op as op;
-use neura_profile::{AttentionTile, Geometry, MatmulStrategy, MatmulTile, Profile};
+use neura_profile::{AttentionTile, MatmulStrategy, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -98,7 +98,6 @@ pub(crate) struct Plan {
 }
 
 pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
-    let spare = spare_shared(units, profile);
     let mut plan = Plan {
         values: values.to_vec(),
         tasks: Vec::new(),
@@ -108,9 +107,9 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
         if writes_narrow(&plan.values, task) {
-            schedule_narrow(&mut plan, task, profile, spare);
+            schedule_narrow(&mut plan, task, profile);
         } else {
-            schedule_unit(&mut plan, task, profile, spare);
+            schedule_unit(&mut plan, task, profile);
         }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
@@ -143,29 +142,11 @@ fn walks_by_index(values: &[ValueInfo], task: &Task) -> bool {
     })
 }
 
-fn spare_shared(units: &[TaskInfo], profile: Profile) -> u64 {
-    let kinds = units.iter().map(|unit| unit.kind).collect::<Vec<Kind>>();
-    let geometry = Geometry::of(
-        profile.workgroup(),
-        profile.shared_bytes(),
-        profile.tiles(),
-        &[],
-    );
-    let declared = geometry.declared_shared_bytes(&kinds);
-    assert!(
-        declared <= profile.shared_bytes(),
-        "a plan of {} kinds reserves {declared} bytes of workgroup scratch beyond the {} its profile offers",
-        kinds.len(),
-        profile.shared_bytes(),
-    );
-    profile.shared_bytes() - declared
-}
-
 fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
     values[task.out as usize].element.narrow()
 }
 
-fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64) {
+fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     if let Some((source, steps)) = pointwise_steps(plan, unit) {
         let tasks = convert(plan, unit, source, steps, profile);
         plan.tasks.extend(tasks);
@@ -191,7 +172,7 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u6
         copy.chain.clear();
         plan.tasks.push(copy);
     }
-    schedule_unit(plan, &redirected(unit, image), profile, spare);
+    schedule_unit(plan, &redirected(unit, image), profile);
     let tasks = convert(plan, unit, image, Vec::new(), profile);
     plan.tasks.extend(tasks);
 }
@@ -311,7 +292,7 @@ impl Plan {
     }
 }
 
-fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64) {
+fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let target = device_workgroups(profile);
     match unit.kind {
         Kind::Matmul => matmul(plan, unit, profile),
@@ -319,7 +300,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
             let rows = plan.shape(unit.out).dims();
             let tokens = rows[2];
             let planes = rows[0] * rows[1];
-            let geometry = attention_geometry(plan, spare, rows[3]);
+            let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
             for plane in 0..planes {
                 for (first, count) in spans(tokens, profile.workgroup()) {
@@ -338,7 +319,7 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile, spare: u64)
             let keys = plan.shape(unit.inputs[1]).dims();
             let tokens = keys[2];
             let planes = keys[0] * keys[1];
-            let geometry = attention_geometry(plan, spare, keys[3]);
+            let geometry = attention_geometry(plan, profile, keys[3]);
             let tile = plan.attention[geometry as usize];
             for plane in 0..planes {
                 for (first, count) in spans(tokens, profile.workgroup()) {
@@ -471,11 +452,12 @@ fn attention_work(count: u32, tokens: u32, tile: AttentionTile) -> u64 {
     u64::from(count) * u64::from(keys) * u64::from(tile.width()) * u64::from(blocks)
 }
 
-fn attention_geometry(plan: &mut Plan, spare: u64, width: u32) -> u32 {
+fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32) -> u32 {
     if let Some(index) = plan.attention.iter().position(|tile| tile.width() == width) {
         return index as u32;
     }
-    plan.attention.push(AttentionTile::fit(spare, width));
+    plan.attention
+        .push(AttentionTile::fit(profile.scratch_bytes(), width));
     (plan.attention.len() - 1) as u32
 }
 

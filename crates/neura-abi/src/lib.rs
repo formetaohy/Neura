@@ -8,7 +8,7 @@ pub mod store;
 pub mod strategy;
 
 pub use element::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK};
-pub use kind::{Geometry, KINDS, Kind, KindInfo, Module, Scratch};
+pub use kind::{Geometry, KINDS, Kind, KindInfo, Module};
 pub use placement::Placement;
 pub use record::{
     FieldLayout, FieldType, PlacementFields, PlacementRecord, RECORDS, RecordLayout, SegmentFields,

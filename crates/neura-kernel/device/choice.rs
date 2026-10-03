@@ -8,8 +8,8 @@ mod source {
     }
 
     fn workgroup_choice(lid: u32, value: f32, index: u32) -> u32 {
-        reduction_scratch[lid] = value;
-        choice_index[lid] = index;
+        scratch[lid] = value;
+        scratch[SCRATCH_CHOICE + lid] = bitcast_f32(index);
         workgroup_barrier();
         let mut stride = WORKGROUP_SIZE / 2u32;
         loop {
@@ -18,19 +18,19 @@ mod source {
             }
             if lid < stride
                 && choice_precedes(
-                    reduction_scratch[lid],
-                    choice_index[lid],
-                    reduction_scratch[lid + stride],
-                    choice_index[lid + stride],
+                    scratch[lid],
+                    bitcast_u32(scratch[SCRATCH_CHOICE + lid]),
+                    scratch[lid + stride],
+                    bitcast_u32(scratch[SCRATCH_CHOICE + lid + stride]),
                 )
             {
-                reduction_scratch[lid] = reduction_scratch[lid + stride];
-                choice_index[lid] = choice_index[lid + stride];
+                scratch[lid] = scratch[lid + stride];
+                scratch[SCRATCH_CHOICE + lid] = scratch[SCRATCH_CHOICE + lid + stride];
             }
             workgroup_barrier();
             stride = stride / 2u32;
         }
-        let chosen = choice_index[0u32];
+        let chosen = bitcast_u32(scratch[SCRATCH_CHOICE]);
         workgroup_barrier();
         return chosen;
     }

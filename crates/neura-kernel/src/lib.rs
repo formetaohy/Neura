@@ -39,13 +39,10 @@ use neura_compiler::{Compiler, ir};
 use neura_profile::Geometry;
 
 pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geometry: &Geometry) {
-    let declared = geometry.declared_shared_bytes(kinds);
-    assert!(
-        declared <= geometry.shared_bytes(),
-        "a device program of {} kinds declares {declared} bytes of workgroup scratch beyond the {} its profile offers",
-        kinds.len(),
-        geometry.shared_bytes(),
-    );
+    let words = geometry.scratch_words(kinds);
+    if words > 0 {
+        compiler.workgroup("scratch", "f32", words);
+    }
     substrate(compiler, elements);
     for module in Module::ALL {
         if kinds.iter().any(|kind| kind.carries(*module)) {
@@ -65,11 +62,11 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
         );
     }
     assert!(
-        compiler.workgroup_bytes() <= geometry.shared_bytes(),
+        compiler.workgroup_bytes() <= geometry.budget(),
         "a device program of {} kinds declares {} bytes of workgroup scratch beyond the {} its profile offers",
         kinds.len(),
         compiler.workgroup_bytes(),
-        geometry.shared_bytes(),
+        geometry.budget(),
     );
 }
 
@@ -84,23 +81,14 @@ fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geomet
     match module {
         Module::Matmul => matmul_device::define(compiler),
         Module::MatmulTiles => {
-            let (left, right) = geometry.stage_lengths();
-            if left > 0 {
-                compiler.workgroup("matmul_left", "f32", left);
-            }
-            if right > 0 {
-                compiler.workgroup("matmul_right", "f32", right);
-            }
+            compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
             matmul::specialize(compiler, geometry);
         }
         Module::Attention => attention::define(compiler, geometry),
-        Module::Reduce => {
-            compiler.workgroup("reduction_scratch", "f32", geometry.workgroup());
-            reduce::define(compiler);
-        }
+        Module::Reduce => reduce::define(compiler),
         Module::Softmax => softmax::define(compiler),
         Module::Choice => {
-            compiler.workgroup("choice_index", "u32", geometry.workgroup());
+            compiler.constant("SCRATCH_CHOICE", geometry.choice());
             choice::define(compiler);
         }
         Module::Select => select::define(compiler),
