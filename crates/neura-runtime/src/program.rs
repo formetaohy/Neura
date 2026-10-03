@@ -2,11 +2,13 @@ use crate::cache::Resident;
 use crate::heap::Allocation;
 use crate::pool::Recycled;
 use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
+use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
-use neura_plan::{Region, Span};
+use neura_plan::{Plan, Region, Span};
 use neura_profile::{MatmulTile, Profile};
+use std::cell::{Ref, RefCell};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -78,12 +80,45 @@ pub struct Program<'r> {
     pub(crate) workgroups: u32,
     placement: Recycled,
     revision: Revision,
+    tasks: Recycled,
+    values: Recycled,
+    bound: RefCell<Bound>,
+    plan: Arc<Plan>,
+}
+
+struct Bound {
+    extents: Option<Vec<u32>>,
+    written: bool,
+}
+
+impl Bound {
+    fn of(dynamic: bool) -> Self {
+        let fixed = !dynamic;
+        Self {
+            extents: (!dynamic).then(Vec::new),
+            written: fixed,
+        }
+    }
+
+    pub(crate) fn extents(&self) -> &[u32] {
+        self.extents.as_deref().unwrap_or_else(|| {
+            panic!(
+                "a program of free extents runs the binding a run names, and no run has named one yet",
+            )
+        })
+    }
+
+    pub(crate) fn bind(&mut self, extents: Vec<u32>, dynamic: bool) {
+        self.written = !dynamic;
+        self.extents = Some(extents);
+    }
 }
 
 impl<'r> Program<'r> {
     pub(crate) fn of(
         context: &GpuContext,
         resident: Arc<Resident>,
+        plan: Arc<Plan>,
         tensors: Allocation,
         weights: Weights<'r>,
         revision: Revision,
@@ -102,8 +137,8 @@ impl<'r> Program<'r> {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
-        let waves = resident.plan.wave_count();
-        let segments = resident.plan.segments().len() as u32;
+        let waves = plan.wave_count();
+        let segments = plan.segments().len() as u32;
         let header = progress::header(segments, waves);
         let progress_buffer = Recycled::claim(
             pool,
@@ -113,12 +148,12 @@ impl<'r> Program<'r> {
         );
         progress_buffer.buffer().write(
             queue,
-            bytemuck::cast_slice(&progress::words(segments, resident.plan.wave_tasks())),
+            bytemuck::cast_slice(&progress::words(segments, plan.wave_tasks())),
         );
         let mut clearing = Submission::new(context.device(), "neura tensors");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
-        for quantum in resident.plan.quanta() {
+        for quantum in plan.quanta() {
             tensors.buffer().write_at(
                 queue,
                 tensors.offset() + quantum.offset,
@@ -136,20 +171,28 @@ impl<'r> Program<'r> {
                 }),
             })),
         );
+        let tasks = Recycled::claim(
+            pool,
+            "neura tasks",
+            plan.tasks().len() as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        let values = Recycled::claim(
+            pool,
+            "neura values",
+            plan.values().len() as u64,
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
+        tasks.buffer().write(queue, plan.tasks());
+        values.buffer().write(queue, plan.values());
         let group = resident.kernel.bind_group(&[
             Binding {
                 index: TASKS,
-                buffer: resident
-                    .tasks
-                    .buffer()
-                    .binding(0, resident.tasks.buffer().size()),
+                buffer: tasks.buffer().binding(0, tasks.buffer().size()),
             },
             Binding {
                 index: VALUES,
-                buffer: resident
-                    .values
-                    .buffer()
-                    .binding(0, resident.values.buffer().size()),
+                buffer: values.buffer().binding(0, values.buffer().size()),
             },
             Binding {
                 index: HEAP,
@@ -184,7 +227,8 @@ impl<'r> Program<'r> {
                     .binding(0, resident.segments.buffer().size()),
             },
         ]);
-        let workgroups = segments.min(resident.plan.profile().workgroups()).max(1);
+        let dynamic = plan.dynamic();
+        let workgroups = segments.min(plan.profile().workgroups()).max(1);
         Self {
             brand: PhantomData,
             resident,
@@ -197,7 +241,50 @@ impl<'r> Program<'r> {
             workgroups,
             placement,
             revision,
+            tasks,
+            values,
+            bound: RefCell::new(Bound::of(dynamic)),
+            plan,
         }
+    }
+
+    pub(crate) fn bind(&self, extents: &[u32]) {
+        let bounds = self.plan.slot_bounds();
+        assert_eq!(
+            extents.len(),
+            bounds.len(),
+            "a program of {} free extents runs a binding of {} lengths",
+            bounds.len(),
+            extents.len(),
+        );
+        for (slot, (extent, bound)) in extents.iter().zip(bounds).enumerate() {
+            assert!(
+                extent <= bound,
+                "free extent {slot} of {extent} outruns the bound of {bound} the graph declares",
+            );
+        }
+        self.bound
+            .borrow_mut()
+            .bind(extents.to_vec(), self.dynamic());
+    }
+
+    pub(crate) fn extents(&self) -> Ref<'_, [u32]> {
+        Ref::map(self.bound.borrow(), |bound| bound.extents())
+    }
+
+    pub(crate) fn write_records(&self, queue: &Queue, extents: &[u32]) {
+        let encoding = self.plan.encode(extents);
+        self.values.buffer().write(queue, &encoding.values);
+        self.tasks.buffer().write(queue, &encoding.tasks);
+    }
+
+    pub(crate) fn records_pending(&self) -> bool {
+        let bound = self.bound.borrow();
+        bound.extents.is_some() && !bound.written
+    }
+
+    pub(crate) fn records_written(&self) {
+        self.bound.borrow_mut().written = true;
     }
 
     pub fn stamp(&self) -> GraphStamp {
@@ -232,15 +319,15 @@ impl<'r> Program<'r> {
     }
 
     pub fn tensor_bytes(&self) -> u64 {
-        self.resident.plan.tensor_bytes()
+        self.plan.tensor_bytes()
     }
 
     pub fn arena_bytes(&self) -> u64 {
-        self.resident.plan.arena_bytes()
+        self.plan.arena_bytes()
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        self.resident.plan.resident_bytes()
+        self.plan.resident_bytes()
     }
 
     pub fn weights(&self) -> &Weights<'r> {
@@ -249,8 +336,8 @@ impl<'r> Program<'r> {
 
     pub fn device_bytes(&self) -> u64 {
         self.tensors.heap().bytes()
-            + self.resident.tasks.buffer().size()
-            + self.resident.values.buffer().size()
+            + self.tasks.buffer().size()
+            + self.values.buffer().size()
             + self.resident.steps.buffer().size()
             + self.resident.segments.buffer().size()
             + self.refusal.buffer().size()
@@ -259,7 +346,11 @@ impl<'r> Program<'r> {
     }
 
     pub fn profile(&self) -> Profile {
-        self.resident.plan.profile()
+        self.plan.profile()
+    }
+
+    pub fn dynamic(&self) -> bool {
+        self.plan.dynamic()
     }
 
     pub fn is_compiled(&self) -> bool {
@@ -267,23 +358,23 @@ impl<'r> Program<'r> {
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        self.resident.plan.tiles()
+        self.plan.tiles()
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
-        self.resident.plan.matmul_geometries()
+        self.plan.matmul_geometries()
     }
 
     pub fn task_count(&self) -> u32 {
-        self.resident.plan.task_count()
+        self.plan.task_count()
     }
 
     pub fn step_count(&self) -> u32 {
-        self.resident.plan.step_count()
+        self.plan.step_count()
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.resident.plan.wave_count()
+        self.plan.wave_count()
     }
 
     pub fn workgroups(&self) -> u32 {
@@ -291,22 +382,23 @@ impl<'r> Program<'r> {
     }
 
     pub fn value_count(&self) -> u32 {
-        self.resident.plan.value_count()
+        self.plan.value_count()
     }
 
     pub fn work(&self) -> u64 {
-        self.resident.plan.work()
+        self.plan.work()
     }
 
     pub fn readable(&self, value: Value) -> bool {
-        self.resident.plan.readable(value)
+        self.plan.readable(value)
     }
 
     pub fn updates_weights(&self) -> bool {
-        self.resident.plan.updates_weights()
+        self.plan.updates_weights()
     }
 
     pub fn span(&self, value: Value) -> Span {
-        self.resident.plan.span(value, self.at())
+        let extents = self.extents();
+        self.plan.span_at(value, self.at(), extents.as_ref())
     }
 }

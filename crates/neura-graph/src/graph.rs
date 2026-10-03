@@ -1,6 +1,6 @@
 use crate::autodiff::Recomputation;
 use crate::init::Init;
-use crate::shape::Shape;
+use crate::shape::{Free, Shape};
 use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_pointwise as op;
@@ -102,6 +102,7 @@ impl TaskInfo {
 pub struct ValueInfo {
     pub shape: Shape,
     pub strides: [u32; 4],
+    pub strides_source: Option<[u8; 4]>,
     pub storage: u32,
     pub element: Element,
     pub scale: f32,
@@ -118,6 +119,7 @@ impl ValueInfo {
         Self {
             shape,
             strides: shape.strides(),
+            strides_source: None,
             storage: id,
             element: Element::Single,
             scale: 1.0,
@@ -139,6 +141,7 @@ pub(crate) struct GraphState {
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
     pub(crate) version: u64,
+    pub(crate) frees: u32,
 }
 
 pub struct GraphSnapshot {
@@ -209,6 +212,7 @@ impl<'g> Graph<'g> {
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
+                frees: 0,
             }),
             instance: NEXT_GRAPH.fetch_add(1, Ordering::Relaxed),
             brand: PhantomData,
@@ -238,6 +242,18 @@ impl<'g> Graph<'g> {
         };
         state.revisions.push(Arc::downgrade(&revision.state));
         revision
+    }
+
+    pub fn free(&self, bound: u32) -> Free {
+        let mut state = self.state.borrow_mut();
+        let slot = state.frees;
+        state.frees += 1;
+        assert!(
+            state.frees < u32::from(u8::MAX),
+            "a graph names at most {} free extents",
+            u8::MAX,
+        );
+        Free::of(slot, bound)
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -474,18 +490,27 @@ impl<'g> Graph<'g> {
 
     pub fn detach(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        let (shape, strides, storage, element, scale) = {
+        let (shape, strides, strides_source, storage, element, scale) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
                 info.shape,
                 info.strides,
+                info.strides_source,
                 info.storage,
                 info.element,
                 info.scale,
             )
         };
-        self.alias(shape, strides, storage, element, scale, false)
+        self.alias(
+            shape,
+            strides,
+            strides_source,
+            storage,
+            element,
+            scale,
+            false,
+        )
     }
 
     pub(crate) fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
@@ -575,15 +600,22 @@ impl<'g> Graph<'g> {
             "a scatter walks its updates row by row, and value {} is a view",
             updates.id(),
         );
-        let expected = self.shape(indices).dims();
-        let actual = self.shape(updates).dims();
-        let width = self.shape(target).dims()[3];
-        assert_eq!(
-            actual,
-            [expected[0], expected[1], expected[2], width],
-            "a scatter of {:?} indices meets updates of {:?} where the table holds {width} numbers per row",
-            expected,
-            actual,
+        let indices_shape = self.shape(indices);
+        let updates_shape = self.shape(updates);
+        let target_shape = self.shape(target);
+        for axis in 0..3 {
+            assert!(
+                indices_shape.meets(updates_shape, axis, axis),
+                "a scatter of {:?} indices meets updates of {:?}",
+                indices_shape.dims(),
+                updates_shape.dims(),
+            );
+        }
+        assert!(
+            updates_shape.meets(target_shape, 3, 3),
+            "a scatter of {:?} updates meets a table of {} numbers per row",
+            updates_shape.dims(),
+            target_shape.dims()[3],
         );
         let mut task = TaskInfo::of(
             kind,
@@ -615,7 +647,7 @@ impl<'g> Graph<'g> {
             "a fold names one of the {MAX_RANK} axes of {:?}",
             shape.dims(),
         );
-        if shape.dims()[axis as usize] == 1 {
+        if shape.free(axis).is_none() && shape.dims()[axis as usize] == 1 {
             return value;
         }
         self.fold(value, axis)
@@ -627,6 +659,11 @@ impl<'g> Graph<'g> {
         assert!(
             axis < MAX_RANK,
             "a mean names one of the {MAX_RANK} axes of {:?}",
+            shape.dims(),
+        );
+        assert!(
+            shape.free(axis).is_none(),
+            "a mean over axis {axis} of {:?} weighs every length the free extent takes, and the weight a plan carries is one number",
             shape.dims(),
         );
         let summed = self.sum_axis(value, axis);
@@ -778,11 +815,17 @@ impl<'g> Graph<'g> {
         seed: Option<Init>,
         requires_grad: bool,
     ) -> Value<'g> {
+        assert!(
+            !matches!(residency, Residency::Parameter | Residency::State) || !shape.dynamic(),
+            "a weight or a training state of {:?} holds one tensor of every run, and a free extent takes a length it cannot hold",
+            shape.dims(),
+        );
         let mut state = self.state.borrow_mut();
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
             strides: shape.strides(),
+            strides_source: None,
             storage: id,
             element,
             scale,
@@ -834,6 +877,7 @@ impl<'g> Graph<'g> {
         state.values.push(ValueInfo {
             shape,
             strides: shape.strides(),
+            strides_source: None,
             storage: id,
             element,
             scale,
@@ -848,10 +892,12 @@ impl<'g> Graph<'g> {
         Value::of(self.instance, id, shape)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn alias(
         &self,
         shape: Shape,
         strides: [u32; 4],
+        strides_source: Option<[u8; 4]>,
         storage: u32,
         element: Element,
         scale: f32,
@@ -862,6 +908,7 @@ impl<'g> Graph<'g> {
         state.values.push(ValueInfo {
             shape,
             strides,
+            strides_source,
             storage,
             element,
             scale,

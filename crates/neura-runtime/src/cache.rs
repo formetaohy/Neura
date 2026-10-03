@@ -15,8 +15,6 @@ pub(crate) struct Resident {
     signature: Vec<u8>,
     pub(crate) plan: Arc<Plan>,
     pub(crate) kernel: PipelineHandle,
-    pub(crate) tasks: Recycled,
-    pub(crate) values: Recycled,
     pub(crate) steps: Recycled,
     pub(crate) segments: Recycled,
     pool: Arc<Pool>,
@@ -49,8 +47,6 @@ impl Resident {
             );
         }
         let kernel = context.declare(kernel.program());
-        let tasks_bytes = plan.tasks().len() as u64;
-        let values_bytes = plan.values().len() as u64;
         let steps_bytes = (plan.steps().len() as u64).max(size_of::<StepRecord>() as u64);
         let segments_bytes = size_of_val(plan.segments()) as u64;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -58,18 +54,11 @@ impl Resident {
             signature,
             plan,
             kernel,
-            tasks: Recycled::claim(pool, "neura tasks", tasks_bytes, storage),
-            values: Recycled::claim(pool, "neura values", values_bytes, storage),
             steps: Recycled::claim(pool, "neura steps", steps_bytes, storage),
             segments: Recycled::claim(pool, "neura segments", segments_bytes, storage),
             pool: pool.clone(),
         };
         let queue = context.queue();
-        resident.tasks.buffer().write(queue, resident.plan.tasks());
-        resident
-            .values
-            .buffer()
-            .write(queue, resident.plan.values());
         if !resident.plan.steps().is_empty() {
             resident.steps.buffer().write(queue, resident.plan.steps());
         }

@@ -1,10 +1,36 @@
 use neura_abi::MAX_RANK;
 
 const ELEMENT_LIMIT: u64 = i32::MAX as u64;
+const FIXED: u8 = u8::MAX;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct Free {
+    slot: u32,
+    bound: u32,
+}
+
+impl Free {
+    pub(crate) fn of(slot: u32, bound: u32) -> Self {
+        assert!(
+            bound > 0,
+            "a free extent bounded at {bound} holds no length a tensor can take",
+        );
+        Self { slot, bound }
+    }
+
+    pub const fn slot(self) -> u32 {
+        self.slot
+    }
+
+    pub const fn bound(self) -> u32 {
+        self.bound
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Shape {
     dims: [u32; 4],
+    frees: [u8; 4],
     elements: u32,
 }
 
@@ -12,6 +38,7 @@ impl Shape {
     pub const fn scalar() -> Self {
         Self {
             dims: [1; 4],
+            frees: [FIXED; 4],
             elements: 1,
         }
     }
@@ -32,18 +59,58 @@ impl Shape {
             dims.len(),
         );
         let mut padded = [1u32; 4];
-        let mut elements = 1u64;
         for (slot, dim) in padded[4 - dims.len()..].iter_mut().zip(dims) {
             assert!(*dim > 0, "a tensor dimension must be positive");
             *slot = *dim;
-            elements *= u64::from(*dim);
+        }
+        Self::from_axes(padded, [None; 4])
+    }
+
+    pub fn freed(self, frees: &[(u32, Free)]) -> Self {
+        let mut shape = self;
+        for (axis, free) in frees {
+            assert!(
+                *axis < MAX_RANK,
+                "a free extent names one of the {MAX_RANK} axes of {:?}",
+                shape.dims,
+            );
+            assert_eq!(
+                shape.dims[*axis as usize], free.bound,
+                "axis {axis} of {:?} declares {} numbers where the free extent bound at {} holds them",
+                shape.dims, shape.dims[*axis as usize], free.bound,
+            );
+            assert!(
+                shape.free(*axis).is_none(),
+                "axis {axis} of {:?} already carries a free extent",
+                shape.dims,
+            );
+            shape.frees[*axis as usize] = u8::try_from(free.slot)
+                .expect("a graph holds fewer free extents than one byte names");
+        }
+        shape
+    }
+
+    pub(crate) fn from_axes(dims: [u32; 4], frees: [Option<u32>; 4]) -> Self {
+        let mut elements = 1u64;
+        for dim in dims {
+            assert!(dim > 0, "a tensor dimension must be positive");
+            elements *= u64::from(dim);
         }
         assert!(
             elements <= ELEMENT_LIMIT,
             "a tensor of {elements} elements outruns the index space the device addresses",
         );
+        let mut slots = [FIXED; 4];
+        for axis in 0..4 {
+            slots[axis] = match frees[axis] {
+                Some(slot) => u8::try_from(slot)
+                    .expect("a graph holds fewer free extents than one byte names"),
+                None => FIXED,
+            };
+        }
         Self {
-            dims: padded,
+            dims,
+            frees: slots,
             elements: elements as u32,
         }
     }
@@ -56,8 +123,150 @@ impl Shape {
         self.elements
     }
 
+    pub fn free(self, axis: u32) -> Option<u32> {
+        assert!(
+            axis < MAX_RANK,
+            "a shape holds {MAX_RANK} axes, and a free extent names axis {axis}",
+        );
+        match self.frees[axis as usize] {
+            FIXED => None,
+            slot => Some(u32::from(slot)),
+        }
+    }
+
+    pub const fn dynamic(self) -> bool {
+        self.frees[0] != FIXED
+            || self.frees[1] != FIXED
+            || self.frees[2] != FIXED
+            || self.frees[3] != FIXED
+    }
+
+    pub fn slots(self) -> u32 {
+        self.frees
+            .iter()
+            .filter(|slot| **slot != FIXED)
+            .map(|slot| u32::from(*slot) + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn meets(self, other: Self, left: u32, right: u32) -> bool {
+        let (left_free, right_free) = (self.free(left), other.free(right));
+        match (left_free, right_free) {
+            (Some(slot), Some(other_slot)) => slot == other_slot,
+            (None, None) => self.dims[left as usize] == other.dims[right as usize],
+            _ => false,
+        }
+    }
+
+    pub fn meeting(self, other: Self, left: u32, right: u32) -> (u32, Option<u32>) {
+        assert!(
+            self.meets(other, left, right),
+            "axis {left} of {:?} meets axis {right} of {:?}, and the two walk extents that never agree",
+            self.dims,
+            other.dims,
+        );
+        let free = self.free(left).or_else(|| other.free(right));
+        (self.dims[left as usize], free)
+    }
+
+    pub fn combining_axis(self, other: Self, left: u32, right: u32) -> (u32, Option<u32>) {
+        let (left_free, right_free) = (self.free(left), other.free(right));
+        let (left_dim, right_dim) = (self.dims[left as usize], other.dims[right as usize]);
+        match (left_free, right_free) {
+            (Some(slot), Some(other_slot)) => {
+                assert_eq!(
+                    slot, other_slot,
+                    "axis {left} of {:?} and axis {right} of {:?} walk two free extents that never agree",
+                    self.dims, other.dims,
+                );
+                (left_dim.max(right_dim), Some(slot))
+            }
+            (Some(slot), None) => {
+                assert_eq!(
+                    right_dim, 1,
+                    "axis {left} of {:?} walks a free extent where axis {right} of {:?} holds {right_dim} numbers",
+                    self.dims, other.dims,
+                );
+                (left_dim, Some(slot))
+            }
+            (None, Some(slot)) => {
+                assert_eq!(
+                    left_dim, 1,
+                    "axis {right} of {:?} walks a free extent where axis {left} of {:?} holds {left_dim} numbers",
+                    other.dims, self.dims,
+                );
+                (right_dim, Some(slot))
+            }
+            (None, None) => {
+                assert!(
+                    left_dim == right_dim || left_dim == 1 || right_dim == 1,
+                    "axis {left} of {:?} meets axis {right} of {:?}",
+                    self.dims,
+                    other.dims,
+                );
+                (left_dim.max(right_dim), None)
+            }
+        }
+    }
+
+    pub fn fixed_axis(self, axis: u32, dim: u32) -> Self {
+        assert!(
+            axis < MAX_RANK,
+            "a shape holds {MAX_RANK} axes, and {axis} is not one of them",
+        );
+        assert!(
+            self.free(axis).is_none(),
+            "axis {axis} of {:?} walks a free extent, and a fixed extent replaces every length it takes",
+            self.dims,
+        );
+        assert!(dim > 0, "a tensor dimension must be positive");
+        let mut dims = self.dims;
+        dims[axis as usize] = dim;
+        Self::from_axes(dims, self.frees())
+    }
+
+    pub fn adopting(self, other: Self, axis: u32) -> Self {
+        let mut dims = self.dims;
+        let mut frees = self.frees();
+        dims[axis as usize] = other.dims[axis as usize];
+        frees[axis as usize] = other.free(axis);
+        Self::from_axes(dims, frees)
+    }
+
+    pub(crate) fn frees(self) -> [Option<u32>; 4] {
+        let mut frees = [None; 4];
+        for (axis, free) in frees.iter_mut().enumerate() {
+            *free = self.free(axis as u32);
+        }
+        frees
+    }
+
+    pub fn actual(self, extents: &[u32]) -> Self {
+        let dims = self.actual_dims(extents);
+        Self::from_axes(dims, [None; 4])
+    }
+
+    pub fn actual_dims(self, extents: &[u32]) -> [u32; 4] {
+        let mut dims = self.dims;
+        for (axis, dim) in dims.iter_mut().enumerate() {
+            if let Some(slot) = self.free(axis as u32) {
+                *dim = extents.get(slot as usize).copied().unwrap_or_else(|| {
+                    panic!(
+                        "axis {axis} walks free extent {slot}, and the binding names {} extents",
+                        extents.len(),
+                    )
+                });
+            }
+        }
+        dims
+    }
+
     pub fn strides(self) -> [u32; 4] {
-        let dims = self.dims;
+        Self::dense_strides(self.dims)
+    }
+
+    pub fn dense_strides(dims: [u32; 4]) -> [u32; 4] {
         let mut strides = [0u32; 4];
         let mut stride = 1u32;
         for axis in (0..4).rev() {
@@ -68,10 +277,19 @@ impl Shape {
     }
 
     pub fn combines_with(self, other: Self) -> bool {
-        self.dims
-            .iter()
-            .zip(other.dims)
-            .all(|(left, right)| left == &right || *left == 1 || right == 1)
+        (0..4).all(|axis| {
+            let axis = axis as u32;
+            match (self.free(axis), other.free(axis)) {
+                (Some(slot), Some(other_slot)) => slot == other_slot,
+                (Some(_), None) => other.dims[axis as usize] == 1,
+                (None, Some(_)) => self.dims[axis as usize] == 1,
+                (None, None) => {
+                    self.dims[axis as usize] == other.dims[axis as usize]
+                        || self.dims[axis as usize] == 1
+                        || other.dims[axis as usize] == 1
+                }
+            }
+        })
     }
 
     pub fn combined(self, other: Self) -> Self {
@@ -82,18 +300,48 @@ impl Shape {
             other.dims,
         );
         let mut dims = [1u32; 4];
-        for (axis, dim) in dims.iter_mut().enumerate() {
-            *dim = self.dims[axis].max(other.dims[axis]);
+        let mut frees = [None; 4];
+        for axis in 0..4 {
+            let axis = axis as u32;
+            frees[axis as usize] = self.free(axis).or_else(|| other.free(axis));
+            dims[axis as usize] = self.dims[axis as usize].max(other.dims[axis as usize]);
         }
-        Self::of(dims)
+        Self::from_axes(dims, frees)
     }
 
     pub fn fits_within(self, other: Self) -> bool {
-        (0..4).all(|axis| self.dims[axis] == other.dims[axis] || self.dims[axis] == 1)
+        (0..4).all(|axis| {
+            let axis = axis as u32;
+            match (self.free(axis), other.free(axis)) {
+                (Some(slot), Some(other_slot)) => slot == other_slot,
+                (Some(_), None) => false,
+                (None, Some(_)) => self.dims[axis as usize] == 1,
+                (None, None) => {
+                    self.dims[axis as usize] == other.dims[axis as usize]
+                        || self.dims[axis as usize] == 1
+                }
+            }
+        })
     }
 
     pub fn batch(self) -> [u32; 2] {
         [self.dims[0], self.dims[1]]
+    }
+
+    pub fn batches_combine_with(self, other: Self) -> bool {
+        (0..2).all(|axis| {
+            let axis = axis as u32;
+            match (self.free(axis), other.free(axis)) {
+                (Some(slot), Some(other_slot)) => slot == other_slot,
+                (Some(_), None) => other.dims[axis as usize] == 1,
+                (None, Some(_)) => self.dims[axis as usize] == 1,
+                (None, None) => {
+                    self.dims[axis as usize] == other.dims[axis as usize]
+                        || self.dims[axis as usize] == 1
+                        || other.dims[axis as usize] == 1
+                }
+            }
+        })
     }
 
     pub fn reduced(self, axis: u32) -> Self {
@@ -103,8 +351,10 @@ impl Shape {
             self.dims,
         );
         let mut dims = self.dims;
+        let mut frees = self.frees();
+        frees[axis as usize] = None;
         dims[axis as usize] = 1;
-        Self::of(dims)
+        Self::from_axes(dims, frees)
     }
 
     pub fn rows(self) -> u32 {

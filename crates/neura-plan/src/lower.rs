@@ -1,4 +1,5 @@
 use crate::access::Reads;
+use crate::span::{self, Measure, Split};
 use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
@@ -37,6 +38,7 @@ pub(crate) struct Task {
     pub(crate) prelude: Vec<StepRecord>,
     pub(crate) chain: Vec<StepRecord>,
     pub(crate) unit: u32,
+    pub(crate) split: Split,
 }
 
 impl Reads for Task {
@@ -86,6 +88,7 @@ impl Task {
             prelude: unit.prelude.clone(),
             chain: unit.chain.clone(),
             unit: 0,
+            split: Split::Range { first, count },
         }
     }
 }
@@ -95,6 +98,8 @@ pub(crate) struct Plan {
     pub(crate) tasks: Vec<Task>,
     pub(crate) tiles: Vec<MatmulTile>,
     pub(crate) attention: Vec<AttentionTile>,
+    pub(crate) measures: Vec<Measure>,
+    pub(crate) measured: Vec<(u32, u32)>,
 }
 
 pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) -> Plan {
@@ -103,6 +108,8 @@ pub(crate) fn lower(values: &[ValueInfo], units: &[TaskInfo], profile: Profile) 
         tasks: Vec::new(),
         tiles: profile.tiles().to_vec(),
         attention: Vec::new(),
+        measures: Vec::new(),
+        measured: Vec::new(),
     };
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
@@ -157,6 +164,17 @@ fn schedule_narrow(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     if !writes_every_element(unit.kind) {
         let elements = plan.shape(target).elements();
         let mut copy = Task::span(unit, 0, elements, u64::from(elements));
+        copy.split = match measured(plan, target, Measure::Elements) {
+            Some(measure) => Split::Uniform {
+                measure,
+                index: 0,
+                group: 1,
+            },
+            None => Split::Range {
+                first: 0,
+                count: elements,
+            },
+        };
         copy.kind = Kind::Unary;
         copy.op = op::IDENTITY;
         copy.geometry = 0;
@@ -237,7 +255,7 @@ fn writes_every_element(kind: Kind) -> bool {
 }
 
 fn convert(
-    plan: &Plan,
+    plan: &mut Plan,
     unit: &TaskInfo,
     source: u32,
     steps: Vec<StepRecord>,
@@ -248,8 +266,9 @@ fn convert(
     let words = element.payload_words(u64::from(plan.shape(target).elements()));
     let words = u32::try_from(words).expect("a tensor of words fits the device word space");
     let per_task = task_elements(words, device_workgroups(profile));
-    spans(words, per_task)
-        .map(|(first, count)| {
+    span::chunks(words, per_task, measured(plan, target, Measure::Words))
+        .into_iter()
+        .map(|(first, count, split)| {
             let mut task = Task::span(unit, first, count, u64::from(count));
             task.kind = Kind::Convert;
             task.op = op::NONE;
@@ -264,12 +283,21 @@ fn convert(
             task.in_place = true;
             task.prelude.clear();
             task.chain = steps.clone();
+            task.split = split;
             task
         })
         .collect()
 }
 
 impl Plan {
+    fn measure(&mut self, measure: Measure) -> u32 {
+        if let Some(index) = self.measures.iter().position(|kept| *kept == measure) {
+            return index as u32;
+        }
+        self.measures.push(measure);
+        (self.measures.len() - 1) as u32
+    }
+
     fn shape(&self, value: u32) -> Shape {
         self.values[value as usize].shape
     }
@@ -302,17 +330,12 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let planes = rows[0] * rows[1];
             let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
-            for plane in 0..planes {
-                for (first, count) in spans(tokens, profile.workgroup()) {
-                    let mut task = Task::span(
-                        unit,
-                        plane * tokens + first,
-                        count,
-                        attention_work(count, tokens, tile),
-                    );
-                    task.geometry = geometry;
-                    plan.tasks.push(task);
-                }
+            let measure = measured(plan, unit.out, Measure::Tokens);
+            for (first, count, split) in attention_spans(tokens, planes, profile, measure) {
+                let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
+                task.geometry = geometry;
+                task.split = split;
+                plan.tasks.push(task);
             }
         }
         Kind::AttentionKeyGrad | Kind::AttentionValueGrad => {
@@ -321,29 +344,27 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let planes = keys[0] * keys[1];
             let geometry = attention_geometry(plan, profile, keys[3]);
             let tile = plan.attention[geometry as usize];
-            for plane in 0..planes {
-                for (first, count) in spans(tokens, profile.workgroup()) {
-                    let mut task = Task::span(
-                        unit,
-                        plane * tokens + first,
-                        count,
-                        attention_work(count, tokens, tile),
-                    );
-                    task.geometry = geometry;
-                    plan.tasks.push(task);
-                }
+            let measure = measured(plan, unit.inputs[1], Measure::Tokens);
+            for (first, count, split) in attention_spans(tokens, planes, profile, measure) {
+                let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
+                task.geometry = geometry;
+                task.split = split;
+                plan.tasks.push(task);
             }
         }
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.rows(), softmax_rows_per_task(out.rows(), target)) {
-                plan.tasks.push(Task::span(
-                    unit,
-                    first,
-                    count,
-                    u64::from(count) * u64::from(out.columns()),
-                ));
-            }
+            let rows = out.rows();
+            let columns = out.columns();
+            let measure = measured(plan, unit.out, Measure::Rows);
+            spread(
+                plan,
+                unit,
+                rows,
+                softmax_rows_per_task(rows, target),
+                measure,
+                |_, count| u64::from(count) * u64::from(columns),
+            );
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::SumChunk => reduce(plan, unit, target),
@@ -353,10 +374,15 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let filter = plan.shape(unit.inputs[1]);
             let dims = filter.dims();
             let taps = u64::from(dims[1] * dims[2] * dims[3]);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * taps));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count) * taps,
+            );
         }
         Kind::Conv2dInputGrad => {
             let out = plan.shape(unit.out);
@@ -364,18 +390,28 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             let dims = filter.dims();
             let groups = out.dims()[1] / dims[1];
             let taps = u64::from(dims[0] / groups * dims[2] * dims[3]);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * taps));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count) * taps,
+            );
         }
         Kind::PoolMax2d | Kind::PoolMean2d => {
             let out = plan.shape(unit.out);
             let taps = window_taps(unit.window);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * taps));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count) * taps,
+            );
         }
         Kind::PoolMax2dInputGrad | Kind::PoolMean2dInputGrad => {
             let out = plan.shape(unit.out);
@@ -385,10 +421,15 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             } else {
                 covering
             };
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * scans));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count) * scans,
+            );
         }
         Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit, profile),
         Kind::MatmulFold => {
@@ -396,10 +437,15 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count) * 4));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count) * 4,
+            );
         }
         Kind::Binary
         | Kind::Unary
@@ -410,40 +456,80 @@ fn schedule_unit(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         | Kind::OneHot
         | Kind::Gather => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count)));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count),
+            );
         }
         Kind::Concat => {
             let source = plan.shape(unit.inputs[0]);
-            for (first, count) in spans(source.elements(), task_elements(source.elements(), target))
-            {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count)));
-            }
+            let measure = measured(plan, unit.inputs[0], Measure::Elements);
+            spread(
+                plan,
+                unit,
+                source.elements(),
+                task_elements(source.elements(), target),
+                measure,
+                |_, count| u64::from(count),
+            );
         }
         Kind::Slice => {
             let out = plan.shape(unit.out);
-            for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
-                plan.tasks
-                    .push(Task::span(unit, first, count, u64::from(count)));
-            }
+            let measure = measured(plan, unit.out, Measure::Elements);
+            spread(
+                plan,
+                unit,
+                out.elements(),
+                task_elements(out.elements(), target),
+                measure,
+                |_, count| u64::from(count),
+            );
         }
         Kind::Scatter | Kind::ScatterWrite => {
             let rows = plan.shape(unit.inputs[1]).elements();
             let width = plan.shape(unit.out).columns();
-            for (first, count) in spans(rows, scatter_rows_per_task(rows)) {
-                plan.tasks.push(Task::span(
-                    unit,
-                    first,
-                    count,
-                    u64::from(count) * u64::from(width),
-                ));
-            }
+            let measure = measured(plan, unit.inputs[1], Measure::Elements);
+            spread(
+                plan,
+                unit,
+                rows,
+                scatter_rows_per_task(rows),
+                measure,
+                |_, count| u64::from(count) * u64::from(width),
+            );
         }
         Kind::Convert => panic!("a narrow tensor is written by the convert its task schedules"),
     }
+}
+
+fn attention_spans(
+    tokens: u32,
+    planes: u32,
+    profile: Profile,
+    measure: Option<u32>,
+) -> Vec<(u32, u32, Split)> {
+    let per_task = profile.workgroup();
+    match measure {
+        None => {
+            let mut spans = Vec::new();
+            for plane in 0..planes {
+                spans.extend(spans_of(tokens, per_task).map(|(first, count)| {
+                    (plane * tokens + first, count, Split::Range { first, count })
+                }));
+            }
+            spans
+        }
+        Some(measure) => span::plane_chunks(tokens, per_task, planes, measure),
+    }
+}
+
+fn spans_of(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
+    spans(units, per_task)
 }
 
 fn attention_work(count: u32, tokens: u32, tile: AttentionTile) -> u64 {
@@ -481,7 +567,11 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let positions = input.dims()[0] * gradient.dims()[2] * gradient.dims()[3];
     let per_task = task_elements(filters, device_workgroups(profile));
     let spans_per_chunk = filters.div_ceil(per_task);
-    let chunks = (device_workgroups(profile) / spans_per_chunk).clamp(1, positions);
+    let chunks = if plan.values[unit.inputs[0] as usize].shape.dynamic() {
+        1
+    } else {
+        (device_workgroups(profile) / spans_per_chunk).clamp(1, positions)
+    };
     let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
     for chunk in 0..chunks {
         for (first, count) in spans(filters, per_task) {
@@ -515,9 +605,11 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     } else {
         strategy::WORKGROUP_ROW
     };
-    for (first, count) in spans(rows, choice_rows_per_task(rows, target)) {
+    let measure = measured(plan, unit.out, Measure::Rows);
+    for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
         task.geometry = geometry;
+        task.split = split;
         plan.tasks.push(task);
     }
 }
@@ -533,9 +625,17 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let splits = matmul_splits(tile, rows, columns, depth, planes, profile);
     let partials =
         (splits > 1).then(|| plan.publish(Shape::vector(splits * planes * rows * columns)));
+    let measure = measured(plan, unit.out, |value| Measure::Tiles { value, geometry });
     for split in 0..splits {
         for index in 0..tiles {
             let mut task = Task::span(unit, index, 1, tile.tile_work());
+            if let Some(measure) = measure {
+                task.split = Split::Uniform {
+                    measure,
+                    index,
+                    group: tiles,
+                };
+            }
             task.geometry = geometry;
             if let Some(partials) = partials {
                 task.out = partials;
@@ -552,15 +652,15 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         return;
     };
     let elements = planes * rows * columns;
-    for (first, count) in spans(
-        elements,
-        task_elements(elements, device_workgroups(profile)),
-    ) {
+    let per_task = task_elements(elements, device_workgroups(profile));
+    let measure = measured(plan, unit.out, Measure::Elements);
+    for (first, count, split) in span::chunks(elements, per_task, measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
         task.kind = Kind::MatmulFold;
         task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         task.splits = splits;
         task.prelude.clear();
+        task.split = split;
         plan.tasks.push(task);
     }
 }
@@ -677,13 +777,23 @@ fn matmul_splits(
 
 fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
     let mut source = unit.inputs[0];
+    let dynamic = plan.values[unit.inputs[0] as usize].shape.dynamic();
+    let mut extent = plan.measure(Measure::Elements(unit.inputs[0]));
     loop {
         let elements = plan.shape(source).elements();
         let per_reduction = reduction_elements(elements, target);
         let opens = source == unit.inputs[0];
+        let measure = dynamic.then_some(extent);
         if elements <= per_reduction {
             let mut task = Task::span(unit, 0, elements, u64::from(elements));
             task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+            if let Some(measure) = measure {
+                task.split = Split::Uniform {
+                    measure,
+                    index: 0,
+                    group: 1,
+                };
+            }
             if !opens {
                 task.prelude.clear();
             }
@@ -692,7 +802,13 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
         }
         let chunks = elements.div_ceil(per_reduction);
         let partials = plan.publish(Shape::vector(chunks));
-        for (slot, (first, count)) in spans(elements, per_reduction).enumerate() {
+        if dynamic {
+            plan.measured.push((partials, extent));
+        }
+        for (slot, (first, count, split)) in span::chunks(elements, per_reduction, measure)
+            .into_iter()
+            .enumerate()
+        {
             let mut task = Task::span(unit, first, count, u64::from(count));
             task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
             if !opens {
@@ -700,8 +816,13 @@ fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {
             }
             task.slot = slot as u32;
             task.out = partials;
+            task.split = split;
             plan.tasks.push(task);
         }
+        extent = plan.measure(Measure::Chunks {
+            source: extent,
+            divisor: per_reduction,
+        });
         source = partials;
     }
 }
@@ -727,16 +848,22 @@ fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
         } else {
             strategy::WORKGROUP_ROW
         };
-        for (first, count) in spans(out.elements(), fold_rows_per_task(out.elements(), target)) {
+        let measure = measured(plan, unit.out, Measure::Elements);
+        let per_task = fold_rows_per_task(out.elements(), target);
+        for (first, count, split) in span::chunks(out.elements(), per_task, measure) {
             let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
             task.geometry = geometry;
+            task.split = split;
             plan.tasks.push(task);
         }
         return;
     }
-    for (first, count) in spans(out.elements(), task_elements(out.elements(), target)) {
+    let measure = measured(plan, unit.out, Measure::Elements);
+    let per_task = task_elements(out.elements(), target);
+    for (first, count, split) in span::chunks(out.elements(), per_task, measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(folds));
         task.geometry = strategy::THREAD_ELEMENT;
+        task.split = split;
         plan.tasks.push(task);
     }
 }
@@ -765,7 +892,29 @@ fn scatter_rows_per_task(rows: u32) -> u32 {
     rows.min(SCATTER_ROW_CEILING)
 }
 
-fn spans(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
+fn measured(plan: &mut Plan, value: u32, measure: impl FnOnce(u32) -> Measure) -> Option<u32> {
+    if !plan.values[value as usize].shape.dynamic() {
+        return None;
+    }
+    Some(plan.measure(measure(value)))
+}
+
+fn spread(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    total: u32,
+    per_task: u32,
+    measure: Option<u32>,
+    work: impl Fn(u32, u32) -> u64,
+) {
+    for (first, count, split) in span::chunks(total, per_task, measure) {
+        let mut task = Task::span(unit, first, count, work(first, count));
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+pub(crate) fn spans(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
     let mut first = 0;
     std::iter::from_fn(move || {
         if first >= units {

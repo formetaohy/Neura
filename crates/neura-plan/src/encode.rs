@@ -4,6 +4,7 @@ use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
 use crate::schedule;
+use crate::span::{Extents, Split};
 use neura_abi::{
     Element, Geometry, Kind, NO_VALUE, Placement, SegmentRecord, StepRecord, Store, TaskFields,
     TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
@@ -16,6 +17,11 @@ use std::mem::size_of;
 pub struct Quantum {
     pub offset: u64,
     pub scale: f32,
+}
+
+pub struct Encoding {
+    pub values: Vec<u8>,
+    pub tasks: Vec<u8>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -129,6 +135,10 @@ pub struct Plan {
     layout: Layout,
     updates_weights: bool,
     work: u64,
+    extents: Extents,
+    splits: Vec<Split>,
+    order: Vec<u32>,
+    slot_bounds: Vec<u32>,
 }
 
 impl Plan {
@@ -342,6 +352,24 @@ impl Plan {
             });
         }
 
+        let splits = tasks.iter().map(|task| task.split).collect::<Vec<_>>();
+        let order = order.to_vec();
+        let extents = Extents::of(values, &plan.tiles, &plan.measures, &plan.measured);
+        let slot_bounds = {
+            let mut bounds = Vec::new();
+            for info in values {
+                for axis in 0..neura_abi::MAX_RANK {
+                    if let Some(slot) = info.shape.free(axis) {
+                        let bound = info.shape.dims()[axis as usize];
+                        if bounds.len() <= slot as usize {
+                            bounds.resize(slot as usize + 1, 0);
+                        }
+                        bounds[slot as usize] = bound;
+                    }
+                }
+            }
+            bounds
+        };
         Self {
             profile,
             kinds,
@@ -361,6 +389,10 @@ impl Plan {
             layout,
             updates_weights,
             work,
+            extents,
+            splits,
+            order,
+            slot_bounds,
         }
     }
 
@@ -403,6 +435,49 @@ impl Plan {
 
     pub fn tasks(&self) -> &[u8] {
         &self.tasks
+    }
+
+    pub fn dynamic(&self) -> bool {
+        !self.slot_bounds.is_empty()
+    }
+
+    pub fn slot_bounds(&self) -> &[u32] {
+        &self.slot_bounds
+    }
+
+    pub fn encode(&self, extents: &[u32]) -> Encoding {
+        assert!(
+            self.dynamic(),
+            "a plan of one shape carries the records of every run it serves",
+        );
+        let mut values = self.values.clone();
+        for id in 0..self.spans.len() {
+            let dims = self.extents.dims(id as u32, extents);
+            let strides = self.extents.strides(id as u32, extents);
+            let at = id * size_of::<ValueRecord>();
+            let mut record: ValueRecord =
+                bytemuck::pod_read_unaligned(&values[at..at + size_of::<ValueRecord>()]);
+            record.dims = dims;
+            record.strides = strides;
+            values[at..at + size_of::<ValueRecord>()].copy_from_slice(bytemuck::bytes_of(&record));
+        }
+        let mut tasks = self.tasks.clone();
+        for (position, index) in self.order.iter().enumerate() {
+            let (first, count) = self.extents.span(self.splits[*index as usize], extents);
+            let at = position * size_of::<TaskRecord>();
+            let mut record: TaskRecord =
+                bytemuck::pod_read_unaligned(&tasks[at..at + size_of::<TaskRecord>()]);
+            record.first = first;
+            record.count = count;
+            tasks[at..at + size_of::<TaskRecord>()].copy_from_slice(bytemuck::bytes_of(&record));
+        }
+        Encoding { values, tasks }
+    }
+
+    pub fn span_at(&self, value: Value<'_>, placement: Placement, extents: &[u32]) -> Span {
+        let mut span = self.span(value, placement);
+        span.elements = self.extents.dims(value.id(), extents).iter().product();
+        span
     }
 
     pub fn values(&self) -> &[u8] {

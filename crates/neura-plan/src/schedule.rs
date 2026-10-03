@@ -122,6 +122,7 @@ fn accesses(
             if task.in_place {
                 for (writer, written) in &writers[*storage as usize] {
                     if region.overlaps(*written) {
+                        let _ = storage;
                         visit(*writer, index);
                     }
                 }

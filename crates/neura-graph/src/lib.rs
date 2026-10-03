@@ -13,5 +13,5 @@ pub use graph::{
 };
 pub use init::Init;
 pub use pool::Pool;
-pub use shape::Shape;
+pub use shape::{Free, Shape};
 pub use window::Window;

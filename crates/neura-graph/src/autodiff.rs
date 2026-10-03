@@ -116,12 +116,13 @@ impl Recomputing {
                 info.storage,
                 info.shape,
                 info.strides,
+                info.strides_source,
                 info.element,
                 info.scale,
                 info.requires_grad,
             ))
         };
-        let Some((storage, shape, strides, element, scale, tracked)) = view else {
+        let Some((storage, shape, strides, strides_source, element, scale, tracked)) = view else {
             return value;
         };
         let Some(copy) = self.copies.get(&storage).copied() else {
@@ -130,7 +131,15 @@ impl Recomputing {
         if let Some(view) = self.views.get(&value) {
             return *view;
         }
-        let view = graph.alias(shape, strides, copy, element, scale, tracked);
+        let view = graph.alias(
+            shape,
+            strides,
+            strides_source,
+            copy,
+            element,
+            scale,
+            tracked,
+        );
         self.views.insert(value, view.id());
         view.id()
     }
@@ -850,6 +859,7 @@ impl<'g> Graph<'g> {
             return self.alias(
                 owner_shape,
                 owner_shape.strides(),
+                None,
                 self.owner_of(contribution.id()),
                 self.element(contribution),
                 self.scale(contribution),

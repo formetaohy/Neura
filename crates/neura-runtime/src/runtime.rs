@@ -297,7 +297,7 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let revision = graph.revision();
-        let resident = self.assemble(graph, profile);
+        let (resident, plan) = self.assemble(graph, profile);
         assert!(
             resident.plan.task_count() > 0,
             "a program whose plan holds no task has nothing for the device to run",
@@ -315,19 +315,25 @@ impl Runtime {
             weights.state().tensors(),
         );
         resident.kernel.compile();
-        let tensors = self
-            .heap
-            .allocate(resident.plan.tensor_bytes() / WORD_BYTES);
-        Program::of(&self.context, resident, tensors, weights.clone(), revision)
+        let tensors = self.heap.allocate(plan.tensor_bytes() / WORD_BYTES);
+        Program::of(
+            &self.context,
+            resident,
+            plan,
+            tensors,
+            weights.clone(),
+            revision,
+        )
     }
 
-    fn assemble(&self, graph: &Graph, profile: Profile) -> Arc<Resident> {
+    fn assemble(&self, graph: &Graph, profile: Profile) -> (Arc<Resident>, Arc<Plan>) {
         let assembly = self
             .artifacts
             .assemble(graph.stamp(), profile, self.alignment, || {
                 self.assembly(graph, profile)
             });
-        self.artifacts
+        let resident = self
+            .artifacts
             .resident(assembly.signature.clone(), |signature| {
                 Resident::build(
                     &self.context,
@@ -336,7 +342,8 @@ impl Runtime {
                     assembly.kernel.clone(),
                     signature,
                 )
-            })
+            });
+        (resident, assembly.plan.clone())
     }
 
     fn assembly(&self, graph: &Graph, profile: Profile) -> Assembly {
@@ -404,6 +411,13 @@ impl Runtime {
         measured / f64::from(TUNE_ROUNDS)
     }
 
+    pub fn bind(&self, program: &Program<'_>, extents: &[u32]) {
+        self.assert_owns(program);
+        program.assert_current();
+        self.context.assert_alive();
+        program.bind(extents);
+    }
+
     pub fn run(&self, program: &Program<'_>) -> Run<'_> {
         self.assert_owns(program);
         program.assert_current();
@@ -412,6 +426,13 @@ impl Runtime {
             program.is_compiled(),
             "a device program compiles at the call that compiles it, and a run only runs what a compile has compiled",
         );
+        if program.dynamic() {
+            let extents = program.extents().to_vec();
+            if program.records_pending() {
+                program.write_records(self.context.queue(), &extents);
+                program.records_written();
+            }
+        }
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
         submission.clear(program.refusal.buffer(), 0, program.refusal.buffer().size());
@@ -449,9 +470,11 @@ impl Runtime {
             span.elements,
         );
         let bytes = pack(span.element, span.scale, data);
-        program
-            .heap()
-            .write_at(self.context.queue(), span.offset, &bytes);
+        if !bytes.is_empty() {
+            program
+                .heap()
+                .write_at(self.context.queue(), span.offset, &bytes);
+        }
     }
 
     pub fn read(&self, program: &Program<'_>, value: Value<'_>) -> Vec<f32> {
@@ -493,7 +516,9 @@ impl Runtime {
         let mut at = 0;
         for span in &spans {
             let bytes = span_bytes(*span);
-            submission.copy(program.heap(), span.offset, staging, at, bytes);
+            if bytes > 0 {
+                submission.copy(program.heap(), span.offset, staging, at, bytes);
+            }
             collected.push((*span, at, bytes));
             at += bytes;
         }
