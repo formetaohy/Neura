@@ -20,7 +20,7 @@ fn assert_slope(element: usize, analytic: f32, numeric: f32, elements: usize) {
     let slack = 1e-3 + 1e-2 * analytic.abs().max(numeric.abs());
     assert!(
         (numeric - analytic).abs() <= slack,
-        "element {element} of a tensor of {elements} numbers: the tape gives {analytic} where the slope is {numeric}",
+        "element {element} of a tensor of {elements} numbers: the plan gives {analytic} where the slope is {numeric}",
     );
 }
 

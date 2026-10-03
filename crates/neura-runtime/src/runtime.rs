@@ -1,20 +1,20 @@
+use crate::cache::{self, Artifacts, Assembly, Resident};
 use crate::checkpoint::Checkpoint;
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
-use crate::tape::{self, DeviceTape, Plan, Tapes};
 use neura_abi::{Kind, Placement, Refusal, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback, Submission,
     SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
-use neura_megakernel::Megakernel;
+use neura_kernel::Kernel;
+use neura_plan::{Layout, Plan, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, Profile};
-use neura_tape::{Layout, Span, Tape};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -67,7 +67,7 @@ pub struct Runtime {
     readback: Readback,
     heap: Arc<Heap>,
     pool: Arc<Pool>,
-    tapes: Tapes,
+    artifacts: Artifacts,
     alignment: u64,
 }
 
@@ -104,13 +104,13 @@ impl Runtime {
             readback: Readback::new(context.device(), readback_bytes, READBACK_SLOTS),
             heap: Arc::new(Heap::new(&context, heap_bytes)),
             pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
-            tapes: Tapes::new(),
+            artifacts: Artifacts::new(),
             context,
         }
     }
 
-    pub fn device_tapes(&self) -> usize {
-        self.tapes.resident()
+    pub fn resident_plans(&self) -> usize {
+        self.artifacts.resident_plans()
     }
 
     pub fn profiles(&self) -> Vec<Profile> {
@@ -269,8 +269,8 @@ impl Runtime {
 
     pub fn precompile(&self, graph: &Graph, profile: Profile) {
         self.assert_profile(profile);
-        let tape = Tape::of(graph, self.alignment, profile);
-        let kernel = self.kernel(&tape, profile);
+        let plan = Plan::of(graph, self.alignment, profile);
+        let kernel = self.kernel(&plan, profile);
         self.context.declare(kernel.program()).compile();
     }
 
@@ -297,66 +297,72 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let revision = graph.revision();
-        let tape = self.assemble(graph, profile);
+        let resident = self.assemble(graph, profile);
         assert!(
-            tape.image.task_count() > 0,
-            "a program whose tape holds no task has nothing for the device to run",
+            resident.plan.task_count() > 0,
+            "a program whose plan holds no task has nothing for the device to run",
         );
         assert!(
-            tape.image.weights() == weights.region(),
+            resident.plan.weights() == weights.region(),
             "this graph holds {} parameters where the weight store carries {}; one store serves every program of one model",
-            tape.image.weights().tensors(),
+            resident.plan.weights().tensors(),
             weights.tensors(),
         );
         assert!(
-            tape.image.state().tensors() == 0 || tape.image.state() == weights.state(),
+            resident.plan.state().tensors() == 0 || resident.plan.state() == weights.state(),
             "this graph trains with {} tensors of state where the store carries {}; a store serves one training state",
-            tape.image.state().tensors(),
+            resident.plan.state().tensors(),
             weights.state().tensors(),
         );
-        tape.kernel.compile();
-        let tensors = self.heap.allocate(tape.image.tensor_bytes() / WORD_BYTES);
-        Program::of(&self.context, tape, tensors, weights.clone(), revision)
+        resident.kernel.compile();
+        let tensors = self
+            .heap
+            .allocate(resident.plan.tensor_bytes() / WORD_BYTES);
+        Program::of(&self.context, resident, tensors, weights.clone(), revision)
     }
 
-    fn assemble(&self, graph: &Graph, profile: Profile) -> Arc<DeviceTape> {
-        let plan = self.tapes.plan(graph.stamp(), profile, self.alignment, || {
-            self.plan(graph, profile)
-        });
-        self.tapes.of(plan.signature.clone(), |signature| {
-            DeviceTape::build(
-                &self.context,
-                &self.pool,
-                plan.image.clone(),
-                plan.kernel.clone(),
-                signature,
-            )
-        })
+    fn assemble(&self, graph: &Graph, profile: Profile) -> Arc<Resident> {
+        let assembly = self
+            .artifacts
+            .assemble(graph.stamp(), profile, self.alignment, || {
+                self.assembly(graph, profile)
+            });
+        self.artifacts
+            .resident(assembly.signature.clone(), |signature| {
+                Resident::build(
+                    &self.context,
+                    &self.pool,
+                    assembly.plan.clone(),
+                    assembly.kernel.clone(),
+                    signature,
+                )
+            })
     }
 
-    fn plan(&self, graph: &Graph, profile: Profile) -> Plan {
-        let tape = Arc::new(Tape::of(graph, self.alignment, profile));
-        let signature = tape::signature(&tape, profile, self.alignment);
-        let kernel = self.kernel(&tape, profile);
-        Plan {
+    fn assembly(&self, graph: &Graph, profile: Profile) -> Assembly {
+        let plan = Arc::new(Plan::of(graph, self.alignment, profile));
+        let signature = cache::signature(&plan, profile, self.alignment);
+        let kernel = self.kernel(&plan, profile);
+        Assembly {
             signature,
-            image: tape,
+            plan,
             kernel,
         }
     }
 
-    fn kernel(&self, tape: &Tape, profile: Profile) -> Arc<Megakernel> {
-        let kinds = tape.kinds().to_vec();
-        let elements = tape.elements().to_vec();
+    fn kernel(&self, plan: &Plan, profile: Profile) -> Arc<Kernel> {
+        let kinds = plan.kinds().to_vec();
+        let elements = plan.elements().to_vec();
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
-            tape.tiles(),
-            tape.attention(),
+            plan.tiles(),
+            plan.attention(),
         );
-        self.tapes.kernel(&kinds, &elements, geometry.clone(), || {
-            Megakernel::assemble(&kinds, &elements, geometry)
-        })
+        self.artifacts
+            .kernel(&kinds, &elements, geometry.clone(), || {
+                Kernel::assemble(&kinds, &elements, geometry)
+            })
     }
 
     pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
@@ -414,7 +420,7 @@ impl Runtime {
             .buffer()
             .write_at(self.context.queue(), 0, &program.header);
         submission.dispatch(
-            &program.tape.kernel,
+            &program.resident.kernel,
             &program.group,
             [program.workgroups, 1, 1],
         );
@@ -432,7 +438,7 @@ impl Runtime {
         let span = program.span(value);
         assert!(
             program.readable(value),
-            "value {} is a temporary whose storage a later task of the tape reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before writing it",
+            "value {} is a temporary whose storage a later task of the plan reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before writing it",
             value.id(),
         );
         assert_eq!(
@@ -469,7 +475,7 @@ impl Runtime {
         for value in values {
             assert!(
                 program.readable(*value),
-                "value {} is a temporary whose storage a later task of the tape reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before pulling it",
+                "value {} is a temporary whose storage a later task of the plan reuses, or a view that walks a layout the storage does not; retain the tensor that owns the storage, and materialize a permuted view before pulling it",
                 value.id(),
             );
         }
@@ -560,11 +566,11 @@ impl Runtime {
     }
 
     pub fn assembled_kernels(&self) -> usize {
-        self.tapes.kernels()
+        self.artifacts.kernels()
     }
 
     pub fn built_plans(&self) -> usize {
-        self.tapes.built()
+        self.artifacts.built()
     }
 }
 

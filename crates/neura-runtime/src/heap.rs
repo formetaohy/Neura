@@ -20,7 +20,7 @@ impl Heap {
         let words = bytes / WORD_BYTES;
         assert!(
             words > 0,
-            "a device heap of {bytes} bytes holds no word the tape can address",
+            "a device heap of {bytes} bytes holds no word a plan can address",
         );
         let stride = (context.binding_alignment() / WORD_BYTES).max(1);
         let buffer = GpuBuffer::new(

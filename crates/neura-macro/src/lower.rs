@@ -31,7 +31,7 @@ pub(crate) fn function(source: &syn::ItemFn) -> syn::Result<TokenStream> {
         };
         let arg_name = ident.ident.to_string();
         let ty = ty(&argument.ty)?;
-        arguments.push(quote!(neura_rust_ir::Argument {
+        arguments.push(quote!(neura_ast::Argument {
             name: #arg_name.into(), ty: #ty,
         }));
     }
@@ -43,7 +43,7 @@ pub(crate) fn function(source: &syn::ItemFn) -> syn::Result<TokenStream> {
         }
     };
     let body = statements(&source.block.stmts)?;
-    Ok(quote!(neura_rust_ir::Function {
+    Ok(quote!(neura_ast::Function {
         name: #name.into(),
         arguments: vec![#(#arguments),*],
         result: #result,
@@ -64,12 +64,12 @@ fn ty(source: &syn::Type) -> syn::Result<TokenStream> {
             } else {
                 name.as_str()
             };
-            Ok(quote!(neura_rust_ir::Type::Named(#name.into())))
+            Ok(quote!(neura_ast::Type::Named(#name.into())))
         }
         syn::Type::Array(array) => {
             let element = ty(&array.elem)?;
             let length = expression(&array.len)?;
-            Ok(quote!(neura_rust_ir::Type::Array {
+            Ok(quote!(neura_ast::Type::Array {
                 element: Box::new(#element), length: Box::new(#length),
             }))
         }
@@ -105,7 +105,7 @@ fn statement(source: &Stmt) -> syn::Result<TokenStream> {
             let name = ident.ident.to_string();
             let mutable = ident.mutability.is_some();
             let value = expression(&init.expr)?;
-            Ok(quote!(neura_rust_ir::Statement::Let {
+            Ok(quote!(neura_ast::Statement::Let {
                 name: #name.into(), mutable: #mutable, value: #value,
             }))
         }
@@ -126,7 +126,7 @@ fn branch(source: &Expr) -> syn::Result<Vec<TokenStream>> {
 }
 
 fn executable(source: &Expr) -> syn::Result<TokenStream> {
-    let path = quote!(neura_rust_ir::Statement);
+    let path = quote!(neura_ast::Statement);
     match source {
         Expr::If(expr) => {
             let condition = expression(&expr.cond)?;
@@ -152,7 +152,7 @@ fn executable(source: &Expr) -> syn::Result<TokenStream> {
                     ));
                 }
                 let pattern = match &arm.pat {
-                    Pat::Wild(_) => quote!(neura_rust_ir::Pattern::Default),
+                    Pat::Wild(_) => quote!(neura_ast::Pattern::Default),
                     Pat::Lit(lit) => {
                         let Lit::Int(number) = &lit.lit else {
                             return Err(syn::Error::new_spanned(
@@ -161,7 +161,7 @@ fn executable(source: &Expr) -> syn::Result<TokenStream> {
                             ));
                         };
                         let (value, _) = integer(number)?;
-                        quote!(neura_rust_ir::Pattern::Integer(#value))
+                        quote!(neura_ast::Pattern::Integer(#value))
                     }
                     Pat::Path(path) if path.path.segments.len() > 1 => {
                         let name = path
@@ -171,7 +171,7 @@ fn executable(source: &Expr) -> syn::Result<TokenStream> {
                             .map(|part| part.ident.to_string())
                             .collect::<Vec<_>>()
                             .join("::");
-                        quote!(neura_rust_ir::Pattern::Constant(#name.into()))
+                        quote!(neura_ast::Pattern::Constant(#name.into()))
                     }
                     _ => {
                         return Err(syn::Error::new_spanned(
@@ -181,7 +181,7 @@ fn executable(source: &Expr) -> syn::Result<TokenStream> {
                     }
                 };
                 let body = branch(&arm.body)?;
-                arms.push(quote!(neura_rust_ir::Arm {
+                arms.push(quote!(neura_ast::Arm {
                     pattern: #pattern, body: vec![#(#body),*],
                 }));
             }
@@ -282,7 +282,7 @@ fn assignment(op: &syn::BinOp) -> Option<TokenStream> {
         _ => return None,
     };
     let name = syn::Ident::new(name, proc_macro2::Span::call_site());
-    Some(quote!(neura_rust_ir::BinaryOperator::#name))
+    Some(quote!(neura_ast::BinaryOperator::#name))
 }
 
 fn binary(op: &syn::BinOp) -> Option<TokenStream> {
@@ -308,11 +308,11 @@ fn binary(op: &syn::BinOp) -> Option<TokenStream> {
         _ => return None,
     };
     let name = syn::Ident::new(name, proc_macro2::Span::call_site());
-    Some(quote!(neura_rust_ir::BinaryOperator::#name))
+    Some(quote!(neura_ast::BinaryOperator::#name))
 }
 
 pub(crate) fn expression(source: &Expr) -> syn::Result<TokenStream> {
-    let path = quote!(neura_rust_ir::Expression);
+    let path = quote!(neura_ast::Expression);
     match source {
         Expr::Lit(lit) => match &lit.lit {
             Lit::Int(value) => {
@@ -368,8 +368,8 @@ pub(crate) fn expression(source: &Expr) -> syn::Result<TokenStream> {
         }
         Expr::Unary(unary) => {
             let op = match unary.op {
-                syn::UnOp::Neg(_) => quote!(neura_rust_ir::UnaryOperator::Negate),
-                syn::UnOp::Not(_) => quote!(neura_rust_ir::UnaryOperator::Not),
+                syn::UnOp::Neg(_) => quote!(neura_ast::UnaryOperator::Negate),
+                syn::UnOp::Not(_) => quote!(neura_ast::UnaryOperator::Not),
                 _ => {
                     return Err(syn::Error::new_spanned(
                         unary,
@@ -441,9 +441,9 @@ fn call_name(source: &Expr) -> syn::Result<String> {
 
 fn integer(number: &syn::LitInt) -> syn::Result<(u32, TokenStream)> {
     let kind = match number.suffix() {
-        "" | "usize" => quote!(neura_rust_ir::IntegerType::Inferred),
-        "u32" => quote!(neura_rust_ir::IntegerType::Unsigned),
-        "i32" => quote!(neura_rust_ir::IntegerType::Signed),
+        "" | "usize" => quote!(neura_ast::IntegerType::Inferred),
+        "u32" => quote!(neura_ast::IntegerType::Unsigned),
+        "i32" => quote!(neura_ast::IntegerType::Signed),
         _ => {
             return Err(syn::Error::new_spanned(
                 number,

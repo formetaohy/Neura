@@ -10,17 +10,17 @@ const DEVICE: Budget = Budget::of(1024, 48 << 10);
 fn profiles() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
 }
-use neura_megakernel::{BINDINGS, Megakernel};
+use neura_kernel::{BINDINGS, Kernel};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
-fn all(profile: usize) -> &'static Megakernel {
-    static PROGRAMS: OnceLock<Vec<Megakernel>> = OnceLock::new();
+fn all(profile: usize) -> &'static Kernel {
+    static PROGRAMS: OnceLock<Vec<Kernel>> = OnceLock::new();
     let programs = PROGRAMS.get_or_init(|| {
         profiles()
             .iter()
             .map(|profile| {
-                Megakernel::assemble(
+                Kernel::assemble(
                     Kind::ALL,
                     Element::ALL,
                     Geometry::of(
@@ -36,8 +36,8 @@ fn all(profile: usize) -> &'static Megakernel {
     &programs[profile]
 }
 
-fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Megakernel {
-    Megakernel::assemble(
+fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
+    Kernel::assemble(
         kinds,
         elements,
         Geometry::of(
@@ -193,7 +193,7 @@ fn specialization_includes_only_reachable_rust_functions() {
     assert_eq!(
         scratch,
         vec!["claim".to_owned()],
-        "a fill kernel declares no workgroup scratch beside the megakernel's own claim",
+        "a fill kernel declares no workgroup scratch beside the scheduler's own claim",
     );
     let all = all(0).program();
     assert!(program.spirv().len() < all.spirv().len());
@@ -366,7 +366,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         profile.tiles(),
         &attention,
     );
-    let kernel = Megakernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
+    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone());
     let used = workgroup_bytes(&kernel.program());
     assert_eq!(
         used,
@@ -394,7 +394,7 @@ fn the_same_rust_specialization_produces_the_same_device_program() {
 fn attention_specialization_contains_every_tile_of_its_geometry() {
     let profile = *profiles().last().expect("a profile");
     let attention = [AttentionTile::new(4, 8), AttentionTile::new(2, 16)];
-    let kernel = Megakernel::assemble(
+    let kernel = Kernel::assemble(
         &[
             Kind::Attention,
             Kind::AttentionQueryGrad,

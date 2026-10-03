@@ -6,5 +6,5 @@ mod lower;
 mod region;
 mod schedule;
 
-pub use encode::{Quantum, Span, Tape};
+pub use encode::{Plan, Quantum, Span};
 pub use layout::{Layout, Region, Seed};

@@ -1,5 +1,5 @@
 use neura_abi::Kind;
-use neura_rust_ir as ir;
+use neura_ast as ast;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Family {
@@ -45,12 +45,12 @@ pub enum Partial {
     Direct,
     Formula {
         roles: &'static [Role],
-        build: fn() -> ir::Expression,
+        build: fn() -> ast::Expression,
     },
 }
 
 impl Partial {
-    pub fn formula(self) -> Option<ir::Expression> {
+    pub fn formula(self) -> Option<ast::Expression> {
         match self {
             Self::Direct => None,
             Self::Formula { build, .. } => Some(build()),
@@ -115,7 +115,7 @@ macro_rules! ops {
                 })
             }
 
-            pub fn apply_expression(self) -> ir::Expression {
+            pub fn apply_expression(self) -> ast::Expression {
                 match self.code {
                     $($name => neura_macro::expression!($apply),)+
                     code => panic!("op {code} is not a declared pointwise op"),

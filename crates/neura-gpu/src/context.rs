@@ -5,8 +5,9 @@ use crate::capability::{
 };
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
-use crate::pipeline::{ComputeProgram, PipelineHandle};
+use crate::pipeline::PipelineHandle;
 use crate::submission::{Command, SubmissionIndex, Write};
+use neura_shader::ComputeProgram;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::sync::{Arc, LazyLock, Mutex};

@@ -25,17 +25,16 @@ windows = "0.62"
 libloading = "0.8"
 neura-abi = { version = "0.4.0", path = "crates/neura-abi" }
 neura-compiler = { version = "0.4.0", path = "crates/neura-compiler" }
-neura-rust-ir = { version = "0.4.0", path = "crates/neura-rust-ir" }
+neura-ast = { version = "0.4.0", path = "crates/neura-ast" }
 neura-macro = { version = "0.4.0", path = "crates/neura-macro" }
 neura-pointwise = { version = "0.4.0", path = "crates/neura-pointwise" }
 neura-profile = { version = "0.4.0", path = "crates/neura-profile" }
 neura-precision = { version = "0.4.0", path = "crates/neura-precision" }
 neura-graph = { version = "0.4.0", path = "crates/neura-graph" }
-neura-kernel = { version = "0.4.0", path = "crates/neura-kernel" }
 neura-shader = { version = "0.4.0", path = "crates/neura-shader" }
-neura-megakernel = { version = "0.4.0", path = "crates/neura-megakernel" }
+neura-kernel = { version = "0.4.0", path = "crates/neura-kernel" }
 neura-gpu = { version = "0.4.0", path = "crates/neura-gpu" }
-neura-tape = { version = "0.4.0", path = "crates/neura-tape" }
+neura-plan = { version = "0.4.0", path = "crates/neura-plan" }
 neura-runtime = { version = "0.4.0", path = "crates/neura-runtime" }
 neura-nn = { version = "0.4.0", path = "crates/neura-nn" }
 
@@ -57,7 +56,7 @@ repository.workspace = true
 [dependencies]
 neura-abi = { workspace = true }
 neura-graph = { workspace = true }
-neura-tape = { workspace = true }
+neura-plan = { workspace = true }
 neura-runtime = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }

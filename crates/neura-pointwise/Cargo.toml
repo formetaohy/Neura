@@ -11,5 +11,5 @@ workspace = true
 
 [dependencies]
 neura-abi = { workspace = true }
-neura-rust-ir = { workspace = true }
+neura-ast = { workspace = true }
 neura-macro = { workspace = true }

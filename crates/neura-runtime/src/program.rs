@@ -1,12 +1,12 @@
+use crate::cache::Resident;
 use crate::heap::Allocation;
 use crate::pool::Recycled;
-use crate::tape::DeviceTape;
 use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
-use neura_megakernel::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_kernel::{HEAP, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS, TASKS, VALUES};
+use neura_plan::{Region, Span};
 use neura_profile::{MatmulTile, Profile};
-use neura_tape::{Region, Span};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -68,7 +68,7 @@ impl<'r> Weights<'r> {
 
 pub struct Program<'r> {
     brand: PhantomData<&'r ()>,
-    pub(crate) tape: Arc<DeviceTape>,
+    pub(crate) resident: Arc<Resident>,
     pub(crate) refusal: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
@@ -83,12 +83,12 @@ pub struct Program<'r> {
 impl<'r> Program<'r> {
     pub(crate) fn of(
         context: &GpuContext,
-        tape: Arc<DeviceTape>,
+        resident: Arc<Resident>,
         tensors: Allocation,
         weights: Weights<'r>,
         revision: Revision,
     ) -> Self {
-        let pool = tape.pool();
+        let pool = resident.pool();
         let refusal = Recycled::claim(
             pool,
             "neura refusal",
@@ -102,8 +102,8 @@ impl<'r> Program<'r> {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
-        let waves = tape.image.wave_count();
-        let segments = tape.image.segments().len() as u32;
+        let waves = resident.plan.wave_count();
+        let segments = resident.plan.segments().len() as u32;
         let header = progress::header(segments, waves);
         let progress_buffer = Recycled::claim(
             pool,
@@ -113,12 +113,12 @@ impl<'r> Program<'r> {
         );
         progress_buffer.buffer().write(
             queue,
-            bytemuck::cast_slice(&progress::words(segments, tape.image.wave_tasks())),
+            bytemuck::cast_slice(&progress::words(segments, resident.plan.wave_tasks())),
         );
         let mut clearing = Submission::new(context.device(), "neura tensors");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
         clearing.submit(queue);
-        for quantum in tape.image.quanta() {
+        for quantum in resident.plan.quanta() {
             tensors.buffer().write_at(
                 queue,
                 tensors.offset() + quantum.offset,
@@ -136,14 +136,20 @@ impl<'r> Program<'r> {
                 }),
             })),
         );
-        let group = tape.kernel.bind_group(&[
+        let group = resident.kernel.bind_group(&[
             Binding {
                 index: TASKS,
-                buffer: tape.tasks.buffer().binding(0, tape.tasks.buffer().size()),
+                buffer: resident
+                    .tasks
+                    .buffer()
+                    .binding(0, resident.tasks.buffer().size()),
             },
             Binding {
                 index: VALUES,
-                buffer: tape.values.buffer().binding(0, tape.values.buffer().size()),
+                buffer: resident
+                    .values
+                    .buffer()
+                    .binding(0, resident.values.buffer().size()),
             },
             Binding {
                 index: HEAP,
@@ -161,7 +167,10 @@ impl<'r> Program<'r> {
             },
             Binding {
                 index: STEPS,
-                buffer: tape.steps.buffer().binding(0, tape.steps.buffer().size()),
+                buffer: resident
+                    .steps
+                    .buffer()
+                    .binding(0, resident.steps.buffer().size()),
             },
             Binding {
                 index: PLACEMENT,
@@ -169,16 +178,16 @@ impl<'r> Program<'r> {
             },
             Binding {
                 index: SEGMENTS,
-                buffer: tape
+                buffer: resident
                     .segments
                     .buffer()
-                    .binding(0, tape.segments.buffer().size()),
+                    .binding(0, resident.segments.buffer().size()),
             },
         ]);
-        let workgroups = segments.min(tape.image.profile().workgroups()).max(1);
+        let workgroups = segments.min(resident.plan.profile().workgroups()).max(1);
         Self {
             brand: PhantomData,
-            tape,
+            resident,
             refusal,
             group,
             tensors,
@@ -223,15 +232,15 @@ impl<'r> Program<'r> {
     }
 
     pub fn tensor_bytes(&self) -> u64 {
-        self.tape.image.tensor_bytes()
+        self.resident.plan.tensor_bytes()
     }
 
     pub fn arena_bytes(&self) -> u64 {
-        self.tape.image.arena_bytes()
+        self.resident.plan.arena_bytes()
     }
 
     pub fn resident_bytes(&self) -> u64 {
-        self.tape.image.resident_bytes()
+        self.resident.plan.resident_bytes()
     }
 
     pub fn weights(&self) -> &Weights<'r> {
@@ -240,41 +249,41 @@ impl<'r> Program<'r> {
 
     pub fn device_bytes(&self) -> u64 {
         self.tensors.heap().bytes()
-            + self.tape.tasks.buffer().size()
-            + self.tape.values.buffer().size()
-            + self.tape.steps.buffer().size()
-            + self.tape.segments.buffer().size()
+            + self.resident.tasks.buffer().size()
+            + self.resident.values.buffer().size()
+            + self.resident.steps.buffer().size()
+            + self.resident.segments.buffer().size()
             + self.refusal.buffer().size()
             + self.progress.buffer().size()
             + self.placement.buffer().size()
     }
 
     pub fn profile(&self) -> Profile {
-        self.tape.image.profile()
+        self.resident.plan.profile()
     }
 
     pub fn is_compiled(&self) -> bool {
-        self.tape.kernel.is_compiled()
+        self.resident.kernel.is_compiled()
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
-        self.tape.image.tiles()
+        self.resident.plan.tiles()
     }
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
-        self.tape.image.matmul_geometries()
+        self.resident.plan.matmul_geometries()
     }
 
     pub fn task_count(&self) -> u32 {
-        self.tape.image.task_count()
+        self.resident.plan.task_count()
     }
 
     pub fn step_count(&self) -> u32 {
-        self.tape.image.step_count()
+        self.resident.plan.step_count()
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.tape.image.wave_count()
+        self.resident.plan.wave_count()
     }
 
     pub fn workgroups(&self) -> u32 {
@@ -282,22 +291,22 @@ impl<'r> Program<'r> {
     }
 
     pub fn value_count(&self) -> u32 {
-        self.tape.image.value_count()
+        self.resident.plan.value_count()
     }
 
     pub fn work(&self) -> u64 {
-        self.tape.image.work()
+        self.resident.plan.work()
     }
 
     pub fn readable(&self, value: Value) -> bool {
-        self.tape.image.readable(value)
+        self.resident.plan.readable(value)
     }
 
     pub fn updates_weights(&self) -> bool {
-        self.tape.image.updates_weights()
+        self.resident.plan.updates_weights()
     }
 
     pub fn span(&self, value: Value) -> Span {
-        self.tape.image.span(value, self.at())
+        self.resident.plan.span(value, self.at())
     }
 }

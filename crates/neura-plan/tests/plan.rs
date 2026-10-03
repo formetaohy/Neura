@@ -18,18 +18,18 @@ fn wide() -> Profile {
 fn every_profile() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
 }
-use neura_tape::{Layout, Tape};
+use neura_plan::{Layout, Plan};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
-fn tape(graph: &Graph) -> Tape {
-    tape_with(graph, narrow())
+fn plan(graph: &Graph) -> Plan {
+    plan_with(graph, narrow())
 }
 
-fn tape_with(graph: &Graph, profile: Profile) -> Tape {
-    Tape::of(graph, ALIGNMENT, profile)
+fn plan_with(graph: &Graph, profile: Profile) -> Plan {
+    Plan::of(graph, ALIGNMENT, profile)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -39,38 +39,38 @@ fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
         .collect()
 }
 
-fn tasks(tape: &Tape) -> Vec<TaskRecord> {
-    records(tape.tasks(), size_of::<TaskRecord>())
+fn tasks(plan: &Plan) -> Vec<TaskRecord> {
+    records(plan.tasks(), size_of::<TaskRecord>())
 }
 
-fn steps(tape: &Tape) -> Vec<StepRecord> {
-    records(tape.steps(), size_of::<StepRecord>())
+fn steps(plan: &Plan) -> Vec<StepRecord> {
+    records(plan.steps(), size_of::<StepRecord>())
 }
 
-fn kinds(tape: &Tape) -> Vec<Kind> {
-    tasks(tape).iter().map(|task| Kind::of(task.kind)).collect()
+fn kinds(plan: &Plan) -> Vec<Kind> {
+    tasks(plan).iter().map(|task| Kind::of(task.kind)).collect()
 }
 
-fn segment_of(tape: &Tape, task: usize) -> usize {
-    tape.segments()
+fn segment_of(plan: &Plan, task: usize) -> usize {
+    plan.segments()
         .partition_point(|segment| segment.first as usize <= task)
         - 1
 }
 
-fn follows(tape: &Tape, before: usize, after: usize) -> bool {
-    let segment = segment_of(tape, before);
-    wave_of(tape, before) < wave_of(tape, after)
-        || (segment == segment_of(tape, after)
-            && before as u32 - tape.segments()[segment].first
-                < after as u32 - tape.segments()[segment].first)
+fn follows(plan: &Plan, before: usize, after: usize) -> bool {
+    let segment = segment_of(plan, before);
+    wave_of(plan, before) < wave_of(plan, after)
+        || (segment == segment_of(plan, after)
+            && before as u32 - plan.segments()[segment].first
+                < after as u32 - plan.segments()[segment].first)
 }
 
-fn wave_of(tape: &Tape, task: usize) -> u32 {
-    tasks(tape)[task].wave
+fn wave_of(plan: &Plan, task: usize) -> u32 {
+    tasks(plan)[task].wave
 }
 
-fn writers(tape: &Tape, value: u32) -> Vec<usize> {
-    tasks(tape)
+fn writers(plan: &Plan, value: u32) -> Vec<usize> {
+    tasks(plan)
         .iter()
         .enumerate()
         .filter(|(_, task)| task.out == value)
@@ -78,9 +78,9 @@ fn writers(tape: &Tape, value: u32) -> Vec<usize> {
         .collect()
 }
 
-fn readers(tape: &Tape, value: u32) -> Vec<usize> {
-    let steps = steps(tape);
-    let tasks = tasks(tape);
+fn readers(plan: &Plan, value: u32) -> Vec<usize> {
+    let steps = steps(plan);
+    let tasks = tasks(plan);
     tasks
         .iter()
         .enumerate()
@@ -108,10 +108,10 @@ fn a_chain_of_rectifiers_fuses_into_one_task() {
         value = graph.relu(value);
     }
     assert_eq!(graph.task_count(), 4);
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 1);
-    assert_eq!(tape.wave_count(), 1);
-    assert_eq!(tape.step_count(), 3);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 1);
+    assert_eq!(plan.wave_count(), 1);
+    assert_eq!(plan.step_count(), 3);
     assert_eq!(value.shape().elements(), 4);
 }
 
@@ -122,12 +122,12 @@ fn a_dense_layer_fuses_its_epilogue_into_the_product() {
     let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let data = graph.input(Shape::matrix(3, 4), Element::Single);
     let activated = graph.relu(graph.add(graph.matmul(data, weight), bias));
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 1);
-    assert_eq!(tape.wave_count(), 1);
-    assert_eq!(kinds(&tape), vec![Kind::Matmul]);
-    let steps = steps(&tape);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 1);
+    assert_eq!(plan.wave_count(), 1);
+    assert_eq!(kinds(&plan), vec![Kind::Matmul]);
+    let steps = steps(&plan);
+    let tasks = tasks(&plan);
     assert_eq!(
         tasks[0].steps, 2,
         "the bias and the rectifier ride the product"
@@ -144,11 +144,11 @@ fn a_value_two_tasks_read_stays_on_the_tape() {
     let graph = Graph::new();
     let data = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
     let squared = graph.mul(data, data);
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 1);
-    assert_eq!(kinds(&tape), vec![Kind::Binary]);
-    assert_eq!(readers(&tape, data.id()), vec![0]);
-    assert_eq!(tasks(&tape)[0].out, squared.id());
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 1);
+    assert_eq!(kinds(&plan), vec![Kind::Binary]);
+    assert_eq!(readers(&plan, data.id()), vec![0]);
+    assert_eq!(tasks(&plan)[0].out, squared.id());
 }
 
 #[test]
@@ -159,17 +159,17 @@ fn a_value_two_tasks_read_keeps_its_storage_from_the_output_of_either() {
     let product = graph.mul(left, right);
     let negated = graph.neg(product);
     let squared = graph.mul(product, product);
-    let tape = tape(&graph);
-    let reader = writers(&tape, negated.id())[0];
-    let taker = writers(&tape, squared.id())[0];
+    let plan = plan(&graph);
+    let reader = writers(&plan, negated.id())[0];
+    let taker = writers(&plan, squared.id())[0];
     assert_eq!(
-        wave_of(&tape, reader),
-        wave_of(&tape, taker),
+        wave_of(&plan, reader),
+        wave_of(&plan, taker),
         "both readers of a value share a wave",
     );
     assert_ne!(
-        tape.span(product, PLACEMENT).offset,
-        tape.span(squared, PLACEMENT).offset,
+        plan.span(product, PLACEMENT).offset,
+        plan.span(squared, PLACEMENT).offset,
         "the storage of a value a second task reads in the same wave was handed to its reader",
     );
 }
@@ -180,10 +180,10 @@ fn a_value_one_task_reads_hands_its_storage_to_that_task() {
     let data = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let scaled = graph.mul(data, graph.fill(Shape::vector(64), 2.0));
     let squared = graph.mul(scaled, scaled);
-    let tape = tape(&graph);
+    let plan = plan(&graph);
     assert_eq!(
-        tape.span(scaled, PLACEMENT).offset,
-        tape.span(squared, PLACEMENT).offset,
+        plan.span(scaled, PLACEMENT).offset,
+        plan.span(squared, PLACEMENT).offset,
         "the only reader of a value takes the storage it consumed",
     );
 }
@@ -196,12 +196,12 @@ fn a_retained_value_is_never_folded_away() {
     graph.retain(doubled);
     let activated = graph.relu(doubled);
     graph.retain(activated);
-    let tape = tape(&graph);
-    let reader = writers(&tape, activated.id());
+    let plan = plan(&graph);
+    let reader = writers(&plan, activated.id());
     assert_eq!(reader.len(), 1, "the rectifier keeps a task of its own");
-    assert_eq!(kinds(&tape)[reader[0]], Kind::Unary);
+    assert_eq!(kinds(&plan)[reader[0]], Kind::Unary);
     assert!(
-        readers(&tape, doubled.id()).contains(&reader[0]),
+        readers(&plan, doubled.id()).contains(&reader[0]),
         "the rectifier reads the value the graph retains",
     );
 }
@@ -217,19 +217,19 @@ fn a_consumer_closes_the_producers_it_reads_into_one_segment() {
     graph.retain(product);
     let out = graph.add(sum, product);
     graph.retain(out);
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 3);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 3);
     assert_eq!(
-        tape.wave_count(),
+        plan.wave_count(),
         1,
         "a wave the device cannot fill hands its work to the wave it reads",
     );
-    assert_eq!(tape.segments().len(), 1);
-    let sum_task = writers(&tape, sum.id())[0];
-    let product_task = writers(&tape, product.id())[0];
-    let consumer = writers(&tape, out.id())[0];
-    assert!(follows(&tape, sum_task, consumer));
-    assert!(follows(&tape, product_task, consumer));
+    assert_eq!(plan.segments().len(), 1);
+    let sum_task = writers(&plan, sum.id())[0];
+    let product_task = writers(&plan, product.id())[0];
+    let consumer = writers(&plan, out.id())[0];
+    assert!(follows(&plan, sum_task, consumer));
+    assert!(follows(&plan, product_task, consumer));
     assert_eq!(out.shape(), Shape::vector(64));
 }
 
@@ -240,10 +240,10 @@ fn a_chain_of_temporaries_holds_one_tensor() {
     for _ in 0..16 {
         value = graph.relu(value);
     }
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 1);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 1);
     assert_eq!(
-        tape.arena_bytes(),
+        plan.arena_bytes(),
         256 * 4,
         "the arena holds only the value the fused chain produces",
     );
@@ -262,8 +262,8 @@ fn a_plan_sizes_its_own_arena() {
     let large = Graph::new();
     let parameter = large.parameter(Shape::vector(4096), Init::Zero, Element::Single);
     large.relu(parameter);
-    let small = tape(&small);
-    let large = tape(&large);
+    let small = plan(&small);
+    let large = plan(&large);
     assert_eq!(small.arena_bytes(), 256 * 4);
     assert_eq!(large.arena_bytes(), 4096 * 4);
     assert!(
@@ -308,9 +308,9 @@ fn a_product_takes_the_tile_that_spends_the_least_on_the_workgroups_it_fills() {
     let ragged = graph.matmul(tall, blocked);
     graph.retain(balanced);
     graph.retain(ragged);
-    let tape = tape_with(&graph, wide());
-    let tiles = tape.tiles();
-    let tasks = tasks(&tape);
+    let plan = plan_with(&graph, wide());
+    let tiles = plan.tiles();
+    let tasks = tasks(&plan);
     let balanced_task = *tasks
         .iter()
         .find(|task| task.out == balanced.id())
@@ -341,23 +341,23 @@ fn a_product_takes_the_tile_that_spends_the_least_on_the_workgroups_it_fills() {
     );
     let ragged_products = tasks.iter().filter(|task| task.out == ragged.id()).count() as u32;
     assert_eq!(
-        tape.matmul_geometries(),
+        plan.matmul_geometries(),
         vec![(balanced_tile, products + ragged_products)],
-        "a tape reports the geometry of every task it hands the device",
+        "a plan reports the geometry of every task it hands the device",
     );
     assert_eq!(
-        tape.work(),
+        plan.work(),
         u64::from(products + ragged_products) * balanced_tile.tile_work(),
         "a plan accounts the tile work it schedules",
     );
     assert_eq!(
-        tape.tiles(),
+        plan.tiles(),
         wide().tiles(),
         "a plan carries every tile of the profile it compiles for",
     );
     assert_ne!(
-        tape_with(&graph, narrow()).tiles(),
-        tape_with(&graph, wide()).tiles(),
+        plan_with(&graph, narrow()).tiles(),
+        plan_with(&graph, wide()).tiles(),
         "a profile decides which tiles a product is tiled with",
     );
 }
@@ -369,8 +369,8 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
     let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero, Element::Single);
     let out = graph.matmul(narrow, weight);
     graph.retain(out);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks(&tape);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks(&plan);
     assert_eq!(out.shape(), Shape::matrix(8, 32));
     let products = tasks
         .iter()
@@ -381,7 +381,7 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         .filter(|task| Kind::of(task.kind) == Kind::MatmulFold)
         .collect::<Vec<_>>();
     assert_eq!(folds.len(), 1);
-    let tile = tape.tiles()[products[0].geometry as usize];
+    let tile = plan.tiles()[products[0].geometry as usize];
     let tiles =
         out.shape().rows().div_ceil(tile.rows()) * out.shape().columns().div_ceil(tile.columns());
     let splits = folds[0].splits;
@@ -414,8 +414,8 @@ fn a_product_whose_output_is_narrow_splits_its_depth_across_tasks() {
         "the fold writes one element per task",
     );
     assert_eq!(
-        wave_of(&tape, tasks.len() - 1),
-        tape.wave_count() - 1,
+        wave_of(&plan, tasks.len() - 1),
+        plan.wave_count() - 1,
         "the fold reads every slot after the last slot is written",
     );
 }
@@ -427,15 +427,15 @@ fn a_fold_leaves_the_wave_that_already_fills_the_device() {
     let weight = graph.parameter(Shape::matrix(4096, 32), Init::Zero, Element::Single);
     let out = graph.matmul(narrow, weight);
     graph.retain(out);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks(&tape);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks(&plan);
     let fold = tasks
         .iter()
         .position(|task| Kind::of(task.kind) == Kind::MatmulFold)
         .expect("a product that splits its depth carries a fold");
     assert_ne!(
-        wave_of(&tape, fold),
-        wave_of(&tape, 0),
+        wave_of(&plan, fold),
+        wave_of(&plan, 0),
         "a fold never lengthens the wave its own partials already fill",
     );
 }
@@ -448,8 +448,8 @@ fn a_split_product_hands_its_epilogue_to_the_fold() {
     let data = graph.input(Shape::matrix(8, 4096), Element::Single);
     let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
     graph.retain(out);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks(&tape);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks(&plan);
     let folds = tasks
         .iter()
         .filter(|task| Kind::of(task.kind) == Kind::MatmulFold)
@@ -460,7 +460,7 @@ fn a_split_product_hands_its_epilogue_to_the_fold() {
         folds[0].steps, 2,
         "the bias and the rectifier ride the fold"
     );
-    let steps = steps(&tape);
+    let steps = steps(&plan);
     assert_eq!(steps[folds[0].chain as usize].op, op::ADD);
     assert_eq!(steps[folds[0].chain as usize].operand, bias.id());
     assert_eq!(steps[folds[0].chain as usize + 1].op, op::RELU);
@@ -481,9 +481,9 @@ fn a_wide_op_hands_the_device_a_bounded_number_of_tasks() {
         let graph = Graph::new();
         let data = graph.input(Shape::vector(elements), Element::Single);
         graph.relu(data);
-        let tape = tape(&graph);
+        let plan = plan(&graph);
         assert_eq!(
-            tape.task_count(),
+            plan.task_count(),
             tasks,
             "a rectifier over {elements} elements hands the device {tasks} tasks",
         );
@@ -498,13 +498,13 @@ fn every_profile_plans_the_same_values() {
         let bias = graph.parameter(Shape::vector(8), Init::Zero, Element::Single);
         let data = graph.input(Shape::matrix(2, 4), Element::Single);
         let out = graph.relu(graph.add(graph.matmul(data, weight), bias));
-        let tape = tape_with(&graph, profile);
+        let plan = plan_with(&graph, profile);
         assert_eq!(
-            tape.value_count() as usize,
+            plan.value_count() as usize,
             graph.value_count(),
             "{profile:?} publishes values a graph without a reduction holds",
         );
-        assert_eq!(tape.span(out, PLACEMENT).elements, 16);
+        assert_eq!(plan.span(out, PLACEMENT).elements, 16);
     }
 }
 
@@ -522,7 +522,7 @@ fn a_backward_pass_reaches_every_parameter() {
     assert_eq!(grads.of(weight).shape(), Shape::matrix(4, 8));
     assert_eq!(grads.of(bias).shape(), Shape::vector(8));
 
-    let kinds = kinds(&tape(&graph));
+    let kinds = kinds(&plan(&graph));
     assert!(
         kinds.contains(&Kind::Matmul),
         "the weight gradient is a matmul"
@@ -561,7 +561,7 @@ fn a_broadcast_product_folds_its_gradient_back_to_the_shape_of_its_operand() {
     );
     assert_eq!(grads.of(right).shape(), right.shape());
     assert_eq!(
-        kinds(&tape(&graph))
+        kinds(&plan(&graph))
             .iter()
             .filter(|kind| **kind == Kind::SumAxis)
             .count(),
@@ -575,8 +575,8 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
     let graph = Graph::new();
     let wide = graph.parameter(Shape::vector(1 << 21), Init::Zero, Element::Single);
     let loss = graph.sum(wide);
-    let tape = tape(&graph);
-    let reductions = kinds(&tape)
+    let plan = plan(&graph);
+    let reductions = kinds(&plan)
         .iter()
         .filter(|kind| **kind == Kind::SumChunk)
         .count();
@@ -584,10 +584,10 @@ fn a_reduction_folds_through_as_many_levels_as_it_takes() {
         reductions, 257,
         "a sum folds a chunk of 8192 elements at a time until one scalar stands",
     );
-    assert_eq!(tape.wave_count(), 2, "every level of the fold is a wave");
+    assert_eq!(plan.wave_count(), 2, "every level of the fold is a wave");
     assert_eq!(loss.shape(), Shape::scalar());
     assert!(
-        tape.value_count() as usize > graph.value_count(),
+        plan.value_count() as usize > graph.value_count(),
         "a folded reduction publishes its partial sums",
     );
 }
@@ -603,13 +603,13 @@ fn a_parameter_updated_in_place_feeds_the_tasks_that_follow() {
     graph.add_into(weight, scaled);
     let read_back = graph.relu(weight);
     graph.retain(read_back);
-    let tape = tape(&graph);
-    let update = writers(&tape, weight.id());
+    let plan = plan(&graph);
+    let update = writers(&plan, weight.id());
     assert!(!update.is_empty(), "the update writes the parameter");
-    let reader = writers(&tape, read_back.id());
+    let reader = writers(&plan, read_back.id());
     assert_eq!(reader.len(), 1, "the reader holds a task of its own");
     assert!(
-        update.iter().all(|task| follows(&tape, *task, reader[0])),
+        update.iter().all(|task| follows(&plan, *task, reader[0])),
         "a reader observes the update it follows",
     );
 }
@@ -626,17 +626,17 @@ fn an_update_in_place_follows_every_reader_of_the_value_it_replaces() {
     graph.add_into(weight, grads.of(weight));
     let read_back = graph.relu(weight);
     graph.retain(read_back);
-    let tape = tape(&graph);
-    let update = writers(&tape, weight.id());
+    let plan = plan(&graph);
+    let update = writers(&plan, weight.id());
     assert_eq!(update.len(), 1, "the update writes the parameter once");
-    let before = writers(&tape, read.id())[0];
-    let after = writers(&tape, read_back.id())[0];
+    let before = writers(&plan, read.id())[0];
+    let after = writers(&plan, read_back.id())[0];
     assert!(
-        follows(&tape, before, update[0]),
+        follows(&plan, before, update[0]),
         "an update in place follows every reader of the value it replaces",
     );
     assert!(
-        follows(&tape, update[0], after),
+        follows(&plan, update[0], after),
         "a reader that follows the update observes it",
     );
 }
@@ -661,15 +661,15 @@ fn a_view_shares_the_storage_of_its_source() {
     let matrix = graph.parameter(Shape::matrix(8, 4), Init::Zero, Element::Single);
     let transposed = graph.permute(matrix, [0, 1, 3, 2]);
     assert_eq!(transposed.shape(), Shape::matrix(4, 8));
-    let tape = tape(&graph);
-    assert_eq!(tape.span(matrix, PLACEMENT).elements, 32);
+    let plan = plan(&graph);
+    assert_eq!(plan.span(matrix, PLACEMENT).elements, 32);
     assert!(
         refuses(|| {
-            let _ = tape.span(transposed, PLACEMENT);
+            let _ = plan.span(transposed, PLACEMENT);
         }),
         "a transposed view was handed its own storage",
     );
-    assert!(!tape.readable(transposed));
+    assert!(!plan.readable(transposed));
 }
 
 #[test]
@@ -679,10 +679,10 @@ fn a_view_that_its_storage_addresses_row_by_row_reads_back_as_that_storage() {
     let flattened = graph.reshape(matrix, Shape::vector(32));
     let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Single);
     let squared = graph.reshape(weight, Shape::matrix(2, 4));
-    let tape = tape(&graph);
+    let plan = plan(&graph);
     for (view, storage) in [(flattened, matrix), (squared, weight)] {
-        assert_eq!(tape.span(view, PLACEMENT), tape.span(storage, PLACEMENT));
-        assert!(tape.readable(view));
+        assert_eq!(plan.span(view, PLACEMENT), plan.span(storage, PLACEMENT));
+        assert!(plan.readable(view));
     }
 }
 
@@ -737,7 +737,7 @@ fn a_narrow_product_streams_the_operands_a_wide_one_stages() {
         narrow_graph.parameter(Shape::matrix(512, 512), Init::Zero, Element::Single);
     let narrow_data = narrow_graph.parameter(Shape::matrix(1, 512), Init::Zero, Element::Single);
     narrow_graph.retain(narrow_graph.matmul(narrow_data, narrow_weight));
-    let narrow = tape_with(&narrow_graph, wide());
+    let narrow = plan_with(&narrow_graph, wide());
     assert!(!narrow.matmul_geometries().is_empty());
     assert!(
         narrow
@@ -759,7 +759,7 @@ fn a_narrow_product_streams_the_operands_a_wide_one_stages() {
     let wide_weight = wide_graph.parameter(Shape::matrix(1024, 1024), Init::Zero, Element::Single);
     let wide_data = wide_graph.parameter(Shape::matrix(64, 1024), Init::Zero, Element::Single);
     wide_graph.retain(wide_graph.matmul(wide_data, wide_weight));
-    let wide = tape_with(&wide_graph, wide());
+    let wide = plan_with(&wide_graph, wide());
     assert!(!wide.matmul_geometries().is_empty());
     assert!(
         wide.matmul_geometries()
@@ -790,16 +790,16 @@ fn a_plan_holds_every_value_and_the_seed_of_every_parameter() {
     let input = graph.input(Shape::matrix(2, 4), Element::Single);
     let out = graph.softmax(graph.matmul(input, weight));
     graph.backward(graph.sum(out));
-    let tape = tape(&graph);
-    assert!(tape.value_count() as usize >= graph.value_count());
-    assert!(tape.arena_bytes() > 0);
-    assert!(tape.work() > 0);
+    let plan = plan(&graph);
+    assert!(plan.value_count() as usize >= graph.value_count());
+    assert!(plan.arena_bytes() > 0);
+    assert!(plan.work() > 0);
     let layout = Layout::of(&graph, ALIGNMENT);
     let seed = layout
         .seeds()
         .iter()
         .find(|seed| {
-            layout.weight_bytes(PLACEMENT, seed.address()) == tape.span(weight, PLACEMENT).offset
+            layout.weight_bytes(PLACEMENT, seed.address()) == plan.span(weight, PLACEMENT).offset
         })
         .expect("the weight carries its sampler");
     assert_eq!(seed.elements(), 16);
@@ -837,13 +837,13 @@ fn every_tensor_a_plan_names_lies_inside_its_region() {
         graph.retain(out);
         let grads = graph.backward(graph.sum(out));
         graph.retain(grads.of(weight));
-        let tape = tape_with(&graph, profile);
+        let plan = plan_with(&graph, profile);
         let layout = Layout::of(&graph, ALIGNMENT);
         for value in [weight, data, out, grads.of(weight)] {
-            let span = tape.span(value, PLACEMENT);
+            let span = plan.span(value, PLACEMENT);
             let bytes = u64::from(span.elements) * WORD_BYTES;
             let (base, limit) = match span.store {
-                Store::Tensors => (PLACEMENT.tensors() * WORD_BYTES, tape.tensor_bytes()),
+                Store::Tensors => (PLACEMENT.tensors() * WORD_BYTES, plan.tensor_bytes()),
                 Store::Weights => (PLACEMENT.weights() * WORD_BYTES, layout.weights().bytes()),
             };
             assert!(
@@ -874,10 +874,10 @@ fn a_folded_operand_remembers_which_side_of_its_consumer_it_took() {
     let quotient = graph.div(graph.mul(right, left), bias);
     graph.retain(difference);
     graph.retain(quotient);
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 2);
-    let tasks = tasks(&tape);
-    let steps = steps(&tape);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 2);
+    let tasks = tasks(&plan);
+    let steps = steps(&plan);
     assert_eq!(tasks[0].op, op::MUL);
     let folded_into_a_subtraction = steps[tasks[0].chain as usize];
     assert_eq!(folded_into_a_subtraction.op, op::SUB);
@@ -906,8 +906,8 @@ fn a_partial_reads_back_the_result_its_formula_names() {
     let loss = graph.sum(scaled);
     let gradients = graph.backward(loss);
     graph.retain(gradients.of(weight));
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
     let tangent = tasks
         .iter()
         .find(|task| task.op == op::TANH)
@@ -939,8 +939,8 @@ fn a_partial_reads_back_the_operands_its_formula_names() {
     let gradients = graph.backward(loss);
     graph.retain(gradients.of(weight));
     graph.retain(gradients.of(other));
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
     let absolute = tasks
         .iter()
         .find(|task| task.op == op::ABS && Kind::of(task.kind) == Kind::Partial)
@@ -991,16 +991,16 @@ fn a_write_takes_its_turn_after_every_write_it_follows() {
     let out = graph.relu(state);
     graph.retain(state);
     graph.retain(out);
-    let tape = tape(&graph);
-    let updates = writers(&tape, state.id());
+    let plan = plan(&graph);
+    let updates = writers(&plan, state.id());
     assert_eq!(updates.len(), 2, "two tasks update the resident tensor");
-    let reader = writers(&tape, out.id())[0];
+    let reader = writers(&plan, out.id())[0];
     assert!(
-        follows(&tape, updates[0], updates[1]),
+        follows(&plan, updates[0], updates[1]),
         "the copy reaches the tensor the sum already updated",
     );
     assert!(
-        updates.iter().all(|update| follows(&tape, *update, reader)),
+        updates.iter().all(|update| follows(&plan, *update, reader)),
         "the reader reaches the tensor after every update to it",
     );
 }
@@ -1010,25 +1010,25 @@ fn an_update_in_place_spreads_the_spans_it_names_over_workgroups() {
     let graph = Graph::new();
     let state = graph.state(Shape::vector(200_000), Init::Zero, Element::Single);
     graph.mul_into(state, graph.fill(Shape::scalar(), 0.5));
-    let tape = tape(&graph);
-    let updates = writers(&tape, state.id());
+    let plan = plan(&graph);
+    let updates = writers(&plan, state.id());
     assert!(
         updates.len() > 1,
         "one update in place of one tensor spans the work its decomposition names",
     );
     assert_eq!(
-        tape.wave_count(),
+        plan.wave_count(),
         2,
         "the constant the update reads is a wave of its own",
     );
-    let wave = wave_of(&tape, updates[0]);
+    let wave = wave_of(&plan, updates[0]);
     assert!(
-        updates.iter().all(|task| wave_of(&tape, *task) == wave),
+        updates.iter().all(|task| wave_of(&plan, *task) == wave),
         "the spans of one update in place meet in one wave",
     );
     let mut workgroups = updates
         .iter()
-        .map(|task| segment_of(&tape, *task))
+        .map(|task| segment_of(&plan, *task))
         .collect::<Vec<_>>();
     workgroups.sort_unstable();
     workgroups.dedup();
@@ -1048,21 +1048,21 @@ fn a_chain_of_single_task_levels_rides_one_segment() {
     }
     let out = graph.relu(value);
     graph.retain(out);
-    let tape = tape(&graph);
-    assert_eq!(tape.task_count(), 7);
+    let plan = plan(&graph);
+    assert_eq!(plan.task_count(), 7);
     assert_eq!(
-        tape.wave_count(),
+        plan.wave_count(),
         1,
         "a chain of single task levels leaves one wave",
     );
     assert_eq!(
-        tape.segments().len(),
+        plan.segments().len(),
         1,
         "one workgroup carries the whole chain",
     );
-    for task in 0..tape.task_count() as usize {
-        assert_eq!(segment_of(&tape, task), 0);
-        assert_eq!(wave_of(&tape, task), 0);
+    for task in 0..plan.task_count() as usize {
+        assert_eq!(segment_of(&plan, task), 0);
+        assert_eq!(wave_of(&plan, task), 0);
     }
 }
 
@@ -1076,15 +1076,15 @@ fn a_fold_reads_a_leaf_no_later_than_the_task_it_lands_behind() {
     graph.copy_into(state, patch);
     let out = graph.relu(read);
     graph.retain(out);
-    let tape = tape(&graph);
-    let writer = writers(&tape, out.id());
+    let plan = plan(&graph);
+    let writer = writers(&plan, out.id());
     assert_eq!(writer.len(), 1);
     assert_eq!(
-        kinds(&tape)[writer[0]],
+        kinds(&plan)[writer[0]],
         Kind::Unary,
         "the rectifier kept a task of its own behind the write of the leaf it reads",
     );
-    assert!(readers(&tape, read.id()).contains(&writer[0]));
+    assert!(readers(&plan, read.id()).contains(&writer[0]));
 }
 
 #[test]
@@ -1096,14 +1096,14 @@ fn a_fold_reaches_past_a_task_the_chain_does_not_read() {
     let filler = graph.fill(Shape::vector(8), 1.0);
     let out = graph.add(product, filler);
     graph.retain(out);
-    let tape = tape(&graph);
+    let plan = plan(&graph);
     assert_eq!(
-        tape.task_count(),
+        plan.task_count(),
         2,
-        "the product folded into the sum it feeds and left the filler on the tape",
+        "the product folded into the sum it feeds and left the filler on the plan",
     );
-    assert_eq!(kinds(&tape), vec![Kind::Fill, Kind::Binary]);
-    let tasks = tasks(&tape);
+    assert_eq!(kinds(&plan), vec![Kind::Fill, Kind::Binary]);
+    let tasks = tasks(&plan);
     assert_eq!(tasks[1].out, out.id());
     assert_eq!(tasks[1].steps, 1);
 }
@@ -1115,17 +1115,17 @@ fn a_reduction_opens_the_chain_it_would_have_materialized() {
     let squared = graph.mul(data, data);
     let rows = graph.sum_rows(squared);
     graph.retain(rows);
-    let tape = tape(&graph);
-    assert_eq!(kinds(&tape), vec![Kind::SumAxis]);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    assert_eq!(kinds(&plan), vec![Kind::SumAxis]);
+    let tasks = tasks(&plan);
     assert_eq!(
         tasks[0].prelude_steps, 1,
         "the fold of the reduction opens the product it would have read",
     );
     assert_eq!(tasks[0].a, data.id(), "the reduction reads the operand");
     assert_eq!(tasks[0].out, rows.id(), "the reduction writes its own row");
-    assert_eq!(writers(&tape, squared.id()), Vec::<usize>::new());
-    let opened = steps(&tape)[tasks[0].prelude as usize];
+    assert_eq!(writers(&plan, squared.id()), Vec::<usize>::new());
+    let opened = steps(&plan)[tasks[0].prelude as usize];
     assert_eq!(opened.op, op::MUL);
     assert_eq!(opened.operand, data.id());
     assert_eq!(opened.swapped, 0);
@@ -1138,13 +1138,13 @@ fn a_pinned_product_keeps_the_task_that_writes_it() {
     let squared = graph.mul(data, data);
     graph.retain(squared);
     graph.retain(graph.sum_rows(squared));
-    let tape = tape(&graph);
-    assert_eq!(kinds(&tape), vec![Kind::Binary, Kind::SumAxis]);
+    let plan = plan(&graph);
+    assert_eq!(kinds(&plan), vec![Kind::Binary, Kind::SumAxis]);
     assert!(
-        tasks(&tape).iter().all(|task| task.prelude_steps == 0),
+        tasks(&plan).iter().all(|task| task.prelude_steps == 0),
         "a reduction opens no tensor another task still reads",
     );
-    assert_eq!(writers(&tape, squared.id()).len(), 1);
+    assert_eq!(writers(&plan, squared.id()).len(), 1);
 }
 
 #[test]
@@ -1153,13 +1153,13 @@ fn a_task_that_reads_its_source_more_than_once_keeps_it_materialized() {
     let data = graph.input(Shape::matrix(1, 8), Element::Single);
     let logits = graph.exp(data);
     graph.retain(graph.softmax(logits));
-    let tape = tape(&graph);
-    assert_eq!(kinds(&tape), vec![Kind::Unary, Kind::Softmax]);
+    let plan = plan(&graph);
+    assert_eq!(kinds(&plan), vec![Kind::Unary, Kind::Softmax]);
     assert!(
-        tasks(&tape).iter().all(|task| task.prelude_steps == 0),
+        tasks(&plan).iter().all(|task| task.prelude_steps == 0),
         "a row a task walks three times holds the task that wrote it",
     );
-    assert_eq!(writers(&tape, logits.id()).len(), 1);
+    assert_eq!(writers(&plan, logits.id()).len(), 1);
 }
 
 #[test]
@@ -1168,12 +1168,12 @@ fn a_reduction_that_opens_a_chain_also_carries_its_epilogue() {
     let data = graph.input(Shape::matrix(1, 8), Element::Single);
     let squared = graph.mul(data, data);
     graph.retain(graph.relu(graph.sum_rows(squared)));
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
-    assert_eq!(tape.task_count(), 1);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    assert_eq!(plan.task_count(), 1);
     assert_eq!(tasks[0].prelude_steps, 1);
     assert_eq!(tasks[0].steps, 1);
-    let steps = steps(&tape);
+    let steps = steps(&plan);
     assert_eq!(steps[tasks[0].prelude as usize].op, op::MUL);
     assert_eq!(steps[tasks[0].chain as usize].op, op::RELU);
     assert_ne!(
@@ -1189,13 +1189,13 @@ fn a_product_two_reductions_read_keeps_the_task_that_writes_it() {
     let squared = graph.mul(data, data);
     graph.retain(graph.sum(squared));
     graph.retain(graph.sum_rows(squared));
-    let tape = tape(&graph);
+    let plan = plan(&graph);
     assert_eq!(
-        kinds(&tape),
+        kinds(&plan),
         vec![Kind::Binary, Kind::SumChunk, Kind::SumAxis],
     );
     assert!(
-        tasks(&tape).iter().all(|task| task.prelude_steps == 0),
+        tasks(&plan).iter().all(|task| task.prelude_steps == 0),
         "a reduction opens only a tensor no other task reads",
     );
 }
@@ -1205,7 +1205,7 @@ fn an_opened_reduction_hands_its_arena_back_to_the_product() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(4, 256), Element::Single);
     graph.retain(graph.sum_rows(graph.mul(data, data)));
-    let opened = tape(&graph);
+    let opened = plan(&graph);
     let pinned = Graph::new();
     let data = pinned.input(Shape::matrix(4, 256), Element::Single);
     let squared = pinned.mul(data, data);
@@ -1213,7 +1213,7 @@ fn an_opened_reduction_hands_its_arena_back_to_the_product() {
     pinned.retain(pinned.sum_rows(squared));
     assert_eq!(opened.task_count(), 4);
     assert!(
-        opened.arena_bytes() < tape(&pinned).arena_bytes(),
+        opened.arena_bytes() < plan(&pinned).arena_bytes(),
         "the product a reduction opens holds no tensor of its own",
     );
 }
@@ -1228,13 +1228,13 @@ fn a_fold_keeps_the_storage_a_view_reads_written() {
     let rows = graph.sum_rows(graph.permute(product, [0, 1, 3, 2]));
     graph.retain(doubled);
     graph.retain(rows);
-    let tape = tape(&graph);
+    let plan = plan(&graph);
     assert_eq!(
-        writers(&tape, product.id()).len(),
+        writers(&plan, product.id()).len(),
         1,
         "the product a view reads kept the task that writes it",
     );
-    assert_eq!(tape.task_count(), 3);
+    assert_eq!(plan.task_count(), 3);
 }
 
 #[test]
@@ -1285,9 +1285,9 @@ fn a_narrow_parameter_update_packs_the_image_the_chain_folded() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::vector(300), Init::Zero, Element::Half);
     graph.mul_into(weight, graph.fill(Shape::vector(300), 2.0));
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     assert_eq!(values[weight.id() as usize].element, Element::Half.code());
     assert_eq!(values[weight.id() as usize].store, Store::Weights.code());
 
@@ -1310,14 +1310,14 @@ fn a_narrow_parameter_update_packs_the_image_the_chain_folded() {
         .expect("the image holds the product the update computed");
     assert_eq!(Kind::of(writer.kind), Kind::Fill);
     assert_eq!(writer.steps, 1);
-    let step = steps(&tape)[writer.chain as usize];
+    let step = steps(&plan)[writer.chain as usize];
     assert_eq!(step.op, op::MUL);
     assert_eq!(step.operand, weight.id());
     assert_eq!(step.swapped, 1);
     assert_eq!(
         tasks.len(),
         2,
-        "the fill and the convert that packs its product are the whole tape",
+        "the fill and the convert that packs its product are the whole plan",
     );
 }
 
@@ -1327,20 +1327,20 @@ fn a_wide_narrow_update_in_place_spreads_the_words_it_packs() {
     let weight = graph.parameter(Shape::vector(200_000), Init::Zero, Element::Half);
     let factor = graph.input(Shape::vector(200_000), Element::Single);
     graph.mul_into(weight, factor);
-    let tape = tape(&graph);
-    let packs = writers(&tape, weight.id());
+    let plan = plan(&graph);
+    let packs = writers(&plan, weight.id());
     assert!(
         packs.len() > 1,
         "a wide narrow write packs the words its decomposition names",
     );
-    let wave = wave_of(&tape, packs[0]);
+    let wave = wave_of(&plan, packs[0]);
     assert!(
-        packs.iter().all(|task| wave_of(&tape, *task) == wave),
+        packs.iter().all(|task| wave_of(&plan, *task) == wave),
         "the words of one narrow write meet in one wave",
     );
     let mut workgroups = packs
         .iter()
-        .map(|task| segment_of(&tape, *task))
+        .map(|task| segment_of(&plan, *task))
         .collect::<Vec<_>>();
     workgroups.sort_unstable();
     workgroups.dedup();
@@ -1357,8 +1357,8 @@ fn a_narrow_update_in_place_packs_the_word_it_reads() {
     let weight = graph.parameter(Shape::vector(300), Init::Zero, Element::Half);
     let factor = graph.input(Shape::vector(300), Element::Single);
     graph.mul_into(weight, factor);
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
     assert_eq!(
         tasks.len(),
         1,
@@ -1371,7 +1371,7 @@ fn a_narrow_update_in_place_packs_the_word_it_reads() {
     assert_eq!(convert.first, 0);
     assert_eq!(convert.count, 150);
     assert_eq!(convert.steps, 1);
-    let step = steps(&tape)[convert.chain as usize];
+    let step = steps(&plan)[convert.chain as usize];
     assert_eq!(step.op, op::MUL);
     assert_eq!(step.operand, factor.id());
     assert_eq!(step.swapped, 0);
@@ -1384,9 +1384,9 @@ fn a_narrow_product_packs_the_image_it_computed() {
     let right = graph.parameter(Shape::matrix(8, 16), Init::Zero, Element::Half);
     let product = graph.matmul(left, right);
     assert_eq!(graph.element(product), Element::Half);
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     assert_eq!(
         values[product.id() as usize].element,
         Element::Half.code(),
@@ -1422,9 +1422,9 @@ fn a_quantized_parameter_packs_four_numbers_a_word_beside_its_quantum() {
     assert_eq!(graph.scale(weight), 0.25);
     let instead = Graph::new();
     instead.parameter(Shape::vector(300), Init::Zero, Element::Single);
-    let single_precision = tape(&instead);
-    let tape = tape(&graph);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let single_precision = plan(&instead);
+    let plan = plan(&graph);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     let record = values[weight.id() as usize];
     assert_eq!(record.element, Element::Int8.code());
     assert_eq!(record.store, Store::Weights.code());
@@ -1433,7 +1433,7 @@ fn a_quantized_parameter_packs_four_numbers_a_word_beside_its_quantum() {
         Element::Int8.payload_words(300) as u32,
         "the quantum a quantized tensor reconstructs by stands at the end of the words its numbers pack into",
     );
-    assert_eq!(tape.weights().words(), Element::Int8.storage_words(300));
+    assert_eq!(plan.weights().words(), Element::Int8.storage_words(300));
     assert_eq!(single_precision.weights().words(), 300);
 }
 
@@ -1446,10 +1446,10 @@ fn a_quantized_image_packs_four_numbers_a_word() {
     let instead = Graph::new();
     let source = instead.parameter(Shape::vector(300), Init::Zero, Element::Single);
     instead.retain(instead.cast(source, Element::Half));
-    let half_precision = tape(&instead);
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let half_precision = plan(&instead);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     let record = values[quantized.id() as usize];
     assert_eq!(record.element, Element::Int8.code());
     assert_eq!(record.table, Element::Int8.payload_words(300) as u32);
@@ -1462,9 +1462,9 @@ fn a_quantized_image_packs_four_numbers_a_word() {
     assert_eq!(convert.a, source.id());
     assert_eq!(convert.first, 0);
     assert_eq!(convert.count, 75);
-    assert_eq!(steps(&tape)[convert.chain as usize].op, op::IDENTITY);
+    assert_eq!(steps(&plan)[convert.chain as usize].op, op::IDENTITY);
     assert_eq!(
-        tape.arena_bytes(),
+        plan.arena_bytes(),
         Element::Int8.storage_words(300) * WORD_BYTES,
         "the arena holds a word of every four numbers a quantized tensor carries beside the quantum they share",
     );
@@ -1494,8 +1494,8 @@ fn a_cast_declares_the_numbers_a_tensor_carries() {
         narrow,
         "a cast that asks for the numbers a tensor already carries adds no task",
     );
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
     let convert = tasks
         .iter()
         .find(|task| Kind::of(task.kind) == Kind::Convert)
@@ -1504,7 +1504,7 @@ fn a_cast_declares_the_numbers_a_tensor_carries() {
     assert_eq!(convert.a, wide.id());
     assert_eq!(convert.count, 3);
     assert_eq!(convert.steps, 1);
-    assert_eq!(steps(&tape)[convert.chain as usize].op, op::IDENTITY);
+    assert_eq!(steps(&plan)[convert.chain as usize].op, op::IDENTITY);
     let widened = tasks
         .iter()
         .find(|task| task.out == folded.id())
@@ -1522,9 +1522,9 @@ fn narrow_rows_through_an_image(kind: Kind) {
         Kind::ScatterWrite => graph.write_into(table, indices, updates),
         other => panic!("a {} task reaches no row of a table", other.name()),
     }
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     let convert = tasks
         .iter()
         .find(|task| Kind::of(task.kind) == Kind::Convert)
@@ -1554,7 +1554,7 @@ fn a_narrow_parameter_reaches_the_rows_it_names_through_an_image() {
 }
 
 #[test]
-fn a_cursor_stays_on_the_tape_the_block_it_starts_from_reads_it() {
+fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
     let graph = Graph::new();
     let queries = graph.parameter(Shape::of([1, 1, 4, 4]), Init::Zero, Element::Single);
     let keys = graph.parameter(Shape::of([1, 1, 4, 4]), Init::Zero, Element::Single);
@@ -1570,24 +1570,24 @@ fn a_cursor_stays_on_the_tape_the_block_it_starts_from_reads_it() {
         },
     );
     graph.retain(out);
-    let tape = tape(&graph);
-    let written = writers(&tape, cursor.id());
+    let plan = plan(&graph);
+    let written = writers(&plan, cursor.id());
     assert_eq!(
         written.len(),
         1,
         "a cursor is a tensor the task that walks a block reads, not a chain it folds away",
     );
-    let attended = readers(&tape, cursor.id());
+    let attended = readers(&plan, cursor.id());
     let attention = attended
         .iter()
         .copied()
-        .find(|task| Kind::of(tasks(&tape)[*task].kind) == Kind::Attention)
+        .find(|task| Kind::of(tasks(&plan)[*task].kind) == Kind::Attention)
         .expect("the attention reads the cursor it starts from");
     assert!(
-        follows(&tape, written[0], attention),
+        follows(&plan, written[0], attention),
         "the task that writes the cursor runs before the block that starts from it",
     );
-    assert_eq!(tasks(&tape)[attention].origin, cursor.id());
+    assert_eq!(tasks(&plan)[attention].origin, cursor.id());
 }
 
 #[test]
@@ -1625,8 +1625,8 @@ fn a_cursor_holds_one_position_per_plane() {
 fn a_block_quantized_weight_finds_its_quantum_beside_the_words_it_packs() {
     let graph = Graph::new();
     let weight = graph.block_quantized_parameter(Shape::vector(300), Init::Zero, Element::Int4);
-    let tape = tape(&graph);
-    let values = records::<ValueRecord>(tape.values(), size_of::<ValueRecord>());
+    let plan = plan(&graph);
+    let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
     let record = values[weight.id() as usize];
     assert_eq!(record.element, Element::Int4.code());
     assert_eq!(record.store, Store::Weights.code());
@@ -1636,18 +1636,18 @@ fn a_block_quantized_weight_finds_its_quantum_beside_the_words_it_packs() {
         "the quantum of every block stands beside the words its numbers pack into",
     );
     assert_eq!(Element::Int4.quanta(300), 3);
-    assert_eq!(tape.weights().words(), Element::Int4.storage_words(300));
+    assert_eq!(plan.weights().words(), Element::Int4.storage_words(300));
 }
 
 #[test]
-fn a_tape_never_writes_a_block_quantized_tensor() {
+fn a_plan_never_writes_a_block_quantized_tensor() {
     let graph = Graph::new();
     let weight = graph.block_quantized_parameter(Shape::vector(4), Init::Zero, Element::Int4);
     let data = graph.input(Shape::vector(4), Element::Single);
     graph.add_into(weight, data);
     assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tape(&graph))).is_err(),
-        "a block quantized weight packs the quantum of every block out of the numbers it holds, and a tape carries none of them",
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| plan(&graph))).is_err(),
+        "a block quantized weight packs the quantum of every block out of the numbers it holds, and a plan carries none of them",
     );
 }
 
@@ -1667,8 +1667,8 @@ fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
         },
     );
     graph.retain(out);
-    let tape = tape(&graph);
-    let tile = tape.attention()[0];
+    let plan = plan(&graph);
+    let tile = plan.attention()[0];
     assert!(
         tile.registers() <= AttentionTile::REGISTER_CEILING,
         "a row of {} numbers and its gradient outrun the {} registers a device thread carries",
@@ -1705,7 +1705,7 @@ fn a_head_too_wide_for_one_thread_is_refused() {
     );
     assert!(
         refuses(|| {
-            let _ = tape(&graph);
+            let _ = plan(&graph);
         }),
         "a query row of 80 numbers and its gradient outrun the registers of one device thread",
     );
@@ -1721,11 +1721,11 @@ fn a_reader_of_one_span_stays_beside_every_write_of_that_span() {
     let halfway = graph.relu(state);
     graph.add_into(state, addend);
     graph.retain(halfway);
-    let tape = tape(&graph);
-    let tasks = tasks(&tape);
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
     let mut checked = 0;
-    for update in writers(&tape, state.id()) {
-        for reader in readers(&tape, state.id()) {
+    for update in writers(&plan, state.id()) {
+        for reader in readers(&plan, state.id()) {
             if update == reader {
                 continue;
             }
@@ -1738,7 +1738,7 @@ fn a_reader_of_one_span_stays_beside_every_write_of_that_span() {
             }
             checked += 1;
             assert!(
-                follows(&tape, reader, update) || follows(&tape, update, reader),
+                follows(&plan, reader, update) || follows(&plan, update, reader),
                 "task {update} writes the span task {reader} reads, and neither rides a wave or a slot before the other",
             );
         }

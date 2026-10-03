@@ -67,14 +67,14 @@ impl<'a> Fold<'a> {
         for value in 0..self.values.len() {
             self.absorb(value as u32);
         }
-        let mut tape = Vec::with_capacity(self.tasks.len());
+        let mut ordered = Vec::with_capacity(self.tasks.len());
         for (task, time) in self.tasks.into_iter().zip(self.times) {
             if let Some(task) = task {
-                tape.push((time, task));
+                ordered.push((time, task));
             }
         }
-        tape.sort_by_key(|(time, _)| *time);
-        let (times, tasks): (Vec<u32>, Vec<TaskInfo>) = tape.into_iter().unzip();
+        ordered.sort_by_key(|(time, _)| *time);
+        let (times, tasks): (Vec<u32>, Vec<TaskInfo>) = ordered.into_iter().unzip();
         assert_sources(self.values, self.authored, &tasks, &times);
         tasks
     }
@@ -362,11 +362,16 @@ fn drop_use(reads: &mut [Vec<Use>], value: u32, task: usize) {
     reads[value as usize].retain(|use_| use_.task != task);
 }
 
-fn assert_sources(values: &[ValueInfo], authored: &[TaskInfo], tape: &[TaskInfo], times: &[u32]) {
+fn assert_sources(
+    values: &[ValueInfo],
+    authored: &[TaskInfo],
+    ordered: &[TaskInfo],
+    times: &[u32],
+) {
     let mut authored_writer = vec![NO_VALUE; values.len()];
-    let mut tape_writer = vec![NO_VALUE; values.len()];
+    let mut plan_writer = vec![NO_VALUE; values.len()];
     let mut at = 0usize;
-    for (index, (task, time)) in tape.iter().zip(times).enumerate() {
+    for (index, (task, time)) in ordered.iter().zip(times).enumerate() {
         while at < *time as usize {
             for out in authored[at].writes() {
                 authored_writer[access::storage(values, out) as usize] = out;
@@ -375,12 +380,12 @@ fn assert_sources(values: &[ValueInfo], authored: &[TaskInfo], tape: &[TaskInfo]
         }
         for storage in Access::of(values, task).reads() {
             assert_eq!(
-                tape_writer[*storage as usize], authored_writer[*storage as usize],
-                "task {index} of the tape reads tensor {storage} past the task that rewrites it",
+                plan_writer[*storage as usize], authored_writer[*storage as usize],
+                "task {index} of the plan reads tensor {storage} past the task that rewrites it",
             );
         }
         for out in task.writes() {
-            tape_writer[access::storage(values, out) as usize] = out;
+            plan_writer[access::storage(values, out) as usize] = out;
         }
     }
 }

@@ -17,9 +17,6 @@ pub use capability::{
     CooperativeMatrix, DeviceType, Limits, PowerPreference,
 };
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
-pub use pipeline::{
-    BindGroup, Binding, BindingKind, BindingSpec, ComputeProgram, METAL_SIZE_BUFFER_SLOT,
-    PipelineHandle, ShaderTranslation,
-};
+pub use pipeline::{BindGroup, Binding, PipelineHandle};
 pub use readback::Readback;
 pub use submission::{Submission, SubmissionIndex};

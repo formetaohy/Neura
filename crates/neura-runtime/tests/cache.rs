@@ -49,7 +49,7 @@ fn step(directory: &Path) -> (Vec<f32>, u64, u64) {
 }
 
 #[test]
-fn a_megakernel_reloads_the_shader_it_compiled() {
+fn a_kernel_reloads_the_shader_it_compiled() {
     let directory = directory();
     let (first, loads, stores) = step(&directory);
     assert_eq!(loads, 0, "a cold cache holds no artifact");

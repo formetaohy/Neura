@@ -2,7 +2,7 @@
 name = "neura-kernel"
 version.workspace = true
 edition.workspace = true
-description = "Device bodies the megakernel runs for every task kind"
+description = "The device kernel: bindings, scheduler entry and the body of every task kind"
 license.workspace = true
 repository.workspace = true
 
@@ -12,5 +12,6 @@ workspace = true
 [dependencies]
 neura-abi = { workspace = true }
 neura-compiler = { workspace = true }
-neura-pointwise = { workspace = true }
+neura-shader = { workspace = true }
 neura-profile = { workspace = true }
+neura-pointwise = { workspace = true }

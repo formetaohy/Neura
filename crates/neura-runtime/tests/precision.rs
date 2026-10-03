@@ -1,9 +1,9 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Pool, Shape, Value, Window};
+use neura_plan::{Layout, Plan};
 use neura_precision::{pack, unpack};
 use neura_profile::{Budget, Profile};
 use neura_runtime::{Runtime, RuntimeRequest};
-use neura_tape::{Layout, Tape};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -49,7 +49,7 @@ fn a_cast_keeps_the_numbers_it_narrows_on_the_tape() {
     assert_eq!(
         runtime.read(&program, halves),
         halves_expected,
-        "a cast narrows every number the tape carries",
+        "a cast narrows every number the plan carries",
     );
     assert_eq!(
         runtime.read(&program, rectified),
@@ -142,7 +142,7 @@ fn a_cast_packs_the_numbers_it_narrows_into_a_float_of_eight_bits() {
         assert_eq!(
             runtime.read(&program, packed),
             packed_expected,
-            "a cast narrows every number the tape carries",
+            "a cast narrows every number the plan carries",
         );
         let swept = runtime.read(&program, squared);
         let mut squared_expected = Vec::new();
@@ -170,8 +170,8 @@ fn an_eight_bit_float_arena_holds_a_quarter_of_the_bytes_of_a_wide_one() {
     let narrow_graph = Graph::new();
     let data = narrow_graph.input(Shape::vector(1024), Element::Fp8E4M3);
     narrow_graph.retain(narrow_graph.relu(data));
-    let wide = Tape::of(&wide_graph, 256, narrow());
-    let narrow = Tape::of(&narrow_graph, 256, narrow());
+    let wide = Plan::of(&wide_graph, 256, narrow());
+    let narrow = Plan::of(&narrow_graph, 256, narrow());
     assert_eq!(wide.arena_bytes(), 8192);
     assert_eq!(narrow.arena_bytes(), 2048);
 }
@@ -184,8 +184,8 @@ fn a_narrow_arena_holds_half_the_bytes_of_a_wide_one() {
     let narrow_graph = Graph::new();
     let data = narrow_graph.input(Shape::vector(1024), Element::Half);
     narrow_graph.retain(narrow_graph.relu(data));
-    let wide = Tape::of(&wide_graph, 256, narrow());
-    let narrow = Tape::of(&narrow_graph, 256, narrow());
+    let wide = Plan::of(&wide_graph, 256, narrow());
+    let narrow = Plan::of(&narrow_graph, 256, narrow());
     assert_eq!(wide.arena_bytes(), 8192);
     assert_eq!(narrow.arena_bytes(), 4096);
 }

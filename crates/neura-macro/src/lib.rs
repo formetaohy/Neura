@@ -99,7 +99,7 @@ fn expand_module(input: Tokens) -> syn::Result<Tokens> {
         #visibility mod #name {
             #entry
             pub(crate) fn define(compiler: &mut ::neura_compiler::Compiler) {
-                use ::neura_compiler::ir as neura_rust_ir;
+                use ::neura_compiler::ast as neura_ast;
                 #use_entry
                 #(compiler.function(#definitions);)*
             }
@@ -271,7 +271,7 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
             static PROGRAM: ::std::sync::OnceLock<::neura_compiler::ComputeProgram> =
                 ::std::sync::OnceLock::new();
             PROGRAM.get_or_init(|| {
-                use ::neura_compiler::ir as neura_rust_ir;
+                use ::neura_compiler::ast as neura_ast;
                 let mut compiler = ::neura_compiler::Compiler::empty();
                 #(#records)*
                 #(#bindings)*

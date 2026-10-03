@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_compiler::{Compiler, ir};
+use neura_compiler::{Compiler, ast};
 
 pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     device::define(compiler);
@@ -22,11 +22,11 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
         };
         compiler.insert_case(
             "run_convert",
-            ir::Arm {
-                pattern: ir::Pattern::Integer(element.code()),
-                body: vec![ir::Statement::Expression(ir::Expression::call(
+            ast::Arm {
+                pattern: ast::Pattern::Integer(element.code()),
+                body: vec![ast::Statement::Expression(ast::Expression::call(
                     name,
-                    vec![ir::Expression::name("task"), ir::Expression::name("lid")],
+                    vec![ast::Expression::name("task"), ast::Expression::name("lid")],
                 ))],
             },
         );

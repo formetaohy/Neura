@@ -8,8 +8,8 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
     DeviceType, Limits,
 };
-use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
+use neura_shader::{ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSArray, NSRange, NSString, NSURL};
@@ -242,9 +242,7 @@ impl Device {
             });
         };
         let limits = Limits {
-            max_storage_buffers_per_shader_stage: u32::from(
-                crate::pipeline::METAL_SIZE_BUFFER_SLOT,
-            ),
+            max_storage_buffers_per_shader_stage: u32::from(METAL_SIZE_BUFFER_SLOT),
             max_storage_buffer_binding_size: raw.maxBufferLength().min(1 << 30) as u64,
             max_buffer_size: raw.maxBufferLength().min(1 << 30) as u64,
             max_compute_invocations_per_workgroup: raw.maxThreadsPerThreadgroup().width as u32,
@@ -526,7 +524,7 @@ impl Device {
                             compute.setBytes_length_atIndex(
                                 std::ptr::NonNull::from(first).cast(),
                                 sizes.len() * size_of::<u32>(),
-                                usize::from(crate::pipeline::METAL_SIZE_BUFFER_SLOT),
+                                usize::from(METAL_SIZE_BUFFER_SLOT),
                             )
                         };
                     }

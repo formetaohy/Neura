@@ -1,5 +1,6 @@
 use crate::context::Device;
-use crate::pipeline::{ComputeProgram, PipelineHandle};
+use crate::pipeline::PipelineHandle;
+use neura_shader::ComputeProgram;
 use std::collections::HashMap;
 use std::sync::Arc;
 

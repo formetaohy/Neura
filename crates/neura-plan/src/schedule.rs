@@ -386,7 +386,7 @@ fn assert_ordered(values: &[ValueInfo], tiles: &[MatmulTile], tasks: &[Task], sc
             || (seat[before].0 == after_segment && before_position < after_position);
         assert!(
             ordered,
-            "task {after} touches a tensor that task {before} only reaches later on the tape, and the device gates two waves apart only what a segment orders",
+            "task {after} touches a tensor that task {before} only reaches later in the plan, and the device gates two waves apart only what a segment orders",
         );
     });
 }

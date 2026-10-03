@@ -103,8 +103,8 @@ dependencies = [
  "neura-gpu",
  "neura-graph",
  "neura-nn",
+ "neura-plan",
  "neura-runtime",
- "neura-tape",
  "pollster",
 ]
 
@@ -116,12 +116,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "neura-ast"
+version = "0.4.0"
+
+[[package]]
 name = "neura-compiler"
 version = "0.4.0"
 dependencies = [
  "neura-abi",
+ "neura-ast",
  "neura-macro",
- "neura-rust-ir",
  "neura-shader",
 ]
 
@@ -158,6 +162,7 @@ dependencies = [
  "neura-compiler",
  "neura-pointwise",
  "neura-profile",
+ "neura-shader",
 ]
 
 [[package]]
@@ -167,18 +172,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "neura-megakernel"
-version = "0.4.0"
-dependencies = [
- "neura-abi",
- "neura-compiler",
- "neura-kernel",
- "neura-pointwise",
- "neura-profile",
- "neura-shader",
 ]
 
 [[package]]
@@ -192,12 +185,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "neura-plan"
+version = "0.4.0"
+dependencies = [
+ "bytemuck",
+ "neura-abi",
+ "neura-graph",
+ "neura-pointwise",
+ "neura-profile",
+]
+
+[[package]]
 name = "neura-pointwise"
 version = "0.4.0"
 dependencies = [
  "neura-abi",
+ "neura-ast",
  "neura-macro",
- "neura-rust-ir",
 ]
 
 [[package]]
@@ -225,32 +229,17 @@ dependencies = [
  "neura-compiler",
  "neura-gpu",
  "neura-graph",
- "neura-megakernel",
+ "neura-kernel",
+ "neura-plan",
  "neura-pointwise",
  "neura-precision",
  "neura-profile",
- "neura-tape",
  "pollster",
 ]
 
 [[package]]
-name = "neura-rust-ir"
-version = "0.4.0"
-
-[[package]]
 name = "neura-shader"
 version = "0.4.0"
-
-[[package]]
-name = "neura-tape"
-version = "0.4.0"
-dependencies = [
- "bytemuck",
- "neura-abi",
- "neura-graph",
- "neura-pointwise",
- "neura-profile",
-]
 
 [[package]]
 name = "objc2"

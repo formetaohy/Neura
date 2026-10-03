@@ -8,9 +8,9 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, DeviceType, Limits,
     PowerPreference,
 };
-use crate::pipeline::{BindingKind, ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
 use libloading::Library;
+use neura_shader::{BindingKind, ComputeProgram, ShaderTranslation};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::c_void;

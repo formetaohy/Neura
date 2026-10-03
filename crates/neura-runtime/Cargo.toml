@@ -2,7 +2,7 @@
 name = "neura-runtime"
 version.workspace = true
 edition.workspace = true
-description = "Device execution of a tape: heap, resident tape buffers and programs"
+description = "Device execution of a plan: heap, resident records and programs"
 license.workspace = true
 repository.workspace = true
 
@@ -17,8 +17,8 @@ neura-profile = { workspace = true }
 neura-precision = { workspace = true }
 neura-graph = { workspace = true }
 neura-gpu = { workspace = true }
-neura-tape = { workspace = true }
-neura-megakernel = { workspace = true }
+neura-plan = { workspace = true }
+neura-kernel = { workspace = true }
 
 [dev-dependencies]
 neura-compiler = { workspace = true }

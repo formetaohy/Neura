@@ -1,20 +1,21 @@
 use super::{FunctionLower, Symbol, Typed};
-use crate::{Compiler, DeviceInstruction, ir};
+use crate::ast;
+use crate::{Compiler, DeviceInstruction};
 use neura_shader::{
     AtomicOp, BinaryOp, Constant, MatrixLayout, MatrixUse, Scalar, Type, TypeId, UnaryOp,
 };
 
 impl Compiler {
-    pub(crate) fn rust_type(&mut self, ty: &ir::Type) -> TypeId {
+    pub(crate) fn rust_type(&mut self, ty: &ast::Type) -> TypeId {
         match ty {
-            ir::Type::Named(name) => match name.as_str() {
+            ast::Type::Named(name) => match name.as_str() {
                 "f16" => self.module_mut().scalar(Scalar::F16),
                 "coopmat_a" => self.cooperative(MatrixUse::A),
                 "coopmat_b" => self.cooperative(MatrixUse::B),
                 "coopmat_accumulator" => self.cooperative(MatrixUse::Accumulator),
                 other => self.ty(other),
             },
-            ir::Type::Array { element, length } => {
+            ast::Type::Array { element, length } => {
                 let element = self.rust_type(element);
                 let count = self.evaluate(length);
                 self.array(element, count)
@@ -40,8 +41,8 @@ impl Compiler {
             .unwrap_or_else(|| panic!("the device constant {name} is not defined"))
     }
 
-    pub(crate) fn evaluate(&self, expr: &ir::Expression) -> u32 {
-        use ir::{BinaryOperator as Op, Expression as E, IntegerType};
+    pub(crate) fn evaluate(&self, expr: &ast::Expression) -> u32 {
+        use crate::ast::{BinaryOperator as Op, Expression as E, IntegerType};
         match expr {
             E::Integer { value, ty } if !matches!(ty, IntegerType::Signed) => *value,
             E::Name(name) => self.constant_u32(name),
@@ -82,9 +83,9 @@ impl Compiler {
 }
 
 impl FunctionLower<'_> {
-    fn literal(&mut self, value: u32, kind: ir::IntegerType, hint: Option<TypeId>) -> Typed {
-        let signed = matches!(kind, ir::IntegerType::Signed)
-            || matches!(kind, ir::IntegerType::Inferred)
+    fn literal(&mut self, value: u32, kind: ast::IntegerType, hint: Option<TypeId>) -> Typed {
+        let signed = matches!(kind, ast::IntegerType::Signed)
+            || matches!(kind, ast::IntegerType::Inferred)
                 && hint.is_some_and(|ty| ty == self.compiler.scalar("i32"));
         let ty = if signed {
             self.compiler.scalar("i32")
@@ -148,7 +149,7 @@ impl FunctionLower<'_> {
         }
     }
 
-    fn indexed(&mut self, base: Typed, index: &ir::Expression) -> Typed {
+    fn indexed(&mut self, base: Typed, index: &ast::Expression) -> Typed {
         let element = self.element_type(base.ty);
         if matches!(self.compiler.module().ty(base.ty), Type::Vector { .. }) {
             let index = self
@@ -174,8 +175,8 @@ impl FunctionLower<'_> {
         }
     }
 
-    pub(super) fn place(&mut self, expr: &ir::Expression) -> Option<Typed> {
-        use ir::Expression as E;
+    pub(super) fn place(&mut self, expr: &ast::Expression) -> Option<Typed> {
+        use crate::ast::Expression as E;
         match expr {
             E::Name(name) => match self.lookup(name) {
                 Some(Symbol::Local(local)) => Some(local),
@@ -242,12 +243,16 @@ impl FunctionLower<'_> {
         }
     }
 
-    pub(super) fn value(&mut self, expr: &ir::Expression) -> Typed {
+    pub(super) fn value(&mut self, expr: &ast::Expression) -> Typed {
         self.value_with_hint(expr, None)
     }
 
-    pub(super) fn value_with_hint(&mut self, expr: &ir::Expression, hint: Option<TypeId>) -> Typed {
-        use ir::Expression as E;
+    pub(super) fn value_with_hint(
+        &mut self,
+        expr: &ast::Expression,
+        hint: Option<TypeId>,
+    ) -> Typed {
+        use crate::ast::Expression as E;
         if matches!(expr, E::Name(_) | E::Field { .. } | E::Index { .. })
             && let Some(place) = self.place(expr)
         {
@@ -298,9 +303,9 @@ impl FunctionLower<'_> {
                 let arg = self.value(value);
                 let scalar = self.scalar_of(arg.ty);
                 let op = match op {
-                    ir::UnaryOperator::Negate => UnaryOp::Negate,
-                    ir::UnaryOperator::Not if scalar == Scalar::Bool => UnaryOp::LogicalNot,
-                    ir::UnaryOperator::Not => UnaryOp::BitwiseNot,
+                    ast::UnaryOperator::Negate => UnaryOp::Negate,
+                    ast::UnaryOperator::Not if scalar == Scalar::Bool => UnaryOp::LogicalNot,
+                    ast::UnaryOperator::Not => UnaryOp::BitwiseNot,
                 };
                 self.emit(arg.ty, |result| DeviceInstruction::Unary {
                     op,
@@ -348,8 +353,8 @@ impl FunctionLower<'_> {
             .unwrap_or_else(|| panic!("a device operand is not a scalar"))
     }
 
-    pub(super) fn evaluate_u32(&self, expr: &ir::Expression) -> Option<u32> {
-        use ir::{BinaryOperator as Op, Expression as E, IntegerType};
+    pub(super) fn evaluate_u32(&self, expr: &ast::Expression) -> Option<u32> {
+        use crate::ast::{BinaryOperator as Op, Expression as E, IntegerType};
         match expr {
             E::Integer { value, ty } if !matches!(ty, IntegerType::Signed) => Some(*value),
             E::Name(name) => match self.lookup(name)? {
@@ -384,11 +389,11 @@ impl FunctionLower<'_> {
 
     fn binary(
         &mut self,
-        operator: ir::BinaryOperator,
-        left: &ir::Expression,
-        right: &ir::Expression,
+        operator: ast::BinaryOperator,
+        left: &ast::Expression,
+        right: &ast::Expression,
     ) -> Typed {
-        use ir::BinaryOperator as Op;
+        use crate::ast::BinaryOperator as Op;
         let op = match operator {
             Op::Add => BinaryOp::Add,
             Op::Subtract => BinaryOp::Subtract,
@@ -464,15 +469,15 @@ impl FunctionLower<'_> {
         })
     }
 
-    pub(super) fn reference(&mut self, argument: &ir::Expression, subject: &str) -> Typed {
-        let ir::Expression::Reference(reference) = argument else {
+    pub(super) fn reference(&mut self, argument: &ast::Expression, subject: &str) -> Typed {
+        let ast::Expression::Reference(reference) = argument else {
             panic!("{subject} takes a reference");
         };
         self.place(reference)
             .unwrap_or_else(|| panic!("{subject} refers to a writable device place"))
     }
 
-    fn call(&mut self, name: &str, args: &[ir::Expression]) -> Typed {
+    fn call(&mut self, name: &str, args: &[ast::Expression]) -> Typed {
         match name {
             "uvec4" => {
                 assert_eq!(args.len(), 4);
@@ -573,7 +578,7 @@ impl FunctionLower<'_> {
             "coopmat_accumulator" => {
                 assert_eq!(args.len(), 1);
                 let value = self.value_with_hint(&args[0], Some(self.compiler.scalar("f32")));
-                let ty = self.coopmat(ir::Type::Named("coopmat_accumulator".to_owned()));
+                let ty = self.coopmat(ast::Type::Named("coopmat_accumulator".to_owned()));
                 self.emit(ty, |result| DeviceInstruction::MatrixFill {
                     value: value.value,
                     result,
@@ -629,11 +634,11 @@ impl FunctionLower<'_> {
         }
     }
 
-    fn coopmat(&mut self, ty: ir::Type) -> TypeId {
+    fn coopmat(&mut self, ty: ast::Type) -> TypeId {
         self.compiler.rust_type(&ty)
     }
 
-    fn matrix_load(&mut self, args: &[ir::Expression], layout: MatrixLayout) -> Typed {
+    fn matrix_load(&mut self, args: &[ast::Expression], layout: MatrixLayout) -> Typed {
         assert_eq!(
             args.len(),
             2,
@@ -651,9 +656,9 @@ impl FunctionLower<'_> {
         let ty = match self.compiler.module().ty(element) {
             Type::Scalar(Scalar::F16) => {
                 if matches!(layout, MatrixLayout::RowMajor) {
-                    self.coopmat(ir::Type::Named("coopmat_a".to_owned()))
+                    self.coopmat(ast::Type::Named("coopmat_a".to_owned()))
                 } else {
-                    self.coopmat(ir::Type::Named("coopmat_b".to_owned()))
+                    self.coopmat(ast::Type::Named("coopmat_b".to_owned()))
                 }
             }
             other => panic!(
@@ -670,7 +675,7 @@ impl FunctionLower<'_> {
         })
     }
 
-    pub(super) fn atomic(&mut self, name: &str, args: &[ir::Expression]) -> Typed {
+    pub(super) fn atomic(&mut self, name: &str, args: &[ast::Expression]) -> Typed {
         assert_eq!(args.len(), 2);
         let pointer = self.reference(&args[0], "a device atomic");
         let fun = match name {

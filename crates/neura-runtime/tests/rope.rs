@@ -125,7 +125,7 @@ fn a_rope_gradient_matches_finite_differences() {
         let slack = 1e-3 + 1e-2 * analytic[element].abs().max(numeric.abs());
         assert!(
             (numeric - analytic[element]).abs() <= slack,
-            "element {element} of a rotated tensor: the tape gives {} where the slope is {numeric}",
+            "element {element} of a rotated tensor: the plan gives {} where the slope is {numeric}",
             analytic[element],
         );
     }
@@ -164,7 +164,7 @@ fn a_rope_carries_the_epilogue_that_folds_into_it() {
     assert_eq!(
         program.task_count(),
         2,
-        "a fill and the rope whose epilogue multiplies it ride one tape",
+        "a fill and the rope whose epilogue multiplies it ride one plan",
     );
     let values = random(8, 19);
     runtime.write(&program, data, &values);

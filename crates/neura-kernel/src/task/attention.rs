@@ -1,4 +1,4 @@
-use neura_compiler::{Compiler, ir};
+use neura_compiler::{Compiler, ast};
 use neura_profile::Geometry;
 
 pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
@@ -26,15 +26,15 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
             compiler.specialize(template, &specialized, &constants);
             compiler.insert_case(
                 dispatcher,
-                ir::Arm {
-                    pattern: ir::Pattern::Integer(
+                ast::Arm {
+                    pattern: ast::Pattern::Integer(
                         index
                             .try_into()
                             .expect("a geometry fits in one device word"),
                     ),
-                    body: vec![ir::Statement::Expression(ir::Expression::call(
+                    body: vec![ast::Statement::Expression(ast::Expression::call(
                         specialized,
-                        vec![ir::Expression::name("task"), ir::Expression::name("lid")],
+                        vec![ast::Expression::name("task"), ast::Expression::name("lid")],
                     ))],
                 },
             );

@@ -2,9 +2,7 @@ use crate::buffer::{BufferBinding, GpuBuffer};
 use crate::capability::BufferUsages;
 use crate::context::Device;
 use crate::native::{NativeGroup, NativePipeline};
-pub use neura_shader::{
-    BindingKind, BindingSpec, ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderTranslation,
-};
+use neura_shader::ComputeProgram;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]

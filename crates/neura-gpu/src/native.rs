@@ -8,8 +8,9 @@ pub(crate) mod vulkan;
 use crate::cache::ArtifactCache;
 use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Capability, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
-use crate::pipeline::{BoundBuffer, ComputeProgram};
+use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
+use neura_shader::ComputeProgram;
 use std::sync::Arc;
 use std::time::Duration;
 

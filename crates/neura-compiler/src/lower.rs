@@ -1,7 +1,8 @@
 mod statement;
 mod value;
 
-use crate::{Compiler, DeviceInstruction, ir};
+use crate::ast;
+use crate::{Compiler, DeviceInstruction};
 use neura_shader::{Argument, Block, BuiltIn, Function, Local, Space, TypeId, ValueId};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ pub(super) struct FunctionLower<'a> {
 }
 
 impl<'a> FunctionLower<'a> {
-    pub(super) fn new(compiler: &'a mut Compiler, source: &ir::Function, entry: bool) -> Self {
+    pub(super) fn new(compiler: &'a mut Compiler, source: &ast::Function, entry: bool) -> Self {
         let mut arguments = Vec::new();
         let mut values = Vec::new();
         let mut scope = HashMap::new();
@@ -71,7 +72,7 @@ impl<'a> FunctionLower<'a> {
         }
     }
 
-    pub(super) fn lower(mut self, body: &[ir::Statement]) -> Function {
+    pub(super) fn lower(mut self, body: &[ast::Statement]) -> Function {
         for (index, value) in self.values.clone().into_iter().enumerate() {
             self.push(DeviceInstruction::Argument {
                 index: index as u32,
@@ -142,7 +143,7 @@ impl<'a> FunctionLower<'a> {
             .or_else(|| self.compiler.constant_value(name).map(Symbol::Constant))
     }
 
-    pub(super) fn rust_type(&mut self, ty: &ir::Type) -> TypeId {
+    pub(super) fn rust_type(&mut self, ty: &ast::Type) -> TypeId {
         self.compiler.rust_type(ty)
     }
 }

@@ -11,22 +11,22 @@ fn wide() -> Profile {
         .last()
         .expect("a profile")
 }
-use neura_tape::Tape;
+use neura_plan::Plan;
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
-fn tape_with(graph: &Graph, profile: Profile) -> Tape {
-    Tape::of(graph, ALIGNMENT, profile)
+fn plan_with(graph: &Graph, profile: Profile) -> Plan {
+    Plan::of(graph, ALIGNMENT, profile)
 }
 
 fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn tasks(tape: &Tape) -> Vec<TaskRecord> {
-    tape.tasks()
+fn tasks(plan: &Plan) -> Vec<TaskRecord> {
+    plan.tasks()
         .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>()
         .0
         .iter()
@@ -34,15 +34,15 @@ fn tasks(tape: &Tape) -> Vec<TaskRecord> {
         .collect()
 }
 
-fn tasks_of(tape: &Tape, value: Value) -> Vec<TaskRecord> {
-    tasks(tape)
+fn tasks_of(plan: &Plan, value: Value) -> Vec<TaskRecord> {
+    tasks(plan)
         .into_iter()
         .filter(|task| task.out == value.id())
         .collect()
 }
 
-fn values_of(tape: &Tape) -> Vec<ValueRecord> {
-    tape.values()
+fn values_of(plan: &Plan) -> Vec<ValueRecord> {
+    plan.values()
         .as_chunks::<{ size_of::<ValueRecord>() }>()
         .0
         .iter()
@@ -63,24 +63,24 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
         (narrow(), strategy::WORKGROUP_ROW),
         (wide(), strategy::THREAD_ROW),
     ] {
-        let tape = tape_with(&graph, profile);
-        assert_eq!(tasks_of(&tape, short).len(), 4);
-        let folds = tasks_of(&tape, middle);
+        let plan = plan_with(&graph, profile);
+        assert_eq!(tasks_of(&plan, short).len(), 4);
+        let folds = tasks_of(&plan, middle);
         let rows_per_task = 333u32.div_ceil(profile.workgroups());
         assert_eq!(
             folds.len(),
             333usize.div_ceil(rows_per_task as usize),
             "a row fold hands the device the tasks its device width asks for",
         );
-        assert_eq!(tasks_of(&tape, long).len(), 2);
-        for (index, task) in tasks_of(&tape, short).into_iter().enumerate() {
+        assert_eq!(tasks_of(&plan, long).len(), 2);
+        for (index, task) in tasks_of(&plan, short).into_iter().enumerate() {
             assert_eq!(task.geometry, strategy::THREAD_ROW);
             assert_eq!(task.first, index as u32);
             assert_eq!(task.count, 1);
             assert_eq!(Kind::of(task.kind), Kind::Argmax);
         }
         let mut covered = 0;
-        for task in tasks_of(&tape, middle) {
+        for task in tasks_of(&plan, middle) {
             assert_eq!(
                 task.geometry, middle_geometry,
                 "a row of 200 elements folds through {middle_geometry} on {profile:?}",
@@ -89,7 +89,7 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
             covered += task.count;
         }
         assert_eq!(covered, 333);
-        for (index, task) in tasks_of(&tape, long).into_iter().enumerate() {
+        for (index, task) in tasks_of(&plan, long).into_iter().enumerate() {
             assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
             assert_eq!(task.first, index as u32);
             assert_eq!(task.count, 1);
@@ -113,8 +113,8 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
         (narrow(), strategy::WORKGROUP_ROW),
         (wide(), strategy::THREAD_ROW),
     ] {
-        let tape = tape_with(&graph, profile);
-        let short = tasks_of(&tape, short);
+        let plan = plan_with(&graph, profile);
+        let short = tasks_of(&plan, short);
         assert_eq!(short.len(), 64);
         for (index, task) in short.into_iter().enumerate() {
             assert_eq!(Kind::of(task.kind), Kind::SumAxis);
@@ -127,7 +127,7 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
             assert_eq!(task.first, index as u32);
             assert_eq!(task.count, 1);
         }
-        let long = tasks_of(&tape, long);
+        let long = tasks_of(&plan, long);
         assert_eq!(long.len(), 2);
         for (index, task) in long.into_iter().enumerate() {
             assert_eq!(
@@ -138,7 +138,7 @@ fn a_row_fold_hands_the_device_the_geometry_its_axis_asks_for() {
             assert_eq!(task.first, index as u32);
             assert_eq!(task.count, 1);
         }
-        let view = tasks_of(&tape, view);
+        let view = tasks_of(&plan, view);
         assert_eq!(view.len(), 1);
         assert_eq!(
             view[0].geometry,
@@ -170,8 +170,8 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
     assert_eq!(batched.shape(), Shape::of([2, 3, 64, 32]));
     assert_eq!(shared.shape(), Shape::of([2, 3, 64, 32]));
     assert_eq!(spread.shape(), Shape::of([2, 3, 64, 32]));
-    let tape = tape_with(&graph, wide());
-    let geometries = tape.matmul_geometries();
+    let plan = plan_with(&graph, wide());
+    let geometries = plan.matmul_geometries();
     assert_eq!(
         geometries.len(),
         1,
@@ -185,7 +185,7 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
         "every plane of every product carries its own tiles",
     );
     for product in [batched, shared, spread] {
-        let tasks = tasks_of(&tape, product);
+        let tasks = tasks_of(&plan, product);
         assert_eq!(tasks.len() as u32, 6 * per_plane);
         for (tile_index, task) in tasks.into_iter().enumerate() {
             assert_eq!(Kind::of(task.kind), Kind::Matmul);
@@ -198,7 +198,7 @@ fn a_product_hands_the_device_a_tile_for_every_plane() {
         }
     }
     assert_eq!(
-        tape.work(),
+        plan.work(),
         u64::from(3 * 6 * per_plane) * tile.tile_work(),
         "a plan accounts the tiles of every plane",
     );
@@ -232,8 +232,8 @@ fn a_choice_covers_every_row_once() {
     let seed = graph.input(Shape::scalar(), Element::Single);
     let action = graph.categorical(graph.input(Shape::matrix(rows, 16), Element::Single), seed);
     graph.retain(action);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, action);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, action);
     let per_task = tasks
         .first()
         .expect("a choice of a thousand rows holds a task")
@@ -257,7 +257,7 @@ fn a_choice_covers_every_row_once() {
         cursor += task.count;
     }
     assert_eq!(cursor, rows);
-    assert_eq!(tape.span(action, PLACEMENT).elements, rows);
+    assert_eq!(plan.span(action, PLACEMENT).elements, rows);
 }
 
 #[test]
@@ -266,12 +266,12 @@ fn an_index_list_carries_one_index_per_row() {
     let indices = graph.input(Shape::matrix(6, 1), Element::Single);
     let mask = graph.one_hot(indices, 4);
     graph.retain(mask);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, mask);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, mask);
     assert_eq!(tasks.len(), 1);
     assert_eq!(Kind::of(tasks[0].kind), Kind::OneHot);
     assert_eq!(tasks[0].a, indices.id());
-    assert_eq!(tape.span(mask, PLACEMENT).elements, 24);
+    assert_eq!(plan.span(mask, PLACEMENT).elements, 24);
     assert_eq!(graph.shape(mask), Shape::matrix(6, 4));
 }
 
@@ -282,13 +282,13 @@ fn a_gather_copies_the_rows_of_the_table_it_names() {
     let indices = graph.input(Shape::matrix(7, 1), Element::Single);
     let picked = graph.gather(table, indices);
     graph.retain(picked);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, picked);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, picked);
     assert_eq!(tasks.len(), 1);
     assert_eq!(Kind::of(tasks[0].kind), Kind::Gather);
     assert_eq!(tasks[0].a, table.id());
     assert_eq!(tasks[0].b, indices.id());
-    assert_eq!(tape.span(picked, PLACEMENT).elements, 21);
+    assert_eq!(plan.span(picked, PLACEMENT).elements, 21);
     assert_eq!(graph.shape(picked), Shape::matrix(7, 3));
 }
 
@@ -301,8 +301,8 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 32, 32]));
     graph.retain(convolved);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, convolved);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, convolved);
     assert_eq!(tasks.len(), 4);
     let mut cursor = 0;
     for task in tasks {
@@ -318,9 +318,9 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
         cursor += task.count;
     }
     assert_eq!(cursor, 8192);
-    assert_eq!(tape.span(convolved, PLACEMENT).elements, 8192);
+    assert_eq!(plan.span(convolved, PLACEMENT).elements, 8192);
     assert_eq!(
-        tape.work(),
+        plan.work(),
         8192 * 27,
         "a convolution accounts every channel of every tap it reads",
     );
@@ -337,8 +337,8 @@ fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
     let output_grad = gradients.of(convolved);
     let weight_grad = gradients.of(filter);
     graph.retain(weight_grad);
-    let tape = tape_with(&graph, wide());
-    let gradient_tasks = tasks(&tape)
+    let plan = plan_with(&graph, wide());
+    let gradient_tasks = tasks(&plan)
         .into_iter()
         .filter(|task| Kind::of(task.kind) == Kind::Conv2dWeightGrad)
         .collect::<Vec<_>>();
@@ -348,7 +348,7 @@ fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
         .map(|task| task.out)
         .expect("a weight gradient splits its positions before it folds them");
     assert_eq!(
-        values_of(&tape)[partials as usize].dims,
+        values_of(&plan)[partials as usize].dims,
         [1, 1, 64, 2304],
         "the chunks of a weight gradient are summed down one row each",
     );
@@ -370,7 +370,7 @@ fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
     }
     assert_eq!(chunks, 128);
     assert_eq!(folded, 2304);
-    assert_eq!(tape.span(weight_grad, PLACEMENT).elements, 2304);
+    assert_eq!(plan.span(weight_grad, PLACEMENT).elements, 2304);
 }
 
 #[test]
@@ -459,9 +459,9 @@ fn a_scatter_adds_updates_into_the_leaf_it_names() {
     let indices = graph.input(Shape::matrix(2, 1), Element::Single);
     let updates = graph.input(Shape::matrix(2, 3), Element::Single);
     graph.scatter_into(table, indices, updates);
-    let tape = tape_with(&graph, narrow());
-    assert_eq!(tape.task_count(), 1);
-    assert!(!tape.updates_weights());
+    let plan = plan_with(&graph, narrow());
+    assert_eq!(plan.task_count(), 1);
+    assert!(!plan.updates_weights());
 }
 
 #[test]
@@ -509,8 +509,8 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
     );
     graph.retain(out);
     for profile in [narrow(), wide()] {
-        let tape = tape_with(&graph, profile);
-        let tiles = tape.attention();
+        let plan = plan_with(&graph, profile);
+        let tiles = plan.attention();
         assert_eq!(
             tiles.len(),
             1,
@@ -521,7 +521,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             tiles[0].shared_bytes() <= profile.shared_bytes(),
             "an attention stages more than the pool its profile offers",
         );
-        let tasks = tasks_of(&tape, out);
+        let tasks = tasks_of(&plan, out);
         let blocks = tokens.div_ceil(profile.workgroup());
         assert_eq!(
             tasks.len() as u32,
@@ -571,9 +571,9 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
     );
     graph.retain(out);
     let profile = wide();
-    let tape = tape_with(&graph, profile);
+    let plan = plan_with(&graph, profile);
     assert_eq!(
-        tape.attention(),
+        plan.attention(),
         [AttentionTile::fit(profile.scratch_bytes(), width)],
         "an attention keys as deep as the pool its profile offers, while the products beside it stage from that same pool",
     );
@@ -596,19 +596,19 @@ fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carrie
     );
     graph.retain(out);
     assert!(refuses(|| {
-        let _ = tape_with(&graph, narrow());
+        let _ = plan_with(&graph, narrow());
     }));
 }
 
 #[test]
-fn a_pointwise_task_walks_the_tape_index_over_the_tensors_it_shares_a_frame_with() {
+fn a_pointwise_task_walks_the_plan_index_over_the_tensors_it_shares_a_frame_with() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(64, 64), Element::Single);
     let scaled = graph.mul(data, graph.fill(Shape::scalar(), 2.0));
     let shifted = graph.add(graph.relu(scaled), data);
     graph.retain(shifted);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks(&tape)
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks(&plan)
         .into_iter()
         .filter(|task| matches!(Kind::of(task.kind), Kind::Unary | Kind::Binary))
         .collect::<Vec<_>>();
@@ -620,7 +620,7 @@ fn a_pointwise_task_walks_the_tape_index_over_the_tensors_it_shares_a_frame_with
         assert_eq!(
             task.geometry,
             strategy::INDEX,
-            "a {} task over tensors of one dense frame walks the index the tape hands it",
+            "a {} task over tensors of one dense frame walks the index the plan hands it",
             Kind::of(task.kind).name(),
         );
     }
@@ -633,8 +633,8 @@ fn a_pointwise_task_walks_the_frame_of_a_row_that_shares_no_frame() {
     let row = graph.input(Shape::of([1, 1, 1, 3]), Element::Single);
     let summed = graph.add(rows, row);
     graph.retain(summed);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, summed);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, summed);
     assert_eq!(tasks.len(), 1);
     assert_eq!(
         tasks[0].geometry,
@@ -651,8 +651,8 @@ fn a_pointwise_task_walks_the_frame_of_a_view_that_shares_no_frame() {
     let turned = graph.permute(square, [0, 1, 3, 2]);
     let walked = graph.add(left, turned);
     graph.retain(walked);
-    let tape = tape_with(&graph, wide());
-    let tasks = tasks_of(&tape, walked);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, walked);
     assert_eq!(tasks.len(), 1);
     assert_eq!(
         tasks[0].geometry,
@@ -662,13 +662,13 @@ fn a_pointwise_task_walks_the_frame_of_a_view_that_shares_no_frame() {
 }
 
 #[test]
-fn a_convert_walks_the_tape_index_over_the_tensor_it_narrows() {
+fn a_convert_walks_the_plan_index_over_the_tensor_it_narrows() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(16, 16), Element::Single);
     let narrowed = graph.cast(graph.relu(data), Element::Half);
     graph.retain(narrowed);
-    let tape = tape_with(&graph, wide());
-    let converts = tasks_of(&tape, narrowed);
+    let plan = plan_with(&graph, wide());
+    let converts = tasks_of(&plan, narrowed);
     assert!(
         !converts.is_empty(),
         "a narrow tensor is written by a convert"

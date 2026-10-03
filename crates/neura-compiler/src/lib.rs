@@ -4,7 +4,7 @@ mod lower;
 mod resource;
 pub use neura_abi as abi;
 use neura_abi::{FieldType, RecordLayout};
-pub use neura_rust_ir as ir;
+pub use neura_ast as ast;
 use neura_shader::{
     Access, Binding, BindingKind, Function, Global, Instruction as DeviceInstruction, Member,
     Module, Scalar, Space, TypeId, ValueId,
@@ -18,7 +18,7 @@ pub use resource::{Read, ReadWrite, Uvec3};
 pub struct Compiler {
     module: Module,
     records: HashMap<String, TypeId>,
-    functions: BTreeMap<String, ir::Function>,
+    functions: BTreeMap<String, ast::Function>,
     lowered: HashMap<String, u32>,
     globals: HashMap<String, u32>,
     scalars: HashMap<String, TypeId>,
@@ -206,7 +206,7 @@ impl Compiler {
         );
     }
 
-    pub fn function(&mut self, function: ir::Function) {
+    pub fn function(&mut self, function: ast::Function) {
         let name = function.name.clone();
         assert!(
             self.functions.insert(name.clone(), function).is_none(),
@@ -224,24 +224,25 @@ impl Compiler {
         self.function(function);
     }
 
-    pub fn insert_case(&mut self, name: &str, arm: ir::Arm) {
+    pub fn insert_case(&mut self, name: &str, arm: ast::Arm) {
         let function = self
             .functions
             .get_mut(name)
             .unwrap_or_else(|| panic!("device dispatcher {name} does not exist"));
         assert_eq!(
-            ir::match_count(&function.body),
+            ast::match_count(&function.body),
             1,
             "device dispatcher {name} has exactly one match"
         );
-        let cases = ir::match_cases(&mut function.body).expect("a device dispatcher has one match");
+        let cases =
+            ast::match_cases(&mut function.body).expect("a device dispatcher has one match");
         assert!(
             !cases.iter().any(|present| present.pattern == arm.pattern),
             "device dispatcher {name} has a duplicate case"
         );
         let fallback = cases
             .iter()
-            .position(|present| matches!(present.pattern, ir::Pattern::Default))
+            .position(|present| matches!(present.pattern, ast::Pattern::Default))
             .unwrap_or(cases.len());
         cases.insert(fallback, arm);
     }
@@ -253,12 +254,12 @@ impl Compiler {
             .unwrap_or_else(|| panic!("Rust device dispatcher {name} does not exist"));
         let mut found = false;
         for statement in &mut function.body {
-            if let ir::Statement::Match { arms, .. } = statement {
+            if let ast::Statement::Match { arms, .. } = statement {
                 assert!(!found, "a specialized dispatcher has one Rust match");
                 found = true;
                 arms.retain(|arm| match &arm.pattern {
-                    ir::Pattern::Default => true,
-                    ir::Pattern::Constant(path) => cases.contains(path),
+                    ast::Pattern::Default => true,
+                    ast::Pattern::Constant(path) => cases.contains(path),
                     _ => panic!("a device dispatcher requires qualified Rust constants"),
                 });
             }
@@ -343,7 +344,7 @@ impl Compiler {
     fn reachable(&self, entry: &str) -> Vec<String> {
         fn visit(
             name: &str,
-            functions: &BTreeMap<String, ir::Function>,
+            functions: &BTreeMap<String, ast::Function>,
             path: &mut Vec<String>,
             order: &mut Vec<String>,
         ) {
@@ -385,17 +386,17 @@ impl Compiler {
     }
 }
 
-fn calls(body: &[ir::Statement]) -> Vec<String> {
+fn calls(body: &[ast::Statement]) -> Vec<String> {
     let mut names = Vec::new();
     for statement in body {
         match statement {
-            ir::Statement::Expression(expr) => calls_of_expression(expr, &mut names),
-            ir::Statement::Let { value, .. } => calls_of_expression(value, &mut names),
-            ir::Statement::Assign { place, value, .. } => {
+            ast::Statement::Expression(expr) => calls_of_expression(expr, &mut names),
+            ast::Statement::Let { value, .. } => calls_of_expression(value, &mut names),
+            ast::Statement::Assign { place, value, .. } => {
                 calls_of_expression(place, &mut names);
                 calls_of_expression(value, &mut names);
             }
-            ir::Statement::If {
+            ast::Statement::If {
                 condition,
                 accept,
                 reject,
@@ -404,13 +405,13 @@ fn calls(body: &[ir::Statement]) -> Vec<String> {
                 names.extend(calls(accept));
                 names.extend(calls(reject));
             }
-            ir::Statement::Match { selector, arms } => {
+            ast::Statement::Match { selector, arms } => {
                 calls_of_expression(selector, &mut names);
                 for arm in arms {
                     names.extend(calls(&arm.body));
                 }
             }
-            ir::Statement::For {
+            ast::Statement::For {
                 start,
                 end,
                 step,
@@ -422,26 +423,26 @@ fn calls(body: &[ir::Statement]) -> Vec<String> {
                 }
                 names.extend(calls(body));
             }
-            ir::Statement::While { condition, body } => {
+            ast::Statement::While { condition, body } => {
                 calls_of_expression(condition, &mut names);
                 names.extend(calls(body));
             }
-            ir::Statement::Loop(body) | ir::Statement::Block(body) => {
+            ast::Statement::Loop(body) | ast::Statement::Block(body) => {
                 names.extend(calls(body));
             }
-            ir::Statement::Return(value) => {
+            ast::Statement::Return(value) => {
                 if let Some(value) = value {
                     calls_of_expression(value, &mut names);
                 }
             }
-            ir::Statement::Break | ir::Statement::Continue => {}
+            ast::Statement::Break | ast::Statement::Continue => {}
         }
     }
     names
 }
 
-fn calls_of_expression(expression: &ir::Expression, names: &mut Vec<String>) {
-    use ir::Expression as E;
+fn calls_of_expression(expression: &ast::Expression, names: &mut Vec<String>) {
+    use ast::Expression as E;
     match expression {
         E::Call { name, arguments } => {
             names.push(name.clone());

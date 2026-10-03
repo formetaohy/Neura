@@ -40,17 +40,17 @@ fn sensor<'g>(runtime: &'g Runtime, graph: &Graph<'g>, samples: u32) -> Sensor<'
 }
 
 #[test]
-fn a_recompile_of_one_shape_shares_the_device_tape_but_not_the_tensors() {
+fn a_recompile_of_one_shape_shares_the_device_plan_but_not_the_tensors() {
     let runtime = open();
-    let before = runtime.device_tapes();
+    let before = runtime.resident_plans();
     let first_graph = Graph::new();
     let second_graph = Graph::new();
     let first = sensor(&runtime, &first_graph, 16);
     let second = sensor(&runtime, &second_graph, 16);
     assert_eq!(
-        runtime.device_tapes(),
+        runtime.resident_plans(),
         before + 1,
-        "two compilations of one shape run on one device tape",
+        "two compilations of one shape run on one device plan",
     );
     let first_input = random(16 * 4, 3);
     let second_input = random(16 * 4, 5);
@@ -73,9 +73,9 @@ fn a_recompile_of_one_shape_shares_the_device_tape_but_not_the_tensors() {
 }
 
 #[test]
-fn a_session_of_varying_batches_keeps_one_tape_per_shape() {
+fn a_session_of_varying_batches_keeps_one_plan_per_shape() {
     let runtime = open();
-    let before = runtime.device_tapes();
+    let before = runtime.resident_plans();
     let graphs: Vec<Graph> = [8u32, 16, 8, 24, 16].iter().map(|_| Graph::new()).collect();
     let mut programs = Vec::new();
     for (index, (graph, samples)) in graphs.iter().zip([8u32, 16, 8, 24, 16]).enumerate() {
@@ -92,16 +92,16 @@ fn a_session_of_varying_batches_keeps_one_tape_per_shape() {
         programs.push(sensor.program);
     }
     assert_eq!(
-        runtime.device_tapes(),
+        runtime.resident_plans(),
         before + 3,
-        "a batch of three shapes keeps three device tapes",
+        "a batch of three shapes keeps three resident plans",
     );
 }
 
 #[test]
 fn a_dropped_program_recycles_its_device_tape() {
     let runtime = open();
-    let before = runtime.device_tapes();
+    let before = runtime.resident_plans();
     let graph = Graph::new();
     {
         let sensor = sensor(&runtime, &graph, 12);
@@ -116,9 +116,9 @@ fn a_dropped_program_recycles_its_device_tape() {
         );
     }
     assert_eq!(
-        runtime.device_tapes(),
+        runtime.resident_plans(),
         before,
-        "a program nobody holds leaves no device tape behind"
+        "a program nobody holds leaves no resident plan behind"
     );
     let again = sensor(&runtime, &graph, 12);
     let input = random(12 * 4, 13);

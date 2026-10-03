@@ -162,11 +162,11 @@ fn a_deployment_graph_serves_the_store_a_training_graph_learned() {
     let serving = runtime.compile(&deployment, &weights);
     assert!(
         !serving.updates_weights(),
-        "a deployment tape carries no step of a descent",
+        "a deployment plan carries no step of a descent",
     );
     assert!(
         serving.task_count() < program.task_count(),
-        "a deployment tape carries {} tasks where the tape that trained it carries {}",
+        "a deployment plan carries {} tasks where the plan that trained it carries {}",
         serving.task_count(),
         program.task_count(),
     );

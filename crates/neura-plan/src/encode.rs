@@ -110,7 +110,7 @@ struct Placed {
     scale: f32,
 }
 
-pub struct Tape {
+pub struct Plan {
     profile: Profile,
     kinds: Vec<Kind>,
     elements: Vec<Element>,
@@ -131,12 +131,12 @@ pub struct Tape {
     work: u64,
 }
 
-impl Tape {
+impl Plan {
     pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile) -> Self {
-        Self::plan(&graph.snapshot(), profile, alignment)
+        Self::compile(&graph.snapshot(), profile, alignment)
     }
 
-    fn plan(state: &GraphSnapshot, profile: Profile, alignment: u64) -> Self {
+    fn compile(state: &GraphSnapshot, profile: Profile, alignment: u64) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
@@ -182,7 +182,7 @@ impl Tape {
             records.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
-        let mut tape = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
+        let mut task_bytes = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
         let mut updates_weights = false;
         let mut geometries = vec![0u32; matmul_tiles.len()];
@@ -214,7 +214,7 @@ impl Tape {
                     assert!(
                         task.geometry == neura_abi::strategy::FRAME
                             || task.geometry == neura_abi::strategy::INDEX,
-                        "a {} task walks its reads by the frame or by the tape index, not by geometry {}",
+                        "a {} task walks its reads by the frame or by the plan index, not by geometry {}",
                         task.kind.name(),
                         task.geometry,
                     );
@@ -298,7 +298,7 @@ impl Tape {
                 updates_weights = true;
             }
             work += task.work;
-            tape.extend_from_slice(bytemuck::bytes_of(&record));
+            task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
         let segments = schedule.segments().to_vec();
@@ -346,7 +346,7 @@ impl Tape {
             profile,
             kinds,
             elements,
-            tasks: tape,
+            tasks: task_bytes,
             values: records,
             steps,
             segments,
@@ -597,11 +597,11 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
             match last_writer[*storage as usize] {
                 Some(writer) => assert!(
                     writer < position,
-                    "task {position} reads a tensor that its own tape only writes later",
+                    "task {position} reads a tensor that its own plan only writes later",
                 ),
                 None => assert!(
                     held(values, *storage as usize),
-                    "task {position} reads a tensor no task of the tape writes before it",
+                    "task {position} reads a tensor no task of the plan writes before it",
                 ),
             }
         }

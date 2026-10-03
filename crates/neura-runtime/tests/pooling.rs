@@ -127,7 +127,7 @@ fn a_mean_pooled_gradient_matches_finite_differences() {
         assert!(
             (numeric - analytic[element]).abs()
                 <= 1e-3 + 1e-2 * analytic[element].abs().max(numeric.abs()),
-            "element {element}: the tape gives {} where averaging slopes by {numeric}",
+            "element {element}: the plan gives {} where averaging slopes by {numeric}",
             analytic[element],
         );
     }

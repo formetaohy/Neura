@@ -1,5 +1,5 @@
 [package]
-name = "neura-rust-ir"
+name = "neura-ast"
 version.workspace = true
 edition.workspace = true
 description = "The abstract syntax tree of the Rust device DSL"

@@ -692,7 +692,7 @@ fn a_chain_of_updates_rides_one_wave() {
 }
 
 #[test]
-fn a_tape_runs_a_whole_training_step_in_one_submission() {
+fn a_plan_runs_a_whole_training_step_in_one_submission() {
     let graph = Graph::new();
     let weight = graph.parameter(
         Shape::matrix(4, 3),
@@ -817,7 +817,7 @@ fn a_graph_without_tasks_is_refused_by_the_runtime() {
     }));
     assert!(
         outcome.is_err(),
-        "a program with an empty tape was compiled"
+        "a program with an empty plan was compiled"
     );
 }
 
@@ -909,7 +909,7 @@ fn a_parameter_read_before_any_run_holds_its_seed() {
 }
 
 #[test]
-fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
+fn a_program_binds_exactly_the_memory_its_plan_lays_out() {
     let graph = Graph::new();
     let data = graph.input(Shape::vector(1024), Element::Single);
     let out = graph.relu(graph.mul(data, data));
@@ -924,7 +924,7 @@ fn a_program_binds_exactly_the_memory_its_tape_lays_out() {
     assert_eq!(program.heap_bytes(), runtime.heap_bytes());
     assert!(
         program.device_bytes() >= program.tensor_bytes(),
-        "a tape carries {} bytes of device memory beside its {} byte tensors",
+        "a plan carries {} bytes of device memory beside its {} byte tensors",
         program.device_bytes(),
         program.tensor_bytes(),
     );
@@ -1101,7 +1101,7 @@ fn a_product_that_splits_its_depth_keeps_the_menu_of_one_program() {
 }
 
 #[test]
-fn one_pool_lets_a_tape_stage_every_body_it_runs() {
+fn one_pool_lets_a_plan_stage_every_body_it_runs() {
     let runtime = open();
     let width = 8u32;
     let tokens = 4u32;
@@ -1140,7 +1140,7 @@ fn one_pool_lets_a_tape_stage_every_body_it_runs() {
     for window in sampled.windows(2) {
         assert_eq!(
             window[0], window[1],
-            "a tape that stages a product, an attention, a row fold and a sampling head in one pool samples another index through another profile",
+            "a plan that stages a product, an attention, a row fold and a sampling head in one pool samples another index through another profile",
         );
     }
 }
@@ -1441,14 +1441,14 @@ fn a_second_compile_of_one_graph_plans_once() {
         1,
         "a graph that did not move is planned once",
     );
-    assert_eq!(runtime.device_tapes(), 1);
+    assert_eq!(runtime.resident_plans(), 1);
     assert_eq!(again.task_count(), first.task_count());
     runtime.write(&again, data, &vec![0.25; 256 * 64]);
     runtime.run(&again);
     assert_eq!(
         runtime.read(&again, hidden),
         produced,
-        "the tape a second compile hands back computes what the tape the first one built computed",
+        "the plan a second compile hands back computes what the plan the first one built computed",
     );
     let rectified = graph.relu(hidden);
     graph.retain(rectified);

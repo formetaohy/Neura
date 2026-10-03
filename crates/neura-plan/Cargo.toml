@@ -1,8 +1,8 @@
 [package]
-name = "neura-tape"
+name = "neura-plan"
 version.workspace = true
 edition.workspace = true
-description = "Graph lowering, wave scheduling and device tape encoding"
+description = "Graph lowering, wave scheduling and device plan encoding"
 license.workspace = true
 repository.workspace = true
 

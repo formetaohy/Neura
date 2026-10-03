@@ -61,7 +61,7 @@ fn step<'r>(runtime: &'r Runtime, frozen: bool) -> Program<'r> {
 }
 
 #[test]
-fn a_frozen_base_shortens_the_tape_that_carries_it() {
+fn a_frozen_base_shortens_the_plan_that_carries_it() {
     let runtime = open();
     let frozen = {
         let program = step(&runtime, true);

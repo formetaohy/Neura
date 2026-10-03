@@ -671,6 +671,6 @@ fn a_recomputed_attention_block_matches_the_gradients_it_replaced() {
     }
     assert!(
         program.task_count() > plain_program.task_count(),
-        "a recomputed block re-runs the tape prefix it was authored into",
+        "a recomputed block re-runs the plan prefix it was authored into",
     );
 }

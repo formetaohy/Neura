@@ -6,8 +6,8 @@ use neura_profile::{Budget, Profile};
 fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
 }
+use neura_plan::Plan;
 use neura_runtime::{Runtime, RuntimeRequest};
-use neura_tape::Tape;
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -91,7 +91,7 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256), Element::Single);
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = Tape::of(&graph, 256, narrow());
+    let encoding = Plan::of(&graph, 256, narrow());
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() >= 2 * 256 * 4,
@@ -223,7 +223,7 @@ fn a_narrow_parameter_updates_in_place() {
             initial[2] - 1.0,
             initial[3] - 1.0,
         ],
-        "every run of a tape packs the step it computed over its own storage",
+        "every run of a plan packs the step it computed over its own storage",
     );
 }
 
@@ -348,7 +348,7 @@ fn a_program_wider_than_the_heap_is_refused() {
         refuses(|| {
             let _ = runtime.compile(&graph, &weights);
         }),
-        "a tape whose tensors outrun the device heap was compiled",
+        "a plan whose tensors outrun the device heap was compiled",
     );
 }
 
@@ -491,7 +491,7 @@ fn a_store_of_another_runtime_is_refused() {
         refuses(|| {
             let _ = second.compile(&graph, &weights);
         }),
-        "a weight store of another runtime's heap was compiled into a tape",
+        "a weight store of another runtime's heap was compiled into a plan",
     );
     let program = first.compile(&graph, &weights);
     assert!(

@@ -1,10 +1,11 @@
 use super::{FunctionLower, Symbol, Typed};
-use crate::{DeviceInstruction, ir};
+use crate::DeviceInstruction;
+use crate::ast;
 use neura_shader::{Barrier, BinaryOp, MatrixLayout};
 
 impl FunctionLower<'_> {
-    pub(super) fn statements(&mut self, statements: &[ir::Statement]) {
-        use ir::{Expression as E, Statement as S};
+    pub(super) fn statements(&mut self, statements: &[ast::Statement]) {
+        use crate::ast::{Expression as E, Statement as S};
         for statement in statements {
             match statement {
                 S::Let {
@@ -82,16 +83,16 @@ impl FunctionLower<'_> {
                     operator,
                 } => {
                     let op = operator.map(|operator| match operator {
-                        ir::BinaryOperator::Add => BinaryOp::Add,
-                        ir::BinaryOperator::Subtract => BinaryOp::Subtract,
-                        ir::BinaryOperator::Multiply => BinaryOp::Multiply,
-                        ir::BinaryOperator::Divide => BinaryOp::Divide,
-                        ir::BinaryOperator::Modulo => BinaryOp::Modulo,
-                        ir::BinaryOperator::BitAnd => BinaryOp::And,
-                        ir::BinaryOperator::BitOr => BinaryOp::Or,
-                        ir::BinaryOperator::BitXor => BinaryOp::Xor,
-                        ir::BinaryOperator::ShiftLeft => BinaryOp::ShiftLeft,
-                        ir::BinaryOperator::ShiftRight => BinaryOp::ShiftRight,
+                        ast::BinaryOperator::Add => BinaryOp::Add,
+                        ast::BinaryOperator::Subtract => BinaryOp::Subtract,
+                        ast::BinaryOperator::Multiply => BinaryOp::Multiply,
+                        ast::BinaryOperator::Divide => BinaryOp::Divide,
+                        ast::BinaryOperator::Modulo => BinaryOp::Modulo,
+                        ast::BinaryOperator::BitAnd => BinaryOp::And,
+                        ast::BinaryOperator::BitOr => BinaryOp::Or,
+                        ast::BinaryOperator::BitXor => BinaryOp::Xor,
+                        ast::BinaryOperator::ShiftLeft => BinaryOp::ShiftLeft,
+                        ast::BinaryOperator::ShiftRight => BinaryOp::ShiftRight,
                         other => panic!("{other:?} cannot update a device place"),
                     });
                     self.assignment(place, value, op);
@@ -122,14 +123,14 @@ impl FunctionLower<'_> {
                     let mut default = Vec::new();
                     for arm in arms {
                         match &arm.pattern {
-                            ir::Pattern::Default => {
+                            ast::Pattern::Default => {
                                 default = self.block(|lower| lower.statements(&arm.body));
                             }
-                            ir::Pattern::Integer(value) => {
+                            ast::Pattern::Integer(value) => {
                                 let body = self.block(|lower| lower.statements(&arm.body));
                                 cases.push((*value, body));
                             }
-                            ir::Pattern::Constant(name) => {
+                            ast::Pattern::Constant(name) => {
                                 let value = self.compiler.constant_u32(name);
                                 let body = self.block(|lower| lower.statements(&arm.body));
                                 cases.push((value, body));
@@ -138,7 +139,7 @@ impl FunctionLower<'_> {
                     }
                     assert!(
                         arms.iter()
-                            .any(|arm| matches!(arm.pattern, ir::Pattern::Default)),
+                            .any(|arm| matches!(arm.pattern, ast::Pattern::Default)),
                         "a device match covers its default"
                     );
                     self.push(DeviceInstruction::Switch {
@@ -202,7 +203,12 @@ impl FunctionLower<'_> {
         }
     }
 
-    fn assignment(&mut self, left: &ir::Expression, right: &ir::Expression, op: Option<BinaryOp>) {
+    fn assignment(
+        &mut self,
+        left: &ast::Expression,
+        right: &ast::Expression,
+        op: Option<BinaryOp>,
+    ) {
         let destination = self
             .place(left)
             .expect("a device assignment has a writable place");
@@ -228,8 +234,8 @@ impl FunctionLower<'_> {
         });
     }
 
-    pub(super) fn workgroup_uniform_load(&mut self, arguments: &[ir::Expression]) -> Typed {
-        use ir::Expression as E;
+    pub(super) fn workgroup_uniform_load(&mut self, arguments: &[ast::Expression]) -> Typed {
+        use crate::ast::Expression as E;
         assert_eq!(
             arguments.len(),
             1,
@@ -248,8 +254,8 @@ impl FunctionLower<'_> {
         })
     }
 
-    fn expression_statement(&mut self, expr: &ir::Expression) {
-        use ir::Expression as E;
+    fn expression_statement(&mut self, expr: &ast::Expression) {
+        use crate::ast::Expression as E;
         if let E::Call { name, arguments } = expr {
             match name.as_str() {
                 "workgroup_barrier" => {
@@ -324,11 +330,11 @@ impl FunctionLower<'_> {
     fn for_loop(
         &mut self,
         name: &str,
-        start: &ir::Expression,
-        end: &ir::Expression,
-        step: &ir::Expression,
+        start: &ast::Expression,
+        end: &ast::Expression,
+        step: &ast::Expression,
         unroll: bool,
-        statements: &[ir::Statement],
+        statements: &[ast::Statement],
     ) {
         if unroll {
             let first = self.compiler.evaluate(start);

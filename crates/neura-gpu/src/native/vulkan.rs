@@ -8,9 +8,10 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
     DeviceType, Limits,
 };
-use crate::pipeline::{BoundBuffer, ComputeProgram};
+use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
+use neura_shader::ComputeProgram;
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString};

@@ -1,5 +1,5 @@
+use neura_ast::Expression;
 use neura_pointwise::{self as op, OPS, Role};
-use neura_rust_ir::Expression;
 
 fn refuses(action: impl FnOnce() + std::panic::UnwindSafe) -> bool {
     std::panic::catch_unwind(action).is_err()
