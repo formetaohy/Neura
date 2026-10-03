@@ -242,11 +242,13 @@ dependencies = [
 name = "neura-compiler"
 version = "0.4.0"
 dependencies = [
- "naga",
  "neura-abi",
+ "neura-hlsl",
  "neura-ir",
  "neura-macro",
- "spirv",
+ "neura-msl",
+ "neura-shader-ir",
+ "neura-spirv",
 ]
 
 [[package]]
@@ -275,6 +277,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "neura-hlsl"
+version = "0.4.0"
+dependencies = [
+ "neura-shader-ir",
+]
+
+[[package]]
 name = "neura-ir"
 version = "0.4.0"
 
@@ -295,6 +304,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "neura-msl"
+version = "0.4.0"
+dependencies = [
+ "neura-shader-ir",
 ]
 
 [[package]]
@@ -370,6 +386,17 @@ dependencies = [
  "neura-kernel",
  "neura-op",
  "neura-profile",
+]
+
+[[package]]
+name = "neura-shader-ir"
+version = "0.4.0"
+
+[[package]]
+name = "neura-spirv"
+version = "0.4.0"
+dependencies = [
+ "neura-shader-ir",
 ]
 
 [[package]]

@@ -589,6 +589,8 @@ fn matmul_tile(profile: Profile, rows: u32, columns: u32, depth: u32, planes: u3
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
 const STREAMED_TRAFFIC_WEIGHT: u128 = 16;
+const COOPERATIVE_STAGE_WEIGHT: u128 = 160;
+const COOPERATIVE_TENSOR_WEIGHT: u128 = 1;
 
 fn matmul_cost(
     tile: MatmulTile,
@@ -603,19 +605,21 @@ fn matmul_cost(
     let tiles = u128::from(planes)
         * u128::from(rows.div_ceil(tile.rows()))
         * u128::from(columns.div_ceil(tile.columns()));
-    let registers = u128::from(tile.registers());
     let blocks = u128::from(depth).div_ceil(u128::from(tile.depth()));
     let threads = u128::from(tile.threads());
-    let operands = u128::from(tile.register_rows() + tile.register_columns());
     let splits = u128::from(matmul_splits(tile, rows, columns, depth, planes, profile));
     let work = tiles * block_rows * block_columns * u128::from(depth);
     let cost = match tile.strategy() {
         MatmulStrategy::Staged => {
+            let registers = u128::from(tile.registers());
+            let operands = u128::from(tile.register_rows() + tile.register_columns());
             let staged = registers + operands;
             let panels = tiles * blocks * (block_rows + block_columns) * u128::from(tile.depth());
             work * staged / registers + panels + tiles * blocks * threads * BARRIER_SLOTS
         }
         MatmulStrategy::Streamed => {
+            let registers = u128::from(tile.registers());
+            let operands = u128::from(tile.register_rows() + tile.register_columns());
             let bands = u128::from(rows.div_ceil(tile.rows()));
             let reads = u128::from(planes)
                 * (bands * u128::from(depth) * u128::from(columns)
@@ -623,6 +627,27 @@ fn matmul_cost(
                         * u128::from(depth)
                         * u128::from(rows));
             STREAMED_LOAD_WEIGHT * work * operands / registers + STREAMED_TRAFFIC_WEIGHT * reads
+        }
+        MatmulStrategy::Cooperative => {
+            let subgroups = u128::from(tile.subgroup_rows() * tile.subgroup_columns());
+            let fragment_rows = u128::from(tile.rows()) / u128::from(tile.subgroup_rows());
+            let fragment_columns = u128::from(tile.columns()) / u128::from(tile.subgroup_columns());
+            let fragment_depth = u128::from(tile.depth());
+            let panels = tiles
+                * u128::from(depth.div_ceil(tile.depth()))
+                * (block_rows + block_columns)
+                * u128::from(tile.depth());
+            let tensor = tiles * block_rows * block_columns * u128::from(depth)
+                / fragment_rows
+                / fragment_columns
+                / fragment_depth
+                * subgroups
+                * u128::from(tile.threads());
+            let copy = tiles * block_rows * block_columns;
+            COOPERATIVE_STAGE_WEIGHT * panels
+                + COOPERATIVE_TENSOR_WEIGHT * tensor
+                + copy
+                + tiles * blocks * threads * BARRIER_SLOTS
         }
     };
     cost.div_ceil((tiles * splits).min(u128::from(profile.workgroups())))

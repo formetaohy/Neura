@@ -1,6 +1,8 @@
 use crate::buffer::GpuBuffer;
 use crate::cache::ArtifactCache;
-use crate::capability::{AdapterId, AdapterInfo, AdapterPolicy, Backends, Limits, PowerPreference};
+use crate::capability::{
+    AdapterId, AdapterInfo, AdapterPolicy, Backends, Capability, Limits, PowerPreference,
+};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
 use crate::pipeline::{ComputeProgram, PipelineHandle};
@@ -89,6 +91,7 @@ pub(crate) struct DeviceState {
     pub(crate) native: NativeDevice,
     pub(crate) info: AdapterInfo,
     pub(crate) limits: Limits,
+    pub(crate) capability: Capability,
     pub(crate) artifacts: ArtifactCache,
 }
 
@@ -125,7 +128,7 @@ impl Device {
             Some(root) => ArtifactCache::at(root.clone()),
             None => ArtifactCache::default_location(),
         };
-        let (native, info, limits) = native::open(request, artifacts.clone())?;
+        let (native, info, limits, capability) = native::open(request, artifacts.clone())?;
         if !limits.supports(&Limits::BASELINE) {
             return Err(GpuUnavailable::UnsupportedLimits { info, limits });
         }
@@ -139,6 +142,7 @@ impl Device {
                 native,
                 info,
                 limits,
+                capability,
                 artifacts,
             }),
         })
@@ -150,6 +154,10 @@ impl Device {
 
     pub fn limits(&self) -> &Limits {
         &self.state.limits
+    }
+
+    pub fn capability(&self) -> &Capability {
+        &self.state.capability
     }
 
     pub fn artifact_cache(&self) -> &ArtifactCache {
@@ -269,6 +277,10 @@ impl GpuContext {
 
     pub fn limits(&self) -> &Limits {
         self.device.limits()
+    }
+
+    pub fn capability(&self) -> &Capability {
+        self.device.capability()
     }
 
     pub fn artifact_cache(&self) -> &ArtifactCache {

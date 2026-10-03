@@ -5,7 +5,8 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
+    DeviceType, Limits,
 };
 use crate::pipeline::{BoundBuffer, ComputeProgram};
 use crate::submission::{Command, Write};
@@ -151,6 +152,103 @@ pub(crate) struct Buffer {
     resource: Arc<BufferResource>,
 }
 
+fn instance_fn<T>(owner: &InstanceOwner, name: &CStr) -> Option<T> {
+    let raw = unsafe {
+        owner
+            ._entry
+            .get_instance_proc_addr(owner.raw.handle(), name.as_ptr())
+    };
+    let raw = raw?;
+    Some(unsafe { std::mem::transmute_copy(&raw) })
+}
+
+fn cooperation(
+    owner: &InstanceOwner,
+    physical: vk::PhysicalDevice,
+    available: &[vk::ExtensionProperties],
+) -> Option<CooperativeMatrix> {
+    let advertised = available.iter().any(|extension| unsafe {
+        CStr::from_ptr(extension.extension_name.as_ptr()) == ash::khr::cooperative_matrix::NAME
+    });
+    if !advertised {
+        return None;
+    }
+    let properties2: vk::PFN_vkGetPhysicalDeviceProperties2 =
+        instance_fn(owner, c"vkGetPhysicalDeviceProperties2KHR")
+            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceProperties2"))?;
+    let features2: vk::PFN_vkGetPhysicalDeviceFeatures2 =
+        instance_fn(owner, c"vkGetPhysicalDeviceFeatures2KHR")
+            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceFeatures2"))?;
+    let cooperative_properties: vk::PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR =
+        instance_fn(owner, c"vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR")?;
+    let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+    let mut stages = vk::PhysicalDeviceCooperativeMatrixPropertiesKHR::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default();
+    properties = properties.push_next(&mut subgroup).push_next(&mut stages);
+    unsafe {
+        properties2(physical, &mut properties);
+    }
+    if !stages
+        .cooperative_matrix_supported_stages
+        .contains(vk::ShaderStageFlags::COMPUTE)
+    {
+        return None;
+    }
+    let mut memory_model = vk::PhysicalDeviceVulkan12Features::default();
+    let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default();
+    features = features.push_next(&mut memory_model).push_next(&mut matrix);
+    unsafe {
+        features2(physical, &mut features);
+    }
+    if memory_model.shader_float16 != vk::TRUE
+        || memory_model.vulkan_memory_model != vk::TRUE
+        || memory_model.vulkan_memory_model_device_scope != vk::TRUE
+        || matrix.cooperative_matrix != vk::TRUE
+    {
+        return None;
+    }
+    let mut count = 0u32;
+    if unsafe { cooperative_properties(physical, &mut count, std::ptr::null_mut()) }
+        != vk::Result::SUCCESS
+    {
+        return None;
+    }
+    let mut properties = vec![vk::CooperativeMatrixPropertiesKHR::default(); count as usize];
+    if count == 0
+        || unsafe { cooperative_properties(physical, &mut count, properties.as_mut_ptr()) }
+            != vk::Result::SUCCESS
+    {
+        return None;
+    }
+    properties.truncate(count as usize);
+    let mut best: Option<(u32, u32, u32)> = None;
+    for property in properties {
+        if property.a_type != vk::ComponentTypeKHR::FLOAT16
+            || property.b_type != vk::ComponentTypeKHR::FLOAT16
+            || property.c_type != vk::ComponentTypeKHR::FLOAT32
+            || property.result_type != vk::ComponentTypeKHR::FLOAT32
+            || property.scope != vk::ScopeKHR::SUBGROUP
+            || property.saturating_accumulation != vk::FALSE
+        {
+            continue;
+        }
+        let shape = (property.m_size, property.n_size, property.k_size);
+        let volume =
+            |shape: (u32, u32, u32)| u64::from(shape.0) * u64::from(shape.1) * u64::from(shape.2);
+        if best.is_none_or(|present| volume(shape) > volume(present)) {
+            best = Some(shape);
+        }
+    }
+    let (rows, columns, depth) = best?;
+    Some(CooperativeMatrix {
+        subgroup: subgroup.subgroup_size,
+        rows,
+        columns,
+        depth,
+    })
+}
+
 struct PipelineResource {
     raw: ash::Device,
     layout: vk::PipelineLayout,
@@ -246,7 +344,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         artifacts: ArtifactCache,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let extensions =
             complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
@@ -255,11 +353,19 @@ impl Device {
             CStr::from_ptr(extension.extension_name.as_ptr())
                 == ash::khr::portability_enumeration::NAME
         });
-        let extension_names = if portability {
-            vec![ash::khr::portability_enumeration::NAME.as_ptr()]
-        } else {
-            Vec::new()
-        };
+        let instance_extensions =
+            complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
+                .map_err(|error| format!("enumerating instance extensions: {error:?}"))?;
+        let mut extension_names = Vec::new();
+        if portability {
+            extension_names.push(ash::khr::portability_enumeration::NAME.as_ptr());
+        }
+        if instance_extensions.iter().any(|extension| unsafe {
+            CStr::from_ptr(extension.extension_name.as_ptr())
+                == ash::khr::get_physical_device_properties2::NAME
+        }) {
+            extension_names.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
+        }
         let diagnostics =
             CString::new("VK_LAYER_KHRONOS_validation").expect("a constant layer name");
         let layers = if cfg!(debug_assertions)
@@ -274,9 +380,12 @@ impl Device {
             Vec::new()
         };
         let application = CString::new("neura").expect("a constant application name");
+        let loaded = unsafe { entry.try_enumerate_instance_version() }
+            .map_err(|error| format!("reading the loader version: {error:?}"))?
+            .unwrap_or(vk::API_VERSION_1_0);
         let application_info = vk::ApplicationInfo::default()
             .application_name(&application)
-            .api_version(vk::API_VERSION_1_1);
+            .api_version(loaded.min(vk::API_VERSION_1_3));
         let flags = if portability {
             vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
         } else {
@@ -372,14 +481,35 @@ impl Device {
                 CStr::from_ptr(extension.extension_name.as_ptr())
                     == ash::khr::portability_subset::NAME
             });
-            let device_extensions = if portability {
+            let capability = if vk::api_version_major(props.api_version) > 1
+                || vk::api_version_minor(props.api_version) >= 3
+            {
+                cooperation(&owner, physical, &available)
+            } else {
+                None
+            };
+            let mut device_extensions = if portability {
                 vec![ash::khr::portability_subset::NAME.as_ptr()]
             } else {
                 Vec::new()
             };
-            let config = vk::DeviceCreateInfo::default()
+            if capability.is_some() {
+                device_extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
+            }
+            let mut memory_model = vk::PhysicalDeviceVulkan12Features::default();
+            let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
+            let mut features = vk::PhysicalDeviceFeatures2::default();
+            let mut config = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queues)
                 .enabled_extension_names(&device_extensions);
+            if capability.is_some() {
+                memory_model.shader_float16 = vk::TRUE;
+                memory_model.vulkan_memory_model = vk::TRUE;
+                memory_model.vulkan_memory_model_device_scope = vk::TRUE;
+                matrix.cooperative_matrix = vk::TRUE;
+                features = features.push_next(&mut memory_model).push_next(&mut matrix);
+                config = config.push_next(&mut features);
+            }
             let raw = match unsafe { owner.raw.create_device(physical, &config, None) } {
                 Ok(raw) => raw,
                 Err(error) => {
@@ -461,6 +591,9 @@ impl Device {
                 }),
                 adapter_info,
                 limits,
+                Capability {
+                    cooperative_matrix: capability,
+                },
             ));
         }
         Err(DeviceFailure::reason(if failures.is_empty() {

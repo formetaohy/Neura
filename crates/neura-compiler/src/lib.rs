@@ -4,17 +4,11 @@ mod lower;
 mod program;
 mod resource;
 pub use neura_abi as abi;
-pub use neura_ir as ir;
-mod uniform;
-mod workgroup;
-
-use naga::{
-    AddressSpace, ArraySize, GlobalVariable, Handle, MemoryDecorations, Module, Scalar,
-    StorageAccess, StructMember, Type, TypeInner, VectorSize,
-};
 use neura_abi::{FieldType, RecordLayout};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::num::NonZeroU32;
+pub use neura_ir as ir;
+pub use neura_shader_ir as shader;
+use neura_shader_ir::{Binding, Function, Global, Module, Scalar, Space, TypeId};
+use std::collections::{BTreeMap, HashMap};
 
 pub use neura_macro::{kernel, module};
 pub use program::{
@@ -22,151 +16,127 @@ pub use program::{
     ShaderTranslation, describe, reflect,
 };
 pub use resource::{Read, ReadWrite, Uvec3};
-
-#[derive(Clone, Copy)]
-struct Global {
-    handle: Handle<GlobalVariable>,
-    ty: Handle<Type>,
-}
+pub(crate) use shader::Instruction as DeviceInstruction;
 
 pub struct Compiler {
     module: Module,
-    types: HashMap<String, Handle<Type>>,
+    records: HashMap<String, TypeId>,
     functions: BTreeMap<String, ir::Function>,
-    lowered: HashMap<String, Handle<naga::Function>>,
-    pending: HashSet<String>,
-    globals: HashMap<String, Global>,
+    lowered: HashMap<String, u32>,
+    globals: HashMap<String, u32>,
+    scalars: HashMap<String, TypeId>,
     constants: HashMap<String, u32>,
     bindings: Vec<BindingSpec>,
 }
 
 impl Compiler {
     pub fn empty() -> Self {
-        let mut compiler = Self {
-            module: Module::default(),
-            types: HashMap::new(),
+        let mut module = Module::new(1);
+        let mut scalars = HashMap::new();
+        for (name, scalar) in [
+            ("u32", Scalar::U32),
+            ("i32", Scalar::I32),
+            ("f32", Scalar::F32),
+            ("bool", Scalar::Bool),
+        ] {
+            let ty = module.scalar(scalar);
+            scalars.insert(name.to_owned(), ty);
+        }
+        for (name, scalar, length) in [("uvec3", Scalar::U32, 3), ("uvec4", Scalar::U32, 4)] {
+            let ty = module.vector(scalar, length);
+            scalars.insert(name.to_owned(), ty);
+        }
+        let pair = module.vector(Scalar::F32, 2);
+        scalars.insert("fvec2".to_owned(), pair);
+        Self {
+            module,
+            records: HashMap::new(),
             functions: BTreeMap::new(),
             lowered: HashMap::new(),
-            pending: HashSet::new(),
             globals: HashMap::new(),
+            scalars,
             constants: HashMap::new(),
             bindings: Vec::new(),
-        };
-        for (name, inner) in [
-            ("u32", TypeInner::Scalar(Scalar::U32)),
-            ("i32", TypeInner::Scalar(Scalar::I32)),
-            ("f32", TypeInner::Scalar(Scalar::F32)),
-            ("bool", TypeInner::Scalar(Scalar::BOOL)),
-            (
-                "uvec3",
-                TypeInner::Vector {
-                    size: VectorSize::Tri,
-                    scalar: Scalar::U32,
-                },
-            ),
-            (
-                "uvec4",
-                TypeInner::Vector {
-                    size: VectorSize::Quad,
-                    scalar: Scalar::U32,
-                },
-            ),
-            (
-                "fvec2",
-                TypeInner::Vector {
-                    size: VectorSize::Bi,
-                    scalar: Scalar::F32,
-                },
-            ),
-            ("AtomicU32", TypeInner::Atomic(Scalar::U32)),
-        ] {
-            compiler.types.insert(
-                name.to_owned(),
-                compiler
-                    .module
-                    .types
-                    .insert(Type { name: None, inner }, naga::Span::UNDEFINED),
-            );
         }
-        compiler
     }
 
-    fn ty(&self, name: &str) -> Handle<Type> {
+    pub(crate) fn module(&self) -> &Module {
+        &self.module
+    }
+
+    pub(crate) fn module_mut(&mut self) -> &mut Module {
+        &mut self.module
+    }
+
+    pub(crate) fn scalar(&self, name: &str) -> TypeId {
         *self
-            .types
+            .scalars
             .get(name)
             .unwrap_or_else(|| panic!("the Rust device type {name} is not declared"))
     }
 
+    pub(crate) fn ty(&mut self, name: &str) -> TypeId {
+        if name == "AtomicU32" {
+            return self.module.atomic(Scalar::U32);
+        }
+        if name == "f16" {
+            return self.module.scalar(Scalar::F16);
+        }
+        if let Some(ty) = self.records.get(name) {
+            return *ty;
+        }
+        if let Some(ty) = self.scalars.get(name) {
+            return *ty;
+        }
+        panic!("the Rust device type {name} is not declared")
+    }
+
+    pub(crate) fn array(&mut self, element: TypeId, count: u32) -> TypeId {
+        self.module.array(element, Some(count))
+    }
+
+    pub(crate) fn pointer(&mut self, space: Space, base: TypeId) -> TypeId {
+        self.module.pointer(space, base)
+    }
+
+    pub(crate) fn define(&mut self, ty: TypeId) -> shader::ValueId {
+        self.module.define(ty)
+    }
+
+    pub(crate) fn constant_value(&self, name: &str) -> Option<u32> {
+        self.constants.get(name).copied()
+    }
+
     pub fn record(&mut self, layout: RecordLayout) {
         assert!(
-            !self.types.contains_key(layout.name),
+            !self.records.contains_key(layout.name),
             "a device type is declared twice"
         );
         let members = layout
             .fields
             .iter()
-            .map(|field| StructMember {
-                name: Some(field.name.to_owned()),
-                ty: self.ty(match field.ty {
-                    FieldType::U32 => "u32",
-                    FieldType::I32 => "i32",
-                    FieldType::F32 => "f32",
-                    FieldType::U32x4 => "uvec4",
-                }),
-                binding: None,
-                offset: field.offset,
+            .map(|field| {
+                let ty = match field.ty {
+                    FieldType::U32 => self.scalar("u32"),
+                    FieldType::I32 => self.scalar("i32"),
+                    FieldType::F32 => self.scalar("f32"),
+                    FieldType::U32x4 => self.scalar("uvec4"),
+                };
+                shader::Member {
+                    name: field.name.to_owned(),
+                    ty,
+                    offset: field.offset,
+                }
             })
-            .collect();
-        let handle = self.module.types.insert(
-            Type {
-                name: Some(layout.name.to_owned()),
-                inner: TypeInner::Struct {
-                    members,
-                    span: layout.size,
-                },
-            },
-            naga::Span::UNDEFINED,
-        );
-        self.types.insert(layout.name.to_owned(), handle);
-    }
-
-    fn array(&mut self, element: Handle<Type>, length: Option<u32>) -> Handle<Type> {
-        let stride = self.size(element);
-        let size = length.map_or(ArraySize::Dynamic, |count| {
-            ArraySize::Constant(NonZeroU32::new(count).expect("an array is not empty"))
-        });
-        self.module.types.insert(
-            Type {
-                name: None,
-                inner: TypeInner::Array {
-                    base: element,
-                    size,
-                    stride,
-                },
-            },
-            naga::Span::UNDEFINED,
-        )
-    }
-
-    fn size(&self, ty: Handle<Type>) -> u32 {
-        match &self.module.types[ty].inner {
-            TypeInner::Scalar(scalar) | TypeInner::Atomic(scalar) => u32::from(scalar.width),
-            TypeInner::Vector { size, scalar } => *size as u32 * u32::from(scalar.width),
-            TypeInner::Array { size, stride, .. } => match size {
-                ArraySize::Constant(count) => count.get() * stride,
-                ArraySize::Dynamic => panic!("a runtime array cannot be an array element"),
-                ArraySize::Pending(_) => panic!("an unresolved array has no byte size"),
-            },
-            TypeInner::Struct { span, .. } => *span,
-            other => panic!("{other:?} cannot be held by a storage buffer"),
-        }
+            .collect::<Vec<_>>();
+        let ty = self.module.structure(layout.name, members, layout.size);
+        self.records.insert(layout.name.to_owned(), ty);
     }
 
     pub fn storage_array(&mut self, name: &str, element: &str, spec: BindingSpec) {
-        let ty = self.ty(element);
-        let array = self.array(ty, None);
-        self.storage(name, array, spec);
+        let element = self.ty(element);
+        let ty = self.module.array(element, None);
+        self.storage(name, ty, spec);
     }
 
     pub fn storage_record(&mut self, name: &str, record: &str, spec: BindingSpec) {
@@ -174,72 +144,61 @@ impl Compiler {
         self.storage(name, ty, spec);
     }
 
-    fn storage(&mut self, name: &str, ty: Handle<Type>, spec: BindingSpec) {
+    fn storage(&mut self, name: &str, ty: TypeId, spec: BindingSpec) {
         assert_eq!(
             spec.binding as usize,
             self.bindings.len(),
             "storage slots are dense"
         );
-        let (access, decorations) = match spec.kind {
-            BindingKind::ReadOnlyStorage => (StorageAccess::LOAD, MemoryDecorations::empty()),
-            BindingKind::ReadWriteStorage => (
-                StorageAccess::LOAD | StorageAccess::STORE | StorageAccess::ATOMIC,
-                MemoryDecorations::COHERENT,
-            ),
-        };
-        let handle = self.module.global_variables.append(
-            GlobalVariable {
-                name: Some(name.to_owned()),
-                space: AddressSpace::Storage { access },
-                binding: Some(naga::ResourceBinding {
-                    group: 0,
-                    binding: spec.binding,
-                }),
-                ty,
-                init: None,
-                memory_decorations: decorations,
+        let index = self.module.add_global(Global {
+            name: name.to_owned(),
+            ty,
+            space: Space::Storage,
+            binding: Some(Binding {
+                group: 0,
+                binding: spec.binding,
+            }),
+            access: match spec.kind {
+                BindingKind::ReadOnlyStorage => shader::Access::Read,
+                BindingKind::ReadWriteStorage => shader::Access::ReadWrite,
             },
-            naga::Span::UNDEFINED,
-        );
-        assert!(
-            self.globals
-                .insert(name.to_owned(), Global { handle, ty })
-                .is_none()
-        );
+            coherent: spec.kind == BindingKind::ReadWriteStorage,
+        });
+        assert!(self.globals.insert(name.to_owned(), index).is_none());
         self.bindings.push(spec);
     }
 
     pub fn workgroup(&mut self, name: &str, element: &str, count: u32) {
-        let ty = self.ty(element);
-        let array = self.array(ty, Some(count));
-        let handle = self.module.global_variables.append(
-            GlobalVariable {
-                name: Some(name.to_owned()),
-                space: AddressSpace::WorkGroup,
-                binding: None,
-                ty: array,
-                init: None,
-                memory_decorations: MemoryDecorations::empty(),
-            },
-            naga::Span::UNDEFINED,
-        );
-        assert!(
-            self.globals
-                .insert(name.to_owned(), Global { handle, ty: array })
-                .is_none()
-        );
+        let element = self.ty(element);
+        let ty = self.module.array(element, Some(count));
+        let index = self.module.add_global(Global {
+            name: name.to_owned(),
+            ty,
+            space: Space::WorkGroup,
+            binding: None,
+            access: shader::Access::ReadWrite,
+            coherent: false,
+        });
+        assert!(self.globals.insert(name.to_owned(), index).is_none());
+    }
+
+    pub(crate) fn declares_global(&self, name: &str) -> bool {
+        self.globals.contains_key(name)
+    }
+
+    pub(crate) fn workgroup_global(&self, name: &str) -> u32 {
+        *self
+            .globals
+            .get(name)
+            .unwrap_or_else(|| panic!("the Rust device name {name} is not declared"))
     }
 
     pub fn workgroup_bytes(&self) -> u64 {
-        self.globals
-            .values()
-            .filter(|global| {
-                matches!(
-                    self.module.global_variables[global.handle].space,
-                    AddressSpace::WorkGroup
-                )
-            })
-            .map(|global| u64::from(self.size(global.ty)))
+        self.module
+            .globals()
+            .iter()
+            .filter(|global| global.space == Space::WorkGroup)
+            .map(|global| u64::from(self.module.size(global.ty)))
             .sum()
     }
 
@@ -332,43 +291,183 @@ impl Compiler {
     }
 
     pub fn finish(mut self, label: &str, entry: &str, workgroup: u32) -> ComputeProgram {
-        let function = self
-            .functions
+        assert!(
+            self.functions.contains_key(entry),
+            "{label} does not define the Rust device entry {entry}"
+        );
+        assert!(workgroup > 0, "a device program runs no thread");
+        self.module.set_workgroup(workgroup);
+        self.declare_all(entry);
+        self.lower_all(entry);
+        let index = *self
+            .lowered
             .get(entry)
-            .unwrap_or_else(|| panic!("{label} does not define the Rust device entry {entry}"))
-            .clone();
-        let lowered = lower::FunctionLower::new(&mut self, &function, true).lower(&function.body);
-        self.module.entry_points.push(naga::EntryPoint {
-            name: entry.to_owned(),
-            stage: naga::ShaderStage::Compute,
-            early_depth_test: None,
-            workgroup_size: [workgroup, 1, 1],
-            workgroup_size_overrides: None,
-            function: lowered,
-            mesh_info: None,
-            task_payload: None,
-            incoming_ray_payload: None,
-        });
+            .expect("the device entry is declared");
+        self.module.set_entry(index);
+        self.module.verify();
         ComputeProgram::new(label, self.module, entry, &self.bindings)
     }
 
-    fn lower_function(&mut self, name: &str) -> Handle<naga::Function> {
-        if let Some(handle) = self.lowered.get(name) {
-            return *handle;
+    fn declare_all(&mut self, entry: &str) {
+        let order = self.reachable(entry);
+        for name in order {
+            let source = self
+                .functions
+                .get(&name)
+                .unwrap_or_else(|| panic!("Rust device function {name} is not declared"))
+                .clone();
+            let index = self.module.declare(Function {
+                name: source.name.clone(),
+                arguments: Vec::new(),
+                result: None,
+                locals: Vec::new(),
+                body: Vec::new(),
+            });
+            self.lowered.insert(name, index);
         }
-        assert!(
-            self.pending.insert(name.to_owned()),
-            "recursive Rust device functions are not supported: {name}"
-        );
-        let function = self
-            .functions
+    }
+
+    fn lower_all(&mut self, entry: &str) {
+        let mut order = self.lowered.iter().collect::<Vec<_>>();
+        order.sort_by_key(|(_, index)| **index);
+        let order = order
+            .into_iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        for name in order {
+            let source = self.functions[&name].clone();
+            let lowered =
+                lower::FunctionLower::new(self, &source, name == entry).lower(&source.body);
+            let index = self.lowered[&name];
+            *self.module.function(index) = lowered;
+        }
+    }
+
+    fn reachable(&self, entry: &str) -> Vec<String> {
+        fn visit(
+            name: &str,
+            functions: &BTreeMap<String, ir::Function>,
+            path: &mut Vec<String>,
+            order: &mut Vec<String>,
+        ) {
+            if order.iter().any(|present| present == name) {
+                return;
+            }
+            assert!(
+                !path.iter().any(|present| present == name),
+                "recursive Rust device functions are not supported: {name}"
+            );
+            path.push(name.to_owned());
+            let function = functions
+                .get(name)
+                .unwrap_or_else(|| panic!("Rust device function {name} is not declared"));
+            for callee in calls(&function.body) {
+                if functions.contains_key(&callee) {
+                    visit(&callee, functions, path, order);
+                }
+            }
+            path.pop();
+            order.push(name.to_owned());
+        }
+        let mut order = Vec::new();
+        visit(entry, &self.functions, &mut Vec::new(), &mut order);
+        order
+    }
+
+    pub(crate) fn lower_callee(&mut self, name: &str) -> u32 {
+        *self
+            .lowered
             .get(name)
             .unwrap_or_else(|| panic!("Rust device function {name} is not declared"))
-            .clone();
-        let lowered = lower::FunctionLower::new(self, &function, false).lower(&function.body);
-        let handle = self.module.functions.append(lowered, naga::Span::UNDEFINED);
-        self.lowered.insert(name.to_owned(), handle);
-        self.pending.remove(name);
-        handle
+    }
+
+    pub(crate) fn returns_value(&self, name: &str) -> bool {
+        self.functions
+            .get(name)
+            .is_some_and(|function| function.result.is_some())
+    }
+}
+
+fn calls(body: &[ir::Statement]) -> Vec<String> {
+    let mut names = Vec::new();
+    for statement in body {
+        match statement {
+            ir::Statement::Expression(expr) => calls_of_expression(expr, &mut names),
+            ir::Statement::Let { value, .. } => calls_of_expression(value, &mut names),
+            ir::Statement::Assign { place, value, .. } => {
+                calls_of_expression(place, &mut names);
+                calls_of_expression(value, &mut names);
+            }
+            ir::Statement::If {
+                condition,
+                accept,
+                reject,
+            } => {
+                calls_of_expression(condition, &mut names);
+                names.extend(calls(accept));
+                names.extend(calls(reject));
+            }
+            ir::Statement::Match { selector, arms } => {
+                calls_of_expression(selector, &mut names);
+                for arm in arms {
+                    names.extend(calls(&arm.body));
+                }
+            }
+            ir::Statement::For {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                for expression in [start, end, step] {
+                    calls_of_expression(expression, &mut names);
+                }
+                names.extend(calls(body));
+            }
+            ir::Statement::While { condition, body } => {
+                calls_of_expression(condition, &mut names);
+                names.extend(calls(body));
+            }
+            ir::Statement::Loop(body) | ir::Statement::Block(body) => {
+                names.extend(calls(body));
+            }
+            ir::Statement::Return(value) => {
+                if let Some(value) = value {
+                    calls_of_expression(value, &mut names);
+                }
+            }
+            ir::Statement::Break | ir::Statement::Continue => {}
+        }
+    }
+    names
+}
+
+fn calls_of_expression(expression: &ir::Expression, names: &mut Vec<String>) {
+    use ir::Expression as E;
+    match expression {
+        E::Call { name, arguments } => {
+            names.push(name.clone());
+            for argument in arguments {
+                calls_of_expression(argument, names);
+            }
+        }
+        E::Field { base, .. } | E::Unary { value: base, .. } | E::Cast { value: base, .. } => {
+            calls_of_expression(base, names);
+        }
+        E::Reference(base) => calls_of_expression(base, names),
+        E::Index { base, index } => {
+            calls_of_expression(base, names);
+            calls_of_expression(index, names);
+        }
+        E::Binary { left, right, .. } => {
+            calls_of_expression(left, names);
+            calls_of_expression(right, names);
+        }
+        E::Repeat { value, length } => {
+            calls_of_expression(value, names);
+            calls_of_expression(length, names);
+        }
+        E::Integer { .. } | E::Float(_) | E::Bool(_) | E::Name(_) => {}
     }
 }

@@ -6,15 +6,17 @@ use neura_profile::{AttentionTile, Budget, MatmulStrategy, Profile};
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
 fn narrow() -> Profile {
-    Profile::derive(Budget::BASELINE)[0]
+    Profile::derive(Budget::BASELINE, None)[0]
 }
 
 fn wide() -> Profile {
-    *Profile::derive(Budget::BASELINE).last().expect("a profile")
+    *Profile::derive(Budget::BASELINE, None)
+        .last()
+        .expect("a profile")
 }
 
 fn every_profile() -> Vec<Profile> {
-    Profile::derive(DEVICE)
+    Profile::derive(DEVICE, None)
 }
 use neura_program::{Encoding, Layout};
 use std::mem::size_of;

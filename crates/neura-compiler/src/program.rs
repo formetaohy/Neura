@@ -1,16 +1,9 @@
-use crate::workgroup;
-use naga::back::{hlsl, msl, spv};
-use naga::valid::{Capabilities, ModuleInfo, ValidationFlags, Validator};
-use naga::{AddressSpace, Module, ShaderStage, StorageAccess};
+use neura_shader_ir::{Module, Target, element_name};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub const METAL_SIZE_BUFFER_SLOT: u8 = 30;
-
-fn capabilities() -> Capabilities {
-    Capabilities::SHADER_FLOAT16_IN_FLOAT32 | Capabilities::MEMORY_DECORATION_COHERENT
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Backend {
@@ -69,12 +62,45 @@ pub enum ShaderTranslation {
     },
 }
 
+pub fn reflect(module: &Module) -> Vec<ShaderBinding> {
+    let mut bindings = module
+        .globals()
+        .iter()
+        .filter_map(|global| {
+            let binding = global.binding?;
+            Some(ShaderBinding {
+                group: binding.group,
+                binding: binding.binding,
+                name: global.name.clone(),
+                kind: if global.access.writable() {
+                    BindingKind::ReadWriteStorage
+                } else {
+                    BindingKind::ReadOnlyStorage
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    bindings.sort_by_key(|binding| (binding.group, binding.binding));
+    bindings
+}
+
+pub fn describe(bindings: &[ShaderBinding]) -> String {
+    let mut out = String::new();
+    for binding in bindings {
+        writeln!(
+            out,
+            "group {} binding {} {} {:?}",
+            binding.group, binding.binding, binding.name, binding.kind,
+        )
+        .expect("a string accepts binding descriptions");
+    }
+    out
+}
+
 struct Compiled {
     label: String,
     module: Module,
-    info: ModuleInfo,
     entry: String,
-    index: usize,
     workgroup: u32,
     bindings: Vec<BindingSpec>,
     reflected: Vec<ShaderBinding>,
@@ -112,48 +138,6 @@ impl std::fmt::Debug for ComputeProgram {
     }
 }
 
-pub fn reflect(module: &Module) -> Vec<ShaderBinding> {
-    let mut bindings = module
-        .global_variables
-        .iter()
-        .filter_map(|(_, variable)| {
-            variable.binding.map(|binding| {
-                let AddressSpace::Storage { access } = variable.space else {
-                    panic!("device binding {} is not storage", binding.binding);
-                };
-                ShaderBinding {
-                    group: binding.group,
-                    binding: binding.binding,
-                    name: variable
-                        .name
-                        .clone()
-                        .expect("every device binding has a name"),
-                    kind: if access.contains(StorageAccess::STORE) {
-                        BindingKind::ReadWriteStorage
-                    } else {
-                        BindingKind::ReadOnlyStorage
-                    },
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    bindings.sort_by_key(|binding| (binding.group, binding.binding));
-    bindings
-}
-
-pub fn describe(bindings: &[ShaderBinding]) -> String {
-    let mut out = String::new();
-    for binding in bindings {
-        writeln!(
-            out,
-            "group {} binding {} {} {:?}",
-            binding.group, binding.binding, binding.name, binding.kind,
-        )
-        .expect("a string accepts binding descriptions");
-    }
-    out
-}
-
 impl ComputeProgram {
     pub fn new(label: &str, module: Module, entry: &str, bindings: &[BindingSpec]) -> Self {
         assert!(
@@ -166,13 +150,17 @@ impl ComputeProgram {
                 "storage bindings are dense"
             );
         }
-        let index = module
-            .entry_points
-            .iter()
-            .position(|point| point.name == entry && point.stage == ShaderStage::Compute)
-            .unwrap_or_else(|| panic!("{label} has no compute entry named {entry}"));
-        let workgroup = module.entry_points[index].workgroup_size[0];
-        assert!(workgroup > 0, "a compute workgroup is not empty");
+        assert_eq!(
+            module.entry().name,
+            entry,
+            "{label} carries the device entry {} instead of {entry}",
+            module.entry().name
+        );
+        assert!(
+            module.entry().result.is_none(),
+            "{label} declares an entry that returns a value"
+        );
+        let workgroup = module.workgroup_size();
         let reflected = reflect(&module);
         assert_eq!(
             reflected.len(),
@@ -192,50 +180,25 @@ impl ComputeProgram {
                 spec.binding
             );
         }
-        let info = Validator::new(ValidationFlags::all(), capabilities())
-            .validate(&module)
-            .unwrap_or_else(|error| {
-                panic!("{label} contains an invalid device program: {error:#?}")
-            });
-        crate::uniform::verify(&module, index);
-        let mut options = spv::Options {
-            fake_missing_bindings: false,
-            capabilities: None,
-            lang_version: (1, 0),
-            ..Default::default()
-        };
-        for spec in bindings {
-            options.binding_map.insert(
-                naga::ResourceBinding {
-                    group: 0,
-                    binding: spec.binding,
-                },
-                spv::BindingInfo {
-                    descriptor_set: 0,
-                    binding: spec.binding,
-                    binding_array_size: None,
-                },
-            );
+        for global in module.globals() {
+            if global.space == neura_shader_ir::Space::WorkGroup {
+                assert!(
+                    matches!(
+                        module.ty(global.ty),
+                        neura_shader_ir::Type::Array { count: Some(_), .. }
+                    ),
+                    "{label} declares the workgroup variable {} as a {}",
+                    global.name,
+                    element_name(module.ty(global.ty))
+                );
+            }
         }
-        let spirv = workgroup::isolate(
-            spv::write_vec(
-                &module,
-                &info,
-                &options,
-                Some(&spv::PipelineOptions {
-                    shader_stage: ShaderStage::Compute,
-                    entry_point: entry.to_owned(),
-                }),
-            )
-            .unwrap_or_else(|error| panic!("{label} failed SPIR-V compilation: {error}")),
-        );
+        let spirv = neura_spirv::write(&module);
         Self {
             compiled: Arc::new(Compiled {
                 label: label.to_owned(),
                 module,
-                info,
                 entry: entry.to_owned(),
-                index,
                 workgroup,
                 bindings: bindings.to_vec(),
                 reflected,
@@ -272,104 +235,30 @@ impl ComputeProgram {
         &self.compiled.module
     }
 
+    pub fn requirements(&self) -> neura_shader_ir::Requirements {
+        self.compiled.module.requirements()
+    }
+
     pub fn translate(&self, backend: Backend) -> ShaderTranslation {
         let compiled = &self.compiled;
         match backend {
-            Backend::Vulkan => ShaderTranslation::Spirv(compiled.spirv.clone()),
+            Backend::Vulkan => {
+                Target::SPIRV.supports(compiled.module.requirements(), compiled.label.as_str());
+                ShaderTranslation::Spirv(compiled.spirv.clone())
+            }
             Backend::Dx12 => {
-                let mut options = hlsl::Options {
-                    shader_model: hlsl::ShaderModel::V6_0,
-                    fake_missing_bindings: false,
-                    ..Default::default()
-                };
-                for spec in &compiled.bindings {
-                    options.binding_map.insert(
-                        naga::ResourceBinding {
-                            group: 0,
-                            binding: spec.binding,
-                        },
-                        hlsl::BindTarget {
-                            register: spec.binding,
-                            ..Default::default()
-                        },
-                    );
+                let source = neura_hlsl::write(&compiled.module);
+                ShaderTranslation::Hlsl {
+                    entry: neura_hlsl::symbol(&compiled.entry),
+                    source,
                 }
-                let pipeline = hlsl::PipelineOptions {
-                    entry_point: Some((ShaderStage::Compute, compiled.entry.clone())),
-                };
-                let mut source = String::new();
-                let reflection = hlsl::Writer::new(&mut source, &options, &pipeline)
-                    .write(&compiled.module, &compiled.info, None)
-                    .unwrap_or_else(|error| {
-                        panic!("{} failed HLSL compilation: {error}", compiled.label)
-                    });
-                let entry = reflection.entry_point_names[compiled.index]
-                    .as_ref()
-                    .unwrap_or_else(|error| panic!("{} has no HLSL entry: {error}", compiled.label))
-                    .clone();
-                ShaderTranslation::Hlsl { source, entry }
             }
             Backend::Metal => {
-                let mut resources = msl::EntryPointResources {
-                    sizes_buffer: Some(METAL_SIZE_BUFFER_SLOT),
-                    ..Default::default()
-                };
-                let size_bindings = compiled
-                    .module
-                    .global_variables
-                    .iter()
-                    .filter(|(_, variable)| {
-                        compiled.module.types[variable.ty]
-                            .inner
-                            .needs_host_buffer_byte_size(&compiled.module.types)
-                    })
-                    .map(|(_, variable)| {
-                        let binding = variable.binding.expect("a runtime-sized buffer is bound");
-                        assert_eq!(binding.group, 0);
-                        binding.binding
-                    })
-                    .collect::<Vec<_>>();
-                for spec in &compiled.bindings {
-                    resources.resources.insert(
-                        naga::ResourceBinding {
-                            group: 0,
-                            binding: spec.binding,
-                        },
-                        msl::BindTarget {
-                            buffer: Some(spec.binding as u8),
-                            mutable: spec.kind == BindingKind::ReadWriteStorage,
-                            ..Default::default()
-                        },
-                    );
-                }
-                let mut options = msl::Options {
-                    lang_version: (2, 3),
-                    fake_missing_bindings: false,
-                    ..Default::default()
-                };
-                options
-                    .per_entry_point_map
-                    .insert(compiled.entry.clone(), resources);
-                let (source, reflection) = msl::write_string(
-                    &compiled.module,
-                    &compiled.info,
-                    &options,
-                    &msl::PipelineOptions {
-                        entry_point: Some((ShaderStage::Compute, compiled.entry.clone())),
-                        ..Default::default()
-                    },
-                )
-                .unwrap_or_else(|error| {
-                    panic!("{} failed MSL compilation: {error}", compiled.label)
-                });
-                let entry = reflection.entry_point_names[compiled.index]
-                    .as_ref()
-                    .unwrap_or_else(|error| panic!("{} has no MSL entry: {error}", compiled.label))
-                    .clone();
+                let source = neura_msl::write(&compiled.module);
                 ShaderTranslation::Msl {
+                    entry: neura_msl::symbol(&compiled.entry),
                     source,
-                    entry,
-                    size_bindings,
+                    size_bindings: Vec::new(),
                 }
             }
         }

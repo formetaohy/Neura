@@ -4,7 +4,7 @@ use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
 
 fn narrow() -> Profile {
-    Profile::derive(Budget::BASELINE)[0]
+    Profile::derive(Budget::BASELINE, None)[0]
 }
 use neura_program::Encoding;
 use neura_runtime::{Runtime, RuntimeRequest};

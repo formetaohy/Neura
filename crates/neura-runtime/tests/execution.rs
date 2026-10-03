@@ -1162,7 +1162,7 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
         "a profile asks for more than the baseline pool",
     );
     assert!(
-        profiles.len() < Profile::derive(Budget::of(1024, 48 << 10)).len(),
+        profiles.len() < Profile::derive(Budget::of(1024, 48 << 10), None).len(),
         "the baseline pool must drop a profile the wide pool keeps",
     );
     let graph = Graph::new();
@@ -1174,7 +1174,7 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     assert_eq!(program.profile(), *profiles.last().expect("a profile"));
     assert!(
         refuses(|| {
-            let widest = *Profile::derive(Budget::of(1024, 48 << 10))
+            let widest = *Profile::derive(Budget::of(1024, 48 << 10), None)
                 .last()
                 .expect("a profile");
             let _ = runtime.compile_with(&graph, &weights, widest);

@@ -5,7 +5,8 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::ArtifactCache;
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
+    DeviceType, Limits,
 };
 use crate::pipeline::{ComputeProgram, ShaderTranslation};
 use crate::submission::{Command, Write};
@@ -17,7 +18,7 @@ use objc2_metal::{
     MTLBinaryArchive, MTLBinaryArchiveDescriptor, MTLBlitCommandEncoder, MTLBuffer,
     MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
     MTLComputeCommandEncoder, MTLComputePipelineDescriptor, MTLComputePipelineState, MTLDevice,
-    MTLLibrary, MTLPipelineOption, MTLResource, MTLResourceOptions, MTLSize,
+    MTLGPUFamily, MTLLibrary, MTLPipelineOption, MTLResource, MTLResourceOptions, MTLSize,
 };
 use std::any::Any;
 use std::cmp::Reverse;
@@ -186,6 +187,19 @@ fn claim_group(native: &NativeGroup) {
     }
 }
 
+fn capability(device: &ProtocolObject<dyn MTLDevice>) -> Capability {
+    Capability {
+        cooperative_matrix: device.supportsFamily(MTLGPUFamily::Apple7).then_some(
+            CooperativeMatrix {
+                subgroup: 32,
+                rows: 8,
+                columns: 8,
+                depth: 8,
+            },
+        ),
+    }
+}
+
 fn device_type(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
     if device.hasUnifiedMemory() {
         DeviceType::Integrated
@@ -207,7 +221,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         artifacts: ArtifactCache,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
         let offered = devices
             .iter()
@@ -243,6 +257,7 @@ impl Device {
             .newCommandQueue()
             .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
         let archive = Archive::of(&raw, &artifacts);
+        let capability = capability(&raw);
         Ok((
             Arc::new(Self {
                 raw,
@@ -253,6 +268,7 @@ impl Device {
             }),
             info,
             limits,
+            capability,
         ))
     }
 

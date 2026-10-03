@@ -20,7 +20,7 @@ fn doubled(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
 #[test]
 fn annotated_workgroup_position_has_a_real_rust_type() {
     let program = by_group();
-    assert_eq!(program.module().entry_points[0].function.arguments.len(), 1);
+    assert_eq!(program.module().entry().arguments.len(), 1);
     assert!(matches!(
         program.translate(Backend::Vulkan),
         ShaderTranslation::Spirv(_)

@@ -14,7 +14,7 @@ const LAYERS: usize = 8;
 const BLOCK: usize = 2;
 
 fn narrow() -> Profile {
-    Profile::derive(Budget::BASELINE)[0]
+    Profile::derive(Budget::BASELINE, None)[0]
 }
 
 fn refuses(action: impl FnOnce()) -> bool {

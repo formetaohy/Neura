@@ -5,7 +5,7 @@ use super::{
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, DeviceType, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, DeviceType, Limits,
     PowerPreference,
 };
 use crate::pipeline::{BindingKind, ComputeProgram, ShaderTranslation};
@@ -359,7 +359,7 @@ impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         artifacts: ArtifactCache,
-    ) -> Result<(Arc<Self>, AdapterInfo, Limits), DeviceFailure> {
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
@@ -393,7 +393,7 @@ impl Device {
             }
         };
         let device = Self::assemble(candidate.device, artifacts)?;
-        Ok((device, candidate.info, limits()))
+        Ok((device, candidate.info, limits(), Capability::default()))
     }
 
     fn assemble(raw: ID3D12Device, artifacts: ArtifactCache) -> Result<Arc<Device>, DeviceFailure> {

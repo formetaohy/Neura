@@ -14,7 +14,7 @@ use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
 fn narrow() -> Profile {
-    Profile::derive(Budget::BASELINE)[0]
+    Profile::derive(Budget::BASELINE, None)[0]
 }
 
 fn rounded(element: Element, values: &[f32]) -> Vec<f32> {

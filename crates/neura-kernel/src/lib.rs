@@ -12,6 +12,8 @@ mod element;
 #[path = "../device/layout.rs"]
 mod layout;
 mod matmul;
+#[path = "../device/matmul_cooperative.rs"]
+mod matmul_cooperative;
 #[path = "../device/matmul.rs"]
 mod matmul_device;
 mod op;
@@ -42,6 +44,10 @@ pub fn define(compiler: &mut Compiler, kinds: &[Kind], elements: &[Element], geo
     let words = geometry.scratch_words(kinds);
     if words > 0 {
         compiler.workgroup("scratch", "f32", words);
+    }
+    let half = geometry.half_stage_words();
+    if half > 0 {
+        compiler.workgroup("scratch_half", "f16", half / 2);
     }
     substrate(compiler, elements);
     for module in Module::ALL {
@@ -82,6 +88,7 @@ fn install(compiler: &mut Compiler, module: Module, elements: &[Element], geomet
         Module::Matmul => matmul_device::define(compiler),
         Module::MatmulTiles => {
             compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
+            matmul::define_cooperative(compiler);
             matmul::specialize(compiler, geometry);
         }
         Module::Attention => attention::define(compiler, geometry),

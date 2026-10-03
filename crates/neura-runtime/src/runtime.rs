@@ -11,6 +11,7 @@ use neura_gpu::{
 use neura_graph::{Graph, Value};
 use neura_op as op;
 use neura_precision::{pack, unpack};
+use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, Profile};
 use neura_program::{Encoding, Layout, Span};
 use neura_shader::Megakernel;
@@ -113,7 +114,21 @@ impl Runtime {
     }
 
     pub fn profiles(&self) -> Vec<Profile> {
-        Profile::derive(self.budget())
+        Profile::derive(self.budget(), self.cooperative_matrix())
+    }
+
+    pub fn capability(&self) -> &neura_gpu::Capability {
+        self.context.capability()
+    }
+
+    fn cooperative_matrix(&self) -> Option<CooperativeMatrix> {
+        let capability = self.context.capability().cooperative_matrix?;
+        Some(CooperativeMatrix::new(
+            capability.subgroup,
+            capability.rows,
+            capability.columns,
+            capability.depth,
+        ))
     }
 
     pub fn budget(&self) -> Budget {

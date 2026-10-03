@@ -130,6 +130,19 @@ impl Display for AdapterInfo {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CooperativeMatrix {
+    pub subgroup: u32,
+    pub rows: u32,
+    pub columns: u32,
+    pub depth: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Capability {
+    pub cooperative_matrix: Option<CooperativeMatrix>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub max_storage_buffers_per_shader_stage: u32,

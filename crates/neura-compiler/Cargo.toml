@@ -10,8 +10,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-naga = { workspace = true }
-spirv = { workspace = true }
 neura-abi = { workspace = true }
 neura-ir = { workspace = true }
 neura-macro = { workspace = true }
+neura-shader-ir = { workspace = true }
+neura-spirv = { workspace = true }
+neura-hlsl = { workspace = true }
+neura-msl = { workspace = true }

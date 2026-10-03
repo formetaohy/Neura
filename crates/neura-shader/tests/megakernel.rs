@@ -1,13 +1,14 @@
-use naga::{AddressSpace, Expression, MathFunction, Statement, SwitchValue, TypeInner};
 use neura_abi::{Element, Kind, RECORDS, WORD_BYTES};
-use neura_compiler::{Backend, BindingKind, ComputeProgram, ShaderTranslation};
+use neura_compiler::Backend;
+use neura_compiler::shader::{Instruction, Space, Type};
+use neura_compiler::{BindingKind, ComputeProgram, ShaderTranslation};
 use neura_op::OPS;
 use neura_profile::{AttentionTile, Budget, CLAIM_BYTES, Geometry, Profile};
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
 
 fn profiles() -> Vec<Profile> {
-    Profile::derive(DEVICE)
+    Profile::derive(DEVICE, None)
 }
 use neura_shader::{BINDINGS, Megakernel};
 use std::collections::{BTreeSet, HashSet};
@@ -51,15 +52,30 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Megakerne
 fn functions(program: &ComputeProgram) -> BTreeSet<&str> {
     program
         .module()
-        .functions
+        .functions()
         .iter()
-        .map(|(_, function)| {
-            function
-                .name
-                .as_deref()
-                .expect("a Rust device function has a name")
-        })
+        .map(|function| function.name.as_str())
         .collect()
+}
+
+fn switch_cases(program: &ComputeProgram, name: &str) -> (Vec<u32>, bool) {
+    let function = program
+        .module()
+        .functions()
+        .iter()
+        .find(|function| function.name == name)
+        .unwrap_or_else(|| panic!("the Rust device function {name} was compiled"));
+    function
+        .body
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::Switch { cases, default, .. } => Some((
+                cases.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+                !default.is_empty(),
+            )),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the Rust device function {name} dispatches"))
 }
 
 #[test]
@@ -70,7 +86,7 @@ fn rust_source_compiles_into_three_native_shader_formats() {
             panic!("Vulkan requires SPIR-V");
         };
         assert_eq!(words[0], 0x0723_0203);
-        assert_eq!(words[1], 0x0001_0000, "a device program asks SPIR-V 1.0");
+        assert_eq!(words[1], 0x0001_0300, "a device program asks SPIR-V 1.3");
         let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
             panic!("D3D12 requires HLSL");
         };
@@ -87,8 +103,7 @@ fn rust_source_compiles_into_three_native_shader_formats() {
             panic!("Metal requires MSL");
         };
         assert!(!entry.is_empty());
-        assert!(size_bindings.contains(&2));
-        assert!(source.contains("[[buffer(30)]]"));
+        assert!(size_bindings.is_empty());
         assert!(source.contains("[[buffer(2)]]"));
         assert!(source.contains("[[buffer(7)]]"));
     }
@@ -130,18 +145,18 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
             }
             assert_eq!(program.reflected()[2].kind, BindingKind::ReadWriteStorage);
             for layout in RECORDS {
-                let (_, ty) = program
+                let ty = program
                     .module()
-                    .types
+                    .types()
                     .iter()
-                    .find(|(_, ty)| ty.name.as_deref() == Some(layout.name))
+                    .find(|ty| matches!(ty, Type::Struct { name, .. } if name == layout.name))
                     .expect("all records originate in Rust");
-                let TypeInner::Struct { members, span } = &ty.inner else {
+                let Type::Struct { members, span, .. } = ty else {
                     panic!("a host record is a device struct");
                 };
                 assert_eq!(*span, layout.size);
                 for (member, host) in members.iter().zip(layout.fields) {
-                    assert_eq!(member.name.as_deref(), Some(host.name));
+                    assert_eq!(member.name, host.name);
                     assert_eq!(member.offset, host.offset);
                 }
             }
@@ -170,10 +185,10 @@ fn specialization_includes_only_reachable_rust_functions() {
     }
     let scratch = program
         .module()
-        .global_variables
+        .globals()
         .iter()
-        .filter(|(_, global)| global.space == AddressSpace::WorkGroup)
-        .map(|(_, global)| global.name.clone().unwrap_or_default())
+        .filter(|global| global.space == Space::WorkGroup)
+        .map(|global| global.name.clone())
         .collect::<Vec<_>>();
     assert_eq!(
         scratch,
@@ -193,28 +208,11 @@ fn the_rust_dispatcher_only_accepts_its_selected_task_kinds() {
         &[Element::Single],
     )
     .program();
-    let function = program
-        .module()
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_deref() == Some("run_task"))
-        .expect("the Rust task dispatcher was compiled")
-        .1;
-    let cases = function
-        .body
-        .iter()
-        .find_map(|statement| {
-            if let Statement::Switch { cases, .. } = statement {
-                Some(cases)
-            } else {
-                None
-            }
-        })
-        .expect("a task dispatcher branches over kinds");
-    assert_eq!(cases.len(), 3);
-    assert_eq!(cases[0].value, SwitchValue::U32(Kind::Binary.code()));
-    assert_eq!(cases[1].value, SwitchValue::U32(Kind::Fill.code()));
-    assert_eq!(cases[2].value, SwitchValue::Default);
+    let (codes, has_default) = switch_cases(&program, "run_task");
+    assert_eq!(codes.len(), 2);
+    assert!(has_default, "a task dispatcher covers its default");
+    assert_eq!(codes[0], Kind::Binary.code());
+    assert_eq!(codes[1], Kind::Fill.code());
 }
 
 #[test]
@@ -229,30 +227,8 @@ fn every_declared_kind_reaches_the_device_body_it_names() {
             kind.entry(),
         );
     }
-    let cases = program
-        .module()
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_deref() == Some("run_task"))
-        .expect("the Rust task dispatcher was compiled")
-        .1
-        .body
-        .iter()
-        .find_map(|statement| {
-            if let Statement::Switch { cases, .. } = statement {
-                Some(cases)
-            } else {
-                None
-            }
-        })
-        .expect("a task dispatcher branches over kinds");
-    let dispatched = cases
-        .iter()
-        .filter_map(|case| match case.value {
-            SwitchValue::U32(code) => Some(code),
-            _ => None,
-        })
-        .collect::<HashSet<_>>();
+    let (dispatched, _) = switch_cases(&program, "run_task");
+    let dispatched = dispatched.into_iter().collect::<HashSet<_>>();
     assert_eq!(dispatched.len(), Kind::COUNT as usize);
     for kind in Kind::ALL {
         assert!(
@@ -271,32 +247,11 @@ fn the_rust_operation_dispatcher_contains_every_declared_code() {
         &[Element::Single],
     )
     .program();
-    let function = program
-        .module()
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_deref() == Some("op_apply"))
-        .expect("the Rust op dispatcher was compiled")
-        .1;
-    let cases = function
-        .body
-        .iter()
-        .find_map(|statement| {
-            if let Statement::Switch { cases, .. } = statement {
-                Some(cases)
-            } else {
-                None
-            }
-        })
-        .expect("the operation dispatcher matches every code");
-    let defined = cases
-        .iter()
-        .filter(|case| case.value != SwitchValue::Default)
-        .map(|case| case.value)
-        .collect::<HashSet<_>>();
+    let (defined, _) = switch_cases(&program, "op_apply");
+    let defined = defined.into_iter().collect::<HashSet<_>>();
     assert_eq!(defined.len(), OPS.len());
     for op in OPS {
-        assert!(defined.contains(&SwitchValue::U32(op.code)));
+        assert!(defined.contains(&op.code));
     }
 }
 
@@ -310,33 +265,8 @@ fn every_tensor_element_compiles_only_the_loads_it_reads() {
     )
     .program();
     assert_ne!(single, half);
-    assert!(
-        !single
-            .module()
-            .functions
-            .iter()
-            .flat_map(|(_, function)| function.expressions.iter())
-            .any(|(_, expr)| matches!(
-                expr,
-                Expression::Math {
-                    fun: MathFunction::Unpack2x16float,
-                    ..
-                }
-            ))
-    );
-    assert!(
-        half.module()
-            .functions
-            .iter()
-            .flat_map(|(_, function)| function.expressions.iter())
-            .any(|(_, expr)| matches!(
-                expr,
-                Expression::Math {
-                    fun: MathFunction::Unpack2x16float,
-                    ..
-                }
-            ))
-    );
+    assert!(!functions(&single).contains("fetch_half"));
+    assert!(functions(&half).contains("fetch_half"));
     assert!(!functions(&half).contains("fetch_bfloat16"));
     let quantized = selected(
         profiles()[0],
@@ -406,19 +336,10 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
 fn workgroup_bytes(program: &ComputeProgram) -> u64 {
     program
         .module()
-        .global_variables
+        .globals()
         .iter()
-        .filter(|(_, variable)| variable.space == AddressSpace::WorkGroup)
-        .map(
-            |(_, variable)| match &program.module().types[variable.ty].inner {
-                TypeInner::Array {
-                    stride,
-                    size: naga::ArraySize::Constant(count),
-                    ..
-                } => u64::from(*stride) * u64::from(count.get()),
-                other => panic!("workgroup buffer {other:?} has no static size"),
-            },
-        )
+        .filter(|global| global.space == Space::WorkGroup)
+        .map(|global| u64::from(program.module().size(global.ty)))
         .sum()
 }
 

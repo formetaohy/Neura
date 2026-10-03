@@ -4,18 +4,20 @@ use neura_profile::{Geometry, MatmulStrategy};
 pub fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
     for (index, tile) in geometry.tiles().iter().enumerate() {
         let suffix = index.to_string();
-        let constants = [
+        let mut constants = vec![
             ("MATMUL_ROWS", tile.rows()),
             ("MATMUL_COLUMNS", tile.columns()),
             ("MATMUL_DEPTH", tile.depth()),
-            ("MATMUL_LEFT_STRIDE", tile.left_stride()),
-            ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
-            ("MATMUL_REGISTER_ROWS", tile.register_rows()),
-            ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),
-            ("MATMUL_REGISTERS", tile.registers()),
         ];
         match tile.strategy() {
             MatmulStrategy::Staged => {
+                constants.extend([
+                    ("MATMUL_LEFT_STRIDE", tile.left_stride()),
+                    ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
+                    ("MATMUL_REGISTER_ROWS", tile.register_rows()),
+                    ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),
+                    ("MATMUL_REGISTERS", tile.registers()),
+                ]);
                 compiler.specialize(
                     "template_matmul_load",
                     &format!("matmul_load_{suffix}"),
@@ -28,8 +30,40 @@ pub fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                 );
             }
             MatmulStrategy::Streamed => {
+                constants.extend([
+                    ("MATMUL_LEFT_STRIDE", tile.depth() + 1),
+                    ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
+                    ("MATMUL_REGISTER_ROWS", tile.register_rows()),
+                    ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),
+                    ("MATMUL_REGISTERS", tile.registers()),
+                ]);
                 compiler.specialize(
                     "template_run_matmul_stream",
+                    &format!("run_matmul_{suffix}"),
+                    &constants,
+                );
+            }
+            MatmulStrategy::Cooperative => {
+                compiler.constant("COOPMAT_ROWS", tile.rows() / tile.subgroup_rows());
+                compiler.constant("COOPMAT_COLUMNS", tile.columns() / tile.subgroup_columns());
+                compiler.constant("COOPMAT_DEPTH", tile.depth());
+                constants.extend([
+                    ("MATMUL_LEFT_STRIDE", tile.depth()),
+                    ("COOPMAT_ROWS", tile.rows() / tile.subgroup_rows()),
+                    ("COOPMAT_COLUMNS", tile.columns() / tile.subgroup_columns()),
+                    ("COOPMAT_DEPTH", tile.depth()),
+                    ("COOPMAT_SUBGROUP", geometry.subgroup()),
+                    ("MATMUL_SUBGROUP_COLUMNS", tile.subgroup_columns()),
+                    ("MATMUL_SUBGROUP_ROWS", tile.subgroup_rows()),
+                    ("SCRATCH_COOPERATIVE_RIGHT", 2 * tile.rows() * tile.depth()),
+                ]);
+                compiler.specialize(
+                    "template_matmul_cooperative_load",
+                    &format!("matmul_cooperative_load_{suffix}"),
+                    &constants,
+                );
+                compiler.specialize(
+                    "template_run_matmul_cooperative",
                     &format!("run_matmul_{suffix}"),
                     &constants,
                 );
@@ -50,4 +84,8 @@ pub fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
             },
         );
     }
+}
+
+pub fn define_cooperative(compiler: &mut Compiler) {
+    super::matmul_cooperative::define(compiler);
 }

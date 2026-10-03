@@ -1,4 +1,4 @@
-use naga::Statement;
+use neura_compiler::shader::{Instruction, Type};
 use neura_compiler::{BindingSpec, Compiler, ComputeProgram};
 
 mod unrolled {
@@ -184,32 +184,26 @@ fn compiled_f32(label: &str, define: fn(&mut Compiler)) -> ComputeProgram {
 #[test]
 fn compile_time_unrolling_folds_register_indices_into_literals() {
     let program = compiled_u32("unrolled", unrolled::define);
-    let function = &program.module().entry_points[0].function;
-    assert!(function.local_variables.is_empty());
+    let function = program.module().entry();
+    assert!(function.locals.is_empty());
     assert_eq!(
         function
             .body
             .iter()
-            .filter(|statement| matches!(statement, Statement::Block(_)))
+            .filter(|instruction| matches!(instruction, Instruction::Block(_)))
             .count(),
         4
     );
 }
 
 #[test]
-fn scalar_registers_are_named_naga_locals_instead_of_indexed_arrays() {
+fn scalar_registers_are_named_device_locals_instead_of_indexed_arrays() {
     let program = compiled_f32("scalar registers", registers::define);
-    let function = &program.module().entry_points[0].function;
-    assert_eq!(function.local_variables.len(), 4);
-    for (index, (_, local)) in function.local_variables.iter().enumerate() {
-        assert_eq!(
-            local.name.as_deref(),
-            Some(format!("registers_{index}").as_str())
-        );
-        assert!(matches!(
-            program.module().types[local.ty].inner,
-            naga::TypeInner::Scalar(_)
-        ));
+    let function = program.module().entry();
+    assert_eq!(function.locals.len(), 4);
+    for (index, local) in function.locals.iter().enumerate() {
+        assert_eq!(local.name, format!("registers_{index}"));
+        assert!(matches!(program.module().ty(local.ty), Type::Scalar(_)));
     }
 }
 
@@ -222,11 +216,11 @@ fn scalar_registers_refuse_runtime_indices() {
 #[test]
 fn rust_boolean_short_circuit_keeps_device_side_effects_in_its_branch() {
     let program = compiled_u32("short circuit", boolean::define);
-    let body = &program.module().entry_points[0].function.body;
+    let body = &program.module().entry().body;
     let branches = body
         .iter()
-        .filter_map(|statement| match statement {
-            Statement::If { accept, reject, .. } => Some((accept, reject)),
+        .filter_map(|instruction| match instruction {
+            Instruction::If { accept, reject, .. } => Some((accept, reject)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -234,7 +228,7 @@ fn rust_boolean_short_circuit_keeps_device_side_effects_in_its_branch() {
         branches[0]
             .0
             .iter()
-            .any(|statement| matches!(statement, Statement::Call { .. }))
+            .any(|instruction| matches!(instruction, Instruction::Call { .. }))
     );
     assert!(branches[0].1.is_empty());
     assert!(branches[1].0.is_empty());
@@ -242,7 +236,7 @@ fn rust_boolean_short_circuit_keeps_device_side_effects_in_its_branch() {
         branches[1]
             .1
             .iter()
-            .any(|statement| matches!(statement, Statement::Call { .. }))
+            .any(|instruction| matches!(instruction, Instruction::Call { .. }))
     );
 }
 
@@ -277,7 +271,7 @@ fn divergent_loop_counts_cannot_hide_a_barrier() {
 }
 
 #[test]
-#[should_panic(expected = "invalid device program")]
+#[should_panic(expected = "a device store writes")]
 fn a_readonly_binding_cannot_be_written() {
     let mut compiler = Compiler::empty();
     compiler.storage_array("input", "u32", BindingSpec::storage(0));

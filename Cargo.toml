@@ -35,6 +35,10 @@ neura-precision = { version = "0.4.0", path = "crates/neura-precision" }
 neura-graph = { version = "0.4.0", path = "crates/neura-graph" }
 neura-kernel = { version = "0.4.0", path = "crates/neura-kernel" }
 neura-shader = { version = "0.4.0", path = "crates/neura-shader" }
+neura-shader-ir = { version = "0.4.0", path = "crates/neura-shader-ir" }
+neura-spirv = { version = "0.4.0", path = "crates/neura-spirv" }
+neura-hlsl = { version = "0.4.0", path = "crates/neura-hlsl" }
+neura-msl = { version = "0.4.0", path = "crates/neura-msl" }
 neura-gpu = { version = "0.4.0", path = "crates/neura-gpu" }
 neura-program = { version = "0.4.0", path = "crates/neura-program" }
 neura-runtime = { version = "0.4.0", path = "crates/neura-runtime" }

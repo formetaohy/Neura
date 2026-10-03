@@ -17,7 +17,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 #[test]
 fn a_device_budget_fits_every_profile_it_derives() {
     for budget in [Budget::BASELINE, mid_device(), wide_device()] {
-        let profiles = Profile::derive(budget);
+        let profiles = Profile::derive(budget, None);
         assert!(!profiles.is_empty(), "a device derives no profile");
         for profile in &profiles {
             assert!(
@@ -66,9 +66,9 @@ fn a_device_budget_fits_every_profile_it_derives() {
 
 #[test]
 fn a_wider_device_derives_the_wider_tiles_it_can_stage() {
-    let narrow = Profile::derive(Budget::BASELINE);
-    let mid = Profile::derive(mid_device());
-    let wide = Profile::derive(wide_device());
+    let narrow = Profile::derive(Budget::BASELINE, None);
+    let mid = Profile::derive(mid_device(), None);
+    let wide = Profile::derive(wide_device(), None);
     assert!(narrow.len() <= mid.len() && mid.len() <= wide.len());
     assert!(
         narrow.iter().all(|profile| profile.workgroup() <= 256),
@@ -134,7 +134,7 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
 
 #[test]
 fn a_geometry_declares_every_tile_its_profile_offers() {
-    for profile in Profile::derive(wide_device()) {
+    for profile in Profile::derive(wide_device(), None) {
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
@@ -177,7 +177,7 @@ fn a_geometry_declares_every_tile_its_profile_offers() {
 
 #[test]
 fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
-    for profile in Profile::derive(wide_device()) {
+    for profile in Profile::derive(wide_device(), None) {
         let geometry = Geometry::of(
             profile.workgroup(),
             profile.shared_bytes(),
@@ -238,7 +238,7 @@ fn a_streamed_tile_carries_no_operand_through_shared_memory() {
 
 #[test]
 fn a_profile_offers_a_streamed_tile_for_the_narrowest_product() {
-    for profile in Profile::derive(wide_device()) {
+    for profile in Profile::derive(wide_device(), None) {
         let streamed = profile
             .tiles()
             .iter()
