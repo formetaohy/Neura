@@ -43,6 +43,7 @@ impl Role {
 #[derive(Clone, Copy, Debug)]
 pub enum Partial {
     Direct,
+    Zero,
     Formula {
         roles: &'static [Role],
         build: fn() -> ast::Expression,
@@ -52,14 +53,14 @@ pub enum Partial {
 impl Partial {
     pub fn formula(self) -> Option<ast::Expression> {
         match self {
-            Self::Direct => None,
+            Self::Direct | Self::Zero => None,
             Self::Formula { build, .. } => Some(build()),
         }
     }
 
     pub const fn roles(self) -> &'static [Role] {
         match self {
-            Self::Direct => &[],
+            Self::Direct | Self::Zero => &[],
             Self::Formula { roles, .. } => roles,
         }
     }
@@ -82,6 +83,9 @@ macro_rules! role {
 macro_rules! partial {
     ((direct)) => {
         Partial::Direct
+    };
+    ((zero)) => {
+        Partial::Zero
     };
     (([$($role:ident),*] => $expression:expr)) => {
         Partial::Formula {
@@ -157,6 +161,12 @@ ops! {
     Unary FLOOR = "floor" apply (floor(a)) partials [([] => g * 0.0)];
     Unary GELU = "gelu" apply (gelu(a)) partials [([x] => g * gelu_grad(x))];
     Unary SILU = "silu" apply (a * sigmoid(a)) partials [([x] => g * sigmoid(x) * (1.0 + x * (1.0 - sigmoid(x))))];
+    Binary GREATER = "greater" apply (select(0.0, 1.0, a > b)) partials [(zero), (zero)];
+    Binary GREATER_EQUAL = "greater_equal" apply (select(0.0, 1.0, a >= b)) partials [(zero), (zero)];
+    Binary LESS = "less" apply (select(0.0, 1.0, a < b)) partials [(zero), (zero)];
+    Binary LESS_EQUAL = "less_equal" apply (select(0.0, 1.0, a <= b)) partials [(zero), (zero)];
+    Binary EQUAL = "equal" apply (select(0.0, 1.0, a == b)) partials [(zero), (zero)];
+    Binary NOT_EQUAL = "not_equal" apply (select(0.0, 1.0, a != b)) partials [(zero), (zero)];
 }
 
 pub fn of(code: u32) -> &'static Op {

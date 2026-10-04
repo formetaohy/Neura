@@ -514,4 +514,12 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Select SELECT = "select" {
+        entry: "run_select",
+        modules: [],
+        geometry: Access,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
 }

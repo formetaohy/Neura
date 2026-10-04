@@ -188,6 +188,42 @@ fn probes() -> Vec<Probe> {
                 (s * (1.0 + a * (1.0 - s)), 0.0)
             },
         },
+        Probe {
+            op: op::GREATER,
+            build: |graph, left, right| graph.greater(left, right),
+            apply: |a, b| f32::from(a > b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::GREATER_EQUAL,
+            build: |graph, left, right| graph.greater_equal(left, right),
+            apply: |a, b| f32::from(a >= b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::LESS,
+            build: |graph, left, right| graph.less(left, right),
+            apply: |a, b| f32::from(a < b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::LESS_EQUAL,
+            build: |graph, left, right| graph.less_equal(left, right),
+            apply: |a, b| f32::from(a <= b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::EQUAL,
+            build: |graph, left, right| graph.equal(left, right),
+            apply: |a, b| f32::from(a == b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
+        Probe {
+            op: op::NOT_EQUAL,
+            build: |graph, left, right| graph.not_equal(left, right),
+            apply: |a, b| f32::from(a != b),
+            partial: |_a, _b| (0.0, 0.0),
+        },
     ]
 }
 
@@ -222,6 +258,12 @@ fn every_declared_op_runs_and_differentiates_on_the_device() {
             .map(|(a, b)| (probe.apply)(*a, *b))
             .collect::<Vec<_>>();
         assert_close(&runtime.read(&program, out), &expected, 1e-4);
+
+        let differentiable = (0..definition.family.operands())
+            .any(|slot| !matches!(definition.partial(slot), op::Partial::Zero));
+        if !differentiable {
+            continue;
+        }
 
         let gradient = Graph::new();
         let left = gradient.parameter(Shape::vector(ELEMENTS), Init::Zero, Element::Single);

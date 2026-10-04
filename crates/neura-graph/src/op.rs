@@ -606,10 +606,81 @@ impl<'g> Graph<'g> {
         self.elementwise(op::MAXIMUM, left, right)
     }
 
+    pub fn greater(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::GREATER, left, right)
+    }
+
+    pub fn greater_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::GREATER_EQUAL, left, right)
+    }
+
+    pub fn less(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::LESS, left, right)
+    }
+
+    pub fn less_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::LESS_EQUAL, left, right)
+    }
+
+    pub fn equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::EQUAL, left, right)
+    }
+
+    pub fn not_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+        let left = self.own(left);
+        let right = self.own(right);
+        self.elementwise(op::NOT_EQUAL, left, right)
+    }
+
     pub fn min(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::MINIMUM, left, right)
+    }
+
+    pub fn select(&self, condition: Value<'g>, accept: Value<'g>, reject: Value<'g>) -> Value<'g> {
+        let condition = self.own(condition);
+        let accept = self.own(accept);
+        let reject = self.own(reject);
+        let shape = self
+            .shape(condition)
+            .combined(self.shape(accept))
+            .combined(self.shape(reject));
+        let element = self
+            .element(condition)
+            .promote(self.element(accept))
+            .promote(self.element(reject));
+        let out = self.stored(
+            shape,
+            element,
+            self.carries(element, &[condition, accept, reject]),
+            Residency::Derived,
+            self.tracked(&[accept, reject]),
+        );
+        self.push(TaskInfo::of(
+            Kind::Select,
+            op::NONE,
+            out.id(),
+            [
+                condition.id(),
+                accept.id(),
+                reject.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        ));
+        out
     }
 
     pub fn relu(&self, value: Value<'g>) -> Value<'g> {

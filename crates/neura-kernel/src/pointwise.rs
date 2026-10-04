@@ -202,6 +202,24 @@ mod device {
         }
     }
 
+    fn run_select(task: Task, lid: u32) {
+        let condition = values[task.a];
+        let accept = values[task.b];
+        let reject = values[task.c];
+        let output = values[task.out];
+        let dims = output.dims;
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let at = walked_at(task.geometry, index, dims);
+            let taken = fetch(condition, read_address(at, condition.strides)) != 0.0;
+            let value = select(
+                fetch(reject, read_address(at, reject.strides)),
+                fetch(accept, read_address(at, accept.strides)),
+                taken,
+            );
+            publish(output, index, chained(task, at, value));
+        }
+    }
+
     fn run_partial(task: Task, lid: u32) {
         let primary = values[select(task.a, task.out, task.a == NO_VALUE)];
         let other = values[select(task.b, task.out, task.b == NO_VALUE)];

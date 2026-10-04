@@ -490,6 +490,7 @@ fn schedule_unit(
         }
         Kind::Binary
         | Kind::Unary
+        | Kind::Select
         | Kind::Partial
         | Kind::Fill
         | Kind::Broadcast

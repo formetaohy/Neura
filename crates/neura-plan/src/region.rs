@@ -108,9 +108,12 @@ fn narrowed(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Narrowed
             Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
                 softmax(values, task, &mut narrowed)
             }
-            Kind::Binary | Kind::Unary | Kind::Fill | Kind::Broadcast | Kind::Partial => {
-                elementwise(values, task, &mut narrowed)
-            }
+            Kind::Binary
+            | Kind::Unary
+            | Kind::Select
+            | Kind::Fill
+            | Kind::Broadcast
+            | Kind::Partial => elementwise(values, task, &mut narrowed),
             _ => {}
         }
     }

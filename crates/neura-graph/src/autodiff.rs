@@ -527,8 +527,26 @@ impl<'g> Graph<'g> {
                     if !self.tracked(&[operand]) {
                         continue;
                     }
+                    if matches!(definition.partial(slot), op::Partial::Zero) {
+                        continue;
+                    }
                     let contribution = self.partial(definition, task, slot, gradient);
                     self.accumulate(grads, operand, contribution);
+                }
+            }
+            Kind::Select => {
+                let condition = self.value_of(task.inputs[0]);
+                let accept = self.value_of(task.inputs[1]);
+                let reject = self.value_of(task.inputs[2]);
+                if self.tracked(&[accept]) {
+                    let empty = self.fill(self.shape(gradient), 0.0);
+                    let contribution = self.select(condition, gradient, empty);
+                    self.accumulate(grads, accept, contribution);
+                }
+                if self.tracked(&[reject]) {
+                    let empty = self.fill(self.shape(gradient), 0.0);
+                    let contribution = self.select(condition, empty, gradient);
+                    self.accumulate(grads, reject, contribution);
                 }
             }
             Kind::Softmax => {
