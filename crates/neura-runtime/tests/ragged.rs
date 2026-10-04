@@ -10,6 +10,7 @@ use support::{assert_close, open};
 const WIDTH: u32 = 4;
 const PLANES: u32 = 4;
 const BOUND: u32 = 16;
+const WIDE_BOUND: u32 = 1024;
 const SCALE: f32 = 0.5;
 
 fn refuses(action: impl FnOnce()) -> bool {
@@ -418,4 +419,132 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
             },
         );
     }));
+}
+
+struct Planes {
+    runtime: Runtime,
+    graph: Graph<'static>,
+    lengths: Value<'static>,
+    cursor: Value<'static>,
+    query: Value<'static>,
+    cache: Value<'static>,
+    out: Value<'static>,
+    offsets: Value<'static>,
+    total: Value<'static>,
+}
+
+impl Planes {
+    fn of(planes: u32, bound: u32, width: u32) -> Self {
+        let graph: Graph<'static> = Graph::new();
+        let live = graph.free(planes);
+        let lengths = graph.input(Shape::of([1, planes]).freed(&[(3, live)]), Element::Single);
+        let ragged = graph.ragged(bound, lengths);
+        let cache = graph.resident(
+            Shape::of([1, 1, bound, width]).freed(&[(2, ragged.extent)]),
+            Element::Single,
+        );
+        let query = graph.input(
+            Shape::of([1, planes, 1, width]).freed(&[(1, live)]),
+            Element::Single,
+        );
+        let cursor = graph.input(Shape::of([1, planes, 1, 1]), Element::Single);
+        let out = graph.attention(
+            query,
+            cache,
+            cache,
+            AttentionOptions {
+                scale: SCALE,
+                causal: true,
+                origin: Some(cursor),
+                segments: Some(ragged.offsets),
+            },
+        );
+        let total = graph.sum(cache);
+        graph.retain(out);
+        graph.retain(ragged.offsets);
+        graph.retain(total);
+        Self {
+            runtime: open(),
+            graph,
+            lengths,
+            cursor,
+            query,
+            cache,
+            out,
+            offsets: ragged.offsets,
+            total,
+        }
+    }
+
+    fn compile(&self) -> Program<'_> {
+        let weights = self.runtime.weights(&self.graph);
+        self.runtime.compile(&self.graph, &weights)
+    }
+
+    fn run(&self, program: &Program<'_>, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, f32) {
+        let width = self.graph.shape(self.cache).dims()[3];
+        let bound = self.graph.shape(self.cache).dims()[2];
+        let planes = self.graph.shape(self.cursor).dims()[1];
+        let cache = (0..bound * width)
+            .map(|at| (at % 7) as f32 + 1.0)
+            .collect::<Vec<f32>>();
+        let query = data(lengths.len() as u32 * width, 29);
+        let cursors = lengths
+            .iter()
+            .map(|length| (length - 1.0).max(0.0))
+            .chain(std::iter::repeat_n(
+                0.0,
+                (planes - lengths.len() as u32) as usize,
+            ))
+            .collect::<Vec<f32>>();
+        self.runtime.bind(program, &[lengths.len() as u32]);
+        self.runtime.write(program, self.lengths, lengths);
+        self.runtime.write(program, self.cache, &cache);
+        self.runtime.write(program, self.query, &query);
+        self.runtime.write(program, self.cursor, &cursors);
+        self.runtime.run(program);
+        let produced = self.runtime.read(program, self.out);
+        let scanned = self.runtime.read(program, self.offsets);
+        let summed = self.runtime.read(program, self.total);
+        let packed = packed(lengths, &cache, width);
+        assert_close(
+            &produced,
+            &expected(lengths, &packed, &query, &cursors, width),
+            1e-5,
+        );
+        let walked = self.runtime.read(program, self.cache).len();
+        assert_eq!(
+            walked,
+            packed.len(),
+            "the packed cache walks the tokens a binding holds",
+        );
+        assert_close(&summed, &[packed.iter().sum()], 1e-5);
+        (produced, scanned, summed[0])
+    }
+}
+
+#[test]
+fn a_ragged_axis_walks_only_the_planes_a_binding_holds() {
+    let planes = Planes::of(PLANES, WIDE_BOUND, WIDTH);
+    let program = planes.compile();
+    let (_, warm, _) = planes.run(&program, &[3.0, 2.0, 300.0, 300.0]);
+    assert_eq!(warm, [0.0, 3.0, 5.0, 305.0, 605.0]);
+    let (produced, scanned, _) = planes.run(&program, &[3.0, 2.0]);
+    assert_eq!(produced.len(), 2 * WIDTH as usize);
+    assert_eq!(
+        scanned[..3],
+        [0.0, 3.0, 5.0],
+        "the prefix closes the offsets at the planes a binding holds, not at the bound its graph declares",
+    );
+}
+
+#[test]
+fn a_ragged_axis_of_no_planes_closes_its_offsets_at_nothing() {
+    let planes = Planes::of(PLANES, WIDE_BOUND, WIDTH);
+    let program = planes.compile();
+    planes.run(&program, &[3.0, 2.0, 300.0, 300.0]);
+    let (produced, scanned, summed) = planes.run(&program, &[]);
+    assert!(produced.is_empty());
+    assert_eq!(scanned[0], 0.0);
+    assert_eq!(summed, 0.0);
 }

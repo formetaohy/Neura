@@ -70,9 +70,12 @@ mod device {
         let offsets = values[task.a];
         let lengths = values[task.b];
         if lid == 0u32 {
-            let closing = offsets.dims.x * offsets.dims.y * offsets.dims.z * offsets.dims.w - 1u32;
-            let total = fetch(offsets, closing - 1u32) + fetch(lengths, closing - 1u32);
-            publish(offsets, closing, total);
+            let planes = lengths.dims.x * lengths.dims.y * lengths.dims.z * lengths.dims.w;
+            let mut total = 0.0;
+            if planes > 0u32 {
+                total = fetch(offsets, planes - 1u32) + fetch(lengths, planes - 1u32);
+            }
+            publish(offsets, planes, total);
             publish(values[task.out], 0u32, total);
         }
     }

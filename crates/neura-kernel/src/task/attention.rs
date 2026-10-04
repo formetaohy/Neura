@@ -117,6 +117,9 @@ mod device {
     }
 
     fn template_attention_forward(task: Task, lid: u32) {
+        if task.count == 0u32 {
+            return;
+        }
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -242,6 +245,9 @@ mod device {
         if task.segment != NO_VALUE {
             refuse(kind::ATTENTION_QUERY_GRAD, refusal::TASK, 0u32);
         }
+        if task.count == 0u32 {
+            return;
+        }
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -351,6 +357,9 @@ mod device {
     fn template_attention_key_grad(task: Task, lid: u32) {
         if task.segment != NO_VALUE {
             refuse(kind::ATTENTION_KEY_GRAD, refusal::TASK, 0u32);
+        }
+        if task.count == 0u32 {
+            return;
         }
         let query = values[task.a];
         let key = values[task.b];
@@ -465,6 +474,9 @@ mod device {
     fn template_attention_value_grad(task: Task, lid: u32) {
         if task.segment != NO_VALUE {
             refuse(kind::ATTENTION_VALUE_GRAD, refusal::TASK, 0u32);
+        }
+        if task.count == 0u32 {
+            return;
         }
         let query = values[task.a];
         let key = values[task.b];

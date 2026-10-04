@@ -2104,3 +2104,43 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     planes.sort_unstable();
     assert_eq!(planes, [0, 1, 2, 3]);
 }
+
+#[test]
+fn a_ragged_axis_a_binding_narrows_walks_a_measure() {
+    let fixed = Graph::new();
+    let fixed_lengths = fixed.input(Shape::vector(4), Element::Single);
+    let fixed_ragged = fixed.ragged(16, fixed_lengths);
+    fixed.retain(fixed_ragged.offsets);
+    for task in tasks(&plan(&fixed)) {
+        if matches!(Kind::of(task.kind), Kind::PrefixChunk | Kind::PrefixScan) {
+            assert_eq!(
+                task.split,
+                neura_abi::split::RANGE,
+                "a prefix of one shape walks the range its plan carries",
+            );
+        }
+    }
+
+    let graph = Graph::new();
+    let live = graph.free(4);
+    let lengths = graph.input(Shape::of([1, 4]).freed(&[(3, live)]), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    graph.retain(ragged.offsets);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let scanning = records
+        .iter()
+        .filter(|task| matches!(Kind::of(task.kind), Kind::PrefixChunk | Kind::PrefixScan))
+        .collect::<Vec<_>>();
+    assert_eq!(scanning.len(), 2, "one chunk and the scan that walks it");
+    for task in scanning {
+        assert_eq!(
+            task.split,
+            neura_abi::split::UNIFORM,
+            "a prefix of a length a binding narrows asks the device for the range it walks",
+        );
+        let measure = &plan.measures()[task.measure as usize];
+        assert_eq!(measure.kind, neura_abi::measure::ELEMENTS);
+        assert_eq!(measure.value, lengths.id());
+    }
+}

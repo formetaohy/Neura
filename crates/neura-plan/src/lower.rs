@@ -783,21 +783,27 @@ fn prefix(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let elements = plan.shape(lengths).elements();
     let per_chunk = task_elements(elements, device_workgroups(profile));
     let partials = plan.publish(Shape::vector(elements.div_ceil(per_chunk)));
-    let chunks = spans(elements, per_chunk).collect::<Vec<_>>();
-    for (slot, (first, count)) in chunks.iter().copied().enumerate() {
+    let chunks = span::chunks(
+        elements,
+        per_chunk,
+        measured(plan, lengths, Measure::Elements),
+    );
+    for (slot, (first, count, split)) in chunks.iter().copied().enumerate() {
         let mut task = Task::span(unit, first, count, u64::from(count));
         task.slot = slot as u32;
         task.out = partials;
         task.extra = NO_VALUE;
+        task.split = split;
         plan.tasks.push(task);
     }
-    for (slot, (first, count)) in chunks.iter().copied().enumerate() {
+    for (slot, (first, count, split)) in chunks.iter().copied().enumerate() {
         let mut task = Task::span(unit, first, count, u64::from(count));
         task.kind = Kind::PrefixScan;
         task.slot = slot as u32;
         task.inputs = [lengths, partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         task.out = offsets;
         task.extra = NO_VALUE;
+        task.split = split;
         plan.tasks.push(task);
     }
     let mut close = Task::span(unit, 0, 1, 1);

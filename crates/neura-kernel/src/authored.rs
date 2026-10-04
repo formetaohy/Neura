@@ -181,9 +181,11 @@ mod device {
         for step in stride(lid, record.tasks_count, WORKGROUP_SIZE) {
             let id = patch_list[record.tasks + step];
             let task = tasks[id];
-            tasks[id].first = span_first(task);
-            tasks[id].count = span_count(task);
-            if task.segment != NO_VALUE {
+            let first = span_first(task);
+            let count = span_count(task);
+            tasks[id].first = first;
+            tasks[id].count = count;
+            if task.segment != NO_VALUE && count > 0u32 {
                 tasks[id].keys = segment_keys(task, live + 1u32);
             }
         }
