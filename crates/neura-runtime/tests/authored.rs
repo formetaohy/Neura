@@ -66,6 +66,7 @@ fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model 
                 causal: true,
                 origin: None,
                 segments: None,
+                reach: None,
             },
         );
         graph.matmul(attended, weight)

@@ -406,6 +406,7 @@ impl Plan {
                 patch: task.patch,
                 segment: task.segments,
                 keys: task.keys,
+                reach: task.reach,
             });
             if task.in_place
                 && task

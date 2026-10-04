@@ -55,6 +55,7 @@ fn graph_of(
             causal: shapes.causal,
             origin: None,
             segments: None,
+            reach: (shapes.reach > 0).then_some(shapes.reach),
         },
     );
     graph.retain(out);
@@ -144,6 +145,7 @@ fn shapes(causal: bool) -> Shapes {
         width: 4,
         causal,
         origin: 0,
+        reach: 0,
         scale: 0.5,
     }
 }
@@ -166,6 +168,7 @@ fn an_attention_reads_queries_and_keys_of_different_lengths() {
             width: 3,
             causal: false,
             origin: 0,
+            reach: 0,
             scale: 0.25,
         },
         1e-5,
@@ -183,6 +186,7 @@ fn an_attention_wider_than_one_task_walks_every_row_of_its_block() {
         width: 2,
         causal: true,
         origin: 0,
+        reach: 0,
         scale: 0.5,
     };
     let runtime = open();
@@ -214,6 +218,7 @@ fn an_attention_shares_one_key_head_among_a_group_of_queries() {
             width: 3,
             causal: true,
             origin: 0,
+            reach: 0,
             scale: 0.5,
         },
         1e-5,
@@ -228,6 +233,7 @@ fn an_attention_shares_one_key_head_among_a_group_of_queries() {
             width: 3,
             causal: true,
             origin: 0,
+            reach: 0,
             scale: 0.5,
         },
         1e-5,
@@ -242,6 +248,7 @@ fn an_attention_shares_one_key_head_among_a_group_of_queries() {
             width: 2,
             causal: false,
             origin: 0,
+            reach: 0,
             scale: 0.25,
         },
         1e-5,
@@ -266,6 +273,7 @@ fn an_attention_refuses_values_of_another_width() {
                     causal: false,
                     origin: None,
                     segments: None,
+                    reach: None,
                 },
             );
             graph.retain(out);
@@ -290,6 +298,7 @@ fn an_attention_refuses_a_group_of_queries_that_does_not_divide() {
                 width: 2,
                 causal: false,
                 origin: 0,
+                reach: 0,
                 scale: 0.5,
             };
             let (graph, _, _, _, _) = graph_of(shapes);
@@ -315,6 +324,7 @@ fn a_fused_attention_holds_no_score_matrix_of_its_own() {
             width: 32,
             causal: true,
             origin: 0,
+            reach: 0,
             scale: 0.176_776_69,
         };
         let (graph, queries, keys, values, out) = graph_of(shapes);
@@ -355,6 +365,7 @@ fn an_attention_carries_the_log_sum_of_every_row_it_weights() {
         width: 2,
         causal: true,
         origin: 0,
+        reach: 0,
         scale: 0.5,
     };
     let (graph, queries, keys, values, _) = graph_of(shapes);
@@ -394,6 +405,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 causal: true,
                 origin: None,
                 segments: None,
+                reach: None,
             },
         );
     }));
@@ -407,6 +419,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 causal: false,
                 origin: None,
                 segments: None,
+                reach: None,
             },
         );
     }));
@@ -421,6 +434,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 causal: false,
                 origin: None,
                 segments: None,
+                reach: None,
             },
         );
     }));
@@ -443,6 +457,7 @@ fn a_fused_attention_leaves_no_room_for_a_score_it_cannot_carry() {
             causal: false,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -498,6 +513,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     let loss = graph.sum(out);
@@ -532,6 +548,7 @@ fn every_profile_the_device_offers_runs_the_same_attention() {
         width: 3,
         causal: true,
         origin: 0,
+        reach: 0,
         scale: 0.5,
     };
     let runtime = open();
@@ -611,6 +628,7 @@ fn block<'g>(
                 causal: shapes.causal,
                 origin: None,
                 segments: None,
+                reach: None,
             },
         )
     };
@@ -681,4 +699,28 @@ fn a_recomputed_attention_block_matches_the_gradients_it_replaced() {
         program.task_count() > plain_program.task_count(),
         "a recomputed block re-runs the plan prefix it was authored into",
     );
+}
+
+#[test]
+fn a_window_weighs_only_the_keys_a_query_reaches() {
+    let mut banded = shapes(true);
+    banded.reach = 2;
+    run_forward(banded, 1e-5);
+    run_backward(banded, 1e-5);
+}
+
+#[test]
+fn a_window_of_one_weighs_every_row_its_own_key() {
+    let mut banded = shapes(true);
+    banded.reach = 1;
+    run_forward(banded, 1e-5);
+    run_backward(banded, 1e-5);
+}
+
+#[test]
+fn a_window_wider_than_the_keys_weighs_them_all() {
+    let mut banded = shapes(true);
+    banded.reach = banded.keys + 1;
+    run_forward(banded, 1e-5);
+    run_backward(banded, 1e-5);
 }

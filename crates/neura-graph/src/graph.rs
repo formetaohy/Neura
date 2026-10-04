@@ -2,7 +2,7 @@ use crate::autodiff::Recomputation;
 use crate::init::Init;
 use crate::shape::{Free, Shape};
 use crate::window::Window;
-use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
+use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_pointwise as op;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -13,7 +13,6 @@ use std::sync::{Arc, Weak};
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) const NORM_FLOOR: f32 = 1e-6;
-pub(crate) const EXACT_WALK_LIMIT: u32 = 1 << 24;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Value<'g> {
@@ -48,6 +47,7 @@ pub struct AttentionOptions<'g> {
     pub causal: bool,
     pub origin: Option<Value<'g>>,
     pub segments: Option<Value<'g>>,
+    pub reach: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,6 +94,7 @@ pub struct TaskInfo {
     pub axis: u32,
     pub offset: u32,
     pub segments: u32,
+    pub reach: u32,
     pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
@@ -114,6 +115,7 @@ impl TaskInfo {
             axis: 0,
             offset: 0,
             segments: NO_VALUE,
+            reach: 0,
             prelude: Vec::new(),
             chain: Vec::new(),
         }

@@ -2,7 +2,7 @@ use crate::graph::{AttentionOptions, Graph, Residency, TaskInfo, Value};
 use crate::pool::Pool;
 use crate::shape::Shape;
 use crate::window::Window;
-use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
+use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
 
 impl<'g> Graph<'g> {
@@ -166,6 +166,21 @@ impl<'g> Graph<'g> {
             attention.scale,
         );
         let segments = attention.segments.map(|segments| self.own(segments));
+        let reach = attention.reach;
+        if let Some(reach) = reach {
+            assert!(
+                reach > 0,
+                "an attention that reaches back over {reach} keys weighs no key at all",
+            );
+            assert!(
+                reach <= EXACT_WALK_LIMIT,
+                "an attention that reaches back over {reach} keys positions them past the {EXACT_WALK_LIMIT} keys a device counts exactly",
+            );
+            assert!(
+                attention.causal,
+                "an attention that reaches back over {reach} keys reads the keys its causal mask leaves behind, and an attention without a mask weighs every key",
+            );
+        }
         let tracked = self.tracked(&[query, key, value]);
         if let Some(offsets) = segments {
             let axis = {
@@ -368,6 +383,7 @@ impl<'g> Graph<'g> {
         task.segments = segments.map_or(NO_VALUE, |offsets| offsets.id());
         task.param = attention.scale;
         task.slot = u32::from(attention.causal);
+        task.reach = reach.unwrap_or(0);
         self.push(task);
         out
     }

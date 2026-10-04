@@ -21,6 +21,7 @@ pub use span::{measure, split};
 pub use store::Store;
 
 pub const MAX_RANK: u32 = 4;
+pub const EXACT_WALK_LIMIT: u32 = 1 << 24;
 pub const REFUSAL_WORDS: u32 = 1;
 pub const NO_VALUE: u32 = u32::MAX;
 pub const NO_SLOT: u32 = u8::MAX as u32;

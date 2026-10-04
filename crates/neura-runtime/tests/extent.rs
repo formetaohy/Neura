@@ -106,6 +106,7 @@ fn attention_model(
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     let activated = graph.tanh(attended);

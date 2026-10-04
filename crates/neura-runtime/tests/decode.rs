@@ -37,10 +37,11 @@ fn options(cursor: Value<'static>) -> AttentionOptions<'static> {
         causal: true,
         origin: Some(cursor),
         segments: None,
+        reach: None,
     }
 }
 
-fn cached_shapes(queries: u32, origin: u32) -> Shapes {
+fn cached_shapes(queries: u32, origin: u32, reach: u32) -> Shapes {
     Shapes {
         heads: 1,
         key_heads: 1,
@@ -50,6 +51,7 @@ fn cached_shapes(queries: u32, origin: u32) -> Shapes {
         width: WIDTH,
         causal: true,
         origin,
+        reach,
         scale: SCALE,
     }
 }
@@ -62,10 +64,19 @@ struct Decoder {
     row: Value<'static>,
     query: Value<'static>,
     out: Value<'static>,
+    ring: bool,
 }
 
 impl Decoder {
     fn open(agents: u32) -> Self {
+        Self::of(agents, None)
+    }
+
+    fn ring(agents: u32, reach: u32) -> Self {
+        Self::of(agents, Some(reach))
+    }
+
+    fn of(agents: u32, reach: Option<u32>) -> Self {
         let graph: Graph<'static> = Graph::new();
         let keys = graph.resident(Shape::of([agents, 1, CAPACITY, WIDTH]), Element::Single);
         let values = graph.resident(Shape::of([agents, 1, CAPACITY, WIDTH]), Element::Single);
@@ -76,7 +87,18 @@ impl Decoder {
         let doubled = graph.mul(row, graph.fill(Shape::scalar(), 2.0));
         graph.write_into(keys, slot, doubled);
         graph.write_into(values, slot, doubled);
-        let out = graph.attention(query, keys, values, options(cursor));
+        let out = graph.attention(
+            query,
+            keys,
+            values,
+            AttentionOptions {
+                scale: SCALE,
+                causal: true,
+                origin: Some(cursor),
+                segments: None,
+                reach,
+            },
+        );
         graph.retain(out);
         Self {
             runtime: open(),
@@ -86,6 +108,7 @@ impl Decoder {
             row,
             query,
             out,
+            ring: reach.is_some(),
         }
     }
 
@@ -102,7 +125,8 @@ impl Decoder {
         queries: &[f32],
     ) -> Vec<f32> {
         self.runtime.write(program, self.cursor, cursors);
-        self.runtime.write(program, self.slot, &slots(cursors));
+        self.runtime
+            .write(program, self.slot, &slots(self.ring, cursors));
         self.runtime.write(program, self.row, rows);
         self.runtime.write(program, self.query, queries);
         self.runtime.run(program);
@@ -110,11 +134,18 @@ impl Decoder {
     }
 }
 
-fn slots(cursors: &[f32]) -> Vec<f32> {
+fn slots(ring: bool, cursors: &[f32]) -> Vec<f32> {
     cursors
         .iter()
         .enumerate()
-        .map(|(agent, cursor)| agent as f32 * CAPACITY as f32 + cursor)
+        .map(|(agent, cursor)| {
+            let at = if ring {
+                cursor % CAPACITY as f32
+            } else {
+                *cursor
+            };
+            agent as f32 * CAPACITY as f32 + at
+        })
         .collect()
 }
 
@@ -135,6 +166,7 @@ fn a_decode_step_reads_the_keys_its_cursor_reaches() {
             width: WIDTH,
             causal: true,
             origin: 0,
+            reach: 0,
             scale: SCALE,
         },
         &queries,
@@ -191,7 +223,7 @@ fn a_decode_gradient_reaches_the_keys_a_cursor_exposes() {
     runtime.write(&program, values, &cache);
     runtime.write(&program, query, &query_row);
     for step in 0..TOKENS {
-        let shapes = cached_shapes(1, step);
+        let shapes = cached_shapes(1, step, 0);
         let (produced_row, statistics) = attention_forward(shapes, &query_row, &cache, &cache);
         let (expected_query, expected_key, expected_value) = attention_backward(
             shapes,
@@ -263,7 +295,7 @@ fn a_cursor_frees_each_plane_at_its_own_position() {
                 }
             }
             let (expected, _) = attention_forward(
-                cached_shapes(1, cursor),
+                cached_shapes(1, cursor, 0),
                 &above(&queries, agent, cursor),
                 &cached,
                 &cached,
@@ -297,6 +329,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
             causal: true,
             origin: Some(cursor),
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -318,7 +351,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
             }
         }
         let (expected, _) =
-            attention_forward(cached_shapes_of(heads, step), &queries, &cached, &cached);
+            attention_forward(cached_shapes_of(heads, step, 0), &queries, &cached, &cached);
         runtime.write(&program, cursor, &[step as f32]);
         runtime.write(&program, slot, &[step as f32]);
         runtime.write(&program, row, &tokens[at..at + WIDTH as usize]);
@@ -327,7 +360,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
     }
 }
 
-fn cached_shapes_of(heads: u32, origin: u32) -> Shapes {
+fn cached_shapes_of(heads: u32, origin: u32, reach: u32) -> Shapes {
     Shapes {
         heads,
         key_heads: 1,
@@ -337,6 +370,154 @@ fn cached_shapes_of(heads: u32, origin: u32) -> Shapes {
         width: WIDTH,
         causal: true,
         origin,
+        reach,
         scale: SCALE,
+    }
+}
+
+const REACH: u32 = 3;
+
+#[test]
+fn a_windowed_decode_walks_a_ring_of_its_cache() {
+    let agents = 2;
+    let decoder = Decoder::ring(agents, REACH);
+    let program = decoder.compile();
+    let steps = CAPACITY * 2;
+    let tokens = data(agents * steps * WIDTH, 17);
+    let queries = data(agents * steps * WIDTH, 41);
+    let width = WIDTH as usize;
+    let mut caches = vec![vec![0.0f32; CAPACITY as usize * width]; agents as usize];
+    for step in 0..steps {
+        let mut rows = Vec::new();
+        let mut asked = Vec::new();
+        for agent in 0..agents {
+            let at = ((agent * steps + step) * WIDTH) as usize;
+            rows.extend_from_slice(&tokens[at..at + width]);
+            asked.extend_from_slice(&queries[at..at + width]);
+        }
+        let cursors = (0..agents).map(|_| step as f32).collect::<Vec<_>>();
+        let produced = decoder.step(&program, &cursors, &rows, &asked);
+        for agent in 0..agents {
+            let at = ((agent * steps + step) * WIDTH) as usize;
+            let cache = &mut caches[agent as usize];
+            let slot = (step % CAPACITY) as usize * width;
+            for (kept, value) in cache[slot..slot + width]
+                .iter_mut()
+                .zip(&tokens[at..at + width])
+            {
+                *kept = value * 2.0;
+            }
+            let (expected, _) = attention_forward(
+                cached_shapes(1, step, REACH),
+                &queries[at..at + width],
+                cache,
+                cache,
+            );
+            let start = agent as usize * width;
+            assert_close(&produced[start..start + width], &expected, 1e-4);
+        }
+    }
+}
+
+#[test]
+fn a_ring_of_no_window_still_reads_every_key_its_cursor_reaches() {
+    let decoder = Decoder::ring(1, CAPACITY);
+    let program = decoder.compile();
+    let steps = CAPACITY + TOKENS;
+    let tokens = data(steps * WIDTH, 17);
+    let queries = data(steps * WIDTH, 41);
+    let width = WIDTH as usize;
+    let mut cache = vec![0.0f32; CAPACITY as usize * width];
+    for step in 0..steps {
+        let at = step as usize * width;
+        let slot = (step % CAPACITY) as usize * width;
+        for (kept, value) in cache[slot..slot + width]
+            .iter_mut()
+            .zip(&tokens[at..at + width])
+        {
+            *kept = value * 2.0;
+        }
+        let produced = decoder.step(
+            &program,
+            &[step as f32],
+            &tokens[at..at + width],
+            &queries[at..at + width],
+        );
+        let (expected, _) = attention_forward(
+            cached_shapes(1, step, CAPACITY),
+            &queries[at..at + width],
+            &cache,
+            &cache,
+        );
+        assert_close(&produced, &expected, 1e-4);
+    }
+}
+
+#[test]
+fn a_windowed_decode_gradient_reaches_the_keys_a_ring_exposes() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let keys = graph.parameter(
+        Shape::of([1, 1, CAPACITY, WIDTH]),
+        Init::Zero,
+        Element::Single,
+    );
+    let values = graph.parameter(
+        Shape::of([1, 1, CAPACITY, WIDTH]),
+        Init::Zero,
+        Element::Single,
+    );
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let query = graph.parameter(Shape::of([1, 1, 1, WIDTH]), Init::Zero, Element::Single);
+    let out = graph.attention(
+        query,
+        keys,
+        values,
+        AttentionOptions {
+            scale: SCALE,
+            causal: true,
+            origin: Some(cursor),
+            segments: None,
+            reach: Some(REACH),
+        },
+    );
+    let loss = graph.sum(out);
+    let gradients = graph.backward(loss);
+    let query_grad = gradients.of(query);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let query_row = data(WIDTH, 41);
+    let tokens = data((TOKENS + CAPACITY) * WIDTH, 17);
+    runtime.write(&program, query, &query_row);
+    let width = WIDTH as usize;
+    let mut cache = vec![0.0f32; CAPACITY as usize * width];
+    for step in 0..TOKENS + CAPACITY {
+        let at = step as usize * width;
+        let slot = (step % CAPACITY) as usize * width;
+        cache[slot..slot + width].copy_from_slice(&tokens[at..at + width]);
+        runtime.write(&program, keys, &cache);
+        runtime.write(&program, values, &cache);
+        let shapes = cached_shapes(1, step, REACH);
+        let (produced_row, statistics) = attention_forward(shapes, &query_row, &cache, &cache);
+        let (expected_query, expected_key, expected_value) = attention_backward(
+            shapes,
+            &query_row,
+            &cache,
+            &cache,
+            &produced_row,
+            &statistics,
+            &[1.0; WIDTH as usize],
+        );
+        runtime.write(&program, cursor, &[step as f32]);
+        runtime.run(&program);
+        let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+        assert_close(&produced[0], &expected_query, 1e-4);
+        assert_close(&produced[1], &expected_key, 1e-4);
+        assert_close(&produced[2], &expected_value, 1e-4);
     }
 }

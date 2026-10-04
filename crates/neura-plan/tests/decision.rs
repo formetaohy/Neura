@@ -514,6 +514,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -577,6 +578,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
             causal: false,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -603,6 +605,7 @@ fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carrie
             causal: false,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);

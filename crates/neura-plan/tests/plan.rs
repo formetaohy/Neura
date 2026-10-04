@@ -1615,6 +1615,7 @@ fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
             causal: true,
             origin: Some(cursor),
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -1649,6 +1650,7 @@ fn a_cursor_holds_one_position_per_plane() {
         causal: true,
         origin,
         segments: None,
+        reach: None,
     };
     let _ = graph.attention(queries, keys, keys, options(None));
     let _ = graph.attention(queries, keys, keys, options(Some(positions([1, 1, 1, 1]))));
@@ -1714,6 +1716,7 @@ fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     graph.retain(out);
@@ -1752,6 +1755,7 @@ fn a_head_too_wide_for_one_thread_is_refused() {
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     assert!(
@@ -2061,6 +2065,7 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
             causal: true,
             origin: None,
             segments: None,
+            reach: None,
         },
     );
     let probabilities = graph.softmax(attended);
@@ -2256,6 +2261,7 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
+            reach: None,
         },
     );
     graph.retain(out);
@@ -2332,6 +2338,7 @@ fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
+            reach: None,
         },
     );
     graph.retain(out);

@@ -58,6 +58,17 @@ fn expected(
     cursors: &[f32],
     width: u32,
 ) -> Vec<f32> {
+    expected_with(lengths, cache, query, cursors, width, 0)
+}
+
+fn expected_with(
+    lengths: &[f32],
+    cache: &[f32],
+    query: &[f32],
+    cursors: &[f32],
+    width: u32,
+    reach: u32,
+) -> Vec<f32> {
     let offsets = offsets(lengths);
     let planes = lengths.len();
     let mut out = vec![0.0f32; planes * width as usize];
@@ -70,6 +81,9 @@ fn expected(
         for at in 0..keys {
             if at as f32 > cursors[plane] {
                 break;
+            }
+            if reach > 0 && cursors[plane] - at as f32 >= reach as f32 {
+                continue;
             }
             let key = &cache[(start + at) * width as usize..][..width as usize];
             scores.push(
@@ -110,10 +124,15 @@ struct Ragged {
     cache: Value<'static>,
     out: Value<'static>,
     offsets: Value<'static>,
+    reach: u32,
 }
 
 impl Ragged {
     fn of(planes: u32, bound: u32, width: u32) -> Self {
+        Self::windowed(planes, bound, width, 0)
+    }
+
+    fn windowed(planes: u32, bound: u32, width: u32, reach: u32) -> Self {
         let graph: Graph<'static> = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
@@ -132,6 +151,7 @@ impl Ragged {
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
+                reach: (reach > 0).then_some(reach),
             },
         );
         graph.retain(out);
@@ -145,6 +165,7 @@ impl Ragged {
             cache,
             out,
             offsets: ragged.offsets,
+            reach,
         }
     }
 
@@ -169,7 +190,7 @@ impl Ragged {
         let produced = self.runtime.read(program, self.out);
         let scanned = self.runtime.read(program, self.offsets);
         let packed = packed(lengths, &cache, width);
-        let expected = expected(lengths, &packed, &query, &cursors, width);
+        let expected = expected_with(lengths, &packed, &query, &cursors, width, self.reach);
         assert_close(&produced, &expected, 1e-5);
         (produced, scanned)
     }
@@ -226,6 +247,7 @@ fn device_counts_rule_the_key_spans() {
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
+            reach: None,
         },
     );
     graph.retain(out);
@@ -320,6 +342,7 @@ fn a_segmented_attention_reaches_no_gradient() {
                 causal: false,
                 origin: None,
                 segments: Some(ragged.offsets),
+                reach: None,
             },
         );
     }));
@@ -345,6 +368,7 @@ fn a_segmented_attention_names_an_offset_per_plane() {
                 causal: false,
                 origin: None,
                 segments: Some(ragged.offsets),
+                reach: None,
             },
         );
     }));
@@ -370,6 +394,7 @@ fn a_causal_segmented_attention_walks_a_cursor() {
                 causal: true,
                 origin: None,
                 segments: Some(ragged.offsets),
+                reach: None,
             },
         );
     }));
@@ -416,6 +441,7 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
                 causal: false,
                 origin: None,
                 segments: Some(offsets),
+                reach: None,
             },
         );
     }));
@@ -457,6 +483,7 @@ impl Planes {
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
+                reach: None,
             },
         );
         let total = graph.sum(cache);
@@ -590,6 +617,7 @@ impl CountedPlanes {
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
+                reach: None,
             },
         );
         let total = graph.sum(cache);
@@ -706,6 +734,7 @@ fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
+            reach: None,
         },
     );
     graph.retain(out);
@@ -760,5 +789,15 @@ fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
                 .map(|offset| offset as f32)
                 .collect::<Vec<f32>>(),
         );
+    }
+}
+
+#[test]
+fn a_windowed_segmented_attention_weighs_the_keys_a_plane_reaches() {
+    for reach in [1, 2, 3] {
+        let ragged = Ragged::windowed(PLANES, BOUND, WIDTH, reach);
+        let program = ragged.compile();
+        ragged.step(&program, &[3.0, 0.0, 5.0, 2.0], WIDTH);
+        ragged.step(&program, &[6.0, 1.0, 2.0, 0.0], WIDTH);
     }
 }

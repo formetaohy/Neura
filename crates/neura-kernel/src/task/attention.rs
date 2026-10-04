@@ -44,28 +44,65 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
 
 #[neura_compiler::module]
 mod device {
-    fn visible(at: u32, keys: u32, position: u32, causal: bool) -> bool {
-        if at >= keys {
+    fn key_position(at: u32, keys: u32, written: u32) -> u32 {
+        if written <= keys {
+            return at;
+        }
+        return at + keys * ((written - 1u32 - at) / keys);
+    }
+
+    fn weighed(at: u32, position: u32, reach: u32) -> bool {
+        if at > position {
             return false;
         }
-        if causal && at > position {
+        if reach > 0u32 && position - at >= reach {
             return false;
         }
         return true;
     }
 
-    fn attended(at: u32, tokens: u32, column: u32, origin: u32, causal: bool) -> bool {
+    fn visible(at: u32, keys: u32, written: u32, position: u32, reach: u32, causal: bool) -> bool {
+        if at >= keys {
+            return false;
+        }
+        if !causal {
+            return true;
+        }
+        return weighed(
+            select(at, key_position(at, keys, written), reach > 0u32),
+            position,
+            reach,
+        );
+    }
+
+    fn attended(
+        at: u32,
+        tokens: u32,
+        keys: u32,
+        column: u32,
+        origin: u32,
+        reach: u32,
+        causal: bool,
+    ) -> bool {
         if at >= tokens {
             return false;
         }
         if !causal {
             return true;
         }
-        return at + origin >= column;
+        return weighed(
+            select(
+                column,
+                key_position(column, keys, origin + tokens),
+                reach > 0u32,
+            ),
+            at + origin,
+            reach,
+        );
     }
 
     fn block_origin(task: Task, head: u32, batch: u32, keys: u32, tokens: u32) -> u32 {
-        if task.origin == NO_VALUE {
+        if task.origin == NO_VALUE || keys == 0u32 {
             return 0u32;
         }
         if keys < tokens {
@@ -77,7 +114,8 @@ mod device {
             cursor,
             read_address(uvec4(head, batch, 0u32, 0u32), cursor.strides),
         );
-        return whole_index(raw, keys - tokens + 1u32, task.kind, refusal::ORIGIN);
+        let bound = select(keys - tokens + 1u32, EXACT_WALK_LIMIT, task.reach > 0u32);
+        return whole_index(raw, bound, task.kind, refusal::ORIGIN);
     }
 
     fn template_stage_attention(
@@ -154,10 +192,11 @@ mod device {
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
         let mut origin = 0u32;
-        if keys >= tokens {
+        if keys >= tokens || task.reach > 0u32 {
             origin = block_origin(task, head, plane.y, keys, tokens);
         }
         let position = origin + row;
+        let written = origin + tokens;
         let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
@@ -165,6 +204,13 @@ mod device {
             (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
             reached,
         );
+        let back = task.reach - 1u32;
+        let window = select(
+            0u32,
+            plane.z - min(plane.z, back),
+            task.reach > 0u32 && task.origin == NO_VALUE,
+        );
+        let first_block = window / ATTN_KEYS;
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
         let mut weights = scalar_array(0.0, ATTN_KEYS);
@@ -178,7 +224,7 @@ mod device {
                 );
             }
         }
-        for block in stride(0u32, walked, 1u32) {
+        for block in stride(first_block, walked, 1u32) {
             workgroup_barrier();
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
@@ -193,7 +239,7 @@ mod device {
                     weights[column] = select(
                         -3.4028235e38,
                         score * task.param,
-                        visible(at, keys, position, causal),
+                        visible(at, keys, written, position, task.reach, causal),
                     );
                     block_largest = max(block_largest, weights[column]);
                 }
@@ -275,6 +321,7 @@ mod device {
         let causal = task.slot == 1u32;
         let origin = block_origin(task, head, plane.y, keys, tokens);
         let position = origin + row;
+        let written = origin + tokens;
         let reached = causal && task.origin == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
@@ -282,6 +329,13 @@ mod device {
             (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
             reached,
         );
+        let back = task.reach - 1u32;
+        let window = select(
+            0u32,
+            plane.z - min(plane.z, back),
+            task.reach > 0u32 && task.origin == NO_VALUE,
+        );
+        let first_block = window / ATTN_KEYS;
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
         let mut gradients = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
@@ -308,7 +362,7 @@ mod device {
             }
             normalizer = fetch(statistic, statistic_plane + row * statistic.strides.z);
         }
-        for block in stride(0u32, walked, 1u32) {
+        for block in stride(first_block, walked, 1u32) {
             workgroup_barrier();
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
@@ -322,7 +376,7 @@ mod device {
                     let weight = select(
                         0.0,
                         exp(score * task.param - normalizer),
-                        visible(at, keys, position, causal),
+                        visible(at, keys, written, position, task.reach, causal),
                     );
                     let mut weighted = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
@@ -429,7 +483,7 @@ mod device {
                             0.0,
                             exp(score * task.param
                                 - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                            attended(at, tokens, column, origin, causal),
+                            attended(at, tokens, keys, column, origin, task.reach, causal),
                         );
                         let mut weighted = 0.0;
                         let mut row_dot = 0.0;
@@ -536,7 +590,7 @@ mod device {
                             0.0,
                             exp(score * task.param
                                 - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                            attended(at, tokens, column, origin, causal),
+                            attended(at, tokens, keys, column, origin, task.reach, causal),
                         );
                         for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                             accumulated[depth] = accumulated[depth]

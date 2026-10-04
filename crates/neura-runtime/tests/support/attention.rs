@@ -8,6 +8,7 @@ pub struct Shapes {
     pub width: u32,
     pub causal: bool,
     pub origin: u32,
+    pub reach: u32,
     pub scale: f32,
 }
 
@@ -25,8 +26,25 @@ fn key_plane(shapes: Shapes, plane: usize) -> usize {
     (head / groups(shapes)) * batch + plane % batch
 }
 
+fn key_position(shapes: Shapes, column: usize) -> usize {
+    let keys = shapes.keys as usize;
+    let total = shapes.origin as usize + shapes.queries as usize;
+    if total <= keys {
+        return column;
+    }
+    column + keys * ((total - 1 - column) / keys)
+}
+
 fn masked(shapes: Shapes, row: usize, column: usize) -> bool {
-    if shapes.causal && column > shapes.origin as usize + row {
+    if !shapes.causal {
+        return true;
+    }
+    let position = key_position(shapes, column);
+    let query = shapes.origin as usize + row;
+    if position > query {
+        return false;
+    }
+    if shapes.reach > 0 && query - position >= shapes.reach as usize {
         return false;
     }
     true

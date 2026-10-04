@@ -588,6 +588,7 @@ impl<'g> Graph<'g> {
                     grad.origin = task.origin;
                     grad.param = task.param;
                     grad.slot = task.slot;
+                    grad.reach = task.reach;
                     self.push(grad);
                     self.accumulate(grads, operand, out);
                 }

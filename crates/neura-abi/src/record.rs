@@ -112,6 +112,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     patch: u32 => U32,
     segment: u32 => U32,
     keys: u32 => U32,
+    reach: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

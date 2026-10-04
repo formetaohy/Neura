@@ -171,6 +171,7 @@ impl Kernel {
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
         compiler.constant("NO_VALUE", NO_VALUE);
         compiler.constant("NO_SLOT", neura_abi::NO_SLOT);
+        compiler.constant("EXACT_WALK_LIMIT", neura_abi::EXACT_WALK_LIMIT);
         compiler.constant("INT4_BLOCK", INT4_BLOCK);
         compiler.constant("FP4_BLOCK", FP4_BLOCK);
         compiler.constant("refusal::TENSOR", TENSOR);

@@ -17,6 +17,7 @@ fn causal<'g>(segments: neura_graph::Value<'g>) -> AttentionOptions<'g> {
         causal: false,
         origin: None,
         segments: Some(segments),
+        reach: None,
     }
 }
 

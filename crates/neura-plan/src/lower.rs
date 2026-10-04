@@ -40,6 +40,7 @@ pub(crate) struct Task {
     pub(crate) depends: Vec<u32>,
     pub(crate) patch: u32,
     pub(crate) segments: u32,
+    pub(crate) reach: u32,
     pub(crate) keys: u32,
     pub(crate) plane: u32,
 }
@@ -97,6 +98,7 @@ impl Task {
             depends: Vec::new(),
             patch: NO_VALUE,
             segments: unit.segments,
+            reach: unit.reach,
             keys: 0,
             plane: 0,
         }
