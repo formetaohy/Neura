@@ -17,22 +17,6 @@ impl Region {
         }
         Self::Run { first, count }
     }
-
-    pub(crate) fn overlaps(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::Whole, _) | (_, Self::Whole) => true,
-            (
-                Self::Run {
-                    first: left,
-                    count: l,
-                },
-                Self::Run {
-                    first: right,
-                    count: r,
-                },
-            ) => left < right + r && right < left + l,
-        }
-    }
 }
 
 #[derive(Default)]
