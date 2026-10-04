@@ -30,6 +30,12 @@ pub(crate) enum Split {
         index: u32,
         group: u32,
     },
+    Segment {
+        measure: u32,
+        plane: u32,
+        index: u32,
+        group: u32,
+    },
 }
 
 struct Extent {
@@ -94,6 +100,7 @@ impl Extents {
     pub(crate) fn span(&self, split: Split, extents: &[u32]) -> (u32, u32) {
         match split {
             Split::Range { first, count } => (first, count),
+            Split::Segment { index, .. } => (index, 1),
             Split::Uniform {
                 measure,
                 index,

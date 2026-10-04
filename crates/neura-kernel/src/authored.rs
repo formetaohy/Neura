@@ -162,6 +162,44 @@ mod device {
         return 0u32;
     }
 
+    fn live_segments(offsets: Value, total: u32) -> u32 {
+        let mut segments = 0u32;
+        loop {
+            if fetch(offsets, segments) >= f32(total) {
+                break;
+            }
+            segments = segments + 1u32;
+        }
+        return segments;
+    }
+
+    fn patch_segment(task: Task, id: u32, segments: u32, live: u32) {
+        tasks[id].count = 0u32;
+        if task.plane >= segments {
+            return;
+        }
+        let tiles = measures[task.measure];
+        let column_blocks = ceil_div(value_dims(values[tiles.value]).w, tiles.columns);
+        let offsets = values[task.segment];
+        let start = whole_index(
+            fetch(offsets, task.plane),
+            live + 1u32,
+            refusal::TENSOR,
+            refusal::EXTENT,
+        );
+        let end = whole_index(
+            fetch(offsets, task.plane + 1u32),
+            live + 1u32,
+            refusal::TENSOR,
+            refusal::EXTENT,
+        );
+        let row = (task.index / column_blocks) * tiles.rows;
+        if row < end - start {
+            tasks[id].keys = end - start - row;
+            tasks[id].count = 1u32;
+        }
+    }
+
     fn patch_extents(patch: u32, lid: u32) {
         let record = patches[patch];
         let author = values[record.count];
@@ -178,6 +216,10 @@ mod device {
             values[id].strides = value_strides(value);
         }
         workgroup_barrier();
+        let mut segments = 0u32;
+        if record.segment != NO_VALUE {
+            segments = live_segments(values[record.segment], live);
+        }
         for step in stride(lid, record.tasks_count, WORKGROUP_SIZE) {
             let id = patch_list[record.tasks + step];
             let task = tasks[id];
@@ -185,7 +227,9 @@ mod device {
             let count = span_count(task);
             tasks[id].first = first;
             tasks[id].count = count;
-            if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
+            if task.split == split::SEGMENT {
+                patch_segment(task, id, segments, live);
+            } else if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
                 tasks[id].keys = segment_keys(task, live + 1u32);
             }
         }

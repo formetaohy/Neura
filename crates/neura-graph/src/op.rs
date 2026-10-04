@@ -51,6 +51,101 @@ impl<'g> Graph<'g> {
         out
     }
 
+    pub fn grouped_matmul(
+        &self,
+        left: Value<'g>,
+        weights: Value<'g>,
+        segments: Value<'g>,
+    ) -> Value<'g> {
+        let left = self.own(left);
+        let weights = self.own(weights);
+        let segments = self.own(segments);
+        let axis = {
+            let state = self.state.borrow();
+            state.ragged.get(&segments.id()).cloned()
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "a grouped product walks the segments a ragged axis closes, and value {} holds a table no ragged axis published; close the lengths of every plane with Graph::ragged",
+                segments.id(),
+            )
+        });
+        let left_shape = self.shape(left);
+        let weights_shape = self.shape(weights);
+        let groups = axis.planes.elements();
+        assert_eq!(
+            left_shape.free(2),
+            Some(axis.token),
+            "a grouped product walks the rows of every segment through the token axis its offsets close, and the rows of {left_shape:?} walk free extent {:?} where the ragged axis closes free extent {}",
+            left_shape.free(2),
+            axis.token,
+        );
+        assert!(
+            left_shape.dims()[0] == 1 && left_shape.dims()[1] == 1,
+            "a grouped product packs the rows of every segment into one axis, and {:?} holds {} planes of rows",
+            left_shape.dims(),
+            left_shape.dims()[0] * left_shape.dims()[1],
+        );
+        assert!(
+            self.contiguous(left),
+            "a grouped product walks the rows a ragged axis packs one after another, and value {} strides every row by a layout the offsets do not close",
+            left.id(),
+        );
+        assert_eq!(
+            weights_shape.dims()[0],
+            groups,
+            "a grouped product weighs the {groups} segments a ragged axis closes, and the weights of {weights_shape:?} hold {} planes",
+            weights_shape.dims()[0],
+        );
+        assert!(
+            weights_shape.dims()[1] == 1
+                && weights_shape.free(0).is_none()
+                && weights_shape.free(1).is_none()
+                && weights_shape.free(2).is_none()
+                && weights_shape.free(3).is_none(),
+            "a grouped product segments its rows alone, and the weights of {weights_shape:?} walk a length the binding rules",
+        );
+        let depth = left_shape.dims()[3];
+        assert!(
+            left_shape.meets(weights_shape, 3, 2),
+            "a grouped product of depth {depth} weighs pairs of depth {} against every row of {:?}",
+            weights_shape.dims()[2],
+            left_shape.dims(),
+        );
+        let columns = weights_shape.dims()[3];
+        let element = self.element(left).promote(self.element(weights));
+        assert!(
+            !self.tracked(&[left, weights]),
+            "a grouped product carries no gradient: its offsets place the rows a device packs, and only a host knows the rows a backward pass walks",
+        );
+        let out = self.stored(
+            Shape::from_axes(
+                [1, 1, left_shape.dims()[2], columns],
+                [None, None, left_shape.free(2), None],
+            ),
+            element,
+            self.carries(element, &[left, weights]),
+            Residency::Derived,
+            false,
+        );
+        let mut unit = TaskInfo::of(
+            Kind::Matmul,
+            op::NONE,
+            out.id(),
+            [
+                left.id(),
+                weights.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        unit.segments = segments.id();
+        self.push(unit);
+        out
+    }
+
     pub fn attention(
         &self,
         query: Value<'g>,

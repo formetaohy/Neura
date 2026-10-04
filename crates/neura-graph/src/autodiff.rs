@@ -472,6 +472,10 @@ impl<'g> Graph<'g> {
                 }
             }
             Kind::Matmul => {
+                assert!(
+                    task.segments == NO_VALUE,
+                    "a grouped product carries no gradient: its offsets place the rows a device packs, and only a host knows the rows a backward pass walks",
+                );
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
                 if self.tracked(&[left]) {
                     let transposed = self.permute(right, [0, 1, 3, 2]);

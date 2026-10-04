@@ -673,7 +673,80 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     }
 }
 
+fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product, MatmulTile)]) {
+    let left = plan.shape(unit.inputs[0]).dims();
+    let weights = plan.shape(unit.inputs[1]).dims();
+    let out = plan.shape(unit.out).dims();
+    let (rows, columns) = (out[2], out[3]);
+    let depth = left[3];
+    let product = Product::of(1, rows, columns, depth);
+    if !plan.products.contains(&product) {
+        plan.products.push(product);
+    }
+    let tile = chosen
+        .iter()
+        .find(|(shape, _)| *shape == product)
+        .map(|(_, tile)| *tile)
+        .unwrap_or_else(|| product.planned(profile));
+    assert!(
+        profile.tiles().contains(&tile),
+        "a plan walks {tile:?} for {product:?} where its profile offers {:?}",
+        profile.tiles(),
+    );
+    let geometry = plan.geometry(tile);
+    let segments = weights[0];
+    let tiles_per_segment = rows.div_ceil(tile.rows()) * columns.div_ceil(tile.columns());
+    let splits = product.splits(tile, profile);
+    let partials = (splits > 1).then(|| plan.publish(Shape::vector(splits * rows * columns)));
+    let measure = measured(plan, unit.out, |value| Measure::Tiles { value, geometry })
+        .expect("a grouped product walks the tiles of the rows a ragged axis counts");
+    for split in 0..splits {
+        for plane in 0..segments {
+            for index in 0..tiles_per_segment {
+                let mut task = Task::span(unit, index, 1, tile.tile_work());
+                task.split = Split::Segment {
+                    measure,
+                    plane,
+                    index,
+                    group: tiles_per_segment,
+                };
+                task.plane = plane;
+                task.geometry = geometry;
+                if let Some(partials) = partials {
+                    task.out = partials;
+                    task.slot = split;
+                    task.splits = splits;
+                    task.prelude.clear();
+                    task.chain.clear();
+                    task.in_place = false;
+                }
+                plan.tasks.push(task);
+            }
+        }
+    }
+    let Some(partials) = partials else {
+        return;
+    };
+    let elements = rows * columns;
+    let per_task = task_elements(elements, device_workgroups(profile));
+    let measure = measured(plan, unit.out, Measure::Elements);
+    for (first, count, split) in span::chunks(elements, per_task, measure) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
+        task.kind = Kind::MatmulFold;
+        task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.segments = NO_VALUE;
+        task.splits = splits;
+        task.prelude.clear();
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
 fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product, MatmulTile)]) {
+    if unit.segments != NO_VALUE {
+        grouped(plan, unit, profile, chosen);
+        return;
+    }
     let dims = plan.shape(unit.out).dims();
     let (rows, columns) = (dims[2], dims[3]);
     let depth = plan.shape(unit.inputs[0]).dims()[3];

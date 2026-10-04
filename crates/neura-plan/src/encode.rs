@@ -352,6 +352,19 @@ impl Plan {
                     group,
                     ..
                 } => (neura_abi::split::PLANE, measure, index, group, planes),
+                Split::Segment {
+                    measure,
+                    index,
+                    group,
+                    ..
+                } => {
+                    assert_eq!(
+                        (task.first, task.count),
+                        (index, 1),
+                        "a segment task walks the one tile its plan index names",
+                    );
+                    (neura_abi::split::SEGMENT, measure, index, group, 0)
+                }
             };
             let record = TaskRecord::of(TaskFields {
                 kind: task.kind.code(),

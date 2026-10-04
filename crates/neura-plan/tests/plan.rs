@@ -2343,3 +2343,98 @@ fn a_row_that_reads_a_wider_tensor_waits_for_the_task_that_writes_it() {
         }
     }
 }
+
+#[test]
+fn a_grouped_product_walks_the_tiles_every_segment_holds() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(3), Element::Single);
+    let ragged = graph.ragged(24, lengths);
+    let left = graph.input(
+        Shape::of([1, 1, 24, 4]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let weights = graph.parameter(
+        Shape::of([3, 1, 4, 2]),
+        Init::Uniform {
+            low: -1.0,
+            high: 1.0,
+        },
+        Element::Single,
+    );
+    graph.freeze(&[weights]);
+    let out = graph.grouped_matmul(left, weights, ragged.offsets);
+    graph.retain(out);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let names = kinds(&plan);
+    assert!(
+        names.contains(&Kind::PrefixChunk)
+            && names.contains(&Kind::PrefixScan)
+            && names.contains(&Kind::PrefixClose),
+        "a grouped product walks the offsets a two-level prefix closes: {names:?}",
+    );
+    let patches = plan.patches();
+    assert_eq!(patches.len(), 1, "one slot is authored");
+    let patch = patches[0];
+    assert_eq!(patch.slot, ragged.extent.slot());
+    assert_eq!(
+        patch.segment,
+        ragged.offsets.id(),
+        "the patch that authors a ragged extent closes the offsets of that axis",
+    );
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert_eq!(
+        values,
+        [left.id(), out.id()],
+        "the packed rows and the rows a grouped product weighs take the live extent",
+    );
+    let measure = plan
+        .measures()
+        .iter()
+        .find(|measure| measure.kind == neura_abi::measure::TILES)
+        .expect("a grouped product walks the tiles of the rows it weighs");
+    assert_eq!(measure.value, out.id());
+    assert!(measure.rows > 0 && measure.columns > 0);
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    let mut segments = Vec::new();
+    let mut tiles = Vec::new();
+    for at in patched {
+        let task = records[*at as usize];
+        assert_eq!(Kind::of(task.kind), Kind::Matmul);
+        assert_eq!(task.split, neura_abi::split::SEGMENT);
+        assert_eq!(task.segment, ragged.offsets.id());
+        assert_eq!(
+            task.measure,
+            plan.measures()
+                .iter()
+                .position(|kept| std::ptr::eq(kept, measure))
+                .expect("the measure a grouped product walks")
+                .try_into()
+                .expect("a measure fits a device word"),
+        );
+        assert!(
+            follows(&plan, author, *at as usize),
+            "task {at} walks the offsets the closing task authors",
+        );
+        segments.push(task.plane);
+        tiles.push((task.group, task.index));
+    }
+    segments.sort_unstable();
+    segments.dedup();
+    assert_eq!(
+        segments,
+        [0, 1, 2],
+        "every segment a ragged axis closes holds the tiles of its own rows",
+    );
+    assert_eq!(
+        tiles.len(),
+        segments.len() * 3,
+        "each segment holds the tiles of the bound its packed rows walk",
+    );
+}

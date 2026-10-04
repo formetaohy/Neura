@@ -207,6 +207,7 @@ impl Kernel {
             ("split::RANGE", split::RANGE),
             ("split::UNIFORM", split::UNIFORM),
             ("split::PLANE", split::PLANE),
+            ("split::SEGMENT", split::SEGMENT),
         ] {
             compiler.constant(name, value);
         }

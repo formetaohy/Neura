@@ -1,5 +1,6 @@
 use crate::access::Reads;
 use crate::lower::Task;
+use crate::span::Split;
 use neura_abi::{Kind, NO_VALUE};
 use neura_graph::ValueInfo;
 use neura_profile::MatmulTile;
@@ -98,7 +99,10 @@ fn assert_names_held_numbers(values: &[ValueInfo], task: &Task, touches: &Touche
 
 fn narrowed(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Narrowed {
     let mut narrowed = Narrowed::default();
-    if owned(values, task.out) && dense(&values[task.out as usize]) {
+    if owned(values, task.out)
+        && dense(&values[task.out as usize])
+        && !matches!(task.split, Split::Segment { .. })
+    {
         match task.kind {
             Kind::Matmul => product(values, tiles, task, &mut narrowed),
             Kind::MatmulFold => fold(values, task, &mut narrowed),

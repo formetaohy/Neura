@@ -2,6 +2,7 @@ pub mod split {
     pub const RANGE: u32 = 0;
     pub const UNIFORM: u32 = 1;
     pub const PLANE: u32 = 2;
+    pub const SEGMENT: u32 = 3;
 }
 
 pub mod measure {

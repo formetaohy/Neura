@@ -169,16 +169,42 @@ mod device {
         let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
         let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
         let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
         for tile in stride(task.first, task.first + task.count, 1u32) {
             let plane = tile / tiles_per_plane;
-            let plane_row = plane / plane_columns;
-            let plane_column = plane % plane_columns;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
             let within = tile % tiles_per_plane;
-            let base_row = (within / column_blocks) * MATMUL_ROWS;
-            let base_column = (within % column_blocks) * MATMUL_COLUMNS;
-            let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
-            let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
-            let out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
             for register in unroll(0u32, MATMUL_REGISTERS, 1u32) {
                 acc[register] = 0.0;
             }
@@ -193,7 +219,7 @@ mod device {
                 right_plane,
                 left,
                 right,
-                rows,
+                row_bound,
                 depth,
                 columns,
             );
@@ -210,7 +236,7 @@ mod device {
                         right_plane,
                         left,
                         right,
-                        rows,
+                        row_bound,
                         depth,
                         columns,
                     );
@@ -244,14 +270,14 @@ mod device {
                 for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
                     let out_row = base_row + thread_row + row;
                     let out_column = base_column + thread_column + column * MATMUL_THREAD_COLUMNS;
-                    if out_row < rows && out_column < columns {
+                    if out_row < row_bound && out_column < columns {
                         let index = out_row * columns + out_column;
                         publish(
                             output,
                             out_plane + index,
                             chained(
                                 task,
-                                uvec4(plane_row, plane_column, out_row, out_column),
+                                uvec4(plane_row, plane_column, chain_row + out_row, out_column),
                                 acc[row * MATMUL_REGISTER_COLUMNS + column],
                             ),
                         );
@@ -278,16 +304,42 @@ mod device {
         let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
         let thread_row = (lid / MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_ROWS;
         let thread_column = (lid % MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_COLUMNS;
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
         for tile in stride(task.first, task.first + task.count, 1u32) {
             let plane = tile / tiles_per_plane;
-            let plane_row = plane / plane_columns;
-            let plane_column = plane % plane_columns;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
             let within = tile % tiles_per_plane;
-            let base_row = (within / column_blocks) * MATMUL_ROWS;
-            let base_column = (within % column_blocks) * MATMUL_COLUMNS;
-            let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
-            let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
-            let out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
             let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
             for block in stride(first_block, last_block, 1u32) {
                 for step in stride(
@@ -298,7 +350,7 @@ mod device {
                     let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         let at = base_row + thread_row + row;
-                        let inside = at < rows;
+                        let inside = at < row_bound;
                         let address = select(
                             0u32,
                             left_plane + at * left.strides.z + step * left.strides.w,
@@ -330,14 +382,14 @@ mod device {
                 for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
                     let out_row = base_row + thread_row + row;
                     let out_column = base_column + thread_column + column;
-                    if out_row < rows && out_column < columns {
+                    if out_row < row_bound && out_column < columns {
                         let index = out_row * columns + out_column;
                         publish(
                             output,
                             out_plane + index,
                             chained(
                                 task,
-                                uvec4(plane_row, plane_column, out_row, out_column),
+                                uvec4(plane_row, plane_column, chain_row + out_row, out_column),
                                 acc[row * MATMUL_REGISTER_COLUMNS + column],
                             ),
                         );
@@ -437,16 +489,42 @@ mod cooperative {
         let subgroup_slot = subgroup * COOPMAT_ROWS * COOPMAT_COLUMNS;
         let copy_words =
             MATMUL_SUBGROUP_ROWS * MATMUL_SUBGROUP_COLUMNS * COOPMAT_ROWS * COOPMAT_COLUMNS;
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
         for tile in stride(task.first, task.first + task.count, 1u32) {
             let plane = tile / tiles_per_plane;
-            let plane_row = plane / plane_columns;
-            let plane_column = plane % plane_columns;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
             let within = tile % tiles_per_plane;
-            let base_row = (within / column_blocks) * MATMUL_ROWS;
-            let base_column = (within % column_blocks) * MATMUL_COLUMNS;
-            let left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
-            let right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
-            let out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
             let mut accumulators = scalar_array(coopmat_accumulator(0.0), MATMUL_ACCUMULATORS);
             let mut buffer = 0u32;
             template_matmul_cooperative_load(
@@ -459,7 +537,7 @@ mod cooperative {
                 right_plane,
                 left,
                 right,
-                rows,
+                row_bound,
                 depth,
                 columns,
             );
@@ -476,7 +554,7 @@ mod cooperative {
                         right_plane,
                         left,
                         right,
-                        rows,
+                        row_bound,
                         depth,
                         columns,
                     );
@@ -539,13 +617,13 @@ mod cooperative {
                                 * COOPMAT_COLUMNS
                             + fragment_column * COOPMAT_COLUMNS
                             + within_slot % COOPMAT_COLUMNS;
-                        if out_row < rows && out_column < columns {
+                        if out_row < row_bound && out_column < columns {
                             publish(
                                 output,
                                 out_plane + out_row * columns + out_column,
                                 chained(
                                     task,
-                                    uvec4(plane_row, plane_column, out_row, out_column),
+                                    uvec4(plane_row, plane_column, chain_row + out_row, out_column),
                                     scratch[unit],
                                 ),
                             );

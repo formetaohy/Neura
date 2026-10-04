@@ -257,6 +257,8 @@ fn touched(task: &Task) -> Vec<u32> {
 pub(crate) fn split_measure(split: Split) -> Option<u32> {
     match split {
         Split::Range { .. } => None,
-        Split::Uniform { measure, .. } | Split::Plane { measure, .. } => Some(measure),
+        Split::Uniform { measure, .. }
+        | Split::Plane { measure, .. }
+        | Split::Segment { measure, .. } => Some(measure),
     }
 }
