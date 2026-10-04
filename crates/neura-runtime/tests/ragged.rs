@@ -975,6 +975,17 @@ impl Trainable {
         self.runtime.compile(&self.graph, &weights)
     }
 
+    fn compile_narrow(&self) -> Program<'_> {
+        let runtime = &self.runtime;
+        let narrow = runtime
+            .profiles()
+            .into_iter()
+            .min_by_key(|profile| profile.workgroup())
+            .expect("a device offers a workgroup a program compiles for");
+        let weights = runtime.weights(&self.graph);
+        runtime.compile_chosen(&self.graph, &weights, narrow, &[])
+    }
+
     fn bind(&self, program: &Program<'_>, planes: u32) {
         self.runtime.bind(program, &[planes]);
     }
@@ -1103,4 +1114,11 @@ fn a_bound_a_host_narrows_trains_only_the_planes_it_holds() {
             );
         }
     }
+}
+
+#[test]
+fn a_plane_longer_than_a_workgroup_trains_every_key_of_it() {
+    let trainable = Trainable::windowed(PLANES, 512, WIDTH, 0);
+    let program = trainable.compile_narrow();
+    trainable.step(&program, &[300.0, 70.0, 0.0, 5.0], 0);
 }

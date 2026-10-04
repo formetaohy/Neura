@@ -2649,8 +2649,9 @@ fn a_grouped_product_walks_the_tiles_every_segment_holds() {
 fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);
-    let ragged = graph.ragged(16, lengths);
-    let packed = Shape::of([1, 1, 16, 4]).freed(&[(2, ragged.extent)]);
+    let bound = 256;
+    let ragged = graph.ragged(bound, lengths);
+    let packed = Shape::of([1, 1, bound, 4]).freed(&[(2, ragged.extent)]);
     let query = graph.gradient_input(Shape::of([1, 4, 1, 4]), Element::Single);
     let key = graph.gradient_input(packed, Element::Single);
     let value = graph.gradient_input(packed, Element::Single);
@@ -2712,6 +2713,12 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
         }
     }
     let mut planes = Vec::new();
+    let mut chunks = Vec::new();
+    let group = bound.div_ceil(narrow().workgroup());
+    assert!(
+        group > 1,
+        "a bound of {bound} rows spans one chunk per workgroup"
+    );
     for (index, task) in records.iter().enumerate() {
         let kind = Kind::of(task.kind);
         if kind == Kind::AttentionKeyGrad || kind == Kind::AttentionValueGrad {
@@ -2725,10 +2732,27 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
                 (0, 0),
                 "task {index} takes the rows its segment holds at run time",
             );
+            assert_eq!(
+                task.group, group,
+                "task {index} walks one of the {group} chunks a plane of {bound} rows holds",
+            );
+            assert!(
+                task.index < group,
+                "task {index} walks chunk {} of {group} chunks",
+                task.index,
+            );
             planes.push(task.plane);
+            chunks.push((task.plane, task.index));
         }
     }
     planes.sort_unstable();
     planes.dedup();
     assert_eq!(planes, [0, 1, 2, 3]);
+    chunks.sort_unstable();
+    chunks.dedup();
+    assert_eq!(
+        chunks.len(),
+        4 * group as usize,
+        "every plane walks every chunk of the rows its bound holds, and one task covers one chunk",
+    );
 }

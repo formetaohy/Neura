@@ -18,10 +18,10 @@ mod device {
             planes.dims.z,
             kind::ROWS,
             refusal::INDEX,
-        );
+        ) + task.first;
         for row in stride(lid, task.count, WORKGROUP_SIZE) {
             publish(planes, start + row, f32(task.plane));
-            publish(positions, start + row, f32(row));
+            publish(positions, start + row, f32(task.first + row));
         }
     }
 }

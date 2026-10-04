@@ -435,7 +435,7 @@ mod device {
         let output = values[task.out];
         let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
-        let keys = select(key.dims.z, task.count, segmented);
+        let keys = select(key.dims.z, task.keys, segmented);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -574,7 +574,7 @@ mod device {
         let output = values[task.out];
         let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
-        let keys = select(key.dims.z, task.count, segmented);
+        let keys = select(key.dims.z, task.keys, segmented);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;

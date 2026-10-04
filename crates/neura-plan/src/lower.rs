@@ -373,7 +373,11 @@ fn schedule_unit(
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
             let segmented = unit.segments != NO_VALUE;
             let spans = if segmented {
-                ragged_spans(plan.shape(unit.segments).elements() - 1)
+                ragged_spans(
+                    plan.shape(unit.segments).elements() - 1,
+                    keys[2],
+                    profile.workgroup(),
+                )
             } else {
                 attention_spans(keys[2], keys[0] * keys[1], profile, measure)
             };
@@ -555,7 +559,12 @@ fn schedule_unit(
             let planes = plan.shape(unit.inputs[0]).elements() - 1;
             for plane in 0..planes {
                 let mut task = Task::span(unit, 0, 0, 0);
-                task.split = Split::Ragged { planes, plane };
+                task.split = Split::Ragged {
+                    planes,
+                    plane,
+                    index: 0,
+                    group: 1,
+                };
                 task.plane = plane;
                 plan.tasks.push(task);
             }
@@ -570,10 +579,25 @@ fn schedule_unit(
     }
 }
 
-fn ragged_spans(planes: u32) -> Vec<(u32, u32, u32, Split)> {
-    (0..planes)
-        .map(|plane| (plane, 0, 0, Split::Ragged { planes, plane }))
-        .collect()
+fn ragged_spans(planes: u32, rows: u32, per_task: u32) -> Vec<(u32, u32, u32, Split)> {
+    let group = rows.div_ceil(per_task).max(1);
+    let mut spans = Vec::with_capacity(planes as usize * group as usize);
+    for plane in 0..planes {
+        for index in 0..group {
+            spans.push((
+                plane,
+                0,
+                0,
+                Split::Ragged {
+                    planes,
+                    plane,
+                    index,
+                    group,
+                },
+            ));
+        }
+    }
+    spans
 }
 
 fn attention_spans(

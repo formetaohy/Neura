@@ -214,10 +214,16 @@ mod device {
     fn patch_ragged(task: Task, id: u32, segments: u32, live: u32) {
         tasks[id].first = 0u32;
         tasks[id].count = 0u32;
+        tasks[id].keys = 0u32;
         if task.plane >= segments {
             return;
         }
-        tasks[id].count = segment_keys(task, live + 1u32);
+        let rows = segment_keys(task, live + 1u32);
+        let first = walked_boundary(rows, task.index, task.group);
+        let end = walked_boundary(rows, task.index + 1u32, task.group);
+        tasks[id].keys = rows;
+        tasks[id].first = first;
+        tasks[id].count = end - first;
     }
 
     fn patch_extents(patch: u32, lid: u32) {

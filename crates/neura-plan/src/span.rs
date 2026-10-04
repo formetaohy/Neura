@@ -39,6 +39,8 @@ pub(crate) enum Split {
     Ragged {
         planes: u32,
         plane: u32,
+        index: u32,
+        group: u32,
     },
 }
 
@@ -111,10 +113,15 @@ impl Extents {
                 );
                 (index, 1)
             }
-            Split::Ragged { planes, plane } => {
+            Split::Ragged {
+                planes,
+                plane,
+                index,
+                group,
+            } => {
                 assert!(
-                    plane < planes,
-                    "a ragged walk names plane {plane} where the axis closes {planes}",
+                    plane < planes && index < group,
+                    "a ragged walk names chunk {index} of {group} of plane {plane}, where the axis closes {planes} planes",
                 );
                 (0, 0)
             }

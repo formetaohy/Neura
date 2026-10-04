@@ -209,6 +209,7 @@ impl Plan {
         assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, &tasks);
         assert_units_keep_their_order(&tasks);
+        assert_ragged_chunks_cover_their_plane(&tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         let mut authored =
             authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
@@ -365,13 +366,18 @@ impl Plan {
                     );
                     (neura_abi::split::SEGMENT, measure, index, group, 0)
                 }
-                Split::Ragged { planes, plane } => {
+                Split::Ragged {
+                    planes,
+                    plane,
+                    index,
+                    group,
+                } => {
                     assert_eq!(
-                        (task.first, task.count),
-                        (0, 0),
-                        "a row map walks the rows a ragged axis closes, and the plan hands it no range of its own",
+                        (task.first, task.count, task.plane),
+                        (0, 0, plane),
+                        "a ragged walk of chunk {index} of {group} of plane {plane} takes the rows the patch that closes the axis writes, and carries the plane it walks",
                     );
-                    (neura_abi::split::RAGGED, NO_VALUE, plane, planes, 0)
+                    (neura_abi::split::RAGGED, NO_VALUE, index, group, planes)
                 }
             };
             let record = TaskRecord::of(TaskFields {
@@ -878,6 +884,40 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
         for storage in access.writes() {
             last_writer[*storage as usize] = Some(position);
         }
+    }
+}
+
+fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
+    let mut walked = std::collections::BTreeMap::<(u32, u32), (u32, Vec<u32>)>::new();
+    for task in tasks {
+        let Split::Ragged {
+            planes,
+            plane,
+            index,
+            group,
+        } = task.split
+        else {
+            continue;
+        };
+        assert!(
+            plane < planes && index < group,
+            "a ragged task walks chunk {index} of {group} of plane {plane}, where the axis closes {planes} planes",
+        );
+        let (grouped, chunks) = walked.entry((planes, plane)).or_insert((group, Vec::new()));
+        assert_eq!(
+            *grouped, group,
+            "plane {plane} of a ragged axis of {planes} planes hands its rows to {group} chunks beside the {grouped} its other tasks name",
+        );
+        chunks.push(index);
+    }
+    for ((planes, plane), (group, mut chunks)) in walked {
+        chunks.sort_unstable();
+        chunks.dedup();
+        assert_eq!(
+            chunks,
+            (0..group).collect::<Vec<u32>>(),
+            "plane {plane} of a ragged axis of {planes} planes walks the chunks {chunks:?}, and every one of the {group} chunks its tasks name is walked",
+        );
     }
 }
 
