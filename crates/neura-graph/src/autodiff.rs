@@ -140,6 +140,9 @@ impl Recomputing {
             scale,
             tracked,
         );
+        if graph.prefix_owner(value).is_some() {
+            graph.mark_prefix(view.id(), copy);
+        }
         self.views.insert(value, view.id());
         view.id()
     }
@@ -718,6 +721,7 @@ impl<'g> Graph<'g> {
             }
             Kind::Fill
             | Kind::Layout
+            | Kind::Extend
             | Kind::Partial
             | Kind::RopeGrad
             | Kind::SoftmaxGrad
@@ -889,6 +893,14 @@ impl<'g> Graph<'g> {
 
     fn aligned(&self, value: Value<'g>, contribution: Value<'g>) -> Value<'g> {
         let owner = self.owner_of(value.id());
+        if self.walks_a_prefix(value.id()) {
+            assert!(
+                self.prefix_owner(value.id()).is_some(),
+                "a gradient reaches value {} through a view that walks a prefix of storage {owner}, and only the layout Graph::trim hands out lands in the element order of that storage; materialize the tensor before another view reorders it",
+                value.id(),
+            );
+            return self.extended(value, contribution);
+        }
         let (view_shape, view_strides, owner_shape) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
@@ -929,6 +941,40 @@ impl<'g> Graph<'g> {
             [
                 contribution.id(),
                 value.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        ));
+        out
+    }
+
+    fn extended(&self, view: Value<'g>, contribution: Value<'g>) -> Value<'g> {
+        let view = self.own(view);
+        let contribution = self.own(contribution);
+        let shape = self.shape(view);
+        let contribution = if self.shape(contribution) == shape {
+            contribution
+        } else {
+            self.reduced_to(contribution, view)
+        };
+        let element = self.element(contribution);
+        let owner = self.value_of(self.owner_of(view.id()));
+        let out = self.stored(
+            self.shape(owner),
+            element,
+            self.carries(element, &[contribution]),
+            Residency::Derived,
+            false,
+        );
+        self.push(TaskInfo::of(
+            Kind::Extend,
+            op::NONE,
+            out.id(),
+            [
+                contribution.id(),
+                view.id(),
                 NO_VALUE,
                 NO_VALUE,
                 NO_VALUE,

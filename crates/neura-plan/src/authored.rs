@@ -113,6 +113,17 @@ pub(crate) fn analyse(
         task.depends.sort_unstable();
         task.depends.dedup();
     }
+    for task in tasks.iter() {
+        if task.kind != Kind::Extend {
+            continue;
+        }
+        let view = task.inputs[1];
+        assert!(
+            !authored.value_slots[view as usize].is_empty(),
+            "a {} task lands the gradient of value {view} in the layout of the tensor that owns its storage, and the patch that rules the extent it walks refreshes no length of it",
+            task.kind.name(),
+        );
+    }
     authored.measures = measure_records(measures, tiles);
     authored
 }

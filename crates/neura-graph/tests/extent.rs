@@ -1,4 +1,4 @@
-use neura_abi::Element;
+use neura_abi::{Element, Kind};
 use neura_graph::{Graph, Residency, Shape};
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -73,15 +73,43 @@ fn a_count_the_host_writes_gains_a_task_of_its_own() {
 }
 
 #[test]
-fn a_tensor_that_trains_walks_no_device_authored_extent() {
+fn a_trainable_tensor_walks_the_extent_a_device_count_authors() {
     let graph = Graph::new();
     let count = graph.input(Shape::scalar(), Element::Single);
     let trainable = graph.gradient_input(Shape::of([1, 1, 4, 8]), Element::Single);
+    let live = graph.trim(trainable, 2, count);
+    let loss = graph.sum(graph.mul(live, live));
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(trainable);
+    assert_eq!(
+        graph.shape(gradient),
+        graph.shape(trainable),
+        "the gradient of a trimmed tensor lands in the layout of the tensor that owns its storage",
+    );
+    assert!(
+        graph
+            .snapshot()
+            .tasks()
+            .iter()
+            .any(|task| task.kind == Kind::Extend),
+        "the gradient of a trimmed tensor is landed by a task that extends it to the bounds it walks",
+    );
+}
+
+#[test]
+fn a_gradient_reaches_a_prefix_only_through_the_layout_trim_hands_out() {
+    let graph = Graph::new();
+    let count = graph.input(Shape::scalar(), Element::Single);
+    let trainable = graph.gradient_input(Shape::of([1, 1, 4, 8]), Element::Single);
+    let live = graph.trim(trainable, 2, count);
+    let permuted = graph.permute(live, [0, 1, 3, 2]);
+    let other = graph.gradient_input(graph.shape(permuted), Element::Single);
+    let loss = graph.sum(graph.mul(permuted, other));
     assert!(
         refuses(|| {
-            graph.trim(trainable, 2, count);
+            graph.backward(loss);
         }),
-        "a tensor whose gradient a device counted extent would shape was trimmed",
+        "a gradient reached a view that reorders the prefix a trim hands out",
     );
 }
 

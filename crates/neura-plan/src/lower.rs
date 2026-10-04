@@ -494,6 +494,7 @@ fn schedule_unit(
         | Kind::Fill
         | Kind::Broadcast
         | Kind::Layout
+        | Kind::Extend
         | Kind::OneHot
         | Kind::Gather => {
             let out = plan.shape(unit.out);

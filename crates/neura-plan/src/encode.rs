@@ -784,6 +784,9 @@ fn carried_elements(values: &[ValueInfo]) -> Vec<Element> {
 
 fn assert_authored_extents_cut_one_walk(values: &[ValueInfo], authored: &[u32]) {
     for (id, info) in values.iter().enumerate() {
+        if info.strides != info.shape.strides() {
+            continue;
+        }
         let dims = info.shape.dims();
         for axis in 0..neura_abi::MAX_RANK {
             let Some(slot) = info.shape.free(axis) else {

@@ -174,6 +174,7 @@ pub(crate) struct GraphState {
     pub(crate) names: HashSet<Arc<str>>,
     pub(crate) authored: Vec<u32>,
     pub(crate) ragged: HashMap<u32, RaggedAxis>,
+    pub(crate) prefixes: HashMap<u32, u32>,
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
     pub(crate) version: u64,
@@ -259,6 +260,7 @@ impl<'g> Graph<'g> {
                 names: HashSet::new(),
                 authored: Vec::new(),
                 ragged: HashMap::new(),
+                prefixes: HashMap::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -345,11 +347,6 @@ impl<'g> Graph<'g> {
             "a trim walks the rows of a tensor its storage lays out row by row, and value {} is a view of value {storage}",
             value.id(),
         );
-        assert!(
-            !tracked,
-            "a device authored extent walks a length no gradient knows, and value {} trains",
-            value.id(),
-        );
         let beside = shape.dims()[..axis as usize].iter().product::<u32>();
         assert!(
             beside == 1,
@@ -359,15 +356,45 @@ impl<'g> Graph<'g> {
         let free = self.counted(shape.dims()[axis as usize], count);
         let mut frees = shape.frees();
         frees[axis as usize] = Some(free.slot());
-        self.alias(
+        let live = self.alias(
             Shape::from_axes(shape.dims(), frees),
             strides,
             strides_source,
             storage,
             element,
             scale,
-            false,
-        )
+            tracked,
+        );
+        self.state.borrow_mut().prefixes.insert(live.id(), storage);
+        live
+    }
+
+    pub(crate) fn prefix_owner(&self, value: u32) -> Option<u32> {
+        self.state.borrow().prefixes.get(&value).copied()
+    }
+
+    pub(crate) fn mark_prefix(&self, view: u32, owner: u32) {
+        let mut state = self.state.borrow_mut();
+        assert_eq!(
+            state.values[view as usize].storage, owner,
+            "a view marked as a prefix walks the storage of the tensor it prefixes, and value {view} walks the storage of value {owner}",
+        );
+        state.prefixes.insert(view, owner);
+    }
+
+    pub(crate) fn walks_a_prefix(&self, value: u32) -> bool {
+        let state = self.state.borrow();
+        let info = &state.values[value as usize];
+        if info.residency != Residency::View {
+            return false;
+        }
+        let owner = &state.values[info.storage as usize];
+        let walked = (0..MAX_RANK).filter_map(|axis| owner.shape.free(axis));
+        let mut walked = walked.collect::<Vec<u32>>();
+        walked.sort_unstable();
+        (0..MAX_RANK)
+            .filter_map(|axis| info.shape.free(axis))
+            .any(|slot| walked.binary_search(&slot).is_err())
     }
 
     pub fn author(&self, free: Free, count: Value<'g>) {

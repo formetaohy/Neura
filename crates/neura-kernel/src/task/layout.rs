@@ -20,6 +20,17 @@ mod device {
         }
     }
 
+    fn run_extend(task: Task, lid: u32) {
+        let source = values[task.a];
+        let prefix = values[task.b];
+        let output = values[task.out];
+        let live = prefix.dims.x * prefix.dims.y * prefix.dims.z * prefix.dims.w;
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let held = index < live;
+            publish(output, index, select(0.0, fetch(source, index), held));
+        }
+    }
+
     fn axis_shift(task: Task) -> uvec4 {
         return uvec4(
             select(0u32, task.offset, task.axis == 0u32),

@@ -1948,6 +1948,60 @@ fn a_plan_walks_the_extent_a_device_count_authors() {
 }
 
 #[test]
+fn a_trimmed_tensor_lands_its_gradient_in_the_walk_of_the_storage_that_owns_it() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let gate = graph.gradient_input(Shape::of([1, 1, 1, 4]), Element::Single);
+    let tokens = graph.gradient_input(Shape::of([1, 1, 8, 4]), Element::Single);
+    let rows = graph.trim(tokens, 2, count);
+    let loss = graph.sum(graph.mul(rows, gate));
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(tokens);
+    graph.retain(gradient);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let extend = records
+        .iter()
+        .position(|task| Kind::of(task.kind) == Kind::Extend)
+        .expect("a trimmed tensor lands its gradient through an extend task");
+    assert_eq!(
+        records[extend].out,
+        gradient.id(),
+        "the extend task writes the gradient of the tensor that owns the storage",
+    );
+    assert_eq!(
+        records[extend].b,
+        rows.id(),
+        "the extend task walks the extent the trimmed tensor names",
+    );
+    assert_eq!(
+        records[extend].split,
+        neura_abi::split::RANGE,
+        "the extend task walks the bounds the storage of the tensor it lands in declares",
+    );
+    let patch = plan.patches()[0];
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert!(
+        values.contains(&rows.id()),
+        "the patch refreshes the length of the tensor the trim walks",
+    );
+    assert!(
+        values.contains(&records[extend].a),
+        "the patch refreshes the length of the gradient the extend reads",
+    );
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the task that authors the count");
+    assert!(
+        follows(&plan, author, extend),
+        "the extend task lands its gradient after the task that authors the count",
+    );
+}
+
+#[test]
 fn a_count_rules_every_extent_the_graph_hands_it() {
     let graph = Graph::new();
     let probe = graph.input(Shape::of([1, 1, 16, 1]), Element::Single);

@@ -290,6 +290,14 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Extend EXTEND = "extend" {
+        entry: "run_extend",
+        modules: [Layout],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
     SumChunk SUM_CHUNK = "sum_chunk" {
         entry: "run_sum_chunk",
         modules: [Reduce],
