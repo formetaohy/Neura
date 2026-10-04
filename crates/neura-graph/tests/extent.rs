@@ -84,3 +84,28 @@ fn a_tensor_that_trains_walks_no_device_authored_extent() {
         "a tensor whose gradient a device counted extent would shape was trimmed",
     );
 }
+
+#[test]
+fn a_device_authored_extent_cuts_one_walk() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 4, 1]), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let planes = graph.input(Shape::of([2, 1, 4, 8]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.trim(planes, 2, count);
+        }),
+        "a device count cut the rows of every plane a batch walks",
+    );
+    let batch = graph.input(Shape::of([4, 1, 4, 8]), Element::Single);
+    let live = graph.trim(batch, 0, count);
+    assert!(
+        graph.shape(live).free(0).is_some(),
+        "a device count cuts the planes a tensor walks",
+    );
+    assert_eq!(
+        graph.shape(live).dims(),
+        graph.shape(batch).dims(),
+        "a cut plane keeps the bound its graph declares",
+    );
+}

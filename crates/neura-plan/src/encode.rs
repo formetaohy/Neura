@@ -204,6 +204,7 @@ impl Plan {
         let kinds = carried_kinds(&tasks);
         let elements = carried_elements(values);
         let layout = Layout::of_values(values, alignment);
+        assert_authored_extents_cut_one_walk(values, state.authored());
         assert_writes_match_their_element(values, &tasks);
         assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, &tasks);
@@ -748,6 +749,25 @@ fn carried_elements(values: &[ValueInfo]) -> Vec<Element> {
         .copied()
         .filter(|element| values.iter().any(|info| info.element == *element))
         .collect()
+}
+
+fn assert_authored_extents_cut_one_walk(values: &[ValueInfo], authored: &[u32]) {
+    for (id, info) in values.iter().enumerate() {
+        let dims = info.shape.dims();
+        for axis in 0..neura_abi::MAX_RANK {
+            let Some(slot) = info.shape.free(axis) else {
+                continue;
+            };
+            if authored.get(slot as usize).copied().unwrap_or(NO_VALUE) == NO_VALUE {
+                continue;
+            }
+            let beside = dims[..axis as usize].iter().product::<u32>();
+            assert!(
+                beside == 1,
+                "value {id} walks axis {axis} of {dims:?} through the extent the device authors at slot {slot}, and the {beside} planes beside it hold every stride the cut moves; a count cuts one plane, and every plane of a batch walks the offsets a ragged axis closes",
+            );
+        }
+    }
 }
 
 fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {

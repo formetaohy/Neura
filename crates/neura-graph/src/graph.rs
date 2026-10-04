@@ -322,6 +322,12 @@ impl<'g> Graph<'g> {
             "a device authored extent walks a length no gradient knows, and value {} trains",
             value.id(),
         );
+        let beside = shape.dims()[..axis as usize].iter().product::<u32>();
+        assert!(
+            beside == 1,
+            "a device authored extent cuts one walk of a tensor, and the {beside} planes beside axis {axis} of {:?} hold every stride the cut moves; a count cuts one plane, and every plane of a batch walks the offsets a ragged axis closes",
+            shape.dims(),
+        );
         let free = self.counted(shape.dims()[axis as usize], count);
         let mut frees = shape.frees();
         frees[axis as usize] = Some(free.slot());

@@ -2038,6 +2038,26 @@ fn a_count_that_walks_the_extent_it_authors_is_refused() {
 }
 
 #[test]
+fn a_device_count_of_every_plane_a_batch_walks_is_refused() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+    let counted = graph.free(8);
+    let planes = graph.input(
+        Shape::of([2, 1, 8, 4]).freed(&[(2, counted)]),
+        Element::Single,
+    );
+    let count = graph.sum(probe);
+    graph.author(counted, count);
+    graph.retain(graph.mul(planes, planes));
+    assert!(
+        refuses(|| {
+            plan(&graph);
+        }),
+        "a device count whose extent cuts every plane a batch walks was planned",
+    );
+}
+
+#[test]
 fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);

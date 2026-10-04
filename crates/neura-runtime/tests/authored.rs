@@ -42,7 +42,6 @@ struct Model {
     tokens: Value<'static>,
     live: Value<'static>,
     out: Value<'static>,
-    free: neura_graph::Free,
 }
 
 fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model {
@@ -80,7 +79,6 @@ fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model 
         tokens,
         live,
         out,
-        free: batch_extent,
     }
 }
 
@@ -295,28 +293,74 @@ fn a_count_beyond_the_bound_the_graph_declares_is_refused() {
     );
 }
 
+const CUT_PLANES: u32 = 4;
+
+struct Cut {
+    mask: Value<'static>,
+    planes: Value<'static>,
+    live: Value<'static>,
+    out: Value<'static>,
+}
+
+fn cut(graph: &Graph<'static>, planes: u32, tokens: u32) -> Cut {
+    let token_extent = graph.free(tokens);
+    let mask = graph.input(Shape::of([planes, 1, 1, 1]), Element::Single);
+    let held = graph.input(
+        Shape::of([planes, 1, tokens, WIDTH]).freed(&[(2, token_extent)]),
+        Element::Single,
+    );
+    let count = graph.sum_axis(mask, 0);
+    let live = graph.trim(held, 0, count);
+    let out = graph.sum_axis(live, 2);
+    graph.retain(live);
+    graph.retain(out);
+    Cut {
+        mask,
+        planes: held,
+        live,
+        out,
+    }
+}
+
 #[test]
-fn a_host_extent_and_a_device_count_share_one_graph() {
+fn a_device_count_cuts_the_planes_a_host_extent_holds() {
     let runtime = open();
     let graph = Graph::new();
-    let model = build(&graph, BOUND, 2, true);
+    let model = cut(&graph, CUT_PLANES, BOUND);
     let store = runtime.weights(&graph);
     let program = runtime.compile(&graph, &store);
-    assert_eq!(
-        model.free.bound(),
-        2,
-        "the graph declares the batch extent the host binds",
+    let plan = Plan::of(&graph, runtime.alignment(), program.profile());
+    assert!(
+        plan.carries_authored(),
+        "the planes of the batch walk an extent the device authors",
     );
-    runtime.bind(&program, &[2]);
-    let tokens = data(2 * BOUND * WIDTH, 31);
-    runtime.write(&program, model.tokens, &tokens);
+    assert_eq!(
+        plan.host_slots().len(),
+        1,
+        "the token extent is bound by the host while the device authors the planes",
+    );
     let assembled = runtime.assembled_kernels();
-    for live in [BOUND, 3] {
-        runtime.write(&program, model.probe, &live_probe(BOUND, live));
+    for (planes, tokens) in [(CUT_PLANES, BOUND), (CUT_PLANES, 3), (2, BOUND), (1, 2)] {
+        runtime.bind(&program, &[tokens]);
+        let image = data(CUT_PLANES * tokens * WIDTH, 37);
+        runtime.write(&program, model.planes, &image);
+        runtime.write(&program, model.mask, &live_probe(CUT_PLANES, planes));
         runtime.run(&program);
-        let actual = runtime.read(&program, model.out);
-        let expected = reference(&runtime, live, 2, true, 31);
-        assert_close(&actual, &expected, 1e-4);
+        let walked = runtime.read(&program, model.live);
+        assert_close(&walked, &image[..(planes * tokens * WIDTH) as usize], 0.0);
+        let summed = runtime.read(&program, model.out);
+        let mut expected = Vec::new();
+        for plane in 0..planes {
+            for column in 0..WIDTH {
+                let first = plane * tokens * WIDTH + column;
+                let mut total = 0.0;
+                for row in 0..tokens {
+                    total += image[(first + row * WIDTH) as usize];
+                }
+                expected.push(total);
+            }
+        }
+        assert_close(&summed, &expected, 1e-4);
     }
     assert_eq!(
         runtime.assembled_kernels(),
