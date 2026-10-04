@@ -219,7 +219,7 @@ fn a_grouped_product_weighs_the_weights_of_static_planes() {
 }
 
 #[test]
-fn a_grouped_product_carries_no_gradient() {
+fn a_grouped_product_carries_the_gradients_of_the_rows_and_the_weights_it_weighs() {
     let graph: Graph<'static> = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
@@ -227,18 +227,21 @@ fn a_grouped_product_carries_no_gradient() {
         Shape::of([1, 1, BOUND, DEPTH]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
-    let weights = graph.parameter(
-        Shape::of([PLANES, 1, DEPTH, COLUMNS]),
-        neura_graph::Init::Uniform {
-            low: -1.0,
-            high: 1.0,
-        },
-        Element::Single,
+    let weights = graph.gradient_input(Shape::of([PLANES, 1, DEPTH, COLUMNS]), Element::Single);
+    let out = graph.grouped_matmul(left, weights, ragged.offsets);
+    let loss = graph.sum(out);
+    let collected = graph.backward(loss);
+    let rows = collected.of(left);
+    assert_eq!(
+        graph.shape(rows).free(2),
+        Some(ragged.extent.slot()),
+        "the rows a grouped product packs walk the gradient of the depth it weighs them by",
     );
-    assert!(
-        refuses(|| {
-            graph.grouped_matmul(left, weights, ragged.offsets);
-        }),
-        "a grouped product carried the gradient of the rows a device packs",
+    assert_eq!(graph.shape(rows).dims(), [1, 1, BOUND, DEPTH]);
+    let filter = collected.of(weights);
+    assert_eq!(
+        graph.shape(filter).dims(),
+        [PLANES, 1, DEPTH, COLUMNS],
+        "one weight plane holds the gradient of the rows its own segment packs",
     );
 }

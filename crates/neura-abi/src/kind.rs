@@ -14,6 +14,7 @@ pub enum DeviceModule {
     Convert,
     Scan,
     Rows,
+    MatmulWeight,
 }
 
 impl DeviceModule {
@@ -32,6 +33,7 @@ impl DeviceModule {
         Self::Convert,
         Self::Scan,
         Self::Rows,
+        Self::MatmulWeight,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -50,6 +52,7 @@ impl DeviceModule {
             Self::Convert => "convert",
             Self::Scan => "scan",
             Self::Rows => "rows",
+            Self::MatmulWeight => "matmul_weight",
         }
     }
 }
@@ -491,6 +494,14 @@ kinds! {
         entry: "run_rows",
         modules: [Rows],
         geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    MatmulWeightGrad MATMUL_WEIGHT_GRAD = "matmul_weight_grad" {
+        entry: "run_matmul_weight_grad",
+        modules: [MatmulWeight],
+        geometry: Product,
         prelude: false,
         chain: false,
         origin: false,

@@ -63,6 +63,17 @@ impl Product {
         })
     }
 
+    pub(crate) fn staged(self, profile: Profile) -> MatmulTile {
+        self.cheapest(profile, |tile| {
+            tile.strategy() == MatmulStrategy::Staged
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "a segmented product weighs the rows of every segment through the staged panels a tile stages, and {profile:?} stages no tile",
+            )
+        })
+    }
+
     pub fn shortlist(self, profile: Profile) -> Vec<MatmulTile> {
         let planned = self.planned(profile);
         let mut tiles = vec![planned];

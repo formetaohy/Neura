@@ -340,6 +340,7 @@ fn install(
     match module {
         DeviceModule::Matmul => task::matmul::install(compiler),
         DeviceModule::MatmulTiles => task::matmul::install_tiles(compiler, geometry),
+        DeviceModule::MatmulWeight => task::matmul_weight::install(compiler, geometry),
         DeviceModule::Attention => task::attention::install(compiler, geometry),
         DeviceModule::Reduce => task::reduce::install(compiler),
         DeviceModule::Softmax => task::softmax::install(compiler),

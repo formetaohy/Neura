@@ -271,8 +271,12 @@ mod device {
                 let count = span_count(task);
                 tasks[id].first = span_first(task);
                 tasks[id].count = count;
-                if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
-                    tasks[id].keys = segment_keys(task, live + 1u32);
+                if record.segment != NO_VALUE && task.segment == record.segment {
+                    if count > 0u32 && task.plane < segments {
+                        tasks[id].keys = segment_keys(task, live + 1u32);
+                    } else {
+                        tasks[id].keys = 0u32;
+                    }
                 }
             }
         }

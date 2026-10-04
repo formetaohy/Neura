@@ -114,10 +114,6 @@ impl<'g> Graph<'g> {
         );
         let columns = weights_shape.dims()[3];
         let element = self.element(left).promote(self.element(weights));
-        assert!(
-            !self.tracked(&[left, weights]),
-            "a grouped product carries no gradient: its offsets place the rows a device packs, and only a host knows the rows a backward pass walks",
-        );
         let out = self.stored(
             Shape::from_axes(
                 [1, 1, left_shape.dims()[2], columns],
@@ -126,7 +122,7 @@ impl<'g> Graph<'g> {
             element,
             self.carries(element, &[left, weights]),
             Residency::Derived,
-            false,
+            self.tracked(&[left, weights]),
         );
         let mut unit = TaskInfo::of(
             Kind::Matmul,

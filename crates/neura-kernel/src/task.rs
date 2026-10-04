@@ -4,6 +4,7 @@ pub(crate) mod conv;
 pub(crate) mod convert;
 pub(crate) mod layout;
 pub(crate) mod matmul;
+pub(crate) mod matmul_weight;
 pub(crate) mod pool;
 pub(crate) mod reduce;
 pub(crate) mod rope;

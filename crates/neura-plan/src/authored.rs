@@ -202,6 +202,19 @@ pub(crate) fn plan_patches(
                 authored.patch_list.push(seat[index]);
             }
         }
+        if segment != NO_VALUE {
+            for (index, task) in tasks.iter().enumerate() {
+                if task.segments != segment {
+                    continue;
+                }
+                assert!(
+                    authored.patch_list[tasks_first as usize..].contains(&seat[index]),
+                    "a {} task walks the segments value {} closes, and the patch that closes that axis hands it no rows; every task that walks a segment stands on the count that rules it",
+                    task.kind.name(),
+                    task.segments,
+                );
+            }
+        }
         let tasks_count = authored.patch_list.len() as u32 - tasks_first;
         let patch = authored.patches.len() as u32;
         authored.patches.push(PatchRecord::of(PatchFields {

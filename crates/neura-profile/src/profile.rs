@@ -1070,6 +1070,7 @@ impl Geometry {
             DeviceModule::MatmulTiles => {
                 (2 * (self.left_stage + self.right_stage)).max(self.copy) as u32
             }
+            DeviceModule::MatmulWeight => (self.left_stage + self.right_stage) as u32,
             DeviceModule::Attention => 2 * self.attention_stage_words(),
             DeviceModule::Reduce => self.workgroup,
             DeviceModule::Choice => 2 * self.workgroup,

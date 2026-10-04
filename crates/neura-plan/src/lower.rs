@@ -391,6 +391,7 @@ fn schedule_unit(
                 plan.tasks.push(task);
             }
         }
+        Kind::MatmulWeightGrad => matmul_weight_grad(plan, unit, profile, chosen),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             let out = plan.shape(unit.out);
             let rows = out.rows();
@@ -786,6 +787,46 @@ fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Produc
         task.prelude.clear();
         task.split = split;
         plan.tasks.push(task);
+    }
+}
+
+fn matmul_weight_grad(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    profile: Profile,
+    chosen: &[(Product, MatmulTile)],
+) {
+    let left = plan.shape(unit.inputs[0]).dims();
+    let output = plan.shape(unit.out).dims();
+    let (segments, depth, columns) = (output[0], output[2], output[3]);
+    let product = Product::of(segments, depth, columns, left[2]);
+    if !plan.products.contains(&product) {
+        plan.products.push(product);
+    }
+    let tile = chosen
+        .iter()
+        .find(|(shape, tile)| *shape == product && matches!(tile, MatmulTile::Staged(_)))
+        .map(|(_, tile)| *tile)
+        .unwrap_or_else(|| product.staged(profile));
+    assert!(
+        matches!(tile, MatmulTile::Staged(_)),
+        "a segmented product weighs the rows of every segment through the staged panels its body walks, and {tile:?} stages no panel",
+    );
+    assert!(
+        profile.tiles().contains(&tile),
+        "a plan walks {tile:?} for {product:?} where its profile offers {:?}",
+        profile.tiles(),
+    );
+    let geometry = plan.geometry(tile);
+    let blocks = columns.div_ceil(tile.columns());
+    let tiles = depth.div_ceil(tile.rows()) * blocks;
+    for plane in 0..segments {
+        for index in 0..tiles {
+            let mut task = Task::span(unit, index, 1, tile.tile_work());
+            task.plane = plane;
+            task.geometry = geometry;
+            plan.tasks.push(task);
+        }
     }
 }
 

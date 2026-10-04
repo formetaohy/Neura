@@ -2917,3 +2917,79 @@ fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
         }
     }
 }
+
+#[test]
+fn a_segmented_product_weighs_the_rows_of_every_segment_into_its_weight_gradient() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(3), Element::Single);
+    let bound = 24;
+    let ragged = graph.ragged(bound, lengths);
+    let packed = Shape::of([1, 1, bound, 4]).freed(&[(2, ragged.extent)]);
+    let left = graph.gradient_input(packed, Element::Single);
+    let weights = graph.gradient_input(Shape::of([3, 1, 4, 2]), Element::Single);
+    let out = graph.grouped_matmul(left, weights, ragged.offsets);
+    let weight = graph.gradient_input(
+        Shape::of([1, 1, bound, 2]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let loss = graph.sum(graph.mul(out, weight));
+    let collected = graph.backward(loss);
+    graph.retain(collected.of(left));
+    graph.retain(collected.of(weights));
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patch = plan.patches()[0];
+    assert_eq!(patch.segment, ragged.offsets.id());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    let patched = plan.patch_list()
+        [patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize]
+        .to_vec();
+    let mut walked = Vec::new();
+    for (index, task) in records.iter().enumerate() {
+        if Kind::of(task.kind) != Kind::MatmulWeightGrad {
+            continue;
+        }
+        assert_eq!(
+            task.split,
+            neura_abi::split::RANGE,
+            "a weight gradient walks the tiles of the weights it weighs, and no offsets cut them",
+        );
+        assert_eq!(task.segment, ragged.offsets.id());
+        assert_eq!(
+            task.keys, 0,
+            "the patch that closes the axis writes the rows of the segment the task weighs",
+        );
+        assert!(
+            patched.contains(&(index as u32)),
+            "the patch that closes the axis hands the weight gradient its rows",
+        );
+        assert!(
+            follows(&plan, author, index),
+            "task {index} weighs the rows the closing task authors",
+        );
+        walked.push((task.plane, task.index));
+    }
+    assert!(!walked.is_empty(), "the graph weighs a weight gradient");
+    let tiles = walked.len() / 3;
+    assert_eq!(
+        walked.len(),
+        3 * tiles,
+        "every segment holds the same tiles of the weights it weighs",
+    );
+    for plane in 0..3 {
+        let mut indices = walked
+            .iter()
+            .filter(|(walked, _)| *walked == plane)
+            .map(|(_, index)| *index)
+            .collect::<Vec<u32>>();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            (0..tiles as u32).collect::<Vec<u32>>(),
+            "segment {plane} weighs the tiles 0..{tiles} of its own weights",
+        );
+    }
+}

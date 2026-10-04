@@ -472,20 +472,49 @@ impl<'g> Graph<'g> {
                 }
             }
             Kind::Matmul => {
-                assert!(
-                    task.segments == NO_VALUE,
-                    "a grouped product carries no gradient: its offsets place the rows a device packs, and only a host knows the rows a backward pass walks",
-                );
                 let (left, right) = (self.value_of(task.inputs[0]), self.value_of(task.inputs[1]));
-                if self.tracked(&[left]) {
-                    let transposed = self.permute(right, [0, 1, 3, 2]);
-                    let contribution = self.matmul(gradient, transposed);
-                    self.accumulate(grads, left, contribution);
-                }
-                if self.tracked(&[right]) {
-                    let transposed = self.permute(left, [0, 1, 3, 2]);
-                    let contribution = self.matmul(transposed, gradient);
-                    self.accumulate(grads, right, contribution);
+                if task.segments != NO_VALUE {
+                    if self.tracked(&[left]) {
+                        let transposed = self.permute(right, [0, 1, 3, 2]);
+                        let contribution =
+                            self.grouped_matmul(gradient, transposed, self.value_of(task.segments));
+                        self.accumulate(grads, left, contribution);
+                    }
+                    if self.tracked(&[right]) {
+                        let out = self.fresh(
+                            self.shape(right),
+                            Element::Single,
+                            Residency::Derived,
+                            false,
+                        );
+                        let mut grad = TaskInfo::of(
+                            Kind::MatmulWeightGrad,
+                            op::NONE,
+                            out.id(),
+                            [
+                                left.id(),
+                                gradient.id(),
+                                NO_VALUE,
+                                NO_VALUE,
+                                NO_VALUE,
+                                NO_VALUE,
+                            ],
+                        );
+                        grad.segments = task.segments;
+                        self.push(grad);
+                        self.accumulate(grads, right, out);
+                    }
+                } else {
+                    if self.tracked(&[left]) {
+                        let transposed = self.permute(right, [0, 1, 3, 2]);
+                        let contribution = self.matmul(gradient, transposed);
+                        self.accumulate(grads, left, contribution);
+                    }
+                    if self.tracked(&[right]) {
+                        let transposed = self.permute(left, [0, 1, 3, 2]);
+                        let contribution = self.matmul(transposed, gradient);
+                        self.accumulate(grads, right, contribution);
+                    }
                 }
             }
             Kind::Binary | Kind::Unary => {
@@ -704,6 +733,7 @@ impl<'g> Graph<'g> {
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite
+            | Kind::MatmulWeightGrad
             | Kind::Rows => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
