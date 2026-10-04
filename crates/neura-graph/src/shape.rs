@@ -1,3 +1,4 @@
+use crate::window::Window;
 use neura_abi::MAX_RANK;
 
 const ELEMENT_LIMIT: u64 = i32::MAX as u64;
@@ -243,6 +244,78 @@ impl Shape {
                 (left_dim.max(right_dim), None)
             }
         }
+    }
+
+    pub(crate) fn joined(shapes: &[Self], axis: u32) -> Self {
+        assert!(
+            axis < MAX_RANK,
+            "a concatenation names one of the {MAX_RANK} axes",
+        );
+        let first = *shapes
+            .first()
+            .expect("a concatenation joins at least one tensor");
+        for shape in shapes {
+            assert!(
+                shape.free(axis).is_none(),
+                "a concatenation along axis {axis} shifts every tensor beside it by the lengths it holds, and the shift a plan carries is one number; axis {axis} of {:?} walks a free extent whose length a binding rules",
+                shape.dims,
+            );
+            for walked in 0..MAX_RANK {
+                if walked == axis {
+                    continue;
+                }
+                assert!(
+                    first.meets(*shape, walked, walked),
+                    "a concatenation along axis {axis} meets {:?} and {:?}",
+                    first.dims,
+                    shape.dims,
+                );
+            }
+        }
+        let mut dims = first.dims;
+        dims[axis as usize] = shapes.iter().map(|shape| shape.dims[axis as usize]).sum();
+        Self::from_axes(dims, first.frees())
+    }
+
+    pub(crate) fn tapped(self, window: Window) -> Self {
+        assert!(
+            self.free(2).is_none() && self.free(3).is_none(),
+            "a window walks the taps of {:?} row by row, and a free extent of either tap axis hands the taps a length a binding rules",
+            self.dims,
+        );
+        assert_eq!(
+            [self.dims[2], self.dims[3]],
+            [window.reach_rows(), window.reach_columns()],
+            "a window of {} by {} taps walks a filter of {} by {} taps",
+            window.reach_rows(),
+            window.reach_columns(),
+            self.dims[2],
+            self.dims[3],
+        );
+        self
+    }
+
+    pub(crate) fn windowed(self, window: Window) -> [u32; 2] {
+        assert!(
+            self.free(2).is_none() && self.free(3).is_none(),
+            "a window walks the rows and columns of {:?}, and a free extent of either hands every length the taps reach",
+            self.dims,
+        );
+        let padded_rows = self.dims[2] + 2 * window.pad_rows();
+        let padded_columns = self.dims[3] + 2 * window.pad_columns();
+        assert!(
+            padded_rows >= window.reach_rows() && padded_columns >= window.reach_columns(),
+            "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
+            window.reach_rows(),
+            window.reach_columns(),
+            self.dims,
+            window.pad_rows(),
+            window.pad_columns(),
+        );
+        [
+            (padded_rows - window.reach_rows()) / window.stride_rows() + 1,
+            (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
+        ]
     }
 
     pub fn fixed_axis(self, axis: u32, dim: u32) -> Self {

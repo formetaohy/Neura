@@ -8,8 +8,8 @@ use crate::product::Product;
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
-    Element, Geometry, Kind, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord, Store,
-    TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    Element, Geometry, Kind, MAX_RANK, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord,
+    Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -212,6 +212,7 @@ impl Plan {
         assert_ragged_chunks_cover_their_plane(&tasks);
         assert_a_segmented_attention_walks_the_planes_its_query_holds(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
+        assert_a_task_needs_exact_lengths_the_plan_froze(values, &tasks);
         let mut authored =
             authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
         let schedule = schedule::Schedule::of(values, &menu, &tasks, profile.workgroups());
@@ -965,6 +966,105 @@ fn assert_prefix_tables_close_their_walk(values: &[ValueInfo], tasks: &[Task]) {
             "a prefix holds {table} offsets of the {walked} numbers it sums; a table of one entry past that walk carries the total that closes it, and a table of one entry per number carries the offsets alone",
         );
     }
+}
+
+pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
+    values: &[ValueInfo],
+    tasks: &[Task],
+) {
+    for task in tasks {
+        match task.kind {
+            Kind::Concat => {
+                for operand in task.inputs {
+                    exact_length(values, task, operand, task.axis);
+                }
+            }
+            Kind::Slice => exact_length(values, task, task.inputs[0], task.axis),
+            Kind::Conv2d => {
+                for axis in 1..MAX_RANK {
+                    exact_length(values, task, task.inputs[0], axis);
+                    exact_length(values, task, task.inputs[1], axis);
+                }
+            }
+            Kind::Conv2dInputGrad => {
+                for axis in 1..MAX_RANK {
+                    exact_length(values, task, task.inputs[0], axis);
+                    exact_length(values, task, task.out, axis);
+                }
+                for axis in 2..MAX_RANK {
+                    exact_length(values, task, task.inputs[1], axis);
+                }
+            }
+            Kind::Conv2dWeightGrad => {
+                for axis in 1..MAX_RANK {
+                    exact_length(values, task, task.inputs[2], axis);
+                    exact_length(values, task, task.out, axis);
+                }
+                for axis in 2..MAX_RANK {
+                    exact_length(values, task, task.inputs[1], axis);
+                }
+            }
+            Kind::PoolMax2d | Kind::PoolMean2d => {
+                for axis in 2..MAX_RANK {
+                    exact_length(values, task, task.inputs[0], axis);
+                }
+            }
+            Kind::PoolMax2dInputGrad | Kind::PoolMean2dInputGrad => {
+                for axis in 2..MAX_RANK {
+                    exact_length(values, task, task.inputs[0], axis);
+                    exact_length(values, task, task.inputs[1], axis);
+                    exact_length(values, task, task.out, axis);
+                }
+            }
+            Kind::Rope | Kind::RopeGrad => exact_length(values, task, task.inputs[0], 3),
+            Kind::Matmul
+            | Kind::MatmulFold
+            | Kind::Attention
+            | Kind::AttentionQueryGrad
+            | Kind::AttentionKeyGrad
+            | Kind::AttentionValueGrad
+            | Kind::Binary
+            | Kind::Unary
+            | Kind::Partial
+            | Kind::PrefixChunk
+            | Kind::PrefixScan
+            | Kind::PrefixClose
+            | Kind::Fill
+            | Kind::Broadcast
+            | Kind::Layout
+            | Kind::Extend
+            | Kind::SumChunk
+            | Kind::SumAxis
+            | Kind::Softmax
+            | Kind::SoftmaxGrad
+            | Kind::LogSoftmax
+            | Kind::LogSoftmaxGrad
+            | Kind::Argmax
+            | Kind::Categorical
+            | Kind::OneHot
+            | Kind::Gather
+            | Kind::Scatter
+            | Kind::ScatterWrite
+            | Kind::Compact
+            | Kind::Convert
+            | Kind::Rows
+            | Kind::MatmulWeightGrad
+            | Kind::Select => {}
+        }
+    }
+}
+
+fn exact_length(values: &[ValueInfo], task: &Task, value: u32, axis: u32) {
+    if value == NO_VALUE {
+        return;
+    }
+    let info = &values[value as usize];
+    assert!(
+        info.shape.free(axis).is_none(),
+        "a {} task holds the length of axis {axis} as the number the plan froze, and value {value} of {:?} walks a free extent whose length a binding rules",
+        task.kind.name(),
+        info.shape.dims(),
+    );
 }
 
 fn assert_units_keep_their_order(tasks: &[Task]) {

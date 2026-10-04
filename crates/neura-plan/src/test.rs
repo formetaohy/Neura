@@ -1,9 +1,10 @@
+use crate::encode;
 use crate::hazard::{Accesses, Hazard};
 use crate::lower;
 use crate::region::{self, Region};
 use crate::span;
-use neura_abi::{Element, Kind};
-use neura_graph::{Graph, Shape};
+use neura_abi::{Element, Kind, NO_VALUE};
+use neura_graph::{Graph, Shape, ValueInfo, Window};
 use neura_profile::{Budget, Profile};
 
 fn overlaps(left: Region, right: Region) -> bool {
@@ -233,5 +234,74 @@ fn a_walk_a_binding_rules_touches_whole_storages() {
     assert!(
         narrowed > 1,
         "a walk of 8192 numbers a binding does not rule schedules more than one task",
+    );
+}
+
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
+#[test]
+fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
+    let graph = Graph::new();
+    let free = graph.free(4);
+    let values = vec![
+        ValueInfo::derived(Shape::of([1, 1, 1, 4]).freed(&[(3, free)]), 0),
+        ValueInfo::derived(Shape::of([1, 1, 1, 4]), 1),
+    ];
+    let exact = lower::Task {
+        kind: Kind::Concat,
+        op: neura_pointwise::NONE,
+        geometry: 0,
+        first: 0,
+        count: 4,
+        slot: 0,
+        out: 1,
+        extra: NO_VALUE,
+        inputs: [1, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        origin: NO_VALUE,
+        param: 0.0,
+        window: Window::sliding([1, 1]),
+        splits: 1,
+        work: 0,
+        in_place: false,
+        axis: 3,
+        offset: 0,
+        prelude: Vec::new(),
+        chain: Vec::new(),
+        unit: 0,
+        split: span::Split::Range { first: 0, count: 4 },
+        depends: Vec::new(),
+        patch: NO_VALUE,
+        segments: NO_VALUE,
+        reach: 0,
+        keys: 0,
+        plane: 0,
+    };
+    assert!(
+        !refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+            &values,
+            std::slice::from_ref(&exact),
+        )),
+        "a concatenation of tensors that hold the length it shifts by",
+    );
+    let mut walked = exact.clone();
+    walked.inputs = [0, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+    assert!(
+        refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+            &values,
+            std::slice::from_ref(&walked),
+        )),
+        "a concatenation shifts every tensor beside it by the length the plan froze",
+    );
+    let mut taps = exact;
+    taps.kind = Kind::Conv2d;
+    taps.inputs = [1, 0, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+    assert!(
+        refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+            &values,
+            std::slice::from_ref(&taps),
+        )),
+        "a window walks the taps of its filter row by row over the reach the plan froze",
     );
 }

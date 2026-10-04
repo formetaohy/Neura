@@ -446,7 +446,7 @@ impl<'g> Graph<'g> {
         let input = self.own(input);
         let filter = self.own(filter);
         let input_shape = self.shape(input);
-        let filter_shape = self.shape(filter);
+        let filter_shape = self.shape(filter).tapped(window);
         let input_dims = input_shape.dims();
         let filter_dims = filter_shape.dims();
         assert!(
@@ -454,11 +454,6 @@ impl<'g> Graph<'g> {
             "a convolution of {} channels reads {} channels of a filter, and a free extent of the pair hands every length the group every channel serves",
             input_dims[1],
             filter_dims[1],
-        );
-        assert!(
-            input_shape.free(2).is_none() && input_shape.free(3).is_none(),
-            "a window walks the rows and columns of {:?}, and a free extent of either hands every length the taps reach",
-            input_dims,
         );
         assert!(
             input_dims[1].is_multiple_of(filter_dims[1]),
@@ -472,35 +467,11 @@ impl<'g> Graph<'g> {
             "a convolution of {groups} channel groups writes {} output channels",
             filter_dims[0],
         );
-        assert_eq!(
-            [filter_dims[2], filter_dims[3]],
-            [window.reach_rows(), window.reach_columns()],
-            "a window of {} by {} taps walks a filter of {} by {} taps",
-            window.reach_rows(),
-            window.reach_columns(),
-            filter_dims[2],
-            filter_dims[3],
-        );
-        let padded_rows = input_dims[2] + 2 * window.pad_rows();
-        let padded_columns = input_dims[3] + 2 * window.pad_columns();
-        assert!(
-            padded_rows >= filter_dims[2] && padded_columns >= filter_dims[3],
-            "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
-            filter_dims[2],
-            filter_dims[3],
-            input_dims,
-            window.pad_rows(),
-            window.pad_columns(),
-        );
+        let [rows, columns] = input_shape.windowed(window);
         let element = self.element(input).promote(self.element(filter));
         let out = self.stored(
             Shape::from_axes(
-                [
-                    input_dims[0],
-                    filter_dims[0],
-                    (padded_rows - filter_dims[2]) / window.stride_rows() + 1,
-                    (padded_columns - filter_dims[3]) / window.stride_columns() + 1,
-                ],
+                [input_dims[0], filter_dims[0], rows, columns],
                 [input_shape.free(0), filter_shape.free(0), None, None],
             ),
             element,
@@ -530,30 +501,10 @@ impl<'g> Graph<'g> {
         let input = self.own(input);
         let input_shape = self.shape(input);
         let input_dims = input_shape.dims();
-        assert!(
-            input_shape.free(2).is_none() && input_shape.free(3).is_none(),
-            "a window walks the rows and columns of {:?}, and a free extent of either hands every length the taps reach",
-            input_dims,
-        );
-        let padded_rows = input_dims[2] + 2 * window.pad_rows();
-        let padded_columns = input_dims[3] + 2 * window.pad_columns();
-        assert!(
-            padded_rows >= window.reach_rows() && padded_columns >= window.reach_columns(),
-            "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
-            window.reach_rows(),
-            window.reach_columns(),
-            input_dims,
-            window.pad_rows(),
-            window.pad_columns(),
-        );
+        let [rows, columns] = input_shape.windowed(window);
         let out = self.stored(
             Shape::from_axes(
-                [
-                    input_dims[0],
-                    input_dims[1],
-                    (padded_rows - window.reach_rows()) / window.stride_rows() + 1,
-                    (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
-                ],
+                [input_dims[0], input_dims[1], rows, columns],
                 [input_shape.free(0), input_shape.free(1), None, None],
             ),
             self.element(input),
@@ -922,20 +873,13 @@ impl<'g> Graph<'g> {
             .iter()
             .map(|value| self.own(*value))
             .collect::<Vec<_>>();
-        let first = self.shape(values[0]);
+        let shapes = values
+            .iter()
+            .map(|value| self.shape(*value))
+            .collect::<Vec<_>>();
         let element = self.element(values[0]);
         let scale = self.scale(values[0]);
-        let mut dims = first.dims();
-        let mut frees = first.frees();
-        assert!(
-            first.free(axis).is_none(),
-            "a concatenation along axis {axis} joins {:?} with the tensors beside it, and a free extent of the axis holds every length the sum takes",
-            first.dims(),
-        );
-        frees[axis as usize] = None;
-        dims[axis as usize] = 0;
         for value in &values {
-            let shape = self.shape(*value);
             assert_eq!(
                 self.element(*value),
                 element,
@@ -949,27 +893,17 @@ impl<'g> Graph<'g> {
                 "a concatenation joins numbers reconstructed by {} with numbers reconstructed by {scale}",
                 self.scale(*value),
             );
-            for index in 0..MAX_RANK as usize {
-                let walked = index as u32;
-                assert!(
-                    walked == axis || first.meets(shape, walked, walked),
-                    "a concatenation along axis {axis} meets {:?} and {:?}",
-                    first.dims(),
-                    shape.dims(),
-                );
-            }
-            dims[axis as usize] += shape.dims()[axis as usize];
         }
         let widened = element.narrow();
         let out = self.stored(
-            Shape::from_axes(dims, frees),
+            Shape::joined(&shapes, axis),
             if widened { Element::Single } else { element },
             if widened { 1.0 } else { scale },
             Residency::Derived,
             self.tracked(&values),
         );
         let mut offset = 0;
-        for value in &values {
+        for (value, shape) in values.iter().zip(&shapes) {
             let mut task = TaskInfo::of(
                 Kind::Concat,
                 op::NONE,
@@ -979,7 +913,7 @@ impl<'g> Graph<'g> {
             task.axis = axis;
             task.offset = offset;
             self.push(task);
-            offset += self.shape(*value).dims()[axis as usize];
+            offset += shape.dims()[axis as usize];
         }
         if !widened {
             return out;

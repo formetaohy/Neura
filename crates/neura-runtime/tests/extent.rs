@@ -459,6 +459,15 @@ fn a_free_extent_stops_where_a_second_length_starts() {
     assert!(refuses(|| {
         graph.concat(&[input, other], 1);
     }));
+    assert!(
+        refuses(|| {
+            graph.concat(&[other, input], 1);
+        }),
+        "a free extent beside the head of a concatenation holds the shift every tensor behind it takes",
+    );
+    assert!(refuses(|| {
+        graph.concat(&[other, input, other], 1);
+    }));
     assert!(refuses(|| {
         graph.slice(input, 1, 0, 2);
     }));
@@ -480,6 +489,18 @@ fn a_free_extent_stops_where_a_second_length_starts() {
     let image = graph.input(Shape::of([1, 4, 8, 8]).freed(&[(2, rows)]), Element::Single);
     assert!(refuses(|| {
         graph.pool2d(image, Window::sliding([2, 2]), Pool::Mean);
+    }));
+    let taps = graph.free(3);
+    let filter = graph.input(Shape::of([4, 4, 3, 3]).freed(&[(2, taps)]), Element::Single);
+    let plain = graph.input(Shape::of([1, 4, 8, 8]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.conv2d(plain, filter, Window::sliding([3, 3]));
+        }),
+        "a window walks the taps of its filter row by row, and a tap axis that walks a free extent hands the window a length a binding rules",
+    );
+    assert!(refuses(|| {
+        graph.conv2d(image, filter, Window::sliding([3, 3]));
     }));
     assert!(refuses(|| {
         graph.parameter(
