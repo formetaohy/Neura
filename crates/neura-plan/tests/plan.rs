@@ -2144,3 +2144,31 @@ fn a_ragged_axis_a_binding_narrows_walks_a_measure() {
         assert_eq!(measure.value, lengths.id());
     }
 }
+
+#[test]
+fn a_row_that_reads_a_wider_tensor_waits_for_the_task_that_writes_it() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::of([1, 1, 8, 4]), Element::Single);
+    let row = graph.input(Shape::of([1, 1, 1, 64]), Element::Single);
+    let filter = graph.parameter(Shape::of([1, 1, 64, 4]), Init::Zero, Element::Single);
+    let bias = graph.matmul(row, filter);
+    let activated = graph.add(graph.softmax(data), bias);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let writing = writers(&plan, bias.id());
+    assert!(
+        !writing.is_empty(),
+        "the product writes the row the softmax adds to every row it weighs",
+    );
+    for (index, task) in records.iter().enumerate() {
+        if Kind::of(task.kind) != Kind::Softmax {
+            continue;
+        }
+        for writer in &writing {
+            assert!(
+                follows(&plan, *writer, index),
+                "a step that reads the four numbers of a row walks the whole row of {activated:?} rather than the range of the task, so the task waits for the wave that writes it",
+            );
+        }
+    }
+}

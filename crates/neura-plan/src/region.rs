@@ -57,7 +57,7 @@ impl Narrowed {
 
 pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
     let narrowed = narrowed(values, tiles, task);
-    Touches {
+    let touches = Touches {
         writes: task
             .writes()
             .map(|value| {
@@ -76,6 +76,23 @@ pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -
                 )
             })
             .collect(),
+    };
+    assert_names_held_numbers(values, task, &touches);
+    touches
+}
+
+fn assert_names_held_numbers(values: &[ValueInfo], task: &Task, touches: &Touches) {
+    for (storage, region) in touches.reads.iter().chain(&touches.writes) {
+        let Region::Run { first, .. } = *region else {
+            continue;
+        };
+        let info = &values[*storage as usize];
+        assert!(
+            first < u64::from(info.shape.elements()),
+            "a {} task narrows a walk of storage {storage} to {first}, and that tensor holds {} numbers; a narrowed walk names numbers the tensor it names holds",
+            task.kind.name(),
+            info.shape.elements(),
+        );
     }
 }
 
@@ -106,6 +123,11 @@ fn owned(values: &[ValueInfo], value: u32) -> bool {
     values[value as usize].storage == value
 }
 
+fn walks_its_range(values: &[ValueInfo], value: u32, out: &ValueInfo) -> bool {
+    let source = &values[value as usize];
+    source.shape == out.shape && dense(source) && owned(values, value)
+}
+
 fn dense(info: &ValueInfo) -> bool {
     info.strides == info.shape.strides()
 }
@@ -117,8 +139,7 @@ fn elementwise(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
         narrowed.narrow_write(value, range);
     }
     for value in task.reads() {
-        let source = &values[value as usize];
-        let region = if source.shape == out.shape && dense(source) && owned(values, value) {
+        let region = if walks_its_range(values, value, out) {
             range
         } else {
             Region::Whole
@@ -187,8 +208,7 @@ fn convert(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     let count = u64::from(task.count) * stride;
     narrowed.narrow_write(task.out, Region::run(first, count));
     for value in task.reads() {
-        let source = &values[value as usize];
-        let region = if source.shape == out.shape && dense(source) {
+        let region = if walks_its_range(values, value, out) {
             Region::run(first, count)
         } else {
             Region::Whole
@@ -207,8 +227,7 @@ fn rope(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
         narrowed.narrow_write(value, range);
     }
     for value in task.reads() {
-        let source = &values[value as usize];
-        let region = if source.shape == out.shape && dense(source) && owned(values, value) {
+        let region = if walks_its_range(values, value, out) {
             Region::run(first.saturating_sub(half), count + 2 * half)
         } else {
             Region::Whole
@@ -226,8 +245,7 @@ fn softmax(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     );
     narrowed.narrow_write(task.out, range);
     for value in task.reads() {
-        let source = &values[value as usize];
-        let region = if source.shape.dims()[3] == out.shape.dims()[3] {
+        let region = if walks_its_range(values, value, out) {
             range
         } else {
             Region::Whole
