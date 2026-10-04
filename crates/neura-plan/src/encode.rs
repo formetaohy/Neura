@@ -889,7 +889,7 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
 }
 
 fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
-    let mut walked = std::collections::BTreeMap::<(u32, u32), (u32, Vec<u32>)>::new();
+    let mut walked = std::collections::BTreeMap::<(u32, u32, u32), (u32, Vec<u32>)>::new();
     for task in tasks {
         let Split::Ragged {
             planes,
@@ -904,20 +904,27 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
             plane < planes && index < group,
             "a ragged task walks chunk {index} of {group} of plane {plane}, where the axis closes {planes} planes",
         );
-        let (grouped, chunks) = walked.entry((planes, plane)).or_insert((group, Vec::new()));
+        assert!(
+            task.segments != NO_VALUE,
+            "a {} task walks the rows a ragged axis packs, and it names no offsets; the axis a row of a plane belongs to is the value that closes its offsets",
+            task.kind.name(),
+        );
+        let (grouped, chunks) = walked
+            .entry((task.segments, plane, task.out))
+            .or_insert((group, Vec::new()));
         assert_eq!(
             *grouped, group,
-            "plane {plane} of a ragged axis of {planes} planes hands its rows to {group} chunks beside the {grouped} its other tasks name",
+            "plane {plane} of the ragged axis value {} walks {group} chunks, and the tasks that write value {} walk {grouped}; one output parts a plane one way",
+            task.segments, task.out,
         );
         chunks.push(index);
     }
-    for ((planes, plane), (group, mut chunks)) in walked {
+    for ((segment, plane, out), (group, mut chunks)) in walked {
         chunks.sort_unstable();
-        chunks.dedup();
         assert_eq!(
             chunks,
             (0..group).collect::<Vec<u32>>(),
-            "plane {plane} of a ragged axis of {planes} planes walks the chunks {chunks:?}, and every one of the {group} chunks its tasks name is walked",
+            "plane {plane} of the ragged axis value {segment} walks {group} chunks, and the tasks that write value {out} walk {chunks:?}; every chunk of a plane is walked exactly once",
         );
     }
 }

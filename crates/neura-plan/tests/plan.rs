@@ -1,7 +1,7 @@
 use neura_abi::{
     Element, Kind, PatchRecord, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES,
 };
-use neura_graph::{AttentionOptions, Graph, Init, Shape};
+use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
 use neura_pointwise as op;
 use neura_profile::{
     AttentionTile, Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
@@ -2755,4 +2755,165 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
         4 * group as usize,
         "every plane walks every chunk of the rows its bound holds, and one task covers one chunk",
     );
+}
+
+#[test]
+fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let bound = 256;
+    let ragged = graph.ragged(bound, lengths);
+    let packed = Shape::of([1, 1, bound, 4]).freed(&[(2, ragged.extent)]);
+    let query = graph.gradient_input(Shape::of([1, 4, 1, 4]), Element::Single);
+    let key = graph.gradient_input(packed, Element::Single);
+    let value = graph.gradient_input(packed, Element::Single);
+    let cursor = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
+    let out = graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: Some(cursor),
+            segments: Some(ragged.offsets),
+            reach: None,
+        },
+    );
+    let rows = graph.rows(ragged);
+    let loss = graph.sum(out);
+    let collected = graph.backward(loss);
+    for value in [
+        collected.of(query),
+        collected.of(key),
+        collected.of(value),
+        rows.plane,
+        rows.position,
+    ] {
+        graph.retain(value);
+    }
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let group = bound.div_ceil(narrow().workgroup());
+    assert!(
+        group > 1,
+        "a bound of {bound} rows outruns the {} rows one workgroup walks",
+        narrow().workgroup(),
+    );
+    let mut grids = std::collections::BTreeMap::<(u32, u32), Vec<u32>>::new();
+    let mut row_map = Vec::new();
+    for task in records
+        .iter()
+        .filter(|task| task.split == neura_abi::split::RAGGED)
+    {
+        assert_eq!(
+            task.segment,
+            ragged.offsets.id(),
+            "a ragged task walks the offsets the axis it belongs to closes",
+        );
+        if Kind::of(task.kind) == Kind::Rows {
+            row_map.push(task.plane);
+            assert_eq!(
+                (task.group, task.index),
+                (1, 0),
+                "a row map walks the rows of one plane in one task",
+            );
+            continue;
+        }
+        assert_eq!(
+            task.group, group,
+            "a gradient cuts a plane into the {group} chunks one workgroup walks",
+        );
+        grids
+            .entry((task.out, task.plane))
+            .or_default()
+            .push(task.index);
+    }
+    row_map.sort_unstable();
+    assert_eq!(
+        row_map,
+        [0, 1, 2, 3],
+        "a row map walks every plane the ragged axis closes",
+    );
+    assert_eq!(
+        grids.len(),
+        8,
+        "the two gradient families of a packed attention part every plane",
+    );
+    for ((out, plane), mut chunks) in grids {
+        chunks.sort_unstable();
+        assert_eq!(
+            chunks,
+            (0..group).collect::<Vec<u32>>(),
+            "plane {plane} of value {out} walks the chunks {chunks:?}",
+        );
+    }
+}
+
+#[test]
+fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
+    let graph = Graph::new();
+    let mut axes = Vec::new();
+    let mut loss = None::<Value>;
+    for bound in [256u32, 64] {
+        let lengths = graph.input(Shape::vector(4), Element::Single);
+        let ragged = graph.ragged(bound, lengths);
+        let packed = Shape::of([1, 1, bound, 4]).freed(&[(2, ragged.extent)]);
+        let query = graph.gradient_input(Shape::of([1, 4, 1, 4]), Element::Single);
+        let key = graph.gradient_input(packed, Element::Single);
+        let cursor = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
+        let out = graph.attention(
+            query,
+            key,
+            key,
+            AttentionOptions {
+                scale: 0.5,
+                causal: true,
+                origin: Some(cursor),
+                segments: Some(ragged.offsets),
+                reach: None,
+            },
+        );
+        let summed = graph.sum(out);
+        loss = Some(match loss {
+            None => summed,
+            Some(walked) => graph.add(walked, summed),
+        });
+        axes.push((bound, ragged.offsets, key));
+    }
+    let collected = graph.backward(loss.expect("two attentions weigh a loss"));
+    let axes = axes
+        .into_iter()
+        .map(|(bound, offsets, key)| {
+            let gradient = collected.of(key);
+            graph.retain(gradient);
+            (bound, offsets, gradient)
+        })
+        .collect::<Vec<_>>();
+    let plan = plan(&graph);
+    let mut grids = Vec::<(u32, u32, u32, u32)>::new();
+    for task in tasks(&plan)
+        .iter()
+        .filter(|task| task.split == neura_abi::split::RAGGED)
+    {
+        grids.push((task.segment, task.out, task.plane, task.index));
+    }
+    for (bound, offsets, key) in axes {
+        let group = bound.div_ceil(narrow().workgroup());
+        for plane in 0..4 {
+            let mut chunks = grids
+                .iter()
+                .filter(|(segment, out, walked, _)| {
+                    *segment == offsets.id() && *out == key.id() && *walked == plane
+                })
+                .map(|(_, _, _, index)| *index)
+                .collect::<Vec<u32>>();
+            chunks.sort_unstable();
+            assert_eq!(
+                chunks,
+                (0..group).collect::<Vec<u32>>(),
+                "plane {plane} of the ragged axis of {bound} rows walks the chunks {chunks:?}",
+            );
+        }
+    }
 }

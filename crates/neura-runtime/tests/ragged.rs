@@ -779,6 +779,18 @@ struct Packed<'a> {
     reach: u32,
 }
 
+fn row_map(lengths: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let mut plane = Vec::new();
+    let mut position = Vec::new();
+    for (walked, length) in lengths.iter().enumerate() {
+        for row in 0..*length as u32 {
+            plane.push(walked as f32);
+            position.push(row as f32);
+        }
+    }
+    (plane, position)
+}
+
 fn trainable_reference(packed: Packed<'_>, width: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let Packed {
         lengths,
@@ -885,6 +897,7 @@ struct Trainable {
     weight: Value<'static>,
     offsets: Value<'static>,
     out: Value<'static>,
+    rows: [Value<'static>; 2],
     gradients: [Value<'static>; 3],
 }
 
@@ -922,6 +935,7 @@ impl Trainable {
             Element::Single,
         );
         let ragged = graph.ragged(bound, lengths);
+        let mapped = graph.rows(ragged);
         let packed = Shape::of([1, 1, bound, width]).freed(&[(2, ragged.extent)]);
         let planed = |dims: [u32; 4]| match live {
             Some(live) => Shape::of(dims).freed(&[(1, live)]),
@@ -954,6 +968,8 @@ impl Trainable {
         for gradient in gradients {
             graph.retain(gradient);
         }
+        graph.retain(mapped.plane);
+        graph.retain(mapped.position);
         graph.retain(ragged.offsets);
         Self {
             runtime: open(),
@@ -966,6 +982,7 @@ impl Trainable {
             weight,
             offsets: ragged.offsets,
             out,
+            rows: [mapped.plane, mapped.position],
             gradients,
         }
     }
@@ -1023,6 +1040,8 @@ impl Trainable {
                 self.gradients[0],
                 self.gradients[1],
                 self.gradients[2],
+                self.rows[0],
+                self.rows[1],
             ],
         );
         let scanned = self.runtime.read(program, self.offsets);
@@ -1050,6 +1069,15 @@ impl Trainable {
         assert_close(&produced[1], &query_grad, 1e-5);
         assert_close(&produced[2], &key_grad, 1e-5);
         assert_close(&produced[3], &value_grad, 1e-5);
+        let (plane, position) = row_map(lengths);
+        assert_eq!(
+            produced[4], plane,
+            "every packed row walks the plane its offsets close",
+        );
+        assert_eq!(
+            produced[5], position,
+            "every packed row walks the place it holds in its plane",
+        );
         produced
     }
 }
