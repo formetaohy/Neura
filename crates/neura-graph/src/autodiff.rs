@@ -702,7 +702,8 @@ impl<'g> Graph<'g> {
             | Kind::MatmulFold
             | Kind::Convert
             | Kind::Scatter
-            | Kind::ScatterWrite => {}
+            | Kind::ScatterWrite
+            | Kind::Rows => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",
@@ -794,7 +795,7 @@ impl<'g> Graph<'g> {
         self.accumulate(grads, source, out);
     }
 
-    pub(crate) fn rows(&self, kind: Kind, value: Value<'g>) -> Value<'g> {
+    pub(crate) fn rowwise(&self, kind: Kind, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         assert!(
             self.contiguous(value),

@@ -57,6 +57,12 @@ pub struct Ragged<'g> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Rows<'g> {
+    pub plane: Value<'g>,
+    pub position: Value<'g>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Prefixes<'g> {
     pub exclusive: Value<'g>,
     pub total: Value<'g>,
@@ -415,7 +421,7 @@ impl<'g> Graph<'g> {
             "a ragged axis of {planes} planes leaves no room for the offset that closes it",
         );
         let offsets = self.fresh(
-            Shape::vector(planes + 1),
+            Shape::matrix(planes + 1, 1),
             Element::Single,
             Residency::Derived,
             false,
@@ -432,6 +438,48 @@ impl<'g> Graph<'g> {
             },
         );
         Ragged { extent, offsets }
+    }
+
+    pub fn rows(&self, ragged: Ragged<'g>) -> Rows<'g> {
+        let offsets = self.own(ragged.offsets);
+        let axis = {
+            let state = self.state.borrow();
+            state.ragged.get(&offsets.id()).cloned()
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "a row map walks the planes a ragged axis closes, and value {} holds a table no ragged axis published; close the lengths of every plane with Graph::ragged",
+                offsets.id(),
+            )
+        });
+        assert_eq!(
+            axis.token,
+            ragged.extent.slot(),
+            "a row map names the rows of the {} planes a ragged axis closes over free extent {}, and the axis hands it free extent {}",
+            axis.planes.elements(),
+            axis.token,
+            ragged.extent.slot(),
+        );
+        let shape = Shape::of([1, 1, ragged.extent.bound(), 1]).freed(&[(2, ragged.extent)]);
+        let plane = self.fresh(shape, Element::Single, Residency::Derived, false);
+        let position = self.fresh(shape, Element::Single, Residency::Derived, false);
+        let mut task = TaskInfo::of(
+            Kind::Rows,
+            op::NONE,
+            plane.id(),
+            [
+                offsets.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.extra = position.id();
+        task.segments = offsets.id();
+        self.push(task);
+        Rows { plane, position }
     }
 
     pub fn prefix_sum(&self, value: Value<'g>) -> Prefixes<'g> {

@@ -365,6 +365,14 @@ impl Plan {
                     );
                     (neura_abi::split::SEGMENT, measure, index, group, 0)
                 }
+                Split::Ragged { planes, plane } => {
+                    assert_eq!(
+                        (task.first, task.count),
+                        (0, 0),
+                        "a row map walks the rows a ragged axis closes, and the plan hands it no range of its own",
+                    );
+                    (neura_abi::split::RAGGED, NO_VALUE, plane, planes, 0)
+                }
             };
             let record = TaskRecord::of(TaskFields {
                 kind: task.kind.code(),
@@ -862,7 +870,8 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
                 ),
                 None => assert!(
                     held(values, *storage as usize),
-                    "task {position} reads a tensor no task of the plan writes before it",
+                    "task {position} of kind {} reads storage {storage} no task of the plan writes before it",
+                    task.kind.name(),
                 ),
             }
         }

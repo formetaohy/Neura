@@ -13,6 +13,7 @@ pub enum DeviceModule {
     Pool,
     Convert,
     Scan,
+    Rows,
 }
 
 impl DeviceModule {
@@ -30,6 +31,7 @@ impl DeviceModule {
         Self::Pool,
         Self::Convert,
         Self::Scan,
+        Self::Rows,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -47,6 +49,7 @@ impl DeviceModule {
             Self::Pool => "pool",
             Self::Convert => "convert",
             Self::Scan => "scan",
+            Self::Rows => "rows",
         }
     }
 }
@@ -483,5 +486,13 @@ kinds! {
         prelude: false,
         chain: true,
         origin: true,
+    };
+    Rows ROWS = "rows" {
+        entry: "run_rows",
+        modules: [Rows],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
     };
 }

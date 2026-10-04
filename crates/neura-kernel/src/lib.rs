@@ -209,6 +209,7 @@ impl Kernel {
             ("split::UNIFORM", split::UNIFORM),
             ("split::PLANE", split::PLANE),
             ("split::SEGMENT", split::SEGMENT),
+            ("split::RAGGED", split::RAGGED),
         ] {
             compiler.constant(name, value);
         }
@@ -350,5 +351,6 @@ fn install(
         DeviceModule::Pool => task::pool::install(compiler),
         DeviceModule::Convert => task::convert::install(compiler, elements),
         DeviceModule::Scan => task::scan::install(compiler),
+        DeviceModule::Rows => task::rows::install(compiler),
     }
 }

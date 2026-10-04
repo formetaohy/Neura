@@ -3,6 +3,7 @@ pub mod split {
     pub const UNIFORM: u32 = 1;
     pub const PLANE: u32 = 2;
     pub const SEGMENT: u32 = 3;
+    pub const RAGGED: u32 = 4;
 }
 
 pub mod measure {

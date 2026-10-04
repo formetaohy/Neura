@@ -545,6 +545,15 @@ fn schedule_unit(
                 |_, count| u64::from(count),
             );
         }
+        Kind::Rows => {
+            let planes = plan.shape(unit.inputs[0]).elements() - 1;
+            for plane in 0..planes {
+                let mut task = Task::span(unit, 0, 0, 0);
+                task.split = Split::Ragged { planes, plane };
+                task.plane = plane;
+                plan.tasks.push(task);
+            }
+        }
         Kind::Convert => panic!("a narrow tensor is written by the convert its task schedules"),
         Kind::PrefixScan => {
             panic!("the offsets of a walk come from the two-level prefix of the numbers it sums")

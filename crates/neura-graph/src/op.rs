@@ -708,12 +708,12 @@ impl<'g> Graph<'g> {
 
     pub fn softmax(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        self.rows(Kind::Softmax, value)
+        self.rowwise(Kind::Softmax, value)
     }
 
     pub fn log_softmax(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        self.rows(Kind::LogSoftmax, value)
+        self.rowwise(Kind::LogSoftmax, value)
     }
 
     pub fn argmax(&self, value: Value<'g>) -> Value<'g> {

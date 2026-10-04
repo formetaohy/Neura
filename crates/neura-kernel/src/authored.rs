@@ -211,6 +211,15 @@ mod device {
         }
     }
 
+    fn patch_ragged(task: Task, id: u32, segments: u32, live: u32) {
+        tasks[id].first = 0u32;
+        tasks[id].count = 0u32;
+        if task.plane >= segments {
+            return;
+        }
+        tasks[id].count = segment_keys(task, live + 1u32);
+    }
+
     fn patch_extents(patch: u32, lid: u32) {
         let record = patches[patch];
         let author = values[record.count];
@@ -247,6 +256,10 @@ mod device {
             if task.split == split::SEGMENT {
                 if record.segment != NO_VALUE && task.segment == record.segment {
                     patch_segment(task, id, segments, live);
+                }
+            } else if task.split == split::RAGGED {
+                if record.segment != NO_VALUE && task.segment == record.segment {
+                    patch_ragged(task, id, segments, live);
                 }
             } else {
                 let count = span_count(task);

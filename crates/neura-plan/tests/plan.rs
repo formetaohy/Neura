@@ -2316,6 +2316,65 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
 }
 
 #[test]
+fn a_row_map_walks_the_planes_a_ragged_axis_closes() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    let rows = graph.rows(ragged);
+    graph.retain(rows.plane);
+    graph.retain(rows.position);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let at = records
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| Kind::of(task.kind) == Kind::Rows)
+        .map(|(index, _)| index)
+        .collect::<Vec<usize>>();
+    assert_eq!(
+        at.len(),
+        4,
+        "a row map walks the planes a ragged axis closes",
+    );
+    let patches = plan.patches();
+    assert_eq!(patches.len(), 1, "one slot is authored");
+    let patch = patches[0];
+    assert_eq!(patched_slots(&plan, patch), [ragged.extent.slot()]);
+    assert_eq!(patch.segment, ragged.offsets.id());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert!(
+        values.contains(&rows.plane.id()) && values.contains(&rows.position.id()),
+        "the row map takes the live rows of the axis: {values:?}",
+    );
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    let mut planes = Vec::new();
+    for task in at {
+        assert_eq!(records[task].split, neura_abi::split::RAGGED);
+        assert_eq!(
+            (records[task].first, records[task].count),
+            (0, 0),
+            "the device hands a row map its rows",
+        );
+        assert_eq!(records[task].a, ragged.offsets.id());
+        assert_eq!(records[task].segment, ragged.offsets.id());
+        assert!(patched.contains(&(task as u32)));
+        assert!(
+            follows(&plan, author, task),
+            "a row map walks the offsets the closing task authors",
+        );
+        planes.push(records[task].plane);
+    }
+    planes.sort_unstable();
+    assert_eq!(planes, [0, 1, 2, 3]);
+}
+
+#[test]
 fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
     let graph = Graph::new();
     let flags = graph.input(Shape::of([1, 1, 1, 4]), Element::Single);

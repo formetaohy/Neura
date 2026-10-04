@@ -36,6 +36,10 @@ pub(crate) enum Split {
         index: u32,
         group: u32,
     },
+    Ragged {
+        planes: u32,
+        plane: u32,
+    },
 }
 
 struct Extent {
@@ -106,6 +110,13 @@ impl Extents {
                     "a segment walks tile {index} where a segment of its shape holds {group}",
                 );
                 (index, 1)
+            }
+            Split::Ragged { planes, plane } => {
+                assert!(
+                    plane < planes,
+                    "a ragged walk names plane {plane} where the axis closes {planes}",
+                );
+                (0, 0)
             }
             Split::Uniform {
                 measure,

@@ -9,7 +9,7 @@ mod window;
 pub use autodiff::Gradients;
 pub use graph::{
     AttentionOptions, Compacted, Graph, GraphSnapshot, GraphStamp, Prefixes, Ragged, Residency,
-    Revision, TaskInfo, Value, ValueInfo,
+    Revision, Rows, TaskInfo, Value, ValueInfo,
 };
 pub use init::Init;
 pub use pool::Pool;
