@@ -214,19 +214,29 @@ mod device {
     fn patch_extents(patch: u32, lid: u32) {
         let record = patches[patch];
         let author = values[record.count];
-        let bound = extents[record.slot] + 1u32;
-        let live = whole_index(fetch(author, 0u32), bound, refusal::TENSOR, refusal::EXTENT);
-        if lid == 0u32 {
-            extents[record.slot] = live;
+        let declared = extents[patch_list[record.slots]];
+        storage_barrier();
+        let live = whole_index(
+            fetch(author, 0u32),
+            declared + 1u32,
+            refusal::TENSOR,
+            refusal::EXTENT,
+        );
+        for step in stride(lid, record.slots_count, WORKGROUP_SIZE) {
+            let slot = patch_list[record.slots + step];
+            if live > extents[slot] {
+                refuse(refusal::TENSOR, refusal::EXTENT, 0u32);
+            }
+            extents[slot] = live;
         }
-        workgroup_barrier();
+        storage_barrier();
         for step in stride(lid, record.values_count, WORKGROUP_SIZE) {
             let id = patch_list[record.values + step];
             let value = values[id];
             values[id].dims = value_dims(value);
             values[id].strides = value_strides(value);
         }
-        workgroup_barrier();
+        storage_barrier();
         let mut segments = 0u32;
         if record.segment != NO_VALUE {
             segments = live_segments(values[record.segment], live);

@@ -5,7 +5,7 @@ use neura_graph::{GraphSnapshot, Residency, TaskInfo, ValueInfo};
 const CHAIN_SLOT: u32 = u32::MAX;
 
 pub(crate) fn fuse(state: &GraphSnapshot) -> Vec<TaskInfo> {
-    Fold::of(state.values(), state.tasks()).fold()
+    Fold::of(state.values(), state.tasks(), state.authored()).fold()
 }
 
 #[derive(Clone, Copy)]
@@ -15,8 +15,9 @@ struct Use {
 }
 
 struct Fold<'a> {
-    authored: &'a [TaskInfo],
+    units: &'a [TaskInfo],
     values: &'a [ValueInfo],
+    counts: Vec<u32>,
     tasks: Vec<Option<TaskInfo>>,
     times: Vec<u32>,
     producers: Vec<Option<usize>>,
@@ -26,18 +27,26 @@ struct Fold<'a> {
 }
 
 impl<'a> Fold<'a> {
-    fn of(values: &'a [ValueInfo], authored: &'a [TaskInfo]) -> Self {
+    fn of(values: &'a [ValueInfo], units: &'a [TaskInfo], authored: &[u32]) -> Self {
+        let mut counts = authored
+            .iter()
+            .copied()
+            .filter(|count| *count != NO_VALUE)
+            .collect::<Vec<u32>>();
+        counts.sort_unstable();
+        counts.dedup();
         let mut fold = Self {
-            authored,
+            units,
             values,
-            tasks: authored.iter().cloned().map(Some).collect(),
-            times: (0..authored.len() as u32).collect(),
+            counts,
+            tasks: units.iter().cloned().map(Some).collect(),
+            times: (0..units.len() as u32).collect(),
             producers: vec![None; values.len()],
             reads: vec![Vec::new(); values.len()],
             readers: vec![0; values.len()],
             write_times: vec![Vec::new(); values.len()],
         };
-        for (index, task) in authored.iter().enumerate() {
+        for (index, task) in units.iter().enumerate() {
             for out in task.writes() {
                 fold.producers[out as usize] = Some(index);
                 fold.write_times[access::storage(values, out) as usize].push(index as u32);
@@ -75,14 +84,18 @@ impl<'a> Fold<'a> {
         }
         ordered.sort_by_key(|(time, _)| *time);
         let (times, tasks): (Vec<u32>, Vec<TaskInfo>) = ordered.into_iter().unzip();
-        assert_sources(self.values, self.authored, &tasks, &times);
+        assert_sources(self.values, self.units, &tasks, &times);
         tasks
+    }
+
+    fn authors_an_extent(&self, value: u32) -> bool {
+        self.counts.binary_search(&value).is_ok()
     }
 
     fn absorb(&mut self, value: u32) {
         let mut carried = value;
         loop {
-            if pinned(self.values, carried) {
+            if pinned(self.values, carried) || self.authors_an_extent(carried) {
                 return;
             }
             let Some(producer) = self.producers[carried as usize] else {

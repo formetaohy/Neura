@@ -4,6 +4,7 @@ use crate::span::{Measure, Split};
 use neura_abi::{Kind, MeasureFields, MeasureRecord, NO_VALUE, PatchFields, PatchRecord, measure};
 use neura_graph::ValueInfo;
 use neura_profile::MatmulTile;
+use std::collections::BTreeMap;
 
 pub(crate) struct Authored {
     slots: Vec<u32>,
@@ -128,16 +129,20 @@ pub(crate) fn plan_patches(
         return;
     }
     authored.measures = measure_records(measures, tiles);
-    let mut slots = (0..authored.slots.len() as u32)
-        .filter(|slot| authored.walks(*slot))
-        .collect::<Vec<u32>>();
-    slots.sort_unstable();
+    let mut counted = BTreeMap::<u32, Vec<u32>>::new();
+    for slot in 0..authored.slots.len() as u32 {
+        if authored.walks(slot) {
+            counted
+                .entry(authored.count_of(slot))
+                .or_default()
+                .push(slot);
+        }
+    }
     let mut seat = vec![NO_VALUE; tasks.len()];
     for (position, task) in order.iter().enumerate() {
         seat[*task as usize] = position as u32;
     }
-    for slot in slots {
-        let count = authored.count_of(slot);
+    for (count, slots) in counted {
         let writers = tasks
             .iter()
             .enumerate()
@@ -147,13 +152,15 @@ pub(crate) fn plan_patches(
         assert_eq!(
             writers.len(),
             1,
-            "free extent {slot} walks the count of value {count}, and {} tasks of the plan write it",
+            "the device counts value {count} of {} extents, and {} tasks of the plan write it; the task that counts an extent survives every fold",
+            slots.len(),
             writers.len(),
         );
         let writer = writers[0];
         assert!(
             !tasks[writer].depends.contains(&count),
-            "free extent {slot} walks the count of value {count}, and the task that writes it walks a length it authors",
+            "the device counts value {count} of {} extents, and the task that writes it walks a length it authors",
+            slots.len(),
         );
         let closes = tasks[writer].kind == Kind::PrefixClose
             && values[tasks[writer].inputs[0] as usize].shape.elements()
@@ -165,19 +172,27 @@ pub(crate) fn plan_patches(
         };
         assert!(
             order.contains(&(writer as u32)),
-            "the task that authors free extent {slot} stands in no segment of the plan",
+            "the task that authors the count of value {count} stands in no segment of the plan",
         );
+        let slots_first = authored.patch_list.len() as u32;
+        for slot in &slots {
+            authored.patch_list.push(*slot);
+        }
+        let slots_count = authored.patch_list.len() as u32 - slots_first;
         let values_first = authored.patch_list.len() as u32;
-        for (id, slots) in authored.value_slots.iter().enumerate() {
-            if slots.contains(&slot) {
+        for (id, ruled) in authored.value_slots.iter().enumerate() {
+            if ruled.iter().any(|slot| slots.contains(slot)) {
                 authored.patch_list.push(id as u32);
             }
         }
         let values_count = authored.patch_list.len() as u32 - values_first;
         let tasks_first = authored.patch_list.len() as u32;
         for (index, task) in tasks.iter().enumerate() {
-            let walks_the_measure = split_measure(task.split)
-                .is_some_and(|measure| authored.measure_slots[measure as usize].contains(&slot));
+            let walks_the_measure = split_measure(task.split).is_some_and(|measure| {
+                authored.measure_slots[measure as usize]
+                    .iter()
+                    .any(|slot| slots.contains(slot))
+            });
             let walks_a_segment = task.segments != NO_VALUE && task.depends.contains(&count);
             if walks_the_measure || walks_a_segment {
                 assert_ne!(
@@ -190,7 +205,8 @@ pub(crate) fn plan_patches(
         let tasks_count = authored.patch_list.len() as u32 - tasks_first;
         let patch = authored.patches.len() as u32;
         authored.patches.push(PatchRecord::of(PatchFields {
-            slot,
+            slots: slots_first,
+            slots_count,
             count,
             segment,
             values: values_first,
@@ -200,7 +216,7 @@ pub(crate) fn plan_patches(
         }));
         assert_eq!(
             tasks[writer].patch, NO_VALUE,
-            "one task authors two device extents, and a task patches one",
+            "one task writes the counts of two device extents, and a task carries one patch",
         );
         tasks[writer].patch = patch;
     }

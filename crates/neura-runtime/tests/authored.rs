@@ -438,3 +438,88 @@ fn a_device_count_rules_the_rows_a_depth_split_product_walks() {
         assert_close(&actual, &expected, 1e-3);
     }
 }
+
+const WIDE_ROWS: u32 = 12;
+const NARROW_ROWS: u32 = 6;
+
+struct Shared<'g> {
+    probe: Value<'g>,
+    longer: Value<'g>,
+    shorter: Value<'g>,
+    factor: Value<'g>,
+    out: Value<'g>,
+}
+
+fn shared(graph: &Graph<'static>) -> Shared<'static> {
+    let probe = graph.input(Shape::of([1, 1, WIDE_ROWS, 1]), Element::Single);
+    let count = graph.relu(graph.sum(probe));
+    let longer = graph.input(Shape::of([1, 1, WIDE_ROWS, WIDTH]), Element::Single);
+    let shorter = graph.input(Shape::of([1, 1, NARROW_ROWS, WIDTH]), Element::Single);
+    let factor = graph.input(Shape::scalar(), Element::Single);
+    let wide = graph.trim(longer, 2, count);
+    let short = graph.trim(shorter, 2, count);
+    let out = graph.mul(
+        graph.add(graph.sum(wide), graph.sum(short)),
+        graph.mul(count, factor),
+    );
+    graph.retain(out);
+    Shared {
+        probe,
+        longer,
+        shorter,
+        factor,
+        out,
+    }
+}
+
+#[test]
+fn a_device_count_rules_the_length_of_every_tensor_it_authors() {
+    let runtime = open();
+    let graph = Graph::new();
+    let model = shared(&graph);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    assert!(
+        program.carries_authored(),
+        "a graph that trims two tensors walks one count the device authors",
+    );
+    let longer = data(WIDE_ROWS * WIDTH, 71);
+    let shorter = data(NARROW_ROWS * WIDTH, 73);
+    runtime.write(&program, model.longer, &longer);
+    runtime.write(&program, model.shorter, &shorter);
+    for (live, factor) in [(6u32, 2.0f32), (3, -1.5), (1, 0.5), (0, 4.0)] {
+        runtime.write(&program, model.probe, &live_probe(WIDE_ROWS, live));
+        runtime.write(&program, model.factor, &[factor]);
+        runtime.run(&program);
+        let walked = live as usize * WIDTH as usize;
+        let expected = (longer[..walked].iter().sum::<f32>()
+            + shorter[..walked].iter().sum::<f32>())
+            * (live as f32 * factor);
+        assert_close(&runtime.read(&program, model.out), &[expected], 1e-3);
+    }
+}
+
+#[test]
+fn a_device_count_beyond_one_bound_it_walks_is_refused() {
+    let runtime = open();
+    let graph = Graph::new();
+    let model = shared(&graph);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    runtime.write(&program, model.longer, &data(WIDE_ROWS * WIDTH, 79));
+    runtime.write(&program, model.shorter, &data(NARROW_ROWS * WIDTH, 83));
+    runtime.write(&program, model.factor, &[1.0]);
+    runtime.write(
+        &program,
+        model.probe,
+        &live_probe(WIDE_ROWS, NARROW_ROWS + 1),
+    );
+    runtime.run(&program);
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.read(&program, model.out)
+    }));
+    assert!(
+        refused.is_err(),
+        "a count beyond the bound of one tensor it walks was accepted",
+    );
+}

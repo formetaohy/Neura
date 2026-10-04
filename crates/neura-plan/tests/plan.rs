@@ -1,4 +1,6 @@
-use neura_abi::{Element, Kind, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES};
+use neura_abi::{
+    Element, Kind, PatchRecord, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES,
+};
 use neura_graph::{AttentionOptions, Graph, Init, Shape};
 use neura_pointwise as op;
 use neura_profile::{
@@ -57,6 +59,10 @@ fn segment_of(plan: &Plan, task: usize) -> usize {
     plan.segments()
         .partition_point(|segment| segment.first as usize <= task)
         - 1
+}
+
+fn patched_slots(plan: &Plan, patch: PatchRecord) -> Vec<u32> {
+    plan.patch_list()[patch.slots as usize..(patch.slots + patch.slots_count) as usize].to_vec()
 }
 
 fn follows(plan: &Plan, before: usize, after: usize) -> bool {
@@ -1905,8 +1911,11 @@ fn a_plan_walks_the_extent_a_device_count_authors() {
         "the task that patches the extent is the task that counts it",
     );
     let patch = plan.patches()[0];
+    let slots = patched_slots(&plan, patch);
     assert!(
-        plan.authored_values(live.id()).contains(&patch.slot),
+        plan.authored_values(live.id())
+            .iter()
+            .any(|slot| slots.contains(slot)),
         "the trimmed tensor walks the extent its count authors",
     );
     let list = plan.patch_list();
@@ -1932,6 +1941,102 @@ fn a_plan_walks_the_extent_a_device_count_authors() {
             "a task the device count rules walks a measure of the plan",
         );
     }
+}
+
+#[test]
+fn a_count_rules_every_extent_the_graph_hands_it() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 16, 1]), Element::Single);
+    let count = graph.sum(probe);
+    let longer = graph.input(Shape::of([1, 1, 16, 4]), Element::Single);
+    let shorter = graph.input(Shape::of([1, 1, 12, 4]), Element::Single);
+    let first = graph.trim(longer, 2, count);
+    let second = graph.trim(shorter, 2, count);
+    let out = graph.add(graph.sum(first), graph.sum(second));
+    graph.retain(out);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    assert_eq!(
+        plan.patches().len(),
+        1,
+        "one task counts both extents, and one patch rules every extent a count walks",
+    );
+    let patch = plan.patches()[0];
+    assert_eq!(patch.count, count.id());
+    assert_eq!(
+        patched_slots(&plan, patch),
+        [
+            first
+                .shape()
+                .free(2)
+                .expect("a trimmed tensor walks the count on axis 2"),
+            second
+                .shape()
+                .free(2)
+                .expect("a trimmed tensor walks the count on axis 2"),
+        ],
+        "the patch rules the extent of every tensor the count was handed",
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|task| task.patch != neura_abi::NO_VALUE)
+            .count(),
+        1,
+        "the task that counts the extents carries the one patch",
+    );
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert!(
+        values.contains(&first.id()) && values.contains(&second.id()),
+        "the tensors of every extent the count walks are patched",
+    );
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    let walks = |value: u32| {
+        patched.iter().any(|at| {
+            let task = records[*at as usize];
+            [task.a, task.b, task.c, task.d, task.e, task.f]
+                .into_iter()
+                .chain([task.out, task.extra])
+                .any(|touched| touched == value)
+        })
+    };
+    assert!(
+        walks(first.id()) && walks(second.id()),
+        "the ranges of the tasks that walk either extent are patched",
+    );
+}
+
+#[test]
+fn a_count_a_scalar_step_reads_keeps_the_task_that_writes_it() {
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+    let count = graph.relu(graph.sum(probe));
+    let free = graph.counted(8, count);
+    let tokens = graph.input(Shape::of([1, 1, 8, 4]).freed(&[(2, free)]), Element::Single);
+    let factor = graph.input(Shape::scalar(), Element::Single);
+    let scaled = graph.mul(count, factor);
+    let out = graph.mul(graph.sum(tokens), scaled);
+    graph.retain(out);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let writer = records
+        .iter()
+        .position(|task| task.out == count.id())
+        .expect("the count has a writer");
+    assert_eq!(
+        records.iter().filter(|task| task.out == count.id()).count(),
+        1,
+        "a scalar step that reads the count folds no other task into the writer that counts it",
+    );
+    assert_eq!(Kind::of(records[writer].kind), Kind::Unary);
+    assert_eq!(records[writer].op, op::RELU);
+    assert_eq!(plan.patches().len(), 1, "one task authors the extent");
+    assert_eq!(plan.patches()[0].count, count.id());
+    assert_eq!(
+        records[writer].patch, 0,
+        "the patch lands on the task that counts the extent, and that task survives every fold",
+    );
 }
 
 #[test]
@@ -2093,7 +2198,7 @@ fn a_compaction_walks_the_rows_a_mask_names() {
     assert_eq!(plan.authored_slots()[count as usize], count);
     let patches = plan.patches();
     assert_eq!(patches.len(), 1, "one slot is authored");
-    assert_eq!(patches[0].slot, count);
+    assert_eq!(patched_slots(&plan, patches[0]), [count]);
     assert_eq!(
         patches[0].segment,
         neura_abi::NO_VALUE,
@@ -2169,7 +2274,7 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     let patches = plan.patches();
     assert_eq!(patches.len(), 1, "one slot is authored");
     let patch = patches[0];
-    assert_eq!(patch.slot, ragged.extent.slot());
+    assert_eq!(patched_slots(&plan, patch), [ragged.extent.slot()]);
     assert_eq!(
         patch.segment,
         ragged.offsets.id(),
@@ -2242,11 +2347,11 @@ fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
         .iter()
         .find(|patch| patch.segment != neura_abi::NO_VALUE)
         .expect("the closing patch closes the offsets of its ragged axis");
-    assert_eq!(closing.slot, ragged.extent.slot());
+    assert_eq!(patched_slots(&plan, *closing), [ragged.extent.slot()]);
     assert_eq!(closing.segment, ragged.offsets.id());
     let planes = patches
         .iter()
-        .find(|patch| patch.slot == live.slot())
+        .find(|patch| patched_slots(&plan, **patch) == [live.slot()])
         .expect("the device count authors the plane extent");
     assert_eq!(
         planes.segment,
@@ -2376,7 +2481,7 @@ fn a_grouped_product_walks_the_tiles_every_segment_holds() {
     let patches = plan.patches();
     assert_eq!(patches.len(), 1, "one slot is authored");
     let patch = patches[0];
-    assert_eq!(patch.slot, ragged.extent.slot());
+    assert_eq!(patched_slots(&plan, patch), [ragged.extent.slot()]);
     assert_eq!(
         patch.segment,
         ragged.offsets.id(),
