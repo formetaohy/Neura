@@ -2516,6 +2516,41 @@ fn a_row_that_reads_a_wider_tensor_waits_for_the_task_that_writes_it() {
 }
 
 #[test]
+fn a_convert_of_a_walk_a_binding_narrows_waits_for_every_task_that_writes_it() {
+    let graph = Graph::new();
+    let tokens = graph.free(8192);
+    let shape = Shape::of([1, 1, 1, 8192]).freed(&[(3, tokens)]);
+    let left = graph.input(shape, Element::Single);
+    let right = graph.input(shape, Element::Single);
+    let product = graph.mul(left, right);
+    let half = graph.cast(product, Element::Half);
+    graph.retain(product);
+    graph.retain(half);
+    let plan = plan(&graph);
+    let writing = writers(&plan, product.id());
+    let converting = kinds(&plan)
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| **kind == Kind::Convert)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        writing.len() > 1 && converting.len() > 1,
+        "a walk of 8192 numbers a binding rules is written in {} pieces and narrowed in {} of them",
+        writing.len(),
+        converting.len(),
+    );
+    for task in &converting {
+        for writer in &writing {
+            assert!(
+                follows(&plan, *writer, *task),
+                "the convert of a walk a binding narrows reads the numbers task {writer} writes, and the plan stands it before them",
+            );
+        }
+    }
+}
+
+#[test]
 fn a_grouped_product_walks_the_tiles_every_segment_holds() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(3), Element::Single);

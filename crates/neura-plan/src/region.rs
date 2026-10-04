@@ -99,10 +99,7 @@ fn assert_names_held_numbers(values: &[ValueInfo], task: &Task, touches: &Touche
 
 fn narrowed(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Narrowed {
     let mut narrowed = Narrowed::default();
-    if owned(values, task.out)
-        && dense(&values[task.out as usize])
-        && !matches!(task.split, Split::Segment { .. })
-    {
+    if frozen(values, task) {
         match task.kind {
             Kind::Matmul => product(values, tiles, task, &mut narrowed),
             Kind::MatmulFold => fold(values, task, &mut narrowed),
@@ -121,6 +118,21 @@ fn narrowed(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Narrowed
         narrowed.read_whole(*count);
     }
     narrowed
+}
+
+fn frozen(values: &[ValueInfo], task: &Task) -> bool {
+    matches!(task.split, Split::Range { .. })
+        && owned(values, task.out)
+        && dense(&values[task.out as usize])
+        && task
+            .reads()
+            .chain(task.writes())
+            .all(|value| !walks_a_free_axis(values, value))
+}
+
+fn walks_a_free_axis(values: &[ValueInfo], value: u32) -> bool {
+    let info = &values[value as usize];
+    info.shape.dynamic() || values[info.storage as usize].shape.dynamic()
 }
 
 fn owned(values: &[ValueInfo], value: u32) -> bool {

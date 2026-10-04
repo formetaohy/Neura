@@ -1,6 +1,10 @@
 use crate::hazard::{Accesses, Hazard};
-use crate::region::Region;
+use crate::lower;
+use crate::region::{self, Region};
 use crate::span;
+use neura_abi::{Element, Kind};
+use neura_graph::{Graph, Shape};
+use neura_profile::{Budget, Profile};
 
 fn overlaps(left: Region, right: Region) -> bool {
     match (left, right) {
@@ -164,4 +168,70 @@ fn a_boundary_stays_inside_the_numbers_of_its_tensor() {
         }
         assert_eq!(span::boundary(total, group, group), total);
     }
+}
+
+fn lowered(dynamic: bool) -> lower::Plan {
+    let graph = Graph::new();
+    let shape = if dynamic {
+        let tokens = graph.free(4096);
+        Shape::of([1, 1, 4096, 2]).freed(&[(2, tokens)])
+    } else {
+        Shape::of([1, 1, 4096, 2])
+    };
+    let input = graph.input(shape, Element::Single);
+    let doubled = graph.mul(input, input);
+    graph.retain(doubled);
+    let snapshot = graph.snapshot();
+    lower::lower(
+        snapshot.values(),
+        snapshot.tasks(),
+        *Profile::derive(Budget::BASELINE, None)
+            .last()
+            .expect("a profile"),
+        &[],
+    )
+}
+
+#[test]
+fn a_walk_a_binding_rules_touches_whole_storages() {
+    let dynamic = lowered(true);
+    let mut walking = 0;
+    for task in &dynamic.tasks {
+        let touches = region::touches(&dynamic.values, &dynamic.tiles, task);
+        for (storage, region) in touches.reads.iter().chain(&touches.writes) {
+            assert_eq!(
+                *region,
+                Region::Whole,
+                "a {} task walks storage {storage} through a length a binding rules, and its range moves with the binding",
+                task.kind.name(),
+            );
+        }
+        walking += 1;
+    }
+    assert!(
+        walking > 1,
+        "a walk of 8192 numbers a binding rules schedules more than one task",
+    );
+    let frozen = lowered(false);
+    let mut narrowed = 0;
+    for task in &frozen.tasks {
+        if task.kind != Kind::Binary {
+            continue;
+        }
+        let touches = region::touches(&frozen.values, &frozen.tiles, task);
+        assert_eq!(
+            touches.writes,
+            vec![(
+                frozen.values[task.out as usize].storage,
+                Region::run(u64::from(task.first), u64::from(task.count)),
+            )],
+            "a {} task of a shape the plan freezes writes the range it names",
+            task.kind.name(),
+        );
+        narrowed += 1;
+    }
+    assert!(
+        narrowed > 1,
+        "a walk of 8192 numbers a binding does not rule schedules more than one task",
+    );
 }
