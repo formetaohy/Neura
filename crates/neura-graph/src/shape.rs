@@ -49,15 +49,8 @@ impl Domain {
         Self { statics, frees }
     }
 
-    pub(crate) fn contains(&self, other: &Self) -> bool {
-        let mut held = self.frees.clone();
-        other.statics <= self.statics
-            && other.frees.iter().all(|free| {
-                held.iter()
-                    .position(|kept| kept == free)
-                    .map(|at| held.remove(at))
-                    .is_some()
-            })
+    pub(crate) fn meets(&self, other: &Self) -> bool {
+        self.statics == other.statics && self.frees == other.frees
     }
 }
 

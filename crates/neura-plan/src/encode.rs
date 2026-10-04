@@ -210,6 +210,7 @@ impl Plan {
         assert_writers_precede_readers(values, &tasks);
         assert_units_keep_their_order(&tasks);
         assert_ragged_chunks_cover_their_plane(&tasks);
+        assert_a_segmented_attention_walks_the_planes_its_query_holds(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         let mut authored =
             authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
@@ -917,6 +918,27 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
             chunks,
             (0..group).collect::<Vec<u32>>(),
             "plane {plane} of a ragged axis of {planes} planes walks the chunks {chunks:?}, and every one of the {group} chunks its tasks name is walked",
+        );
+    }
+}
+
+fn assert_a_segmented_attention_walks_the_planes_its_query_holds(
+    values: &[ValueInfo],
+    tasks: &[Task],
+) {
+    for task in tasks {
+        if !matches!(task.kind, Kind::AttentionKeyGrad | Kind::AttentionValueGrad)
+            || task.segments == NO_VALUE
+        {
+            continue;
+        }
+        let query = values[task.inputs[0] as usize].shape.dims();
+        assert!(
+            task.plane < query[0] * query[1],
+            "a segmented {} task walks plane {} of the ragged axis its keys pack, and the query it weighs holds {} planes",
+            task.kind.name(),
+            task.plane,
+            query[0] * query[1],
         );
     }
 }

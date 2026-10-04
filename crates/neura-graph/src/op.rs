@@ -209,9 +209,10 @@ impl<'g> Graph<'g> {
             );
             let planes = query_shape.dims()[0] * query_shape.dims()[1];
             assert!(
-                axis.planes.domain().contains(&query_shape.plane_domain()),
-                "a segmented attention of {planes} planes walks the segments a ragged axis closes over {:?}, and the query walks {:?}: every plane of the query walks one segment the ragged axis closes",
+                axis.planes.domain().meets(&query_shape.plane_domain()),
+                "a segmented attention of {planes} planes walks the segments a ragged axis closes over {:?} of {} planes, and the query walks {:?}: the device reads a segment by the very plane the query walks, so one segment closes each plane and no more",
                 axis.planes.dims(),
+                axis.planes.elements(),
                 query_shape.dims(),
             );
             assert!(

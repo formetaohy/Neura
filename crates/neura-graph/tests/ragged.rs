@@ -112,6 +112,31 @@ fn a_segmented_attention_walks_the_planes_its_ragged_axis_closes() {
 }
 
 #[test]
+fn a_segmented_attention_weighs_one_segment_of_every_plane_it_walks() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let ragged = graph.ragged(BOUND, lengths);
+    let cache = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let heads = graph.input(Shape::of([2, 2, 1, WIDTH]), Element::Single);
+    let out = graph.attention(heads, cache, cache, causal(ragged.offsets));
+    assert_eq!(
+        graph.shape(out).dims(),
+        [2, 2, 1, WIDTH],
+        "the planes of a head group walk the segments a ragged axis closes one after another",
+    );
+    let query = graph.input(Shape::of([1, 2, 1, WIDTH]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(query, cache, cache, causal(ragged.offsets));
+        }),
+        "a query of two planes walked the four segments a ragged axis closes, and the device reads a segment by the very plane the query walks",
+    );
+}
+
+#[test]
 fn a_segmented_attention_asks_every_plane_its_own_queries() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
