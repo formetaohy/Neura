@@ -271,7 +271,7 @@ fn redirected(unit: &TaskInfo, image: u32) -> TaskInfo {
 }
 
 fn writes_every_element(kind: Kind) -> bool {
-    !matches!(kind, Kind::Scatter | Kind::ScatterWrite)
+    !matches!(kind, Kind::Scatter | Kind::ScatterWrite | Kind::Compact)
 }
 
 fn convert(
@@ -531,14 +531,24 @@ fn schedule_unit(
                 |_, count| u64::from(count) * u64::from(width),
             );
         }
+        Kind::Compact => {
+            let rows = plan.shape(unit.inputs[0]).elements();
+            let measure = measured(plan, unit.inputs[0], Measure::Elements);
+            spread(
+                plan,
+                unit,
+                rows,
+                scatter_rows_per_task(rows),
+                measure,
+                |_, count| u64::from(count),
+            );
+        }
         Kind::Convert => panic!("a narrow tensor is written by the convert its task schedules"),
         Kind::PrefixScan => {
-            panic!("the offsets of a ragged axis come from the two-level prefix of its lengths")
+            panic!("the offsets of a walk come from the two-level prefix of the numbers it sums")
         }
         Kind::PrefixClose => {
-            panic!(
-                "the extent of a ragged axis closes the offsets of the two-level prefix it walks"
-            )
+            panic!("the extent a walk authors closes the offsets of the two-level prefix it walks")
         }
     }
 }

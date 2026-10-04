@@ -704,9 +704,13 @@ impl<'g> Graph<'g> {
                     task.kind.name(),
                 )
             }
+            Kind::Compact => panic!(
+                "the {} task yields the rows a mask selects, and an index carries no gradient",
+                task.kind.name(),
+            ),
             Kind::PrefixChunk | Kind::PrefixScan | Kind::PrefixClose => {
                 panic!(
-                    "the {} task rebuilds the offsets of a ragged axis, and the lengths it walks carry no gradient",
+                    "the {} task walks a prefix sum, and a prefix sum carries no gradient",
                     task.kind.name(),
                 )
             }

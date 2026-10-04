@@ -722,6 +722,10 @@ fn refusal_message(word: u32) -> String {
             kind.name(),
         ),
         Refusal::Task => format!("this device program carries no {} task", kind.name()),
+        Refusal::Mask => format!(
+            "the device refused a mask of the {} task, whose flag is neither a 1 nor a 0",
+            kind.name(),
+        ),
         Refusal::Element => unreachable!("an element refusal carries no kind"),
     }
 }

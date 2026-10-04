@@ -118,6 +118,7 @@ pub(crate) fn analyse(
 
 pub(crate) fn plan_patches(
     authored: &mut Authored,
+    values: &[ValueInfo],
     tasks: &mut [Task],
     order: &[u32],
     measures: &[Measure],
@@ -154,7 +155,10 @@ pub(crate) fn plan_patches(
             !tasks[writer].depends.contains(&count),
             "free extent {slot} walks the count of value {count}, and the task that writes it walks a length it authors",
         );
-        let segment = if tasks[writer].kind == Kind::PrefixClose {
+        let closes = tasks[writer].kind == Kind::PrefixClose
+            && values[tasks[writer].inputs[0] as usize].shape.elements()
+                > values[tasks[writer].inputs[1] as usize].shape.elements();
+        let segment = if closes {
             tasks[writer].inputs[0]
         } else {
             NO_VALUE

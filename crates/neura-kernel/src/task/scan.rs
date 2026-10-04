@@ -6,6 +6,10 @@ pub(crate) fn install(compiler: &mut Compiler) {
 
 #[neura_compiler::module]
 mod device {
+    fn elements(value: Value) -> u32 {
+        return value.dims.x * value.dims.y * value.dims.z * value.dims.w;
+    }
+
     fn scan_sum(lid: u32, start: f32) -> f32 {
         scratch[lid] = start;
         workgroup_barrier();
@@ -70,12 +74,14 @@ mod device {
         let offsets = values[task.a];
         let lengths = values[task.b];
         if lid == 0u32 {
-            let planes = lengths.dims.x * lengths.dims.y * lengths.dims.z * lengths.dims.w;
+            let planes = elements(lengths);
             let mut total = 0.0;
             if planes > 0u32 {
                 total = fetch(offsets, planes - 1u32) + fetch(lengths, planes - 1u32);
             }
-            publish(offsets, planes, total);
+            if elements(offsets) > planes {
+                publish(offsets, planes, total);
+            }
             publish(values[task.out], 0u32, total);
         }
     }

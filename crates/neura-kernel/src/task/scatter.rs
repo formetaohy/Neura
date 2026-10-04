@@ -25,6 +25,23 @@ mod device {
         }
     }
 
+    fn run_compact(task: Task, lid: u32) {
+        let mask = values[task.a];
+        let positions = values[task.b];
+        let indices = values[task.out];
+        let rows = indices.dims.x * indices.dims.y * indices.dims.z;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let flag = fetch(mask, row);
+            if flag != 0.0 && flag != 1.0 {
+                refuse(kind::COMPACT, refusal::MASK, 0u32);
+            }
+            if flag == 1.0 {
+                let at = whole_index(fetch(positions, row), rows, kind::COMPACT, refusal::INDEX);
+                publish(indices, at, f32(row));
+            }
+        }
+    }
+
     fn run_scatter_write(task: Task, lid: u32) {
         let into = values[task.a];
         let indices = values[task.b];

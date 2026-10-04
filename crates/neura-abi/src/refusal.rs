@@ -1,7 +1,7 @@
 use crate::Kind;
 
 pub const KIND_BITS: u32 = 16;
-pub const CATEGORY_BITS: u32 = 3;
+pub const CATEGORY_BITS: u32 = 4;
 pub const CODE_BITS: u32 = 32 - KIND_BITS - CATEGORY_BITS;
 pub const CODE_LIMIT: u32 = 1 << CODE_BITS;
 
@@ -16,6 +16,7 @@ pub enum Refusal {
     Origin,
     Task,
     Element,
+    Mask,
 }
 
 impl Refusal {
@@ -28,6 +29,7 @@ impl Refusal {
         Self::Origin,
         Self::Task,
         Self::Element,
+        Self::Mask,
     ];
 
     pub const COUNT: u32 = Self::ALL.len() as u32;
@@ -52,6 +54,7 @@ impl Refusal {
             Self::Origin => "origin",
             Self::Task => "task",
             Self::Element => "element",
+            Self::Mask => "mask",
         }
     }
 
@@ -94,3 +97,4 @@ pub const GEOMETRY: u32 = Refusal::Geometry as u32;
 pub const ORIGIN: u32 = Refusal::Origin as u32;
 pub const TASK: u32 = Refusal::Task as u32;
 pub const ELEMENT: u32 = Refusal::Element as u32;
+pub const MASK: u32 = Refusal::Mask as u32;

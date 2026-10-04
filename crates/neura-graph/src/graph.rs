@@ -13,7 +13,7 @@ use std::sync::{Arc, Weak};
 static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) const NORM_FLOOR: f32 = 1e-6;
-pub(crate) const RAGGED_LIMIT: u32 = 1 << 24;
+pub(crate) const EXACT_WALK_LIMIT: u32 = 1 << 24;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Value<'g> {
@@ -54,6 +54,18 @@ pub struct AttentionOptions<'g> {
 pub struct Ragged<'g> {
     pub extent: Free,
     pub offsets: Value<'g>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Prefixes<'g> {
+    pub exclusive: Value<'g>,
+    pub total: Value<'g>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Compacted<'g> {
+    pub indices: Value<'g>,
+    pub count: Value<'g>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -391,19 +403,10 @@ impl<'g> Graph<'g> {
     pub fn ragged(&self, bound: u32, lengths: Value<'g>) -> Ragged<'g> {
         let lengths = self.own(lengths);
         assert!(
-            bound <= RAGGED_LIMIT,
-            "a ragged extent of {bound} numbers outruns the {RAGGED_LIMIT} numbers a device sums exactly",
+            bound <= EXACT_WALK_LIMIT,
+            "a ragged extent of {bound} numbers outruns the {EXACT_WALK_LIMIT} numbers a device sums exactly",
         );
-        assert!(
-            !self.element(lengths).narrow() && !self.element(lengths).per_block(),
-            "a ragged axis walks the lengths of {} storage, and a device sums only the exact numbers it reads",
-            self.element(lengths).name(),
-        );
-        assert!(
-            self.contiguous(lengths),
-            "a ragged axis reads its lengths in one walk, and value {} is a view",
-            lengths.id(),
-        );
+        self.exact_walk(lengths, "a ragged axis");
         let planes = self.shape(lengths).elements();
         assert!(
             planes < u32::MAX,
@@ -416,21 +419,7 @@ impl<'g> Graph<'g> {
             false,
         );
         let total = self.fresh(Shape::scalar(), Element::Single, Residency::Derived, false);
-        let mut task = TaskInfo::of(
-            Kind::PrefixChunk,
-            op::NONE,
-            total.id(),
-            [
-                lengths.id(),
-                NO_VALUE,
-                NO_VALUE,
-                NO_VALUE,
-                NO_VALUE,
-                NO_VALUE,
-            ],
-        );
-        task.extra = offsets.id();
-        self.push(task);
+        self.prefix(lengths, offsets, total);
         let planes = self.shape(lengths);
         let extent = self.counted(bound, total);
         self.state.borrow_mut().ragged.insert(
@@ -441,6 +430,85 @@ impl<'g> Graph<'g> {
             },
         );
         Ragged { extent, offsets }
+    }
+
+    pub fn prefix_sum(&self, value: Value<'g>) -> Prefixes<'g> {
+        let value = self.own(value);
+        self.exact_walk(value, "a prefix sum");
+        let shape = self.shape(value);
+        let total = self.fresh(Shape::scalar(), Element::Single, Residency::Derived, false);
+        let exclusive = self.fresh(shape, Element::Single, Residency::Derived, false);
+        self.prefix(value, exclusive, total);
+        Prefixes { exclusive, total }
+    }
+
+    pub fn compact(&self, mask: Value<'g>) -> Compacted<'g> {
+        let mask = self.own(mask);
+        let shape = self.shape(mask);
+        assert_eq!(
+            shape.dims()[3],
+            1,
+            "a compaction weighs one flag per row, and {:?} holds {} of them",
+            shape.dims(),
+            shape.dims()[3],
+        );
+        assert!(
+            shape.free(3).is_none(),
+            "a compaction weighs one flag per row, and axis 3 of {:?} walks free extent {}",
+            shape.dims(),
+            shape.free(3).unwrap_or_default(),
+        );
+        let prefix = self.prefix_sum(mask);
+        let rows = shape.dims()[..3].iter().product::<u32>();
+        let indices = self.resident(Shape::matrix(rows, 1), Element::Single);
+        self.push(TaskInfo::of(
+            Kind::Compact,
+            op::NONE,
+            indices.id(),
+            [
+                mask.id(),
+                prefix.exclusive.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        ));
+        Compacted {
+            indices: self.trim(indices, 2, prefix.total),
+            count: prefix.total,
+        }
+    }
+
+    fn exact_walk(&self, value: Value<'g>, walks: &str) {
+        assert!(
+            self.contiguous(value),
+            "{walks} walks a tensor its storage lays out row by row, and value {} is a view",
+            value.id(),
+        );
+        let element = self.element(value);
+        assert!(
+            !element.narrow() && !element.per_block(),
+            "{walks} sums the exact numbers it reads, and value {} holds {} storage",
+            value.id(),
+            element.name(),
+        );
+        let elements = self.shape(value).elements();
+        assert!(
+            elements <= EXACT_WALK_LIMIT,
+            "{walks} of {elements} numbers outruns the {EXACT_WALK_LIMIT} numbers a device sums exactly",
+        );
+    }
+
+    fn prefix(&self, value: Value<'g>, offsets: Value<'g>, total: Value<'g>) {
+        let mut unit = TaskInfo::of(
+            Kind::PrefixChunk,
+            op::NONE,
+            total.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        unit.extra = offsets.id();
+        self.push(unit);
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {

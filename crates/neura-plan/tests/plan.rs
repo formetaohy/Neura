@@ -2058,6 +2058,80 @@ fn a_device_count_of_every_plane_a_batch_walks_is_refused() {
 }
 
 #[test]
+fn a_compaction_walks_the_rows_a_mask_names() {
+    let graph = Graph::new();
+    let rows = graph.free(8);
+    let mask = graph.input(Shape::matrix(8, 1).freed(&[(2, rows)]), Element::Single);
+    let compacted = graph.compact(mask);
+    let table = graph.input(Shape::matrix(8, 2), Element::Single);
+    let selected = graph.gather(table, compacted.indices);
+    let total = graph.sum(selected);
+    graph.retain(compacted.indices);
+    graph.retain(selected);
+    graph.retain(total);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let names = kinds(&plan);
+    assert!(
+        names.contains(&Kind::PrefixChunk)
+            && names.contains(&Kind::PrefixScan)
+            && names.contains(&Kind::PrefixClose)
+            && names.contains(&Kind::Compact),
+        "a compaction walks a two-level prefix its count closes: {names:?}",
+    );
+    assert!(plan.carries_authored());
+    assert_eq!(plan.host_slots(), [(rows.slot(), 8)]);
+    let count = graph
+        .shape(compacted.indices)
+        .free(2)
+        .expect("an index list walks the rows a device count holds");
+    assert_eq!(
+        plan.authored_slots()[rows.slot() as usize],
+        neura_abi::NO_VALUE,
+        "the rows of the mask are bound by the host",
+    );
+    assert_eq!(plan.authored_slots()[count as usize], count);
+    let patches = plan.patches();
+    assert_eq!(patches.len(), 1, "one slot is authored");
+    assert_eq!(patches[0].slot, count);
+    assert_eq!(
+        patches[0].segment,
+        neura_abi::NO_VALUE,
+        "a prefix sum closes no offsets of a ragged axis",
+    );
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the count");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let compact = records
+        .iter()
+        .position(|task| Kind::of(task.kind) == Kind::Compact)
+        .expect("a compaction walks the rows its mask names");
+    assert_eq!(records[compact].a, mask.id());
+    assert_ne!(
+        records[compact].b,
+        neura_abi::NO_VALUE,
+        "a compaction walks the offsets its mask sums",
+    );
+    assert!(
+        follows(&plan, author, compact),
+        "a compaction walks the count the closing task authors",
+    );
+    for reader in records
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| task.out != compacted.indices.id() && task.b == compacted.indices.id())
+        .map(|(index, _)| index)
+    {
+        assert!(
+            follows(&plan, compact, reader),
+            "task {reader} walks the index list the compaction fills",
+        );
+    }
+}
+
+#[test]
 fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);

@@ -209,11 +209,13 @@ impl Plan {
         assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, &tasks);
         assert_units_keep_their_order(&tasks);
+        assert_prefix_tables_close_their_walk(values, &tasks);
         let mut authored =
             authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
         let schedule = schedule::Schedule::of(values, &menu, &tasks, profile.workgroups());
         authored::plan_patches(
             &mut authored,
+            values,
             &mut tasks,
             schedule.order(),
             &measures,
@@ -853,6 +855,20 @@ fn assert_writers_precede_readers(values: &[ValueInfo], tasks: &[Task]) {
         for storage in access.writes() {
             last_writer[*storage as usize] = Some(position);
         }
+    }
+}
+
+fn assert_prefix_tables_close_their_walk(values: &[ValueInfo], tasks: &[Task]) {
+    for task in tasks {
+        if task.kind != Kind::PrefixClose {
+            continue;
+        }
+        let table = values[task.inputs[0] as usize].shape.elements();
+        let walked = values[task.inputs[1] as usize].shape.elements();
+        assert!(
+            table == walked || table == walked + 1,
+            "a prefix holds {table} offsets of the {walked} numbers it sums; a table of one entry past that walk carries the total that closes it, and a table of one entry per number carries the offsets alone",
+        );
     }
 }
 

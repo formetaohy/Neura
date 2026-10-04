@@ -380,6 +380,14 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Compact COMPACT = "compact" {
+        entry: "run_compact",
+        modules: [Scatter],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
     Convert CONVERT = "convert" {
         entry: "run_convert",
         modules: [Convert],
