@@ -185,7 +185,7 @@ mod device {
             let count = span_count(task);
             tasks[id].first = first;
             tasks[id].count = count;
-            if task.segment != NO_VALUE && count > 0u32 {
+            if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
                 tasks[id].keys = segment_keys(task, live + 1u32);
             }
         }

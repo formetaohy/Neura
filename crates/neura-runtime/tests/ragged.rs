@@ -548,3 +548,217 @@ fn a_ragged_axis_of_no_planes_closes_its_offsets_at_nothing() {
     assert_eq!(scanned[0], 0.0);
     assert_eq!(summed, 0.0);
 }
+
+struct CountedPlanes {
+    runtime: Runtime,
+    graph: Graph<'static>,
+    count: Value<'static>,
+    lengths: Value<'static>,
+    cursor: Value<'static>,
+    query: Value<'static>,
+    cache: Value<'static>,
+    out: Value<'static>,
+    offsets: Value<'static>,
+    total: Value<'static>,
+}
+
+impl CountedPlanes {
+    fn of(planes: u32, bound: u32, width: u32) -> Self {
+        let graph: Graph<'static> = Graph::new();
+        let count = graph.input(Shape::scalar(), Element::Single);
+        let live = graph.counted(planes, count);
+        let lengths = graph.input(
+            Shape::of([1, 1, 1, planes]).freed(&[(3, live)]),
+            Element::Single,
+        );
+        let ragged = graph.ragged(bound, lengths);
+        let cache = graph.resident(
+            Shape::of([1, 1, bound, width]).freed(&[(2, ragged.extent)]),
+            Element::Single,
+        );
+        let query = graph.input(
+            Shape::of([1, planes, 1, width]).freed(&[(1, live)]),
+            Element::Single,
+        );
+        let cursor = graph.input(Shape::of([1, planes, 1, 1]), Element::Single);
+        let out = graph.attention(
+            query,
+            cache,
+            cache,
+            AttentionOptions {
+                scale: SCALE,
+                causal: true,
+                origin: Some(cursor),
+                segments: Some(ragged.offsets),
+            },
+        );
+        let total = graph.sum(cache);
+        graph.retain(out);
+        graph.retain(ragged.offsets);
+        graph.retain(total);
+        Self {
+            runtime: open(),
+            graph,
+            count,
+            lengths,
+            cursor,
+            query,
+            cache,
+            out,
+            offsets: ragged.offsets,
+            total,
+        }
+    }
+
+    fn compile(&self) -> Program<'_> {
+        let weights = self.runtime.weights(&self.graph);
+        self.runtime.compile(&self.graph, &weights)
+    }
+
+    fn run(
+        &self,
+        program: &Program<'_>,
+        planes: u32,
+        lengths: &[f32],
+    ) -> (Vec<f32>, Vec<f32>, f32) {
+        let width = self.graph.shape(self.cache).dims()[3];
+        let bound = self.graph.shape(self.cache).dims()[2];
+        let cursor_planes = self.graph.shape(self.cursor).dims()[1];
+        let cache = (0..bound * width)
+            .map(|at| (at % 7) as f32 + 1.0)
+            .collect::<Vec<f32>>();
+        let query = data(cursor_planes * width, 29);
+        let cursors = lengths
+            .iter()
+            .map(|length| (length - 1.0).max(0.0))
+            .collect::<Vec<f32>>();
+        self.runtime.write(program, self.count, &[planes as f32]);
+        self.runtime.write(program, self.lengths, lengths);
+        self.runtime.write(program, self.cache, &cache);
+        self.runtime.write(program, self.query, &query);
+        self.runtime.write(program, self.cursor, &cursors);
+        self.runtime.run(program);
+        let produced = self.runtime.read(program, self.out);
+        let scanned = self.runtime.read(program, self.offsets);
+        let summed = self.runtime.read(program, self.total);
+        let live = &lengths[..planes as usize];
+        let packed = packed(live, &cache, width);
+        assert_close(
+            &produced,
+            &expected(live, &packed, &query, &cursors, width),
+            1e-5,
+        );
+        assert_eq!(
+            self.runtime.read(program, self.cache).len(),
+            packed.len(),
+            "a count that rules the planes walks only the tokens those planes hold",
+        );
+        assert_close(&summed, &[packed.iter().sum()], 1e-5);
+        (produced, scanned, summed[0])
+    }
+}
+
+#[test]
+fn a_ragged_axis_a_device_count_narrows_closes_only_the_planes_it_walks() {
+    let planes = CountedPlanes::of(PLANES, WIDE_BOUND, WIDTH);
+    let program = planes.compile();
+    let (wide, scanned, _) = planes.run(&program, PLANES, &[3.0, 2.0, 300.0, 300.0]);
+    assert_eq!(scanned, [0.0, 3.0, 5.0, 305.0, 605.0]);
+    let (narrow, scanned, _) = planes.run(&program, 2, &[3.0, 2.0, 300.0, 300.0]);
+    assert_eq!(
+        narrow,
+        wide[..narrow.len()],
+        "the planes a device count holds walk the tokens their lengths name",
+    );
+    assert_eq!(
+        scanned[..3],
+        [0.0, 3.0, 5.0],
+        "the prefix closes the offsets at the planes a device count holds",
+    );
+}
+
+#[test]
+fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
+    let graph: Graph<'static> = Graph::new();
+    let flags = graph.input(Shape::of([1, 1, 1, PLANES]), Element::Single);
+    let count = graph.sum(flags);
+    let live = graph.counted(PLANES, count);
+    let lengths = graph.input(
+        Shape::of([1, 1, 1, PLANES]).freed(&[(3, live)]),
+        Element::Single,
+    );
+    let ragged = graph.ragged(WIDE_BOUND, lengths);
+    let cache = graph.resident(
+        Shape::of([1, 1, WIDE_BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(
+        Shape::of([1, PLANES, 1, WIDTH]).freed(&[(1, live)]),
+        Element::Single,
+    );
+    let cursor = graph.input(Shape::of([1, PLANES, 1, 1]), Element::Single);
+    let out = graph.attention(
+        query,
+        cache,
+        cache,
+        AttentionOptions {
+            scale: SCALE,
+            causal: true,
+            origin: Some(cursor),
+            segments: Some(ragged.offsets),
+        },
+    );
+    graph.retain(out);
+    graph.retain(ragged.offsets);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let lengths_data = [3.0f32, 2.0, 5.0, 1.0];
+    let cache_data = (0..WIDE_BOUND * WIDTH)
+        .map(|at| (at % 7) as f32 + 1.0)
+        .collect::<Vec<f32>>();
+    let query_data = data(PLANES * WIDTH, 31);
+    let cursor_data = lengths_data
+        .iter()
+        .map(|length| length - 1.0)
+        .collect::<Vec<f32>>();
+    runtime.write(&program, lengths, &lengths_data);
+    runtime.write(&program, cache, &cache_data);
+    runtime.write(&program, query, &query_data);
+    runtime.write(&program, cursor, &cursor_data);
+    for (plane_flags, live_planes) in [
+        ([1.0f32, 1.0, 1.0, 1.0], PLANES),
+        ([1.0, 1.0, 0.0, 0.0], 2),
+        ([0.0, 0.0, 0.0, 0.0], 0),
+    ] {
+        runtime.write(&program, flags, &plane_flags);
+        runtime.run(&program);
+        let produced = runtime.read(&program, out);
+        let scanned = runtime.read(&program, ragged.offsets);
+        let live_lengths = &lengths_data[..live_planes as usize];
+        let packed_cache = packed(live_lengths, &cache_data, WIDTH);
+        assert_close(
+            &produced,
+            &expected(
+                live_lengths,
+                &packed_cache,
+                &query_data,
+                &cursor_data,
+                WIDTH,
+            ),
+            1e-5,
+        );
+        assert_eq!(
+            runtime.read(&program, cache).len(),
+            packed_cache.len(),
+            "the packed cache walks the tokens the planes a device count holds name",
+        );
+        assert_eq!(
+            scanned[..live_lengths.len() + 1],
+            offsets(live_lengths)
+                .into_iter()
+                .map(|offset| offset as f32)
+                .collect::<Vec<f32>>(),
+        );
+    }
+}

@@ -27,6 +27,40 @@ impl Free {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Domain {
+    statics: u32,
+    frees: Vec<(u32, u32)>,
+}
+
+impl Domain {
+    fn over(shape: Shape, axes: impl Iterator<Item = u32>) -> Self {
+        let mut statics = 1u32;
+        let mut frees = Vec::new();
+        for axis in axes {
+            let dim = shape.dims()[axis as usize];
+            match shape.free(axis) {
+                Some(slot) if dim > 1 => frees.push((slot, dim)),
+                Some(_) => {}
+                None => statics *= dim,
+            }
+        }
+        frees.sort_unstable();
+        Self { statics, frees }
+    }
+
+    pub(crate) fn contains(&self, other: &Self) -> bool {
+        let mut held = self.frees.clone();
+        other.statics <= self.statics
+            && other.frees.iter().all(|free| {
+                held.iter()
+                    .position(|kept| kept == free)
+                    .map(|at| held.remove(at))
+                    .is_some()
+            })
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Shape {
     dims: [u32; 4],
@@ -121,6 +155,14 @@ impl Shape {
 
     pub const fn elements(self) -> u32 {
         self.elements
+    }
+
+    pub(crate) fn domain(self) -> Domain {
+        Domain::over(self, 0..MAX_RANK)
+    }
+
+    pub(crate) fn plane_domain(self) -> Domain {
+        Domain::over(self, 0..2)
     }
 
     pub fn free(self, axis: u32) -> Option<u32> {

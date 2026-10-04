@@ -124,6 +124,7 @@ record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {
 record!(PatchRecord, PatchFields, PATCH, "Patch" {
     slot: u32 => U32,
     count: u32 => U32,
+    segment: u32 => U32,
     values: u32 => U32,
     values_count: u32 => U32,
     tasks: u32 => U32,

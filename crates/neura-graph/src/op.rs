@@ -73,13 +73,36 @@ impl<'g> Graph<'g> {
         let segments = attention.segments.map(|segments| self.own(segments));
         let tracked = self.tracked(&[query, key, value]);
         if let Some(offsets) = segments {
-            let planes = query_shape.dims()[0] * query_shape.dims()[1];
+            let axis = {
+                let state = self.state.borrow();
+                state.ragged.get(&offsets.id()).cloned()
+            }
+            .unwrap_or_else(|| {
+                panic!(
+                    "a segmented attention walks the offsets a ragged axis closes, and value {} holds a table no ragged axis published; close the lengths of every plane with Graph::ragged",
+                    offsets.id(),
+                )
+            });
             assert_eq!(
-                self.shape(offsets).elements(),
-                planes + 1,
-                "a segmented attention of {planes} planes walks the {} offsets of value {}, and every plane carries the offset that opens it and the one that closes the last",
-                self.shape(offsets).elements(),
-                offsets.id(),
+                key_shape.free(2),
+                Some(axis.token),
+                "a segmented attention packs the keys of every plane into the token axis its offsets close, and the keys of {key_shape:?} walk free extent {:?} where the ragged axis closes free extent {}",
+                key_shape.free(2),
+                axis.token,
+            );
+            assert_eq!(
+                value_shape.free(2),
+                Some(axis.token),
+                "a segmented attention reads every key through the value its plane packs beside it, and the values of {value_shape:?} walk free extent {:?} where the ragged axis closes free extent {}",
+                value_shape.free(2),
+                axis.token,
+            );
+            let planes = query_shape.dims()[0] * query_shape.dims()[1];
+            assert!(
+                axis.planes.domain().contains(&query_shape.plane_domain()),
+                "a segmented attention of {planes} planes walks the segments a ragged axis closes over {:?}, and the query walks {:?}: every plane of the query walks one segment the ragged axis closes",
+                axis.planes.dims(),
+                query_shape.dims(),
             );
             assert!(
                 key_shape.dims()[0] == 1
@@ -87,23 +110,6 @@ impl<'g> Graph<'g> {
                     && value_shape.dims()[0] == 1
                     && value_shape.dims()[1] == 1,
                 "a segmented attention packs the keys and values of every plane into their token axis, and keys of {key_shape:?} walk values of {value_shape:?}",
-            );
-            assert!(
-                key_shape.free(2).is_some() && value_shape.free(2).is_some(),
-                "a segmented attention walks the keys of a device authored token axis, and {key_shape:?} declares a fixed one",
-            );
-            let slot = key_shape
-                .free(2)
-                .expect("the token axis of a segmented key is free");
-            assert!(
-                self.state
-                    .borrow()
-                    .authored
-                    .get(slot as usize)
-                    .copied()
-                    .unwrap_or(NO_VALUE)
-                    != NO_VALUE,
-                "a segmented attention walks the offsets of a device authored axis: bind the packed token axis with the extent Graph::ragged returns",
             );
             assert!(
                 !tracked,

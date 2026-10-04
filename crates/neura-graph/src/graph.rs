@@ -5,7 +5,7 @@ use crate::window::Window;
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
 use neura_pointwise as op;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -153,10 +153,17 @@ pub(crate) struct GraphState {
     pub(crate) revisions: Vec<Weak<RevisionState>>,
     pub(crate) names: HashSet<Arc<str>>,
     pub(crate) authored: Vec<u32>,
+    pub(crate) ragged: HashMap<u32, RaggedAxis>,
     pub(crate) differentiated: bool,
     pub(crate) updated_in_place: bool,
     pub(crate) version: u64,
     pub(crate) frees: u32,
+}
+
+#[derive(Clone)]
+pub(crate) struct RaggedAxis {
+    pub(crate) planes: Shape,
+    pub(crate) token: u32,
 }
 
 pub struct GraphSnapshot {
@@ -231,6 +238,7 @@ impl<'g> Graph<'g> {
                 revisions: Vec::new(),
                 names: HashSet::new(),
                 authored: Vec::new(),
+                ragged: HashMap::new(),
                 differentiated: false,
                 updated_in_place: false,
                 version: 0,
@@ -423,10 +431,16 @@ impl<'g> Graph<'g> {
         );
         task.extra = offsets.id();
         self.push(task);
-        Ragged {
-            extent: self.counted(bound, total),
-            offsets,
-        }
+        let planes = self.shape(lengths);
+        let extent = self.counted(bound, total);
+        self.state.borrow_mut().ragged.insert(
+            offsets.id(),
+            RaggedAxis {
+                planes,
+                token: extent.slot(),
+            },
+        );
+        Ragged { extent, offsets }
     }
 
     pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {

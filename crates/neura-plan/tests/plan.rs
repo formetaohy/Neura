@@ -2096,6 +2096,11 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     assert_eq!(patches.len(), 1, "one slot is authored");
     let patch = patches[0];
     assert_eq!(patch.slot, ragged.extent.slot());
+    assert_eq!(
+        patch.segment,
+        ragged.offsets.id(),
+        "the patch that authors a ragged extent closes the offsets of that axis",
+    );
     let author = records
         .iter()
         .position(|task| task.patch != neura_abi::NO_VALUE)
@@ -2123,6 +2128,78 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
     }
     planes.sort_unstable();
     assert_eq!(planes, [0, 1, 2, 3]);
+}
+
+#[test]
+fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
+    let graph = Graph::new();
+    let flags = graph.input(Shape::of([1, 1, 1, 4]), Element::Single);
+    let count = graph.sum(flags);
+    let live = graph.counted(4, count);
+    let lengths = graph.input(Shape::of([1, 1, 1, 4]).freed(&[(3, live)]), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    let cache = graph.resident(
+        Shape::of([1, 1, 16, 4]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(Shape::of([1, 4, 1, 4]).freed(&[(1, live)]), Element::Single);
+    let cursor = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
+    let out = graph.attention(
+        query,
+        cache,
+        cache,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: Some(cursor),
+            segments: Some(ragged.offsets),
+        },
+    );
+    graph.retain(out);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patches = plan.patches();
+    assert_eq!(
+        patches.len(),
+        2,
+        "a device count and the closing total author two extents",
+    );
+    let closing = patches
+        .iter()
+        .find(|patch| patch.segment != neura_abi::NO_VALUE)
+        .expect("the closing patch closes the offsets of its ragged axis");
+    assert_eq!(closing.slot, ragged.extent.slot());
+    assert_eq!(closing.segment, ragged.offsets.id());
+    let planes = patches
+        .iter()
+        .find(|patch| patch.slot == live.slot())
+        .expect("the device count authors the plane extent");
+    assert_eq!(
+        planes.segment,
+        neura_abi::NO_VALUE,
+        "a patch that closes no ragged axis walks no offsets",
+    );
+    let list = plan.patch_list();
+    let closed = &list[closing.tasks as usize..(closing.tasks + closing.tasks_count) as usize];
+    assert_eq!(closed.len(), 4, "every plane of the cache closes its keys");
+    for at in closed {
+        let task = records[*at as usize];
+        assert_eq!(Kind::of(task.kind), Kind::Attention);
+        assert_eq!(task.segment, ragged.offsets.id());
+    }
+    let walked = &list[planes.tasks as usize..(planes.tasks + planes.tasks_count) as usize];
+    let attention = walked
+        .iter()
+        .filter(|at| Kind::of(records[**at as usize].kind) == Kind::Attention)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        attention.len(),
+        4,
+        "every plane of the cache walks its own tokens",
+    );
+    for at in attention {
+        assert_eq!(records[*at as usize].segment, ragged.offsets.id());
+    }
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use crate::access::Reads;
 use crate::lower::Task;
 use crate::span::{Measure, Split};
-use neura_abi::{MeasureFields, MeasureRecord, NO_VALUE, PatchFields, PatchRecord, measure};
+use neura_abi::{Kind, MeasureFields, MeasureRecord, NO_VALUE, PatchFields, PatchRecord, measure};
 use neura_graph::ValueInfo;
 use neura_profile::MatmulTile;
 
@@ -154,6 +154,11 @@ pub(crate) fn plan_patches(
             !tasks[writer].depends.contains(&count),
             "free extent {slot} walks the count of value {count}, and the task that writes it walks a length it authors",
         );
+        let segment = if tasks[writer].kind == Kind::PrefixClose {
+            tasks[writer].inputs[0]
+        } else {
+            NO_VALUE
+        };
         assert!(
             order.contains(&(writer as u32)),
             "the task that authors free extent {slot} stands in no segment of the plan",
@@ -183,6 +188,7 @@ pub(crate) fn plan_patches(
         authored.patches.push(PatchRecord::of(PatchFields {
             slot,
             count,
+            segment,
             values: values_first,
             values_count,
             tasks: tasks_first,
