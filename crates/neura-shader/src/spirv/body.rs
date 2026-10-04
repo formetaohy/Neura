@@ -1,8 +1,8 @@
 use crate::spirv::op::*;
 use crate::spirv::writer::Writer;
 use crate::{
-    Address, AtomicOp, Barrier, BinaryOp, Constant, Instruction as DeviceInstruction, MathFun,
-    MatrixLayout, Scalar, Space, Type, UnaryOp, ValueId,
+    Address, AtomicOp, Barrier, BinaryOp, Constant, Instruction as DeviceInstruction,
+    IntegerArithmetic, MathFun, MatrixLayout, Scalar, Space, Type, UnaryOp, ValueId,
 };
 use std::collections::HashSet;
 
@@ -232,6 +232,48 @@ impl<'w, 'm> FunctionWriter<'w, 'm> {
         }
     }
 
+    fn integer_arithmetic(
+        &mut self,
+        arithmetic: IntegerArithmetic,
+        left: ValueId,
+        right: ValueId,
+        ty: u32,
+        result: u32,
+    ) {
+        let left = self.value(left);
+        let right = self.value(right);
+        let opcode = match arithmetic {
+            IntegerArithmetic::TruncatedQuotient => S_DIV,
+            IntegerArithmetic::UnsignedQuotient => U_DIV,
+            IntegerArithmetic::UnsignedRemainder => U_MOD,
+            IntegerArithmetic::TruncatedRemainder => {
+                let divided = self.writer.id();
+                self.push(
+                    Instruction::result(S_DIV, ty, divided)
+                        .operand(left)
+                        .operand(right),
+                );
+                let scaled = self.writer.id();
+                self.push(
+                    Instruction::result(I_MUL, ty, scaled)
+                        .operand(divided)
+                        .operand(right),
+                );
+                self.push(
+                    Instruction::result(I_SUB, ty, result)
+                        .operand(left)
+                        .operand(scaled),
+                );
+                return;
+            }
+        };
+        self.push(
+            Instruction::result(opcode, ty, result)
+                .operand(left)
+                .operand(right),
+        );
+    }
+
     fn block(&mut self, body: &[DeviceInstruction]) {
         for instruction in body {
             self.instruction(instruction);
@@ -368,6 +410,10 @@ impl<'w, 'm> FunctionWriter<'w, 'm> {
                     return;
                 }
                 let scalar = self.scalar(*left);
+                if let Some(arithmetic) = op.integer_arithmetic(scalar) {
+                    self.integer_arithmetic(arithmetic, *left, *right, ty, id);
+                    return;
+                }
                 let opcode = binary_opcode(*op, scalar);
                 self.push(
                     Instruction::result(opcode, ty, id)
@@ -848,11 +894,12 @@ fn binary_opcode(op: BinaryOp, scalar: Scalar) -> u16 {
         (BinaryOp::Multiply, Scalar::F32 | Scalar::F16) => F_MUL,
         (BinaryOp::Multiply, _) => I_MUL,
         (BinaryOp::Divide, Scalar::F32 | Scalar::F16) => F_DIV,
-        (BinaryOp::Divide, Scalar::U32) => U_DIV,
-        (BinaryOp::Divide, _) => S_DIV,
-        (BinaryOp::Modulo, Scalar::F32 | Scalar::F16) => F_MOD,
-        (BinaryOp::Modulo, Scalar::U32) => U_MOD,
-        (BinaryOp::Modulo, _) => S_MOD,
+        (BinaryOp::Divide | BinaryOp::Modulo, _) => {
+            unreachable!(
+                "the integer arithmetic of a device {} realizes its own instructions",
+                op.name()
+            )
+        }
         (BinaryOp::Equal, Scalar::F32 | Scalar::F16) => F_ORD_EQUAL,
         (BinaryOp::Equal, Scalar::Bool) => LOGICAL_EQUAL,
         (BinaryOp::Equal, _) => I_EQUAL,

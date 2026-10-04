@@ -1,3 +1,4 @@
+mod arithmetic;
 pub mod hlsl;
 pub mod instruction;
 pub mod module;
@@ -7,6 +8,7 @@ pub mod spirv;
 pub mod ty;
 mod validate;
 
+pub use arithmetic::IntegerArithmetic;
 pub use instruction::{
     Address, AtomicOp, Barrier, BinaryOp, Block, BuiltIn, Constant, Instruction, MathFun,
     MatrixLayout, UnaryOp,

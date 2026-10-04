@@ -290,6 +290,13 @@ impl<'m> Checker<'m> {
                         "a device bitwise operation applies to the {}",
                         outer.name()
                     ),
+                    BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide => {
+                        assert!(
+                            outer.floating() || outer.integer(),
+                            "a device arithmetic operation applies to numbers, and not to the {}",
+                            outer.name()
+                        )
+                    }
                     _ => {}
                 }
                 let left_ty = self.ty(*left);

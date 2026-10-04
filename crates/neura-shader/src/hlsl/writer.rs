@@ -1,7 +1,7 @@
 use crate::hlsl::source::Source;
 use crate::{
-    Address, AtomicOp, Barrier, BinaryOp, Constant, Function, Instruction, MathFun, Module, Scalar,
-    Space, Target, Type, TypeId, UnaryOp, ValueId,
+    Address, AtomicOp, Barrier, Constant, Function, Instruction, MathFun, Module, Scalar, Space,
+    Target, Type, TypeId, UnaryOp, ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -360,11 +360,7 @@ impl<'m> Writer<'m> {
                 let target = self.target(*result);
                 let left = self.value(*left);
                 let right = self.value(*right);
-                let floating = self.scalar(*result).floating();
-                let text = match op {
-                    BinaryOp::Modulo if floating => format!("fmod({left}, {right})"),
-                    other => format!("({left} {} {right})", other.name()),
-                };
+                let text = format!("({left} {} {right})", op.name());
                 self.out.line(format!("{target} = {text};"));
             }
             Instruction::Select {
