@@ -100,7 +100,13 @@ impl Extents {
     pub(crate) fn span(&self, split: Split, extents: &[u32]) -> (u32, u32) {
         match split {
             Split::Range { first, count } => (first, count),
-            Split::Segment { index, .. } => (index, 1),
+            Split::Segment { index, group, .. } => {
+                assert!(
+                    index < group,
+                    "a segment walks tile {index} where a segment of its shape holds {group}",
+                );
+                (index, 1)
+            }
             Split::Uniform {
                 measure,
                 index,
@@ -155,15 +161,19 @@ impl Extents {
     }
 }
 
+pub(crate) fn boundary(total: u32, piece: u32, group: u32) -> u32 {
+    assert!(
+        group > 0 && piece <= group,
+        "a split of {total} numbers in {group} pieces names no boundary {piece}",
+    );
+    let shared = total / group;
+    let rest = total % group;
+    piece * shared + piece.min(rest)
+}
+
 fn uniform(total: u32, index: u32, group: u32) -> (u32, u32) {
-    let total = u64::from(total);
-    let group = u64::from(group);
-    let first = u64::from(index) * total / group;
-    let end = (u64::from(index) + 1) * total / group;
-    (
-        u32::try_from(first).expect("a split starts within the tensor it walks"),
-        u32::try_from(end - first).expect("a split walks no more than the tensor it names"),
-    )
+    let first = boundary(total, index, group);
+    (first, boundary(total, index + 1, group) - first)
 }
 
 pub(crate) fn chunks(total: u32, per_task: u32, measure: Option<u32>) -> Vec<(u32, u32, Split)> {

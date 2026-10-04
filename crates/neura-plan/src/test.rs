@@ -1,5 +1,6 @@
 use crate::hazard::{Accesses, Hazard};
 use crate::region::Region;
+use crate::span;
 
 fn overlaps(left: Region, right: Region) -> bool {
     match (left, right) {
@@ -118,4 +119,49 @@ fn a_wave_keeps_only_the_segments_that_reach_it() {
     assert_eq!(found.wave, Some(1));
     assert_eq!(found.segments, vec![2, 4]);
     assert_eq!(found.deepest, None);
+}
+
+#[test]
+fn a_split_walks_the_numbers_of_its_tensor_once() {
+    for total in [1u32, 5, 10, 4096, 21_000] {
+        for per_task in [1u32, 7, 256, 2048, 65536] {
+            let mut walked = 0;
+            for (first, count, _) in span::chunks(total, per_task, Some(0)) {
+                assert_eq!(
+                    first, walked,
+                    "a split of {total} numbers in pieces of {per_task} leaves {first} where the walk reached {walked}",
+                );
+                walked += count;
+            }
+            assert_eq!(
+                walked, total,
+                "a split of {total} numbers in pieces of {per_task} walks {walked} of them",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_boundary_stays_inside_the_numbers_of_its_tensor() {
+    for (total, group) in [
+        (1u32 << 22, 1u32 << 11),
+        (1u32 << 24, 1u32 << 13),
+        (i32::MAX as u32, 1u32 << 16),
+        (i32::MAX as u32, i32::MAX as u32),
+    ] {
+        let mut previous = 0;
+        for piece in [0u32, 1, group / 3, group / 2, group - 1, group] {
+            let boundary = span::boundary(total, piece, group);
+            assert!(
+                boundary <= total,
+                "boundary {piece} of {group} walks {boundary} past the {total} numbers it holds",
+            );
+            assert!(
+                boundary >= previous,
+                "boundary {piece} of {group} walks back to {boundary} from {previous}",
+            );
+            previous = boundary;
+        }
+        assert_eq!(span::boundary(total, group, group), total);
+    }
 }

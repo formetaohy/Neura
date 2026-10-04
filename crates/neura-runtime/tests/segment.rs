@@ -150,6 +150,28 @@ fn a_grouped_product_walks_a_segment_longer_than_its_tile() {
 }
 
 #[test]
+fn a_grouped_product_walks_a_segment_the_tiles_a_short_bound_leaves() {
+    let grouped = Grouped::of(1, 12, 8, 4);
+    let tile = MatmulTile::new(MatmulStrategy::Streamed, 4, 4, 8, 1, 4);
+    let profile = Profile::of(&[tile]);
+    let program = grouped.chosen(profile, &[(Product::of(1, 12, 4, 8), tile)]);
+    let produced = grouped.step(&program, &[5.0]);
+    assert_eq!(
+        produced.len(),
+        5 * 4,
+        "a segment walks one tile at a time, and a bound of two tiles leaves the second at the rows a binding holds",
+    );
+}
+
+#[test]
+fn a_grouped_product_walks_a_segment_the_default_tiles_leave_short() {
+    let grouped = Grouped::of(1, 100, 8, 4);
+    let program = grouped.compile();
+    let produced = grouped.step(&program, &[50.0]);
+    assert_eq!(produced.len(), 50 * 4);
+}
+
+#[test]
 fn a_grouped_product_of_no_rows_holds_no_element() {
     let grouped = Grouped::of(3, 8, 4, 2);
     let program = grouped.compile();

@@ -118,12 +118,21 @@ mod device {
         return measure_total(task.measure);
     }
 
+    fn walked_boundary(total: u32, piece: u32, group: u32) -> u32 {
+        let shared = total / group;
+        let rest = total % group;
+        return piece * shared + min(piece, rest);
+    }
+
     fn span_first(task: Task) -> u32 {
         if task.split == split::RANGE {
             return task.first;
         }
+        if task.split == split::SEGMENT {
+            return task.index;
+        }
         let total = walked_total(task);
-        let within = task.index * total / task.group;
+        let within = walked_boundary(total, task.index, task.group);
         if task.split == split::PLANE {
             return task.plane * total + within;
         }
@@ -134,11 +143,12 @@ mod device {
         if task.split == split::RANGE {
             return task.count;
         }
-        let total = walked_total(task);
-        if total == 0u32 {
-            return 0u32;
+        if task.split == split::SEGMENT {
+            return 1u32;
         }
-        return (task.index + 1u32) * total / task.group - task.index * total / task.group;
+        let total = walked_total(task);
+        return walked_boundary(total, task.index + 1u32, task.group)
+            - walked_boundary(total, task.index, task.group);
     }
 
     fn segment_keys(task: Task, bound: u32) -> u32 {
@@ -174,6 +184,7 @@ mod device {
     }
 
     fn patch_segment(task: Task, id: u32, segments: u32, live: u32) {
+        tasks[id].first = task.index;
         tasks[id].count = 0u32;
         if task.plane >= segments {
             return;
@@ -223,14 +234,17 @@ mod device {
         for step in stride(lid, record.tasks_count, WORKGROUP_SIZE) {
             let id = patch_list[record.tasks + step];
             let task = tasks[id];
-            let first = span_first(task);
-            let count = span_count(task);
-            tasks[id].first = first;
-            tasks[id].count = count;
             if task.split == split::SEGMENT {
-                patch_segment(task, id, segments, live);
-            } else if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
-                tasks[id].keys = segment_keys(task, live + 1u32);
+                if record.segment != NO_VALUE && task.segment == record.segment {
+                    patch_segment(task, id, segments, live);
+                }
+            } else {
+                let count = span_count(task);
+                tasks[id].first = span_first(task);
+                tasks[id].count = count;
+                if record.segment != NO_VALUE && task.segment == record.segment && count > 0u32 {
+                    tasks[id].keys = segment_keys(task, live + 1u32);
+                }
             }
         }
     }
