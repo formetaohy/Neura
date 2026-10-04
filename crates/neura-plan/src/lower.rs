@@ -368,13 +368,19 @@ fn schedule_unit(
         }
         Kind::AttentionKeyGrad | Kind::AttentionValueGrad => {
             let keys = plan.shape(unit.inputs[1]).dims();
-            let tokens = keys[2];
-            let planes = keys[0] * keys[1];
             let geometry = attention_geometry(plan, profile, keys[3]);
             let tile = plan.attention[geometry as usize];
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
-            for (plane, first, count, split) in attention_spans(tokens, planes, profile, measure) {
-                let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
+            let segmented = unit.segments != NO_VALUE;
+            let spans = if segmented {
+                ragged_spans(plan.shape(unit.segments).elements() - 1)
+            } else {
+                attention_spans(keys[2], keys[0] * keys[1], profile, measure)
+            };
+            for (plane, first, count, split) in spans {
+                let walked = if segmented { keys[2] } else { count };
+                let mut task =
+                    Task::span(unit, first, count, attention_work(walked, keys[2], tile));
                 task.geometry = geometry;
                 task.split = split;
                 task.plane = plane;
@@ -562,6 +568,12 @@ fn schedule_unit(
             panic!("the extent a walk authors closes the offsets of the two-level prefix it walks")
         }
     }
+}
+
+fn ragged_spans(planes: u32) -> Vec<(u32, u32, u32, Split)> {
+    (0..planes)
+        .map(|plane| (plane, 0, 0, Split::Ragged { planes, plane }))
+        .collect()
 }
 
 fn attention_spans(

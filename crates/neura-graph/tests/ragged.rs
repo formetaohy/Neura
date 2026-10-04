@@ -110,3 +110,24 @@ fn a_segmented_attention_walks_the_planes_its_ragged_axis_closes() {
         "a ragged axis closes one offset per plane and one that ends the last",
     );
 }
+
+#[test]
+fn a_segmented_attention_asks_every_plane_its_own_queries() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let ragged = graph.ragged(BOUND, lengths);
+    let cache = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    assert!(
+        refuses(|| {
+            graph.attention(query, cache, cache, causal(ragged.offsets));
+        }),
+        "a query that packs the rows of every plane into the axis its keys pack walked the keys of the first plane for every row",
+    );
+}

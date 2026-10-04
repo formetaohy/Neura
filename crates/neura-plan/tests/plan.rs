@@ -2644,3 +2644,91 @@ fn a_grouped_product_walks_the_tiles_every_segment_holds() {
         "each segment holds the tiles of the bound its packed rows walk",
     );
 }
+
+#[test]
+fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    let packed = Shape::of([1, 1, 16, 4]).freed(&[(2, ragged.extent)]);
+    let query = graph.gradient_input(Shape::of([1, 4, 1, 4]), Element::Single);
+    let key = graph.gradient_input(packed, Element::Single);
+    let value = graph.gradient_input(packed, Element::Single);
+    let cursor = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
+    let out = graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: Some(cursor),
+            segments: Some(ragged.offsets),
+            reach: None,
+        },
+    );
+    let loss = graph.sum(out);
+    let collected = graph.backward(loss);
+    graph.retain(collected.of(query));
+    graph.retain(collected.of(key));
+    graph.retain(collected.of(value));
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patch = plan.patches()[0];
+    assert_eq!(patch.segment, ragged.offsets.id());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    let patched = plan.patch_list()
+        [patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize]
+        .to_vec();
+    for kind in [
+        Kind::Attention,
+        Kind::AttentionQueryGrad,
+        Kind::AttentionKeyGrad,
+        Kind::AttentionValueGrad,
+    ] {
+        let walked = records
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| Kind::of(task.kind) == kind)
+            .collect::<Vec<(usize, &TaskRecord)>>();
+        assert!(!walked.is_empty(), "the graph walks a {kind:?} task");
+        for (index, task) in walked {
+            assert_eq!(
+                task.segment,
+                ragged.offsets.id(),
+                "every {kind:?} task takes its key span from the offsets its ragged axis closes",
+            );
+            assert!(
+                patched.contains(&(index as u32)),
+                "the patch that closes the offsets hands task {index} of {kind:?} its span",
+            );
+            assert!(
+                follows(&plan, author, index),
+                "task {index} of {kind:?} walks the offsets the closing task authors",
+            );
+        }
+    }
+    let mut planes = Vec::new();
+    for (index, task) in records.iter().enumerate() {
+        let kind = Kind::of(task.kind);
+        if kind == Kind::AttentionKeyGrad || kind == Kind::AttentionValueGrad {
+            assert_eq!(
+                task.split,
+                neura_abi::split::RAGGED,
+                "a gradient walks the keys of one segment, and task {index} separates its rows by the count the ragged axis closes",
+            );
+            assert_eq!(
+                (task.first, task.count),
+                (0, 0),
+                "task {index} takes the rows its segment holds at run time",
+            );
+            planes.push(task.plane);
+        }
+    }
+    planes.sort_unstable();
+    planes.dedup();
+    assert_eq!(planes, [0, 1, 2, 3]);
+}

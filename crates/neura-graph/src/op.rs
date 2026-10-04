@@ -215,15 +215,18 @@ impl<'g> Graph<'g> {
                 query_shape.dims(),
             );
             assert!(
+                axis.planes.elements() == 1 || query_shape.free(2) != Some(axis.token),
+                "a segmented attention weighs the {:?} queries of a plane against the keys its own offsets close, and the ragged axis of {} planes packs the free extent {} that the token axis of {query_shape:?} walks: the rows a packed query axis holds belong to different planes",
+                query_shape.dims()[2],
+                axis.planes.elements(),
+                axis.token,
+            );
+            assert!(
                 key_shape.dims()[0] == 1
                     && key_shape.dims()[1] == 1
                     && value_shape.dims()[0] == 1
                     && value_shape.dims()[1] == 1,
                 "a segmented attention packs the keys and values of every plane into their token axis, and keys of {key_shape:?} walk values of {value_shape:?}",
-            );
-            assert!(
-                !tracked,
-                "a segmented attention carries no gradient: its offsets place the key planes a device fills, and only a host knows the lengths a backward pass walks",
             );
         }
         assert_eq!(

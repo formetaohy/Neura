@@ -315,40 +315,6 @@ fn an_extent_beyond_the_bound_a_graph_declares_is_refused() {
 }
 
 #[test]
-fn a_segmented_attention_reaches_no_gradient() {
-    assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
-        let lengths = graph.parameter(
-            Shape::vector(PLANES),
-            neura_graph::Init::Zero,
-            Element::Single,
-        );
-        let ragged = graph.ragged(BOUND, lengths);
-        let cache = graph.resident(
-            Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
-            Element::Single,
-        );
-        let query = graph.parameter(
-            Shape::of([1, PLANES, 1, WIDTH]),
-            neura_graph::Init::Zero,
-            Element::Single,
-        );
-        graph.attention(
-            query,
-            cache,
-            cache,
-            AttentionOptions {
-                scale: SCALE,
-                causal: false,
-                origin: None,
-                segments: Some(ragged.offsets),
-                reach: None,
-            },
-        );
-    }));
-}
-
-#[test]
 fn a_segmented_attention_names_an_offset_per_plane() {
     assert!(refuses(|| {
         let graph: Graph<'static> = Graph::new();
@@ -799,5 +765,342 @@ fn a_windowed_segmented_attention_weighs_the_keys_a_plane_reaches() {
         let program = ragged.compile();
         ragged.step(&program, &[3.0, 0.0, 5.0, 2.0], WIDTH);
         ragged.step(&program, &[6.0, 1.0, 2.0, 0.0], WIDTH);
+    }
+}
+
+struct Packed<'a> {
+    lengths: &'a [f32],
+    keys: &'a [f32],
+    values: &'a [f32],
+    queries: &'a [f32],
+    cursors: &'a [f32],
+    gradient: &'a [f32],
+    rows: u32,
+    reach: u32,
+}
+
+fn trainable_reference(packed: Packed<'_>, width: u32) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let Packed {
+        lengths,
+        keys,
+        values,
+        queries,
+        cursors,
+        gradient,
+        rows,
+        reach,
+    } = packed;
+    let offsets = offsets(lengths);
+    let planes = lengths.len();
+    let width = width as usize;
+    let rows = rows as usize;
+    let live = *offsets
+        .last()
+        .expect("a ragged axis closes at least one plane") as usize;
+    let mut out = vec![0.0f32; planes * rows * width];
+    let mut query_grad = vec![0.0f32; planes * rows * width];
+    let mut key_grad = vec![0.0f32; live * width];
+    let mut value_grad = vec![0.0f32; live * width];
+    for plane in 0..planes {
+        let count = lengths[plane] as usize;
+        let start = offsets[plane] as usize;
+        let written = cursors[plane] as usize + rows;
+        for row in 0..rows {
+            let at = (plane * rows + row) * width;
+            let query = &queries[at..][..width];
+            let dout = &gradient[at..][..width];
+            let position = cursors[plane] as usize + row;
+            let mut logits = Vec::with_capacity(count);
+            let mut attended = Vec::with_capacity(count);
+            for key in 0..count {
+                let slot = if reach > 0 && written > count {
+                    key + count * ((written - 1 - key) / count)
+                } else {
+                    key
+                };
+                if slot > position {
+                    continue;
+                }
+                if reach > 0 && position - slot >= reach as usize {
+                    continue;
+                }
+                let packed = (start + key) * width;
+                logits.push(
+                    query
+                        .iter()
+                        .zip(&keys[packed..][..width])
+                        .map(|(left, right)| left * right)
+                        .sum::<f32>()
+                        * SCALE,
+                );
+                attended.push(packed);
+            }
+            if attended.is_empty() {
+                continue;
+            }
+            let peak = logits.iter().copied().fold(f32::MIN, f32::max);
+            let weights = logits
+                .iter()
+                .map(|logit| (logit - peak).exp())
+                .collect::<Vec<f32>>();
+            let total = weights.iter().sum::<f32>();
+            let probabilities = weights
+                .iter()
+                .map(|weight| weight / total)
+                .collect::<Vec<f32>>();
+            for depth in 0..width {
+                out[at + depth] = attended
+                    .iter()
+                    .zip(&probabilities)
+                    .map(|(packed, probability)| probability * values[packed + depth])
+                    .sum::<f32>();
+            }
+            let row_dot = (0..width)
+                .map(|depth| dout[depth] * out[at + depth])
+                .sum::<f32>();
+            for (packed, probability) in attended.iter().zip(&probabilities) {
+                let weighted = (0..width)
+                    .map(|depth| dout[depth] * values[packed + depth])
+                    .sum::<f32>();
+                let scored = probability * (weighted - row_dot) * SCALE;
+                for depth in 0..width {
+                    value_grad[packed + depth] += probability * dout[depth];
+                    key_grad[packed + depth] += scored * query[depth];
+                    query_grad[at + depth] += scored * keys[packed + depth];
+                }
+            }
+        }
+    }
+    (out, query_grad, key_grad, value_grad)
+}
+
+struct Trainable {
+    runtime: Runtime,
+    graph: Graph<'static>,
+    lengths: Value<'static>,
+    cursor: Value<'static>,
+    queries: Value<'static>,
+    keys: Value<'static>,
+    values: Value<'static>,
+    weight: Value<'static>,
+    offsets: Value<'static>,
+    out: Value<'static>,
+    gradients: [Value<'static>; 3],
+}
+
+impl Trainable {
+    fn windowed(planes: u32, bound: u32, width: u32, reach: u32) -> Self {
+        Self::shaped(planes, 1, 1, bound, width, reach)
+    }
+
+    fn shaped(planes: u32, heads: u32, rows: u32, bound: u32, width: u32, reach: u32) -> Self {
+        Self::build(planes, heads, rows, bound, width, reach, false)
+    }
+
+    fn bound(planes: u32, bound: u32, width: u32, reach: u32, binding: bool) -> Self {
+        Self::build(planes, 1, 1, bound, width, reach, binding)
+    }
+
+    fn build(
+        planes: u32,
+        heads: u32,
+        rows: u32,
+        bound: u32,
+        width: u32,
+        reach: u32,
+        binding: bool,
+    ) -> Self {
+        assert_eq!(planes % heads, 0, "a head carries a whole number of planes");
+        let batch = planes / heads;
+        let graph: Graph<'static> = Graph::new();
+        let live = binding.then(|| graph.free(planes));
+        let lengths = graph.input(
+            match live {
+                Some(live) => Shape::of([1, planes]).freed(&[(3, live)]),
+                None => Shape::vector(planes),
+            },
+            Element::Single,
+        );
+        let ragged = graph.ragged(bound, lengths);
+        let packed = Shape::of([1, 1, bound, width]).freed(&[(2, ragged.extent)]);
+        let planed = |dims: [u32; 4]| match live {
+            Some(live) => Shape::of(dims).freed(&[(1, live)]),
+            None => Shape::of(dims),
+        };
+        let queries = graph.gradient_input(planed([heads, batch, rows, width]), Element::Single);
+        let keys = graph.gradient_input(packed, Element::Single);
+        let values = graph.gradient_input(packed, Element::Single);
+        let cursor = graph.input(Shape::of([heads, batch, 1, 1]), Element::Single);
+        let out = graph.attention(
+            queries,
+            keys,
+            values,
+            AttentionOptions {
+                scale: SCALE,
+                causal: true,
+                origin: Some(cursor),
+                segments: Some(ragged.offsets),
+                reach: (reach > 0).then_some(reach),
+            },
+        );
+        let weight = graph.input(planed([heads, batch, rows, width]), Element::Single);
+        let loss = graph.sum(graph.mul(out, weight));
+        let collected = graph.backward(loss);
+        let gradients = [
+            collected.of(queries),
+            collected.of(keys),
+            collected.of(values),
+        ];
+        for gradient in gradients {
+            graph.retain(gradient);
+        }
+        graph.retain(ragged.offsets);
+        Self {
+            runtime: open(),
+            graph,
+            lengths,
+            cursor,
+            queries,
+            keys,
+            values,
+            weight,
+            offsets: ragged.offsets,
+            out,
+            gradients,
+        }
+    }
+
+    fn compile(&self) -> Program<'_> {
+        let weights = self.runtime.weights(&self.graph);
+        self.runtime.compile(&self.graph, &weights)
+    }
+
+    fn bind(&self, program: &Program<'_>, planes: u32) {
+        self.runtime.bind(program, &[planes]);
+    }
+
+    fn step(&self, program: &Program<'_>, lengths: &[f32], reach: u32) -> Vec<Vec<f32>> {
+        let width = self.graph.shape(self.keys).dims()[3];
+        let bound = self.graph.shape(self.keys).dims()[2];
+        let cursor_dims = self.graph.shape(self.cursor).dims();
+        let bound_planes = cursor_dims[0] * cursor_dims[1];
+        let rows = self.graph.shape(self.queries).dims()[2];
+        let planes = lengths.len() as u32;
+        let keys = data(bound * width, 43);
+        let values = data(bound * width, 71);
+        let queries = data(planes * rows * width, 17);
+        let weight = data(planes * rows * width, 89);
+        let cursors = lengths
+            .iter()
+            .map(|length| (length - rows as f32).max(0.0))
+            .chain(std::iter::repeat_n(
+                0.0,
+                bound_planes as usize - lengths.len(),
+            ))
+            .collect::<Vec<f32>>();
+        self.runtime.write(program, self.lengths, lengths);
+        self.runtime.write(program, self.keys, &keys);
+        self.runtime.write(program, self.values, &values);
+        self.runtime.write(program, self.queries, &queries);
+        self.runtime.write(program, self.weight, &weight);
+        self.runtime.write(program, self.cursor, &cursors);
+        self.runtime.run(program);
+        let produced = self.runtime.read_many(
+            program,
+            &[
+                self.out,
+                self.gradients[0],
+                self.gradients[1],
+                self.gradients[2],
+            ],
+        );
+        let scanned = self.runtime.read(program, self.offsets);
+        assert_eq!(
+            scanned[..lengths.len() + 1],
+            offsets(lengths)
+                .into_iter()
+                .map(|offset| offset as f32)
+                .collect::<Vec<f32>>(),
+        );
+        let (out, query_grad, key_grad, value_grad) = trainable_reference(
+            Packed {
+                lengths,
+                keys: &keys,
+                values: &values,
+                queries: &queries,
+                cursors: &cursors,
+                gradient: &weight,
+                rows,
+                reach,
+            },
+            width,
+        );
+        assert_close(&produced[0], &out, 1e-5);
+        assert_close(&produced[1], &query_grad, 1e-5);
+        assert_close(&produced[2], &key_grad, 1e-5);
+        assert_close(&produced[3], &value_grad, 1e-5);
+        produced
+    }
+}
+
+#[test]
+fn a_packed_attention_trains_the_queries_the_keys_and_the_values() {
+    for lengths in [
+        [3.0f32, 0.0, 5.0, 2.0].as_slice(),
+        [4.0, 4.0, 4.0, 4.0].as_slice(),
+        [1.0, 0.0, 0.0, 0.0].as_slice(),
+        [0.0, 0.0, 0.0, 7.0].as_slice(),
+        [6.0, 5.0, 3.0, 2.0].as_slice(),
+        [2.0, 0.0, 14.0, 0.0].as_slice(),
+    ] {
+        let trainable = Trainable::windowed(PLANES, BOUND, WIDTH, 0);
+        trainable.step(&trainable.compile(), lengths, 0);
+    }
+}
+
+#[test]
+fn a_packed_attention_trains_every_head_and_every_query_of_a_plane() {
+    for (rows, lengths) in [
+        (3, [3.0f32, 0.0, 5.0, 2.0].as_slice()),
+        (2, [4.0, 4.0, 4.0, 4.0].as_slice()),
+        (5, [6.0, 5.0, 3.0, 2.0].as_slice()),
+        (1, [3.0, 0.0, 5.0, 2.0].as_slice()),
+    ] {
+        let trainable = Trainable::shaped(PLANES, 2, rows, BOUND, WIDTH, 0);
+        trainable.step(&trainable.compile(), lengths, 0);
+    }
+}
+
+#[test]
+fn a_windowed_packed_attention_trains_the_keys_a_plane_reaches() {
+    for reach in [1, 2, 3] {
+        let trainable = Trainable::windowed(PLANES, BOUND, WIDTH, reach);
+        let program = trainable.compile();
+        trainable.step(&program, &[3.0, 0.0, 5.0, 2.0], reach);
+        trainable.step(&program, &[6.0, 1.0, 2.0, 0.0], reach);
+    }
+    let trainable = Trainable::shaped(PLANES, 2, 2, BOUND, WIDTH, 2);
+    let program = trainable.compile();
+    trainable.step(&program, &[3.0, 0.0, 5.0, 2.0], 2);
+    trainable.step(&program, &[6.0, 5.0, 3.0, 2.0], 2);
+}
+
+#[test]
+fn a_bound_a_host_narrows_trains_only_the_planes_it_holds() {
+    let trainable = Trainable::bound(PLANES, BOUND, WIDTH, 0, true);
+    let program = trainable.compile();
+    let lengths = [3.0f32, 2.0, 5.0, 4.0];
+    trainable.bind(&program, PLANES);
+    let wide = trainable.step(&program, &lengths, 0);
+    for planes in [PLANES - 1, 1] {
+        trainable.bind(&program, planes);
+        let narrow = trainable.step(&program, &lengths[..planes as usize], 0);
+        for (narrow, wide) in narrow.iter().zip(&wide) {
+            assert_eq!(
+                narrow,
+                &wide[..narrow.len()],
+                "the planes a binding holds walk the gradients their own lengths name",
+            );
+        }
     }
 }
