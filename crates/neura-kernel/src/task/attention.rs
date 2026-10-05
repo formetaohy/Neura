@@ -620,35 +620,38 @@ mod device {
                 if inside {
                     for step in unroll(0u32, ATTN_KEYS, 1u32) {
                         let at = block * ATTN_KEYS + step;
-                        let mut score = 0.0;
-                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            score = score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
-                        }
-                        let weight = select(
-                            0.0,
-                            exp(score * task.param
-                                - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                            attended(at, tokens, keys, column, origin, task.reach, causal),
-                        );
-                        let mut weighted = 0.0;
-                        let mut row_dot = 0.0;
-                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            weighted = weighted
-                                + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
-                                    * values_row[depth];
-                            row_dot = row_dot
-                                + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
-                                    * fetch(
-                                        output_grad,
-                                        output_grad_plane
-                                            + at * output_grad.strides.z
-                                            + depth * output_grad.strides.w,
-                                    );
-                        }
-                        let scored = weight * (weighted - row_dot) * task.param;
-                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            accumulated[depth] =
-                                accumulated[depth] + scored * scratch[step * ATTN_WIDTH + depth];
+                        if at < tokens {
+                            let mut score = 0.0;
+                            for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                                score =
+                                    score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
+                            }
+                            let weight = select(
+                                0.0,
+                                exp(score * task.param
+                                    - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                                attended(at, tokens, keys, column, origin, task.reach, causal),
+                            );
+                            let mut weighted = 0.0;
+                            let mut row_dot = 0.0;
+                            for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                                weighted = weighted
+                                    + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
+                                        * values_row[depth];
+                                row_dot = row_dot
+                                    + scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth]
+                                        * fetch(
+                                            output_grad,
+                                            output_grad_plane
+                                                + at * output_grad.strides.z
+                                                + depth * output_grad.strides.w,
+                                        );
+                            }
+                            let scored = weight * (weighted - row_dot) * task.param;
+                            for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                                accumulated[depth] = accumulated[depth]
+                                    + scored * scratch[step * ATTN_WIDTH + depth];
+                            }
                         }
                     }
                 }
@@ -791,20 +794,24 @@ mod device {
                 if inside {
                     for step in unroll(0u32, ATTN_KEYS, 1u32) {
                         let at = block * ATTN_KEYS + step;
-                        let mut score = 0.0;
-                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            score = score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
-                        }
-                        let weight = select(
-                            0.0,
-                            exp(score * task.param
-                                - fetch(statistic, statistic_plane + at * statistic.strides.z)),
-                            attended(at, tokens, keys, column, origin, task.reach, causal),
-                        );
-                        for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
-                            accumulated[depth] = accumulated[depth]
-                                + weight
-                                    * scratch[SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth];
+                        if at < tokens {
+                            let mut score = 0.0;
+                            for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                                score =
+                                    score + scratch[step * ATTN_WIDTH + depth] * keys_row[depth];
+                            }
+                            let weight = select(
+                                0.0,
+                                exp(score * task.param
+                                    - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                                attended(at, tokens, keys, column, origin, task.reach, causal),
+                            );
+                            for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
+                                accumulated[depth] = accumulated[depth]
+                                    + weight
+                                        * scratch
+                                            [SCRATCH_ATTENTION_RIGHT + step * ATTN_WIDTH + depth];
+                            }
                         }
                     }
                 }

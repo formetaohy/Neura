@@ -14,6 +14,8 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
+const BESIDE_ROWS: u32 = 256;
+
 fn data(count: u32, seed: u32) -> Vec<f32> {
     let mut entropy = seed | 1;
     (0..count)
@@ -28,6 +30,19 @@ fn data(count: u32, seed: u32) -> Vec<f32> {
 
 fn graph_of(
     shapes: Shapes,
+) -> (
+    Graph<'static>,
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+) {
+    graph_of_beside(shapes, None)
+}
+
+fn graph_of_beside(
+    shapes: Shapes,
+    beside_the_output: Option<f32>,
 ) -> (
     Graph<'static>,
     Value<'static>,
@@ -60,6 +75,9 @@ fn graph_of(
         },
     );
     graph.retain(out);
+    if let Some(value) = beside_the_output {
+        graph.retain(graph.fill(Shape::of([1, 1, BESIDE_ROWS, shapes.width]), value));
+    }
     (graph, queries, keys, values, out)
 }
 
@@ -91,8 +109,12 @@ fn run_forward(shapes: Shapes, tolerance: f32) -> (Vec<f32>, Vec<f32>) {
 }
 
 fn run_backward(shapes: Shapes, tolerance: f32) {
+    run_backward_beside(shapes, tolerance, None);
+}
+
+fn run_backward_beside(shapes: Shapes, tolerance: f32, beside_the_output: Option<f32>) {
     let runtime = open();
-    let (graph, queries, keys, values, out) = graph_of(shapes);
+    let (graph, queries, keys, values, out) = graph_of_beside(shapes, beside_the_output);
     let loss = graph.sum(out);
     let gradients = graph.backward(loss);
     let query_grad = gradients.of(queries);
@@ -205,6 +227,30 @@ fn an_attention_wider_than_one_task_walks_every_row_of_its_block() {
 fn an_attention_block_walks_its_gradient_back_into_queries_keys_and_values() {
     run_backward(shapes(false), 1e-5);
     run_backward(shapes(true), 1e-5);
+}
+
+#[test]
+fn an_attention_gradient_reads_no_row_of_the_storage_beside_its_output() {
+    for causal in [true, false] {
+        let shapes = shapes(causal);
+        run_backward_beside(shapes, 1e-5, Some(f32::NAN));
+        run_backward_beside(
+            Shapes {
+                heads: 1,
+                key_heads: 1,
+                batch: 1,
+                queries: 260,
+                keys: 260,
+                width: 4,
+                causal,
+                origin: 0,
+                reach: 0,
+                scale: 0.5,
+            },
+            1e-4,
+            Some(f32::NAN),
+        );
+    }
 }
 
 #[test]
