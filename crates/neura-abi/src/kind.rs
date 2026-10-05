@@ -530,4 +530,12 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Length LENGTH = "length" {
+        entry: "run_length",
+        modules: [Reduce],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

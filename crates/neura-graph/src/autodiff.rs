@@ -778,7 +778,8 @@ impl<'g> Graph<'g> {
             | Kind::Scatter
             | Kind::ScatterWrite
             | Kind::MatmulWeightGrad
-            | Kind::Rows => {}
+            | Kind::Rows
+            | Kind::Length => {}
             Kind::Argmax | Kind::Categorical | Kind::OneHot => {
                 panic!(
                     "the {} task yields the index of a row, and an index carries no gradient",

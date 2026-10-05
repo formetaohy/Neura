@@ -1,4 +1,4 @@
-use neura_abi::Element;
+use neura_abi::{Element, MAX_RANK};
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 
 pub struct Adapter<'g> {
@@ -238,7 +238,6 @@ pub struct LayerNorm<'g> {
     columns: u32,
     scale: Value<'g>,
     shift: Value<'g>,
-    share: Value<'g>,
     floor: Value<'g>,
 }
 
@@ -270,7 +269,6 @@ impl<'g> LayerNorm<'g> {
                 Init::Zero,
                 element,
             ),
-            share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
             floor: graph.fill(Shape::scalar(), floor),
         }
     }
@@ -283,9 +281,9 @@ impl<'g> LayerNorm<'g> {
             self.columns,
             graph.shape(input).dims(),
         );
-        let mean = graph.mul(graph.sum_rows(input), self.share);
+        let mean = graph.mean_axis(input, MAX_RANK - 1);
         let centered = graph.sub(input, mean);
-        let spread = graph.mul(graph.sum_rows(graph.mul(centered, centered)), self.share);
+        let spread = graph.mean_axis(graph.mul(centered, centered), MAX_RANK - 1);
         let deviation = graph.sqrt(graph.add(spread, self.floor));
         let sharpened = graph.mul(centered, graph.recip(deviation));
         graph.add(graph.mul(sharpened, self.scale), self.shift)
@@ -596,7 +594,6 @@ impl<'g> Mlp<'g> {
 pub struct RmsNorm<'g> {
     columns: u32,
     scale: Value<'g>,
-    share: Value<'g>,
     floor: Value<'g>,
 }
 
@@ -622,7 +619,6 @@ impl<'g> RmsNorm<'g> {
                 init,
                 element,
             ),
-            share: graph.fill(Shape::scalar(), 1.0 / columns as f32),
             floor: graph.fill(Shape::scalar(), floor),
         }
     }
@@ -636,7 +632,7 @@ impl<'g> RmsNorm<'g> {
             graph.shape(input).dims(),
         );
         let squares = graph.mul(input, input);
-        let mean = graph.mul(graph.sum_rows(squares), self.share);
+        let mean = graph.mean_axis(squares, MAX_RANK - 1);
         let deviation = graph.sqrt(graph.add(mean, self.floor));
         graph.mul(graph.mul(input, graph.recip(deviation)), self.scale)
     }

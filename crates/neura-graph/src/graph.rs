@@ -1159,6 +1159,35 @@ impl<'g> Graph<'g> {
         }
     }
 
+    pub fn length(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        assert!(
+            axis < MAX_RANK,
+            "a length names one of the {MAX_RANK} axes of {:?}",
+            shape.dims(),
+        );
+        let dim = shape.dims()[axis as usize];
+        assert!(
+            dim <= EXACT_WALK_LIMIT,
+            "axis {axis} of {:?} walks {dim} numbers, and a device counts the {EXACT_WALK_LIMIT} numbers a single precision word holds exactly",
+            shape.dims(),
+        );
+        if shape.free(axis).is_none() {
+            return self.fill(Shape::scalar(), dim as f32);
+        }
+        let out = self.fresh(Shape::scalar(), Element::Single, Residency::Derived, false);
+        let mut task = TaskInfo::of(
+            Kind::Length,
+            op::NONE,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        task.slot = axis;
+        self.push(task);
+        out
+    }
+
     pub fn mean_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {
         let value = self.own(value);
         let shape = self.shape(value);
@@ -1167,13 +1196,11 @@ impl<'g> Graph<'g> {
             "a mean names one of the {MAX_RANK} axes of {:?}",
             shape.dims(),
         );
-        assert!(
-            shape.free(axis).is_none(),
-            "a mean over axis {axis} of {:?} weighs every length the free extent takes, and the weight a plan carries is one number",
-            shape.dims(),
-        );
         let summed = self.sum_axis(value, axis);
         let count = shape.dims()[axis as usize];
+        if shape.free(axis).is_some() {
+            return self.mul(summed, self.recip(self.length(value, axis)));
+        }
         if count == 1 {
             return summed;
         }

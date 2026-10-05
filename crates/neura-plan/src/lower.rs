@@ -539,6 +539,7 @@ fn schedule_unit(
         | Kind::Layout
         | Kind::Extend
         | Kind::OneHot
+        | Kind::Length
         | Kind::Gather => {
             let out = plan.shape(unit.out);
             let measure = measured(plan, unit.out, Measure::Elements);

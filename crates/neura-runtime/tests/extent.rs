@@ -407,6 +407,67 @@ fn a_zero_extent_runs_the_tasks_that_remain() {
 }
 
 #[test]
+fn a_mean_family_weighs_the_length_every_binding_holds() {
+    let runtime = open();
+    let graph = Graph::new();
+    let rows = graph.free(8);
+    let dynamic = Shape::of([1, 1, 8, 4]).freed(&[(2, rows)]);
+    let (values, weight, mean, gradient) = mean_family(&graph, dynamic);
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+    for live in [8u32, 5, 1] {
+        let graph = Graph::new();
+        let (fixed, shared, fixed_mean, fixed_gradient) =
+            mean_family(&graph, Shape::of([1, 1, live, 4]));
+        let values_data = data(live * 4, 31);
+        let weight_data = data(4, 37);
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        runtime.write(&program, fixed, &values_data);
+        runtime.write(&program, shared, &weight_data);
+        runtime.run(&program);
+        let expected_mean = runtime.read(&program, fixed_mean);
+        let expected_gradient = runtime.read(&program, fixed_gradient);
+
+        runtime.bind(&family, &[live]);
+        runtime.write(&family, values, &values_data);
+        runtime.write(&family, weight, &weight_data);
+        runtime.run(&family);
+        assert_close(&runtime.read(&family, mean), &expected_mean, 1e-5);
+        assert_close(&runtime.read(&family, gradient), &expected_gradient, 1e-5);
+    }
+    runtime.bind(&family, &[0]);
+    runtime.write(&family, values, &[]);
+    runtime.run(&family);
+    assert!(
+        runtime
+            .read(&family, mean)
+            .iter()
+            .all(|value| value.is_nan()),
+        "a mean of no numbers divides an empty sum by an empty length",
+    );
+}
+
+fn mean_family(
+    graph: &Graph<'static>,
+    shape: Shape,
+) -> (
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+) {
+    let values = graph.gradient_input(shape, Element::Single);
+    let weight = graph.input(Shape::of([1, 1, 1, 4]), Element::Single);
+    let mean = graph.mean_axis(values, 2);
+    let loss = graph.sum(graph.mul(mean, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(mean);
+    graph.retain(loss);
+    (values, weight, mean, gradients.of(values))
+}
+
+#[test]
 fn a_family_learns_through_every_binding() {
     let runtime = open();
     let graph = Graph::new();
@@ -534,9 +595,6 @@ fn a_free_extent_stops_where_a_second_length_starts() {
     }));
     assert!(refuses(|| {
         graph.slice(input, 1, 0, 2);
-    }));
-    assert!(refuses(|| {
-        graph.mean_axis(input, 1);
     }));
     assert!(refuses(|| {
         graph.reshape(input, Shape::of([1, 4, 64]));

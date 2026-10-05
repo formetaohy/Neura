@@ -1150,7 +1150,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Convert
             | Kind::Rows
             | Kind::MatmulWeightGrad
-            | Kind::Select => {}
+            | Kind::Select
+            | Kind::Length => {}
         }
     }
 }

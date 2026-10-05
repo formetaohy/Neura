@@ -1,6 +1,7 @@
 use neura_abi::Element;
+use neura_graph::Value;
 use neura_graph::{Graph, Init, Shape};
-use neura_nn::{GroupNorm, RmsNorm, mse_loss};
+use neura_nn::{GroupNorm, LayerNorm, RmsNorm, mse_loss};
 use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
@@ -234,4 +235,103 @@ fn a_group_normalization_keeps_its_scale_beside_its_shift() {
     assert_eq!(layer.parameters().len(), 2);
     assert_eq!(graph.shape(layer.scale()).dims(), [1, 4, 1, 1]);
     assert_eq!(graph.shape(layer.shift()).dims(), [1, 4, 1, 1]);
+}
+
+struct NormFamily {
+    input: Value<'static>,
+    weight: Value<'static>,
+    out: Value<'static>,
+    gradient: Value<'static>,
+    scale: Value<'static>,
+    shift: Option<Value<'static>>,
+}
+
+fn norm_family(graph: &Graph<'static>, rms: bool, shape: Shape) -> NormFamily {
+    let input = graph.gradient_input(shape, Element::Single);
+    let weight = graph.input(shape, Element::Single);
+    let (out, scale, shift) = if rms {
+        let layer = RmsNorm::new(
+            graph,
+            "layer",
+            shape.columns(),
+            Init::Zero,
+            1e-6,
+            Element::Single,
+        );
+        (layer.forward(graph, input), layer.scale(), None)
+    } else {
+        let layer = LayerNorm::new(
+            graph,
+            "layer",
+            shape.columns(),
+            Init::Zero,
+            1e-6,
+            Element::Single,
+        );
+        (
+            layer.forward(graph, input),
+            layer.scale(),
+            Some(layer.shift()),
+        )
+    };
+    let loss = graph.sum(graph.mul(out, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(out);
+    graph.retain(loss);
+    NormFamily {
+        input,
+        weight,
+        out,
+        gradient: gradients.of(input),
+        scale,
+        shift,
+    }
+}
+
+#[test]
+fn a_normalization_weighs_every_row_a_binding_holds() {
+    let runtime = open();
+    for rms in [false, true] {
+        let graph = Graph::new();
+        let rows = graph.free(8);
+        let dynamic = Shape::of([1, 8, 4]).freed(&[(2, rows)]);
+        let family = norm_family(&graph, rms, dynamic);
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        let scale = random(4, 61);
+        let shift = random(4, 67);
+        runtime.bind(&program, &[8]);
+        runtime.write(&program, family.scale, &scale);
+        if let Some(shift_value) = family.shift {
+            runtime.write(&program, shift_value, &shift);
+        }
+        for live in [8u32, 5, 1] {
+            let graph = Graph::new();
+            let reference = norm_family(&graph, rms, Shape::of([1, live, 4]));
+            let store = runtime.weights(&graph);
+            let program_fixed = runtime.compile(&graph, &store);
+            let values = random(live * 4, 71);
+            let weight = random(live * 4, 73);
+            runtime.write(&program_fixed, reference.input, &values);
+            runtime.write(&program_fixed, reference.weight, &weight);
+            runtime.write(&program_fixed, reference.scale, &scale);
+            if let Some(shift_value) = reference.shift {
+                runtime.write(&program_fixed, shift_value, &shift);
+            }
+            runtime.run(&program_fixed);
+            let expected = runtime.read(&program_fixed, reference.out);
+            let expected_gradient = runtime.read(&program_fixed, reference.gradient);
+
+            runtime.bind(&program, &[live]);
+            runtime.write(&program, family.input, &values);
+            runtime.write(&program, family.weight, &weight);
+            runtime.run(&program);
+            assert_close(&runtime.read(&program, family.out), &expected, 1e-4);
+            assert_close(
+                &runtime.read(&program, family.gradient),
+                &expected_gradient,
+                1e-3,
+            );
+        }
+    }
 }

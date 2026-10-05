@@ -502,6 +502,48 @@ fn a_device_count_rules_the_length_of_every_tensor_it_authors() {
 }
 
 #[test]
+fn a_device_count_weighs_the_length_a_mean_divides_by() {
+    let runtime = open();
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, BOUND, 1]), Element::Single);
+    let tokens = graph.input(Shape::of([1, 1, BOUND, WIDTH]), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let live = graph.trim(tokens, 2, count);
+    let mean = graph.mean_axis(live, 2);
+    graph.retain(mean);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    assert!(
+        program.carries_authored(),
+        "a graph that trims a tensor walks a length the device authors",
+    );
+    let tokens_data = data(BOUND * WIDTH, 29);
+    runtime.write(&program, tokens, &tokens_data);
+    for live in [BOUND, 5, 1] {
+        runtime.write(&program, probe, &live_probe(BOUND, live));
+        runtime.run(&program);
+        let expected = (0..WIDTH)
+            .map(|column| {
+                let total = (0..live as usize)
+                    .map(|row| tokens_data[row * WIDTH as usize + column as usize])
+                    .sum::<f32>();
+                total / live as f32
+            })
+            .collect::<Vec<f32>>();
+        assert_close(&runtime.read(&program, mean), &expected, 1e-5);
+    }
+    runtime.write(&program, probe, &live_probe(BOUND, 0));
+    runtime.run(&program);
+    assert!(
+        runtime
+            .read(&program, mean)
+            .iter()
+            .all(|value| value.is_nan()),
+        "a mean of no numbers divides an empty sum by an empty length",
+    );
+}
+
+#[test]
 fn a_device_count_beyond_one_bound_it_walks_is_refused() {
     let runtime = open();
     let graph = Graph::new();

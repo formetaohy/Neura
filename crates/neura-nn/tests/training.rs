@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_graph::{Graph, Init, Shape, Window};
+use neura_graph::{Graph, Init, Shape, Value, Window};
 use neura_nn::{AdamW, Conv2d, Linear, Mlp, Sgd, cross_entropy, mse_loss, policy_loss};
 use neura_runtime::{Runtime, RuntimeRequest};
 
@@ -380,4 +380,96 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
         after < before,
         "eight policy steps moved the loss from {before} to {after}",
     );
+}
+
+fn data(count: u32, seed: u32) -> Vec<f32> {
+    let mut entropy = seed | 1;
+    (0..count)
+        .map(|_| {
+            entropy ^= entropy << 13;
+            entropy ^= entropy >> 17;
+            entropy ^= entropy << 5;
+            (entropy >> 8) as f32 / 16_777_216.0 - 0.5
+        })
+        .collect()
+}
+
+fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "element {index} came back as {actual} where {expected} was expected",
+        );
+    }
+}
+
+struct LossFamily {
+    logits: Value<'static>,
+    target: Value<'static>,
+    loss: Value<'static>,
+    gradient: Value<'static>,
+}
+
+fn loss_family(graph: &Graph<'static>, shape: Shape, cross: bool) -> LossFamily {
+    let logits = graph.gradient_input(shape, Element::Single);
+    let target = graph.input(shape, Element::Single);
+    let loss = if cross {
+        cross_entropy(graph, logits, target)
+    } else {
+        mse_loss(graph, logits, target)
+    };
+    let gradients = graph.backward(loss);
+    graph.retain(loss);
+    LossFamily {
+        logits,
+        target,
+        loss,
+        gradient: gradients.of(logits),
+    }
+}
+
+#[test]
+fn a_loss_weighs_the_lengths_a_binding_holds() {
+    let runtime = open();
+    for cross in [false, true] {
+        let graph = Graph::new();
+        let rows = graph.free(8);
+        let dynamic = Shape::of([1, 1, 8, 4]).freed(&[(2, rows)]);
+        let family = loss_family(&graph, dynamic, cross);
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        for live in [8u32, 5, 1] {
+            let graph = Graph::new();
+            let fixed = loss_family(&graph, Shape::of([1, 1, live, 4]), cross);
+            let store = runtime.weights(&graph);
+            let reference = runtime.compile(&graph, &store);
+            let logits = data(live * 4, 41);
+            let target = data(live * 4, 43);
+            runtime.write(&reference, fixed.logits, &logits);
+            runtime.write(&reference, fixed.target, &target);
+            runtime.run(&reference);
+            let expected_loss = runtime.read(&reference, fixed.loss);
+            let expected_gradient = runtime.read(&reference, fixed.gradient);
+
+            runtime.bind(&program, &[live]);
+            runtime.write(&program, family.logits, &logits);
+            runtime.write(&program, family.target, &target);
+            runtime.run(&program);
+            assert_close(&runtime.read(&program, family.loss), &expected_loss, 1e-5);
+            assert_close(
+                &runtime.read(&program, family.gradient),
+                &expected_gradient,
+                1e-5,
+            );
+        }
+        runtime.bind(&program, &[0]);
+        runtime.write(&program, family.logits, &[]);
+        runtime.write(&program, family.target, &[]);
+        runtime.run(&program);
+        assert!(
+            runtime.read(&program, family.loss)[0].is_nan(),
+            "a loss of no row divides an empty sum by an empty length",
+        );
+    }
 }

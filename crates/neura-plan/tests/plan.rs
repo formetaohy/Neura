@@ -2113,7 +2113,8 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
     let count = graph.sum_axis(probe, 2);
     let live = graph.trim(tokens, 2, count);
     let product = graph.matmul(live, weight);
-    let rotated = graph.rope(product, None, 10_000.0);
+    let centred = graph.sub(product, graph.mean_axis(product, 2));
+    let rotated = graph.rope(centred, None, 10_000.0);
     let attended = graph.attention(
         rotated,
         rotated,
@@ -2134,6 +2135,10 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
     let plan = plan(&graph);
     assert_eq!(plan.patches().len(), 1, "one task authors the extent");
     assert!(
+        kinds(&plan).contains(&Kind::Length),
+        "a mean over an axis a device counts asks the device for the length it divides by",
+    );
+    assert!(
         kinds(&plan).contains(&Kind::MatmulFold),
         "the product splits its depth across tasks, and the fold reads the partials only the split laid out",
     );
@@ -2145,6 +2150,18 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
     let patch = plan.patches()[0];
     let list = plan.patch_list();
     let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    let length = records
+        .iter()
+        .position(|task| task.kind == Kind::Length.code())
+        .expect("the mean walks the length the device counts");
+    assert!(
+        values.contains(&records[length].a),
+        "the length the mean reads walks the extent the count rules",
+    );
+    assert!(
+        follows(&plan, author, length),
+        "the mean reads the length of a tensor the device only refreshes after the count runs",
+    );
     let steps = steps(&plan);
     for (index, task) in records.iter().enumerate() {
         let reads = [

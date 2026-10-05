@@ -128,6 +128,17 @@ mod device {
         }
     }
 
+    fn run_length(task: Task, lid: u32) {
+        if lid == 0u32 {
+            let source = values[task.a];
+            publish(
+                values[task.out],
+                0u32,
+                f32(component(source.dims, task.slot)),
+            );
+        }
+    }
+
     fn run_segment_sum(task: Task, lid: u32) {
         let source = values[task.a];
         let partials = values[task.out];

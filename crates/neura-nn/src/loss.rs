@@ -1,5 +1,18 @@
 use neura_graph::{Graph, Shape, Value};
 
+fn mean_over<'g>(graph: &Graph<'g>, value: Value<'g>, axes: &[u32]) -> Value<'g> {
+    axes.iter()
+        .fold(value, |folded, axis| graph.mean_axis(folded, *axis))
+}
+
+fn mean<'g>(graph: &Graph<'g>, value: Value<'g>) -> Value<'g> {
+    mean_over(graph, value, &[3, 2, 1, 0])
+}
+
+fn mean_rows<'g>(graph: &Graph<'g>, value: Value<'g>) -> Value<'g> {
+    mean_over(graph, value, &[2, 1, 0])
+}
+
 pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>) -> Value<'g> {
     let shape = graph.shape(prediction);
     assert_eq!(
@@ -11,12 +24,7 @@ pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>)
         prediction,
         graph.mul(target, graph.fill(Shape::scalar(), -1.0)),
     );
-    let squared = graph.mul(difference, difference);
-    let total = graph.sum(squared);
-    graph.mul(
-        total,
-        graph.fill(Shape::scalar(), 1.0 / shape.elements() as f32),
-    )
+    mean(graph, graph.mul(difference, difference))
 }
 
 pub fn cross_entropy<'g>(graph: &Graph<'g>, logits: Value<'g>, target: Value<'g>) -> Value<'g> {
@@ -26,13 +34,9 @@ pub fn cross_entropy<'g>(graph: &Graph<'g>, logits: Value<'g>, target: Value<'g>
         graph.shape(target),
         "a cross entropy weighs every class of a row by the target it holds for that class",
     );
-    let rows = shape.rows();
     let log_probability = graph.log_softmax(logits);
     let weighted = graph.mul(target, log_probability);
-    graph.mul(
-        graph.sum(weighted),
-        graph.fill(Shape::scalar(), -1.0 / rows as f32),
-    )
+    graph.neg(mean_rows(graph, graph.sum_rows(weighted)))
 }
 
 pub fn policy_loss<'g>(
@@ -63,8 +67,8 @@ pub fn policy_loss<'g>(
         weights.elements(),
     );
     let taken = graph.mul(graph.one_hot(action, classes), graph.log_softmax(logits));
-    graph.mul(
-        graph.sum(graph.mul(advantage, taken)),
-        graph.fill(Shape::scalar(), -1.0 / rows as f32),
-    )
+    graph.neg(mean_rows(
+        graph,
+        graph.sum_rows(graph.mul(advantage, taken)),
+    ))
 }
