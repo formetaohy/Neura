@@ -1,5 +1,5 @@
 use neura_abi::{Element, Kind};
-use neura_graph::{Graph, Residency, Shape};
+use neura_graph::{AttentionOptions, Graph, Residency, Shape};
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -110,6 +110,90 @@ fn a_gradient_reaches_a_prefix_only_through_the_layout_trim_hands_out() {
             graph.backward(loss);
         }),
         "a gradient reached a view that reorders the prefix a trim hands out",
+    );
+}
+
+#[test]
+fn a_static_operand_stands_beside_a_free_extent_of_its_own_bound() {
+    let graph = Graph::new();
+    let tokens = graph.free(4);
+    let rows = graph.input(
+        Shape::of([1, 1, 4, 8]).freed(&[(2, tokens)]),
+        Element::Single,
+    );
+    let position = graph.input(Shape::of([1, 1, 4, 8]), Element::Single);
+    let sum = graph.add(rows, position);
+    assert_eq!(
+        graph.shape(sum).free(2),
+        Some(tokens.slot()),
+        "a static operand as long as the bound stands beside every step the walk names",
+    );
+    let columns = graph.free(8);
+    let wide = graph.input(
+        Shape::of([1, 1, 2, 8]).freed(&[(3, columns)]),
+        Element::Single,
+    );
+    let scale = graph.input(Shape::of([1, 1, 1, 8]), Element::Single);
+    let scaled = graph.mul(wide, scale);
+    assert_eq!(
+        graph.shape(scaled).free(3),
+        Some(columns.slot()),
+        "a row of static numbers stands beside a walk of the columns it holds",
+    );
+    assert!(
+        refuses(|| {
+            let short = graph.input(Shape::of([1, 1, 2, 8]), Element::Single);
+            graph.add(rows, short);
+        }),
+        "a static operand shorter than the bound names no number of the steps the walk may reach",
+    );
+    let depth = graph.free(8);
+    let left = graph.input(
+        Shape::of([1, 1, 4, 8]).freed(&[(3, depth)]),
+        Element::Single,
+    );
+    let right = graph.input(Shape::of([1, 1, 8, 4]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.matmul(left, right);
+        }),
+        "a product walks the depth of both operands through one count, and a static operand as long as the bound holds numbers of a depth no binding rules",
+    );
+    let planes = graph.free(4);
+    let batched = graph.input(
+        Shape::of([4, 1, 4, 8]).freed(&[(0, planes)]),
+        Element::Single,
+    );
+    let shared = graph.input(Shape::of([4, 1, 8, 4]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.matmul(batched, shared);
+        }),
+        "a product walks the planes of both operands through one count, and a static operand as long as the bound holds numbers of a plane no binding rules",
+    );
+    let width = graph.free(8);
+    let query = graph.input(
+        Shape::of([1, 1, 4, 8]).freed(&[(3, width)]),
+        Element::Single,
+    );
+    let keys = graph.input(Shape::of([1, 1, 4, 8]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(
+                query,
+                keys,
+                keys,
+                AttentionOptions {
+                    scale: 1.0,
+                    causal: false,
+                    origin: None,
+                    segments: None,
+                    reach: None,
+                    query_segments: None,
+                },
+            );
+        }),
+        "an attention scores the width of every key against the width of a query, and a static width holds numbers of a walk no binding rules",
     );
 }
 

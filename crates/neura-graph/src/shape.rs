@@ -223,7 +223,7 @@ impl Shape {
         (self.dims[left as usize], free)
     }
 
-    pub fn combining_axis(self, other: Self, left: u32, right: u32) -> (u32, Option<u32>) {
+    pub fn paired_axis(self, other: Self, left: u32, right: u32) -> (u32, Option<u32>) {
         let (left_free, right_free) = (self.free(left), other.free(right));
         let (left_dim, right_dim) = (self.dims[left as usize], other.dims[right as usize]);
         match (left_free, right_free) {
@@ -238,7 +238,7 @@ impl Shape {
             (Some(slot), None) => {
                 assert_eq!(
                     right_dim, 1,
-                    "axis {left} of {:?} walks a free extent where axis {right} of {:?} holds {right_dim} numbers",
+                    "axis {left} of {:?} walks a free extent where axis {right} of {:?} holds {right_dim} numbers: a product walks the planes of both operands by one count, and the planes of a static operand stand beside a free extent only as one number",
                     self.dims, other.dims,
                 );
                 (left_dim, Some(slot))
@@ -246,7 +246,7 @@ impl Shape {
             (None, Some(slot)) => {
                 assert_eq!(
                     left_dim, 1,
-                    "axis {right} of {:?} walks a free extent where axis {left} of {:?} holds {left_dim} numbers",
+                    "axis {right} of {:?} walks a free extent where axis {left} of {:?} holds {left_dim} numbers: a product walks the planes of both operands by one count, and the planes of a static operand stand beside a free extent only as one number",
                     other.dims, self.dims,
                 );
                 (right_dim, Some(slot))
@@ -406,8 +406,12 @@ impl Shape {
             let axis = axis as u32;
             match (self.free(axis), other.free(axis)) {
                 (Some(slot), Some(other_slot)) => slot == other_slot,
-                (Some(_), None) => other.dims[axis as usize] == 1,
-                (None, Some(_)) => self.dims[axis as usize] == 1,
+                (Some(_), None) => {
+                    covers_a_walk(other.dims[axis as usize], self.dims[axis as usize])
+                }
+                (None, Some(_)) => {
+                    covers_a_walk(self.dims[axis as usize], other.dims[axis as usize])
+                }
                 (None, None) => {
                     self.dims[axis as usize] == other.dims[axis as usize]
                         || self.dims[axis as usize] == 1
@@ -420,7 +424,7 @@ impl Shape {
     pub fn combined(self, other: Self) -> Self {
         assert!(
             self.combines_with(other),
-            "shapes {:?} and {:?} cannot meet element by element",
+            "shapes {:?} and {:?} cannot meet element by element: two axes meet when they walk the same free extent, hold the same length, or one holds one number, and a tensor that stands beside a free extent holds one number or as many numbers as the bound of that extent",
             self.dims,
             other.dims,
         );
@@ -440,30 +444,12 @@ impl Shape {
             match (self.free(axis), other.free(axis)) {
                 (Some(slot), Some(other_slot)) => slot == other_slot,
                 (Some(_), None) => false,
-                (None, Some(_)) => self.dims[axis as usize] == 1,
-                (None, None) => {
-                    self.dims[axis as usize] == other.dims[axis as usize]
-                        || self.dims[axis as usize] == 1
+                (None, Some(_)) => {
+                    covers_a_walk(self.dims[axis as usize], other.dims[axis as usize])
                 }
-            }
-        })
-    }
-
-    pub fn batch(self) -> [u32; 2] {
-        [self.dims[0], self.dims[1]]
-    }
-
-    pub fn batches_combine_with(self, other: Self) -> bool {
-        (0..2).all(|axis| {
-            let axis = axis as u32;
-            match (self.free(axis), other.free(axis)) {
-                (Some(slot), Some(other_slot)) => slot == other_slot,
-                (Some(_), None) => other.dims[axis as usize] == 1,
-                (None, Some(_)) => self.dims[axis as usize] == 1,
                 (None, None) => {
                     self.dims[axis as usize] == other.dims[axis as usize]
                         || self.dims[axis as usize] == 1
-                        || other.dims[axis as usize] == 1
                 }
             }
         })
@@ -493,4 +479,8 @@ impl Shape {
     pub fn is_scalar(self) -> bool {
         self.elements == 1
     }
+}
+
+fn covers_a_walk(held: u32, bound: u32) -> bool {
+    held == 1 || held == bound
 }

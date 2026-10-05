@@ -14,8 +14,8 @@ impl<'g> Graph<'g> {
         let right = self.own(right);
         let left_shape = self.shape(left);
         let right_shape = self.shape(right);
-        let (batch_rows, rows_free) = left_shape.combining_axis(right_shape, 0, 0);
-        let (batch_columns, columns_free) = left_shape.combining_axis(right_shape, 1, 1);
+        let (batch_rows, rows_free) = left_shape.paired_axis(right_shape, 0, 0);
+        let (batch_columns, columns_free) = left_shape.paired_axis(right_shape, 1, 1);
         let (_, _) = left_shape.meeting(right_shape, 3, 2);
         let element = self.element(left).promote(self.element(right));
         let out = self.stored(

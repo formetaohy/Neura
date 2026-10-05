@@ -716,6 +716,214 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
+fn beside_family(
+    graph: &Graph<'static>,
+    rows: Shape,
+    position: Shape,
+) -> (
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+    neura_graph::Gradients<'static>,
+) {
+    let rows = graph.gradient_input(rows, Element::Single);
+    let position = graph.gradient_input(position, Element::Single);
+    let weight = graph.input(graph.shape(rows), Element::Single);
+    let sum = graph.add(rows, position);
+    let loss = graph.sum(graph.mul(sum, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(sum);
+    graph.retain(loss);
+    (rows, position, weight, sum, gradients)
+}
+
+#[test]
+fn a_walk_of_the_last_axis_a_binding_shrinks_reads_every_number() {
+    const WIDTH: u32 = 8;
+    const RANKS: u32 = 2;
+    let runtime = open();
+    let graph = Graph::new();
+    let columns = graph.free(WIDTH);
+    let shape = Shape::of([1, 1, RANKS, WIDTH]).freed(&[(3, columns)]);
+    let rows = graph.gradient_input(shape, Element::Single);
+    let weight = graph.input(shape, Element::Single);
+    let loss = graph.sum(graph.mul(rows, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(loss);
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+    for live in [WIDTH, 3, 1] {
+        let values = data(RANKS * live, 79);
+        runtime.bind(&family, &[live]);
+        runtime.write(&family, rows, &values);
+        runtime.write(&family, weight, &values);
+        runtime.run(&family);
+        assert_close(&runtime.read(&family, gradients.of(rows)), &values, 1e-6);
+    }
+}
+
+#[test]
+fn a_static_operand_stands_beside_every_length_a_binding_holds() {
+    const BOUND: u32 = 6;
+    const WIDTH: u32 = 4;
+    let runtime = open();
+    let graph = Graph::new();
+    let tokens = graph.free(BOUND);
+    let (rows, position, weight, sum, gradients) = beside_family(
+        &graph,
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, tokens)]),
+        Shape::of([1, 1, BOUND, WIDTH]),
+    );
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+    let position_data = data(BOUND * WIDTH, 53);
+    for live in [BOUND, BOUND - 1, 1] {
+        let rows_data = data(live * WIDTH, 59);
+        let weight_data = data(live * WIDTH, 61);
+        let head = position_data[..(live * WIDTH) as usize].to_vec();
+        let graph = Graph::new();
+        let (fixed, fixed_position, shared, fixed_sum, fixed_gradients) = beside_family(
+            &graph,
+            Shape::of([1, 1, live, WIDTH]),
+            Shape::of([1, 1, live, WIDTH]),
+        );
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        runtime.write(&program, fixed, &rows_data);
+        runtime.write(&program, fixed_position, &head);
+        runtime.write(&program, shared, &weight_data);
+        runtime.run(&program);
+        let expected_sum = runtime.read(&program, fixed_sum);
+        let expected_rows = runtime.read(&program, fixed_gradients.of(fixed));
+        let expected_position = runtime.read(&program, fixed_gradients.of(fixed_position));
+
+        runtime.bind(&family, &[live]);
+        runtime.write(&family, rows, &rows_data);
+        runtime.write(&family, position, &position_data);
+        runtime.write(&family, weight, &weight_data);
+        runtime.run(&family);
+        assert_close(&runtime.read(&family, sum), &expected_sum, 1e-5);
+        assert_close(
+            &runtime.read(&family, gradients.of(rows)),
+            &expected_rows,
+            1e-5,
+        );
+        let produced = runtime.read(&family, gradients.of(position));
+        assert_eq!(produced.len(), (BOUND * WIDTH) as usize);
+        assert_close(
+            &produced[..(live * WIDTH) as usize],
+            &expected_position,
+            1e-5,
+        );
+        assert!(
+            produced[(live * WIDTH) as usize..]
+                .iter()
+                .all(|number| *number == 0.0),
+            "a static operand stands beside the steps a binding names, and the walk hands it no gradient beyond the step it holds",
+        );
+    }
+    runtime.bind(&family, &[0]);
+    runtime.write(&family, rows, &[]);
+    runtime.write(&family, position, &position_data);
+    runtime.write(&family, weight, &[]);
+    runtime.run(&family);
+    assert!(runtime.read(&family, sum).is_empty());
+    assert!(runtime.read(&family, gradients.of(rows)).is_empty());
+    assert!(
+        runtime
+            .read(&family, gradients.of(position))
+            .iter()
+            .all(|number| *number == 0.0),
+        "a walk of no steps holds no gradient",
+    );
+}
+
+#[test]
+fn a_static_operand_stands_beside_a_width_a_binding_holds() {
+    const WIDTH: u32 = 8;
+    const RANKS: u32 = 2;
+    let runtime = open();
+    let graph = Graph::new();
+    let columns = graph.free(WIDTH);
+    let rows_shape = Shape::of([1, 1, RANKS, WIDTH]).freed(&[(3, columns)]);
+    let rows = graph.gradient_input(rows_shape, Element::Single);
+    let every_row = graph.gradient_input(Shape::of([1, 1, RANKS, WIDTH]), Element::Single);
+    let every_column = graph.gradient_input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    let weight = graph.input(rows_shape, Element::Single);
+    let sum = graph.add(graph.add(rows, every_row), every_column);
+    let loss = graph.sum(graph.mul(sum, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(sum);
+    graph.retain(loss);
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+    let row_data = data(RANKS * WIDTH, 67);
+    let column_data = data(WIDTH, 71);
+    for live in [WIDTH, WIDTH - 3, 1] {
+        let rows_data = data(RANKS * live, 73);
+        let weight_data = data(RANKS * live, 79);
+        let head = (0..RANKS * live)
+            .map(|index| row_data[(index / live * WIDTH + index % live) as usize])
+            .collect::<Vec<f32>>();
+        let graph = Graph::new();
+        let fixed = graph.gradient_input(Shape::of([1, 1, RANKS, live]), Element::Single);
+        let fixed_row = graph.gradient_input(Shape::of([1, 1, RANKS, live]), Element::Single);
+        let fixed_column = graph.gradient_input(Shape::of([1, 1, 1, live]), Element::Single);
+        let shared = graph.input(Shape::of([1, 1, RANKS, live]), Element::Single);
+        let fixed_sum = graph.add(graph.add(fixed, fixed_row), fixed_column);
+        let fixed_loss = graph.sum(graph.mul(fixed_sum, shared));
+        let fixed_gradients = graph.backward(fixed_loss);
+        graph.retain(fixed_sum);
+        graph.retain(fixed_loss);
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        runtime.write(&program, fixed, &rows_data);
+        runtime.write(&program, fixed_row, &head);
+        runtime.write(&program, fixed_column, &column_data[..live as usize]);
+        runtime.write(&program, shared, &weight_data);
+        runtime.run(&program);
+        let expected_sum = runtime.read(&program, fixed_sum);
+        let expected_rows = runtime.read(&program, fixed_gradients.of(fixed));
+        let expected_row = runtime.read(&program, fixed_gradients.of(fixed_row));
+        let expected_column = runtime.read(&program, fixed_gradients.of(fixed_column));
+
+        runtime.bind(&family, &[live]);
+        runtime.write(&family, rows, &rows_data);
+        runtime.write(&family, every_row, &row_data);
+        runtime.write(&family, every_column, &column_data);
+        runtime.write(&family, weight, &weight_data);
+        runtime.run(&family);
+        assert_close(&runtime.read(&family, sum), &expected_sum, 1e-5);
+        assert_close(
+            &runtime.read(&family, gradients.of(rows)),
+            &expected_rows,
+            1e-5,
+        );
+        let produced = runtime.read(&family, gradients.of(every_row));
+        assert_eq!(produced.len(), (RANKS * WIDTH) as usize);
+        for rank in 0..RANKS {
+            let kept = &produced[(rank * WIDTH) as usize..(rank * WIDTH + live) as usize];
+            let expected = &expected_row[(rank * live) as usize..((rank + 1) * live) as usize];
+            assert_close(kept, expected, 1e-5);
+            assert!(
+                produced[(rank * WIDTH + live) as usize..((rank + 1) * WIDTH) as usize]
+                    .iter()
+                    .all(|number| *number == 0.0),
+                "a static operand lands the gradient of every column the walk names, and no number beyond them",
+            );
+        }
+        let produced = runtime.read(&family, gradients.of(every_column));
+        assert_close(&produced[..live as usize], &expected_column, 1e-5);
+        assert!(
+            produced[live as usize..]
+                .iter()
+                .all(|number| *number == 0.0),
+            "a row of static numbers stands beside the columns a binding names",
+        );
+    }
+}
+
 #[test]
 fn a_program_of_free_extents_runs_no_binding_but_the_one_it_names() {
     let runtime = open();

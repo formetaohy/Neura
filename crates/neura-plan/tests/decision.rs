@@ -676,6 +676,48 @@ fn a_pointwise_task_walks_the_frame_of_a_view_that_shares_no_frame() {
 }
 
 #[test]
+fn a_pointwise_task_walks_the_frame_of_a_last_axis_a_binding_shrinks() {
+    let graph = Graph::new();
+    let columns = graph.free(64);
+    let shape = Shape::of([1, 1, 4, 64]).freed(&[(3, columns)]);
+    let rows = graph.input(shape, Element::Single);
+    let other = graph.input(shape, Element::Single);
+    let summed = graph.add(rows, other);
+    graph.retain(summed);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, summed);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].geometry,
+        strategy::FRAME,
+        "a walk the plan index names reads the number of a step by the stride of the last axis, and a binding of one number hands that axis no step: a last axis a free extent walks reads its own frame",
+    );
+}
+
+#[test]
+fn a_convert_walks_the_frame_of_a_last_axis_a_binding_shrinks() {
+    let graph = Graph::new();
+    let columns = graph.free(64);
+    let shape = Shape::of([1, 1, 4, 64]).freed(&[(3, columns)]);
+    let rows = graph.input(shape, Element::Single);
+    let narrowed = graph.cast(rows, Element::Half);
+    graph.retain(narrowed);
+    let plan = plan_with(&graph, wide());
+    let converts = tasks_of(&plan, narrowed);
+    assert!(
+        !converts.is_empty(),
+        "a narrow tensor is written by a convert"
+    );
+    for task in converts {
+        assert_eq!(
+            task.geometry,
+            strategy::FRAME,
+            "a convert of a last axis a free extent walks reads the frame of every number it narrows",
+        );
+    }
+}
+
+#[test]
 fn a_convert_walks_the_plan_index_over_the_tensor_it_narrows() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(16, 16), Element::Single);

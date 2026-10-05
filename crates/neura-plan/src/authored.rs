@@ -117,11 +117,12 @@ pub(crate) fn analyse(
         if task.kind != Kind::Extend {
             continue;
         }
-        let view = task.inputs[1];
+        let walked = task.inputs[0];
         assert!(
-            !authored.value_slots[view as usize].is_empty(),
-            "a {} task lands the gradient of value {view} in the layout of the tensor that owns its storage, and the patch that rules the extent it walks refreshes no length of it",
+            values[walked as usize].shape.dynamic(),
+            "a {} task lands the gradient of value {} in the layout of the storage that owns it, and value {walked} walks no free extent a binding rules: the device stops at the dims it reads, and only a walk that moves with a binding tells the task where the numbers it holds end",
             task.kind.name(),
+            task.inputs[1],
         );
     }
     authored.measures = measure_records(measures, tiles);

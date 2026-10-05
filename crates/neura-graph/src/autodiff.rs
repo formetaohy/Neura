@@ -933,14 +933,21 @@ impl<'g> Graph<'g> {
     }
 
     fn aligned(&self, value: Value<'g>, contribution: Value<'g>) -> Value<'g> {
-        assert_eq!(
-            self.shape(contribution),
-            self.shape(value),
+        assert!(
+            self.shape(contribution).dims() == self.shape(value).dims(),
             "a gradient lands in the layout of the storage that owns value {}, and value {} walks {:?} where that gradient walks {:?}; fold the axes the tensor spread over before its storage lays the gradient out",
             value.id(),
             contribution.id(),
             self.shape(value).dims(),
             self.shape(contribution).dims(),
+        );
+        let walked = self.shape(contribution).frees();
+        let held = self.shape(value).frees();
+        assert!(
+            (0..MAX_RANK)
+                .all(|axis| walked[axis as usize].is_some() || held[axis as usize].is_none()),
+            "a gradient of value {} arrives without the free extent it walks: the device stops at the dims a binding rules, so the gradient of every step of a walk is shaped by that walk, and a tensor a free extent stands beside holds the gradient of the steps it covers",
+            value.id(),
         );
         let owner = self.owner_of(value.id());
         if self.walks_a_prefix(value.id()) {
@@ -949,6 +956,11 @@ impl<'g> Graph<'g> {
                 "a gradient reaches value {} through a view that walks a prefix of storage {owner}, and only the layout Graph::trim hands out lands in the element order of that storage; materialize the tensor before another view reorders it",
                 value.id(),
             );
+            return self.extended(value, contribution);
+        }
+        if (0..MAX_RANK)
+            .any(|axis| walked[axis as usize].is_some() && held[axis as usize].is_none())
+        {
             return self.extended(value, contribution);
         }
         let (view_shape, view_strides, owner_shape) = {

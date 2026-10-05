@@ -169,8 +169,13 @@ fn walks_by_index(values: &[ValueInfo], task: &Task) -> bool {
         info.strides == [0u32; MAX_RANK as usize]
             || (info.shape == out
                 && info.strides == info.shape.strides()
-                && info.strides[MAX_RANK as usize - 1] == 1)
+                && strides_one_number_a_step_at_every_binding(info))
     })
+}
+
+fn strides_one_number_a_step_at_every_binding(info: &ValueInfo) -> bool {
+    let last = MAX_RANK as usize - 1;
+    info.shape.free(MAX_RANK - 1).is_none() && info.strides[last] == 1
 }
 
 fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
