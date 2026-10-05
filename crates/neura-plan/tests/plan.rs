@@ -2812,6 +2812,107 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
 }
 
 #[test]
+fn a_packed_query_walks_the_rows_its_offsets_close() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let bound = 256;
+    let ragged = graph.ragged(bound, lengths);
+    let packed = Shape::of([1, 1, bound, 4]).freed(&[(2, ragged.extent)]);
+    let query = graph.gradient_input(packed, Element::Single);
+    let key = graph.gradient_input(packed, Element::Single);
+    let value = graph.gradient_input(packed, Element::Single);
+    let out = graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: None,
+            segments: Some(ragged.offsets),
+            reach: None,
+        },
+    );
+    let loss = graph.sum(out);
+    let collected = graph.backward(loss);
+    for gradient in [collected.of(query), collected.of(key), collected.of(value)] {
+        graph.retain(gradient);
+    }
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patch = plan.patches()[0];
+    assert_eq!(patch.segment, ragged.offsets.id());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    let patched = plan.patch_list()
+        [patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize]
+        .to_vec();
+    let group = bound.div_ceil(narrow().workgroup());
+    assert!(
+        group > 1,
+        "a bound of {bound} rows spans one chunk per workgroup"
+    );
+    let mut forward = Vec::new();
+    let mut query_grad = Vec::new();
+    for (index, task) in records.iter().enumerate() {
+        let kind = Kind::of(task.kind);
+        if kind != Kind::Attention && kind != Kind::AttentionQueryGrad {
+            continue;
+        }
+        assert_eq!(
+            task.split,
+            neura_abi::split::RAGGED,
+            "a packed query walks the rows its offsets close, and task {index} of {kind:?} parts them by the counts those offsets close",
+        );
+        assert_eq!(
+            task.segment,
+            ragged.offsets.id(),
+            "a packed query names the offsets its token axis walks, and task {index} of {kind:?} names another",
+        );
+        assert_eq!(
+            (task.first, task.count),
+            (0, 0),
+            "task {index} of {kind:?} takes the rows its plane holds at run time",
+        );
+        assert_eq!(
+            task.group, group,
+            "task {index} of {kind:?} walks one of the {group} chunks a plane of {bound} rows holds",
+        );
+        assert!(
+            task.index < group && task.plane < 4,
+            "task {index} of {kind:?} walks chunk {} of plane {}",
+            task.index,
+            task.plane,
+        );
+        assert!(
+            patched.contains(&(index as u32)),
+            "the patch that closes the offsets hands task {index} of {kind:?} the rows of its plane",
+        );
+        assert!(
+            follows(&plan, author, index),
+            "task {index} of {kind:?} walks the rows the closing task authors",
+        );
+        if kind == Kind::Attention {
+            forward.push((task.plane, task.index));
+        } else {
+            query_grad.push((task.plane, task.index));
+        }
+    }
+    for (walked, name) in [(forward, "attention"), (query_grad, "query gradient")] {
+        let mut walked = walked;
+        walked.sort_unstable();
+        walked.dedup();
+        assert_eq!(
+            walked.len(),
+            4 * group as usize,
+            "every plane of the {name} walks every chunk of the rows its bound holds, and one task covers one chunk",
+        );
+    }
+}
+
+#[test]
 fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);

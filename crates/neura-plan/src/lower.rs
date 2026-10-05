@@ -354,11 +354,28 @@ fn schedule_unit(
         Kind::Attention | Kind::AttentionQueryGrad => {
             let rows = plan.shape(unit.out).dims();
             let tokens = rows[2];
-            let planes = rows[0] * rows[1];
             let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
-            let measure = measured(plan, unit.out, Measure::Tokens);
-            for (plane, first, count, split) in attention_spans(tokens, planes, profile, measure) {
+            let packed = unit.segments != NO_VALUE
+                && plan.shape(unit.out).free(2).is_some()
+                && plan.shape(unit.out).free(2) == plan.shape(unit.inputs[1]).free(2);
+            let spans = if packed {
+                assert!(
+                    rows[0] == 1 && rows[1] == 1,
+                    "a packed query walks the rows of every plane in the free extent its offsets close, and {:?} holds {} planes beside it",
+                    rows,
+                    rows[0] * rows[1],
+                );
+                ragged_spans(
+                    plan.shape(unit.segments).elements() - 1,
+                    tokens,
+                    profile.workgroup(),
+                )
+            } else {
+                let measure = measured(plan, unit.out, Measure::Tokens);
+                attention_spans(tokens, rows[0] * rows[1], profile, measure)
+            };
+            for (plane, first, count, split) in spans {
                 let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
                 task.geometry = geometry;
                 task.split = split;

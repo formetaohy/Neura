@@ -273,6 +273,7 @@ impl<'g> Graph<'g> {
             );
         }
         let tracked = self.tracked(&[query, key, value]);
+        let mut packed = false;
         if let Some(offsets) = segments {
             let axis = {
                 let state = self.state.borrow();
@@ -298,21 +299,6 @@ impl<'g> Graph<'g> {
                 value_shape.free(2),
                 axis.token,
             );
-            let planes = query_shape.dims()[0] * query_shape.dims()[1];
-            assert!(
-                axis.planes.domain().meets(&query_shape.plane_domain()),
-                "a segmented attention of {planes} planes walks the segments a ragged axis closes over {:?} of {} planes, and the query walks {:?}: the device reads a segment by the very plane the query walks, so one segment closes each plane and no more",
-                axis.planes.dims(),
-                axis.planes.elements(),
-                query_shape.dims(),
-            );
-            assert!(
-                axis.planes.elements() == 1 || query_shape.free(2) != Some(axis.token),
-                "a segmented attention weighs the {:?} queries of a plane against the keys its own offsets close, and the ragged axis of {} planes packs the free extent {} that the token axis of {query_shape:?} walks: the rows a packed query axis holds belong to different planes",
-                query_shape.dims()[2],
-                axis.planes.elements(),
-                axis.token,
-            );
             assert!(
                 key_shape.dims()[0] == 1
                     && key_shape.dims()[1] == 1
@@ -320,6 +306,28 @@ impl<'g> Graph<'g> {
                     && value_shape.dims()[1] == 1,
                 "a segmented attention packs the keys and values of every plane into their token axis, and keys of {key_shape:?} walk values of {value_shape:?}",
             );
+            packed = query_shape.free(2) == Some(axis.token);
+            if packed {
+                assert!(
+                    query_shape.dims()[0] == 1 && query_shape.dims()[1] == 1,
+                    "a segmented attention that packs its queries walks the rows of every plane in the free extent the offsets close, and {:?} holds {} planes beside it: the row a plane packs belongs to the plane its offset reaches",
+                    query_shape.dims(),
+                    query_shape.dims()[0] * query_shape.dims()[1],
+                );
+                assert!(
+                    origin.is_none(),
+                    "a packed query walks the rows its offsets close, and the row of a plane is the position it packs; a cursor places rows the packing already places",
+                );
+            } else {
+                let planes = query_shape.dims()[0] * query_shape.dims()[1];
+                assert!(
+                    axis.planes.domain().meets(&query_shape.plane_domain()),
+                    "a segmented attention of {planes} planes walks the segments a ragged axis closes over {:?} of {} planes, and the query walks {:?}: the device reads a segment by the very plane the query walks, so one segment closes each plane and no more",
+                    axis.planes.dims(),
+                    axis.planes.elements(),
+                    query_shape.dims(),
+                );
+            }
         }
         assert_eq!(
             key_shape.dims()[0],
@@ -407,7 +415,7 @@ impl<'g> Graph<'g> {
             );
         } else {
             assert!(
-                !attention.causal || segments.is_none(),
+                !attention.causal || segments.is_none() || packed,
                 "a segmented attention places the key of every plane by its offsets, and a causal mask of the queries needs the cursor that tells them where their keys end",
             );
         }

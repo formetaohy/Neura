@@ -61,6 +61,10 @@ mod device {
         return true;
     }
 
+    fn walks_the_rows_its_offsets_close(task: Task, query: Value, key: Value) -> bool {
+        return task.segment != NO_VALUE && slot_of(query.free, 2u32) == slot_of(key.free, 2u32);
+    }
+
     fn visible(at: u32, keys: u32, written: u32, position: u32, reach: u32, causal: bool) -> bool {
         if at >= keys {
             return false;
@@ -163,21 +167,25 @@ mod device {
         let value = values[task.c];
         let output = values[task.out];
         let statistic = values[task.extra];
-        let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
+        let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
+        let tokens = select(query.dims.z, keys, packed);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
             uvec4(query.dims.x, query.dims.y, query.dims.z, 1u32),
         );
         let head = plane.x / groups;
-        let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
+        let mut query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
         let mut key_plane = head * key.strides.x + plane.y * key.strides.y;
         let mut value_plane = head * value.strides.x + plane.y * value.strides.y;
+        let mut output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
+        let mut statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
+        let mut start = 0u32;
         if segmented {
             let offsets = values[task.segment];
-            let start = whole_index(
+            start = whole_index(
                 fetch(offsets, task.plane),
                 key.dims.z + 1u32,
                 kind::ATTENTION,
@@ -185,9 +193,12 @@ mod device {
             );
             key_plane = start * key.strides.z;
             value_plane = start * value.strides.z;
+            if packed {
+                query_plane = start * query.strides.z;
+                output_plane = start * output.strides.z;
+                statistic_plane = start * statistic.strides.z;
+            }
         }
-        let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
-        let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
@@ -268,7 +279,7 @@ mod device {
         if inside {
             let carries_keys = total > 0.0;
             let normalized = select(0.0, 1.0 / total, carries_keys);
-            let at = uvec4(plane.x, plane.y, row, 0u32);
+            let at = uvec4(plane.x, plane.y, select(row, start + row, packed), 0u32);
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                 publish(
                     output,
@@ -299,21 +310,28 @@ mod device {
         let output_grad = values[task.e];
         let statistic = values[task.f];
         let output = values[task.out];
-        let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
+        let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
+        let tokens = select(query.dims.z, keys, packed);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
             uvec4(query.dims.x, query.dims.y, query.dims.z, 1u32),
         );
         let head = plane.x / groups;
-        let query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
+        let mut query_plane = plane.x * query.strides.x + plane.y * query.strides.y;
         let mut key_plane = head * key.strides.x + plane.y * key.strides.y;
         let mut value_plane = head * value.strides.x + plane.y * value.strides.y;
+        let mut gradient_plane = plane.x * gradient.strides.x + plane.y * gradient.strides.y;
+        let mut output_grad_plane =
+            plane.x * output_grad.strides.x + plane.y * output_grad.strides.y;
+        let mut statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
+        let mut output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
+        let mut start = 0u32;
         if segmented {
             let offsets = values[task.segment];
-            let start = whole_index(
+            start = whole_index(
                 fetch(offsets, task.plane),
                 key.dims.z + 1u32,
                 kind::ATTENTION_QUERY_GRAD,
@@ -321,11 +339,14 @@ mod device {
             );
             key_plane = start * key.strides.z;
             value_plane = start * value.strides.z;
+            if packed {
+                query_plane = start * query.strides.z;
+                gradient_plane = start * gradient.strides.z;
+                output_grad_plane = start * output_grad.strides.z;
+                statistic_plane = start * statistic.strides.z;
+                output_plane = start * output.strides.z;
+            }
         }
-        let gradient_plane = plane.x * gradient.strides.x + plane.y * gradient.strides.y;
-        let output_grad_plane = plane.x * output_grad.strides.x + plane.y * output_grad.strides.y;
-        let statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
-        let output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
@@ -407,7 +428,7 @@ mod device {
             }
         }
         if inside {
-            let at = uvec4(plane.x, plane.y, row, 0u32);
+            let at = uvec4(plane.x, plane.y, select(row, start + row, packed), 0u32);
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                 publish(
                     output,
@@ -433,9 +454,10 @@ mod device {
         let output_grad = values[task.e];
         let statistic = values[task.f];
         let output = values[task.out];
-        let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
+        let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
+        let tokens = select(query.dims.z, keys, packed);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -486,12 +508,26 @@ mod device {
         for group in stride(0u32, heads, 1u32) {
             let plane_head = select(plane.x * groups + group, head, segmented);
             let plane_batch = select(plane.y, batch, segmented);
-            let query_plane = plane_head * query.strides.x + plane_batch * query.strides.y;
-            let gradient_plane = plane_head * gradient.strides.x + plane_batch * gradient.strides.y;
-            let output_grad_plane =
-                plane_head * output_grad.strides.x + plane_batch * output_grad.strides.y;
-            let statistic_plane =
-                plane_head * statistic.strides.x + plane_batch * statistic.strides.y;
+            let query_plane = select(
+                plane_head * query.strides.x + plane_batch * query.strides.y,
+                start * query.strides.z,
+                packed,
+            );
+            let gradient_plane = select(
+                plane_head * gradient.strides.x + plane_batch * gradient.strides.y,
+                start * gradient.strides.z,
+                packed,
+            );
+            let output_grad_plane = select(
+                plane_head * output_grad.strides.x + plane_batch * output_grad.strides.y,
+                start * output_grad.strides.z,
+                packed,
+            );
+            let statistic_plane = select(
+                plane_head * statistic.strides.x + plane_batch * statistic.strides.y,
+                start * statistic.strides.z,
+                packed,
+            );
             for block in stride(first, blocks, 1u32) {
                 workgroup_barrier();
                 template_stage_attention(
@@ -572,9 +608,10 @@ mod device {
         let gradient = values[task.d];
         let statistic = values[task.f];
         let output = values[task.out];
-        let tokens = query.dims.z;
         let segmented = task.segment != NO_VALUE;
+        let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
+        let tokens = select(query.dims.z, keys, packed);
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -618,10 +655,21 @@ mod device {
         for group in stride(0u32, heads, 1u32) {
             let plane_head = select(plane.x * groups + group, head, segmented);
             let plane_batch = select(plane.y, batch, segmented);
-            let query_plane = plane_head * query.strides.x + plane_batch * query.strides.y;
-            let gradient_plane = plane_head * gradient.strides.x + plane_batch * gradient.strides.y;
-            let statistic_plane =
-                plane_head * statistic.strides.x + plane_batch * statistic.strides.y;
+            let query_plane = select(
+                plane_head * query.strides.x + plane_batch * query.strides.y,
+                start * query.strides.z,
+                packed,
+            );
+            let gradient_plane = select(
+                plane_head * gradient.strides.x + plane_batch * gradient.strides.y,
+                start * gradient.strides.z,
+                packed,
+            );
+            let statistic_plane = select(
+                plane_head * statistic.strides.x + plane_batch * statistic.strides.y,
+                start * statistic.strides.z,
+                packed,
+            );
             for block in stride(first, blocks, 1u32) {
                 workgroup_barrier();
                 template_stage_attention(

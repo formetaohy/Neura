@@ -137,7 +137,7 @@ fn a_segmented_attention_weighs_one_segment_of_every_plane_it_walks() {
 }
 
 #[test]
-fn a_segmented_attention_asks_every_plane_its_own_queries() {
+fn a_segmented_attention_walks_the_planes_a_packed_query_holds() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
@@ -149,10 +149,69 @@ fn a_segmented_attention_asks_every_plane_its_own_queries() {
         Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
+    let out = graph.attention(query, cache, cache, causal(ragged.offsets));
+    assert_eq!(
+        graph.shape(out).dims(),
+        [1, 1, BOUND, WIDTH],
+        "a packed query packs the rows of every plane into the axis its keys pack",
+    );
+    assert_eq!(
+        graph.shape(out).free(2),
+        Some(ragged.extent.slot()),
+        "the rows of a packed query walk the very extent the offsets close",
+    );
+}
+
+#[test]
+fn a_cursor_places_no_row_of_a_packed_query() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let ragged = graph.ragged(BOUND, lengths);
+    let cache = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let cursor = graph.input(Shape::of([1, PLANES, 1, 1]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(
+                query,
+                cache,
+                cache,
+                AttentionOptions {
+                    scale: 1.0,
+                    causal: true,
+                    origin: Some(cursor),
+                    segments: Some(ragged.offsets),
+                    reach: None,
+                },
+            );
+        }),
+        "a cursor placed the rows of a packed query, and the row of a plane is the position the packing already names",
+    );
+}
+
+#[test]
+fn a_packed_query_holds_no_plane_beside_the_rows_it_packs() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let ragged = graph.ragged(BOUND, lengths);
+    let cache = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(
+        Shape::of([2, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
     assert!(
         refuses(|| {
             graph.attention(query, cache, cache, causal(ragged.offsets));
         }),
-        "a query that packs the rows of every plane into the axis its keys pack walked the keys of the first plane for every row",
+        "a query packed the rows of every plane through two planes beside the axis its offsets close, and the row a plane packs belongs to the plane its offset reaches",
     );
 }

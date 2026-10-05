@@ -13,6 +13,10 @@ mod device {
         );
     }
 
+    fn slot_of(packed: u32, axis: u32) -> u32 {
+        return (packed >> (axis * 8u32)) & 0xffu32;
+    }
+
     fn coordinates(flat: u32, dims: uvec4) -> uvec4 {
         let w = flat % dims.w;
         let z = flat / dims.w % dims.z;

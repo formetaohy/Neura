@@ -939,18 +939,41 @@ fn assert_a_segmented_attention_walks_the_planes_its_query_holds(
     tasks: &[Task],
 ) {
     for task in tasks {
-        if !matches!(task.kind, Kind::AttentionKeyGrad | Kind::AttentionValueGrad)
-            || task.segments == NO_VALUE
+        if task.segments == NO_VALUE
+            || !matches!(
+                task.kind,
+                Kind::Attention
+                    | Kind::AttentionQueryGrad
+                    | Kind::AttentionKeyGrad
+                    | Kind::AttentionValueGrad
+            )
         {
             continue;
         }
-        let query = values[task.inputs[0] as usize].shape.dims();
+        let query = values[task.inputs[0] as usize].shape;
+        let key = values[task.inputs[1] as usize].shape;
+        let packed = query.free(2).is_some() && query.free(2) == key.free(2);
+        if matches!(task.kind, Kind::Attention | Kind::AttentionQueryGrad) {
+            assert_eq!(
+                matches!(task.split, Split::Ragged { .. }),
+                packed,
+                "a segmented {} task weighs the queries of a plane against the keys its offsets close, and the query of {:?} walks free extent {:?} where those offsets pack free extent {:?}",
+                task.kind.name(),
+                query.dims(),
+                query.free(2),
+                key.free(2),
+            );
+        }
+        let planes = if packed {
+            values[task.segments as usize].shape.elements() - 1
+        } else {
+            query.dims()[0] * query.dims()[1]
+        };
         assert!(
-            task.plane < query[0] * query[1],
-            "a segmented {} task walks plane {} of the ragged axis its keys pack, and the query it weighs holds {} planes",
+            task.plane < planes,
+            "a segmented {} task walks plane {} of the ragged axis its keys pack, and the query it weighs holds {planes} planes",
             task.kind.name(),
             task.plane,
-            query[0] * query[1],
         );
     }
 }

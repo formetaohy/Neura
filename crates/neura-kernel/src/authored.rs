@@ -29,10 +29,6 @@ mod device {
         return 1u32;
     }
 
-    fn slot_of(packed: u32, axis: u32) -> u32 {
-        return (packed >> (axis * 8u32)) & 0xffu32;
-    }
-
     fn walked_extent(slot: u32, bound: u32) -> u32 {
         let free = slot != NO_SLOT;
         return select(bound, extents[select(0u32, slot, free)], free);
