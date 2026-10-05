@@ -10,6 +10,9 @@ mod device {
         let source = values[task.a];
         let output = values[task.out];
         let columns = source.dims.w;
+        if columns == 0u32 {
+            return;
+        }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
             let mut local_max = -3.4028235e38;
@@ -43,6 +46,9 @@ mod device {
         let gradient = values[task.b];
         let output = values[task.out];
         let columns = probability.dims.w;
+        if columns == 0u32 {
+            return;
+        }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
             let mut local = 0.0;
@@ -74,6 +80,9 @@ mod device {
         let source = values[task.a];
         let output = values[task.out];
         let columns = source.dims.w;
+        if columns == 0u32 {
+            return;
+        }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
             let mut local_max = -3.4028235e38;
@@ -108,6 +117,9 @@ mod device {
         let gradient = values[task.b];
         let output = values[task.out];
         let columns = probability.dims.w;
+        if columns == 0u32 {
+            return;
+        }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
             let mut local = 0.0;

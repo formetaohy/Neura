@@ -449,6 +449,69 @@ fn a_family_learns_through_every_binding() {
 }
 
 #[test]
+fn a_softmax_family_walks_every_width_a_binding_holds() {
+    let runtime = open();
+    for log in [false, true] {
+        let graph = Graph::new();
+        let width_extent = graph.free(8);
+        let dynamic = Shape::of([1, 1, 4, 8]).freed(&[(3, width_extent)]);
+        let (logits, weight, probabilities, gradient) = softmax_family(&graph, log, dynamic);
+        let store = runtime.weights(&graph);
+        let family = runtime.compile(&graph, &store);
+        for width in [8u32, 5, 1, 0] {
+            let logits_data = data(4 * width, 5);
+            let weight_data = data(4 * width, 11);
+            let (expected, expected_gradient) = if width == 0 {
+                (Vec::new(), Vec::new())
+            } else {
+                let graph = Graph::new();
+                let (logits, weight, probabilities, gradient) =
+                    softmax_family(&graph, log, Shape::of([1, 1, 4, width]));
+                let store = runtime.weights(&graph);
+                let program = runtime.compile(&graph, &store);
+                runtime.write(&program, logits, &logits_data);
+                runtime.write(&program, weight, &weight_data);
+                runtime.run(&program);
+                (
+                    runtime.read(&program, probabilities),
+                    runtime.read(&program, gradient),
+                )
+            };
+            runtime.bind(&family, &[width]);
+            runtime.write(&family, logits, &logits_data);
+            runtime.write(&family, weight, &weight_data);
+            runtime.run(&family);
+            assert_close(&runtime.read(&family, probabilities), &expected, 1e-4);
+            assert_close(&runtime.read(&family, gradient), &expected_gradient, 1e-4);
+        }
+    }
+}
+
+fn softmax_family(
+    graph: &Graph<'static>,
+    log: bool,
+    shape: Shape,
+) -> (
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+    Value<'static>,
+) {
+    let logits = graph.gradient_input(shape, Element::Single);
+    let weight = graph.input(shape, Element::Single);
+    let probabilities = if log {
+        graph.log_softmax(logits)
+    } else {
+        graph.softmax(logits)
+    };
+    let loss = graph.sum(graph.mul(probabilities, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(probabilities);
+    graph.retain(loss);
+    (logits, weight, probabilities, gradients.of(logits))
+}
+
+#[test]
 fn a_free_extent_stops_where_a_second_length_starts() {
     let graph = Graph::new();
     let batch = graph.free(4);

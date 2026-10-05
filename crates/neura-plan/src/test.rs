@@ -171,6 +171,41 @@ fn a_boundary_stays_inside_the_numbers_of_its_tensor() {
     }
 }
 
+#[test]
+fn a_row_walk_counts_the_rows_of_a_tensor_that_holds_no_numbers() {
+    let graph = Graph::new();
+    let width = graph.free(8);
+    let shape = Shape::of([1, 1, 4, 8]).freed(&[(3, width)]);
+    let extents = span::Extents::of(
+        &[ValueInfo::derived(shape, 0)],
+        &[],
+        &[span::Measure::Rows(0), span::Measure::Elements(0)],
+    );
+    assert_eq!(
+        extents.count(1, &[0]),
+        0,
+        "a tensor of no numbers holds none",
+    );
+    assert_eq!(
+        extents.count(0, &[0]),
+        4,
+        "a row of no numbers still walks the rows the shape of its tensor holds",
+    );
+    assert_eq!(extents.count(0, &[8]), 4);
+    assert_eq!(
+        extents.span(
+            span::Split::Uniform {
+                measure: 0,
+                index: 0,
+                group: 1,
+            },
+            &[0],
+        ),
+        (0, 4),
+        "a row walk names the rows a body must leave alone when they hold no numbers",
+    );
+}
+
 fn lowered(dynamic: bool) -> lower::Plan {
     let graph = Graph::new();
     let shape = if dynamic {

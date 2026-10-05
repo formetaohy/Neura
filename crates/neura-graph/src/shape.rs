@@ -484,7 +484,7 @@ impl Shape {
     }
 
     pub fn rows(self) -> u32 {
-        self.elements / self.dims[3]
+        self.dims[0] * self.dims[1] * self.dims[2]
     }
 
     pub fn columns(self) -> u32 {

@@ -18,6 +18,10 @@ mod device {
     }
 
     fn coordinates(flat: u32, dims: uvec4) -> uvec4 {
+        if dims.x == 0u32 || dims.y == 0u32 || dims.z == 0u32 || dims.w == 0u32 {
+            refuse(refusal::TENSOR, refusal::EMPTY, 0u32);
+            return uvec4(0u32, 0u32, 0u32, 0u32);
+        }
         let w = flat % dims.w;
         let z = flat / dims.w % dims.z;
         let y = flat / (dims.w * dims.z) % dims.y;

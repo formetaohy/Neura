@@ -687,6 +687,9 @@ fn refusal_message(word: u32) -> String {
     if category == Refusal::Element {
         return format!("the device refused element {code} of a tensor");
     }
+    if category == Refusal::Empty {
+        return "the device refused a coordinate in a dimension of no numbers".to_owned();
+    }
     if subject >= Kind::COUNT {
         return format!(
             "the device refused {} {code} of kind {subject}",
@@ -727,5 +730,6 @@ fn refusal_message(word: u32) -> String {
             kind.name(),
         ),
         Refusal::Element => unreachable!("an element refusal carries no kind"),
+        Refusal::Empty => unreachable!("an empty refusal carries no kind"),
     }
 }

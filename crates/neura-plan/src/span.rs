@@ -160,7 +160,7 @@ impl Extents {
 
     fn rows(&self, value: u32, extents: &[u32]) -> u32 {
         let dims = self.dims(value, extents);
-        dims.iter().product::<u32>() / dims[3]
+        dims[0] * dims[1] * dims[2]
     }
 
     fn words(&self, value: u32, extents: &[u32]) -> u32 {
