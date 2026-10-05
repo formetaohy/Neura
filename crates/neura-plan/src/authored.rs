@@ -204,7 +204,8 @@ pub(crate) fn plan_patches(
                     .iter()
                     .any(|slot| slots.contains(slot))
             });
-            let walks_a_segment = task.segments != NO_VALUE && task.depends.contains(&count);
+            let walks_a_segment = (task.grid != NO_VALUE || task.segments != NO_VALUE)
+                && task.depends.contains(&count);
             if walks_the_measure || walks_a_segment {
                 assert_ne!(
                     seat[index], NO_VALUE,
@@ -215,7 +216,7 @@ pub(crate) fn plan_patches(
         }
         if segment != NO_VALUE {
             for (index, task) in tasks.iter().enumerate() {
-                if task.segments != segment {
+                if task.grid != segment && task.segments != segment {
                     continue;
                 }
                 assert!(

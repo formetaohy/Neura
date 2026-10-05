@@ -152,6 +152,7 @@ impl Ragged {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: (reach > 0).then_some(reach),
+                query_segments: None,
             },
         );
         graph.retain(out);
@@ -248,6 +249,7 @@ fn device_counts_rule_the_key_spans() {
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -335,6 +337,7 @@ fn a_segmented_attention_names_an_offset_per_plane() {
                 origin: None,
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -361,6 +364,7 @@ fn a_causal_segmented_attention_walks_a_cursor() {
                 origin: None,
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -408,6 +412,7 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
                 origin: None,
                 segments: Some(offsets),
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -450,6 +455,7 @@ impl Planes {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
         let total = graph.sum(cache);
@@ -584,6 +590,7 @@ impl CountedPlanes {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
         let total = graph.sum(cache);
@@ -701,6 +708,7 @@ fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -955,6 +963,7 @@ impl Trainable {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: (reach > 0).then_some(reach),
+                query_segments: None,
             },
         );
         let weight = graph.input(planed([heads, batch, rows, width]), Element::Single);

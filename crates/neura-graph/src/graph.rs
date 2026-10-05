@@ -48,6 +48,7 @@ pub struct AttentionOptions<'g> {
     pub origin: Option<Value<'g>>,
     pub segments: Option<Value<'g>>,
     pub reach: Option<u32>,
+    pub query_segments: Option<Value<'g>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -101,6 +102,7 @@ pub struct TaskInfo {
     pub offset: u32,
     pub segments: u32,
     pub reach: u32,
+    pub queries: u32,
     pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
@@ -122,6 +124,7 @@ impl TaskInfo {
             offset: 0,
             segments: NO_VALUE,
             reach: 0,
+            queries: NO_VALUE,
             prelude: Vec::new(),
             chain: Vec::new(),
         }

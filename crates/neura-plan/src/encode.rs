@@ -424,6 +424,9 @@ impl Plan {
                 segment: task.segments,
                 keys: task.keys,
                 reach: task.reach,
+                queries: task.queries,
+                tokens: task.tokens,
+                grid: task.grid,
             });
             if task.in_place
                 && task
@@ -903,6 +906,13 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
             group,
         } = task.split
         else {
+            assert_eq!(
+                task.grid,
+                NO_VALUE,
+                "a {} task walks no rows a ragged axis packs, and it names the offsets value {} as the grid of its rows; a grid closes the rows of every plane of one axis",
+                task.kind.name(),
+                task.grid,
+            );
             continue;
         };
         assert!(
@@ -910,17 +920,18 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
             "a ragged task walks chunk {index} of {group} of plane {plane}, where the axis closes {planes} planes",
         );
         assert!(
-            task.segments != NO_VALUE,
-            "a {} task walks the rows a ragged axis packs, and it names no offsets; the axis a row of a plane belongs to is the value that closes its offsets",
+            task.grid == task.segments || task.grid == task.queries,
+            "a {} task walks the rows a ragged axis packs, and value {} closes the rows of no axis it weighs; a grid is the key offsets or the query offsets of the task",
             task.kind.name(),
+            task.grid,
         );
         let (grouped, chunks) = walked
-            .entry((task.segments, plane, task.out))
+            .entry((task.grid, plane, task.out))
             .or_insert((group, Vec::new()));
         assert_eq!(
             *grouped, group,
             "plane {plane} of the ragged axis value {} walks {group} chunks, and the tasks that write value {} walk {grouped}; one output parts a plane one way",
-            task.segments, task.out,
+            task.grid, task.out,
         );
         chunks.push(index);
     }
@@ -952,7 +963,8 @@ fn assert_a_segmented_attention_walks_the_planes_its_query_holds(
         }
         let query = values[task.inputs[0] as usize].shape;
         let key = values[task.inputs[1] as usize].shape;
-        let packed = query.free(2).is_some() && query.free(2) == key.free(2);
+        let packed =
+            query.free(2).is_some() && (query.free(2) == key.free(2) || task.queries != NO_VALUE);
         if matches!(task.kind, Kind::Attention | Kind::AttentionQueryGrad) {
             assert_eq!(
                 matches!(task.split, Split::Ragged { .. }),
@@ -965,7 +977,7 @@ fn assert_a_segmented_attention_walks_the_planes_its_query_holds(
             );
         }
         let planes = if packed {
-            values[task.segments as usize].shape.elements() - 1
+            values[task.grid as usize].shape.elements() - 1
         } else {
             query.dims()[0] * query.dims()[1]
         };

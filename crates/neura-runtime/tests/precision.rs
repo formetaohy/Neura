@@ -586,6 +586,7 @@ fn narrow_stack<'g>(graph: &Graph<'g>, element: Element, data: Shape) -> [Value<
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     let out = graph.sum(graph.softmax(attended));

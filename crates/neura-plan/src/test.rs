@@ -277,6 +277,9 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
         reach: 0,
         keys: 0,
         plane: 0,
+        queries: NO_VALUE,
+        tokens: 0,
+        grid: NO_VALUE,
     };
     assert!(
         !refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(

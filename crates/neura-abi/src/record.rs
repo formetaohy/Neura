@@ -113,6 +113,9 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     segment: u32 => U32,
     keys: u32 => U32,
     reach: u32 => U32,
+    queries: u32 => U32,
+    tokens: u32 => U32,
+    grid: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

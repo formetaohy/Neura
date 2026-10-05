@@ -12,8 +12,8 @@ use support::{assert_close, open};
 
 const WIDTH: u32 = 4;
 const PLANES: u32 = 4;
-const BOUND: u32 = 16;
-const TALL: u32 = 512;
+const KEYS: u32 = 16;
+const QUERIES: u32 = 12;
 const SCALE: f32 = 0.5;
 
 fn data(count: u32, seed: u32) -> Vec<f32> {
@@ -53,35 +53,48 @@ struct Reference {
     value_grad: Vec<f32>,
 }
 
-fn reference(lengths: &[f32], batch: Batch<'_>, reach: u32, causal: bool, width: u32) -> Reference {
+fn reference(
+    query_lengths: &[f32],
+    key_lengths: &[f32],
+    batch: Batch<'_>,
+    reach: u32,
+    causal: bool,
+    width: u32,
+) -> Reference {
     let Batch {
         keys,
         values,
         queries,
         weight,
     } = batch;
-    let offsets = offsets(lengths);
-    let live = offsets.last().copied().unwrap_or(0) as usize;
+    let query_offsets = offsets(query_lengths);
+    let key_offsets = offsets(key_lengths);
+    let query_live = query_offsets.last().copied().unwrap_or(0) as usize;
+    let key_live = key_offsets.last().copied().unwrap_or(0) as usize;
     let width = width as usize;
-    let mut out = vec![0.0f32; live * width];
-    let mut query_grad = vec![0.0f32; live * width];
-    let mut key_grad = vec![0.0f32; live * width];
-    let mut value_grad = vec![0.0f32; live * width];
-    for (plane, length) in lengths.iter().enumerate() {
-        let count = *length as usize;
-        let start = offsets[plane] as usize;
-        for row in 0..count {
-            let at = (start + row) * width;
+    let mut out = vec![0.0f32; query_live * width];
+    let mut query_grad = vec![0.0f32; query_live * width];
+    let mut key_grad = vec![0.0f32; key_live * width];
+    let mut value_grad = vec![0.0f32; key_live * width];
+    for (plane, key_length) in key_lengths.iter().enumerate() {
+        let keys_in_plane = *key_length as usize;
+        let queries_in_plane = query_lengths[plane] as usize;
+        let key_start = key_offsets[plane] as usize;
+        let query_start = query_offsets[plane] as usize;
+        let shift = keys_in_plane - queries_in_plane;
+        for row in 0..queries_in_plane {
+            let at = (query_start + row) * width;
             let query = &queries[at..at + width];
             let dout = &weight[at..at + width];
+            let position = shift + row;
             let mut attended = Vec::new();
             let mut scores = Vec::new();
-            let last = if causal { row } else { count - 1 };
+            let last = if causal { position } else { keys_in_plane - 1 };
             for key in 0..=last {
-                if reach > 0 && (row - key) as u32 >= reach {
+                if reach > 0 && (position - key) as u32 >= reach {
                     continue;
                 }
-                let packed = (start + key) * width;
+                let packed = (key_start + key) * width;
                 scores.push(
                     query
                         .iter()
@@ -139,24 +152,24 @@ fn reference(lengths: &[f32], batch: Batch<'_>, reach: u32, causal: bool, width:
 #[derive(Clone, Copy)]
 struct Case {
     planes: u32,
-    bound: u32,
+    queries: u32,
+    keys: u32,
     width: u32,
     reach: u32,
     causal: bool,
     binding: bool,
-    weighed: bool,
 }
 
 impl Case {
-    fn of(planes: u32, bound: u32, width: u32) -> Self {
+    fn of(planes: u32, queries: u32, keys: u32, width: u32) -> Self {
         Self {
             planes,
-            bound,
+            queries,
+            keys,
             width,
             reach: 0,
             causal: true,
             binding: false,
-            weighed: false,
         }
     }
 
@@ -174,29 +187,25 @@ impl Case {
         self.binding = true;
         self
     }
-
-    fn weighed(mut self) -> Self {
-        self.weighed = true;
-        self
-    }
 }
 
-struct Packed {
+struct Chunked {
     runtime: Runtime,
     graph: Graph<'static>,
-    lengths: Value<'static>,
+    query_lengths: Value<'static>,
+    key_lengths: Value<'static>,
     keys: Value<'static>,
     values: Value<'static>,
     queries: Value<'static>,
     weight: Value<'static>,
-    offsets: Value<'static>,
+    query_offsets: Value<'static>,
+    key_offsets: Value<'static>,
     out: Value<'static>,
     gradients: [Value<'static>; 3],
-    factor: Option<Value<'static>>,
     case: Case,
 }
 
-impl Packed {
+impl Chunked {
     fn over(backends: Backends, case: Case) -> Self {
         Self::build(backend::open_with(backends), case)
     }
@@ -204,66 +213,67 @@ impl Packed {
     fn build(runtime: Runtime, case: Case) -> Self {
         let Case {
             planes,
-            bound,
+            queries,
+            keys,
             width,
             reach,
             causal,
             binding,
-            weighed,
         } = case;
         let graph: Graph<'static> = Graph::new();
         let live = binding.then(|| graph.free(planes));
-        let lengths = graph.input(
-            match live {
-                Some(live) => Shape::of([1, planes]).freed(&[(3, live)]),
-                None => Shape::vector(planes),
-            },
-            Element::Single,
-        );
-        let ragged = graph.ragged(bound, lengths);
-        let packed = Shape::of([1, 1, bound, width]).freed(&[(2, ragged.extent)]);
-        let queries = graph.gradient_input(packed, Element::Single);
-        let keys = graph.gradient_input(packed, Element::Single);
-        let values = graph.gradient_input(packed, Element::Single);
+        let lengths = |bound: u32| {
+            let shape = match live {
+                Some(live) => Shape::of([1, bound]).freed(&[(3, live)]),
+                None => Shape::vector(bound),
+            };
+            graph.input(shape, Element::Single)
+        };
+        let query_lengths = lengths(planes);
+        let key_lengths = lengths(planes);
+        let query_axis = graph.ragged(queries, query_lengths);
+        let key_axis = graph.ragged(keys, key_lengths);
+        let packed_queries = Shape::of([1, 1, queries, width]).freed(&[(2, query_axis.extent)]);
+        let packed_keys = Shape::of([1, 1, keys, width]).freed(&[(2, key_axis.extent)]);
+        let query = graph.gradient_input(packed_queries, Element::Single);
+        let key = graph.gradient_input(packed_keys, Element::Single);
+        let value = graph.gradient_input(packed_keys, Element::Single);
         let out = graph.attention(
-            queries,
-            keys,
-            values,
+            query,
+            key,
+            value,
             AttentionOptions {
                 scale: SCALE,
                 causal,
                 origin: None,
-                segments: Some(ragged.offsets),
+                segments: Some(key_axis.offsets),
                 reach: (reach > 0).then_some(reach),
-                query_segments: None,
+                query_segments: Some(query_axis.offsets),
             },
         );
-        let weight = graph.input(packed, Element::Single);
+        let weight = graph.input(packed_queries, Element::Single);
         let loss = graph.sum(graph.mul(out, weight));
         let collected = graph.backward(loss);
-        let factor = weighed.then(|| graph.input(packed, Element::Single));
-        let query_grad = match factor {
-            Some(factor) => graph.mul(collected.of(queries), factor),
-            None => collected.of(queries),
-        };
-        let gradients = [query_grad, collected.of(keys), collected.of(values)];
+        let gradients = [collected.of(query), collected.of(key), collected.of(value)];
         graph.retain(out);
         for gradient in gradients {
             graph.retain(gradient);
         }
-        graph.retain(ragged.offsets);
+        graph.retain(query_axis.offsets);
+        graph.retain(key_axis.offsets);
         Self {
             runtime,
             graph,
-            lengths,
-            keys,
-            values,
-            queries,
+            query_lengths,
+            key_lengths,
+            keys: key,
+            values: value,
+            queries: query,
             weight,
-            offsets: ragged.offsets,
+            query_offsets: query_axis.offsets,
+            key_offsets: key_axis.offsets,
             out,
             gradients,
-            factor,
             case,
         }
     }
@@ -289,22 +299,27 @@ impl Packed {
         self.runtime.bind(program, &[planes]);
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<Vec<f32>> {
-        let bound = self.graph.shape(self.keys).dims()[2];
-        let width = self.graph.shape(self.keys).dims()[3];
-        let keys = data(bound * width, 43);
-        let values = data(bound * width, 71);
-        let queries = data(bound * width, 17);
-        let weight = data(bound * width, 89);
-        let factor = data(bound * width, 113);
-        self.runtime.write(program, self.lengths, lengths);
+    fn step(
+        &self,
+        program: &Program<'_>,
+        query_lengths: &[f32],
+        key_lengths: &[f32],
+    ) -> Vec<Vec<f32>> {
+        let shape = |value| self.graph.shape(value).dims();
+        let query_bound = shape(self.queries)[2];
+        let key_bound = shape(self.keys)[2];
+        let width = shape(self.keys)[3];
+        let keys = data(key_bound * width, 43);
+        let values = data(key_bound * width, 71);
+        let queries = data(query_bound * width, 17);
+        let weight = data(query_bound * width, 89);
+        self.runtime
+            .write(program, self.query_lengths, query_lengths);
+        self.runtime.write(program, self.key_lengths, key_lengths);
         self.runtime.write(program, self.keys, &keys);
         self.runtime.write(program, self.values, &values);
         self.runtime.write(program, self.queries, &queries);
         self.runtime.write(program, self.weight, &weight);
-        if let Some(value) = self.factor {
-            self.runtime.write(program, value, &factor);
-        }
         self.runtime.run(program);
         let produced = self.runtime.read_many(
             program,
@@ -315,16 +330,21 @@ impl Packed {
                 self.gradients[2],
             ],
         );
-        let scanned = self.runtime.read(program, self.offsets);
-        assert_eq!(
-            scanned[..lengths.len() + 1],
-            offsets(lengths)
-                .into_iter()
-                .map(|offset| offset as f32)
-                .collect::<Vec<f32>>(),
-        );
+        let scanned = self
+            .runtime
+            .read_many(program, &[self.query_offsets, self.key_offsets]);
+        for (scanned, lengths) in [(&scanned[0], query_lengths), (&scanned[1], key_lengths)] {
+            assert_eq!(
+                scanned[..lengths.len() + 1],
+                offsets(lengths)
+                    .into_iter()
+                    .map(|offset| offset as f32)
+                    .collect::<Vec<f32>>(),
+            );
+        }
         let expected = reference(
-            lengths,
+            query_lengths,
+            key_lengths,
             Batch {
                 keys: &keys,
                 values: &values,
@@ -335,19 +355,8 @@ impl Packed {
             self.case.causal,
             width,
         );
-        let weighed = expected
-            .query_grad
-            .iter()
-            .zip(&factor)
-            .map(|(gradient, factor)| gradient * factor)
-            .collect::<Vec<f32>>();
-        let query_grad = if self.factor.is_some() {
-            &weighed
-        } else {
-            &expected.query_grad
-        };
         assert_close(&produced[0], &expected.out, 1e-5);
-        assert_close(&produced[1], query_grad, 1e-5);
+        assert_close(&produced[1], &expected.query_grad, 1e-5);
         assert_close(&produced[2], &expected.key_grad, 1e-5);
         assert_close(&produced[3], &expected.value_grad, 1e-5);
         produced
@@ -355,65 +364,54 @@ impl Packed {
 }
 
 #[test]
-fn a_packed_query_walks_the_offsets_its_keys_close() {
-    let packed = Packed::over(Backends::PLATFORM, Case::of(PLANES, BOUND, WIDTH));
-    let program = packed.compile();
-    for lengths in [
-        [3.0f32, 0.0, 5.0, 2.0].as_slice(),
-        [4.0, 4.0, 4.0, 4.0].as_slice(),
-        [0.0, 0.0, 0.0, 0.0].as_slice(),
-        [1.0, 0.0, 0.0, 0.0].as_slice(),
-        [0.0, 0.0, 0.0, 7.0].as_slice(),
-        [6.0, 5.0, 3.0, 2.0].as_slice(),
+fn a_chunked_prefill_weighs_the_rows_each_plane_packs_against_its_cached_keys() {
+    let chunked = Chunked::build(open(), Case::of(PLANES, QUERIES, KEYS, WIDTH));
+    let program = chunked.compile();
+    for (queries, keys) in [
+        ([3.0f32, 2.0, 1.0, 0.0], [7.0f32, 5.0, 3.0, 1.0]),
+        ([4.0, 4.0, 4.0, 0.0], [4.0, 4.0, 4.0, 0.0]),
+        ([0.0, 0.0, 0.0, 0.0], [6.0, 5.0, 3.0, 2.0]),
+        ([2.0, 0.0, 0.0, 0.0], [2.0, 4.0, 4.0, 4.0]),
+        ([1.0, 2.0, 3.0, 1.0], [6.0, 5.0, 4.0, 1.0]),
     ] {
-        packed.step(&program, lengths);
+        chunked.step(&program, &queries, &keys);
     }
 }
 
 #[test]
-fn a_packed_query_without_a_mask_weighs_every_key_of_its_plane() {
-    let packed = Packed::build(open(), Case::of(PLANES, BOUND, WIDTH).unmasked());
-    let program = packed.compile();
-    packed.step(&program, &[3.0, 0.0, 5.0, 2.0]);
-    packed.step(&program, &[6.0, 5.0, 3.0, 2.0]);
+fn a_chunked_prefill_without_a_mask_weighs_every_cached_key_of_its_plane() {
+    let chunked = Chunked::build(open(), Case::of(PLANES, QUERIES, KEYS, WIDTH).unmasked());
+    let program = chunked.compile();
+    chunked.step(&program, &[3.0, 2.0, 1.0, 0.0], &[7.0, 5.0, 3.0, 1.0]);
+    chunked.step(&program, &[2.0, 4.0, 4.0, 0.0], &[4.0, 6.0, 4.0, 2.0]);
 }
 
 #[test]
-fn a_windowed_packed_query_reaches_back_within_its_plane() {
-    for reach in [1, 2, 3] {
-        let case = Case::of(PLANES, BOUND, WIDTH).windowed(reach);
-        let packed = Packed::build(open(), case);
-        let program = packed.compile();
-        packed.step(&program, &[3.0, 0.0, 5.0, 2.0]);
-        packed.step(&program, &[6.0, 1.0, 2.0, 0.0]);
+fn a_windowed_chunked_prefill_reaches_back_from_the_position_its_rows_pack() {
+    for reach in [1, 2, 3, 5] {
+        let case = Case::of(PLANES, QUERIES, KEYS, WIDTH).windowed(reach);
+        let chunked = Chunked::build(open(), case);
+        let program = chunked.compile();
+        chunked.step(&program, &[3.0, 2.0, 1.0, 0.0], &[7.0, 5.0, 3.0, 1.0]);
+        chunked.step(&program, &[2.0, 4.0, 4.0, 1.0], &[6.0, 4.0, 5.0, 1.0]);
     }
 }
 
 #[test]
-fn a_packed_query_gradient_reads_the_operand_it_folds_at_the_row_it_walks() {
-    let packed = Packed::build(open(), Case::of(PLANES, BOUND, WIDTH).weighed());
-    let program = packed.compile();
-    packed.step(&program, &[3.0, 0.0, 5.0, 2.0]);
-    packed.step(&program, &[6.0, 5.0, 3.0, 2.0]);
-}
-
-#[test]
-fn a_packed_query_of_a_plane_longer_than_a_workgroup_trains_every_row() {
-    let packed = Packed::build(open(), Case::of(PLANES, TALL, WIDTH));
-    let program = packed.compile_narrow();
-    packed.step(&program, &[300.0, 70.0, 0.0, 5.0]);
-}
-
-#[test]
-fn a_packed_query_walks_only_the_planes_a_binding_holds() {
-    let packed = Packed::build(open(), Case::of(PLANES, BOUND, WIDTH).bound());
-    let program = packed.compile();
-    let lengths = [3.0f32, 2.0, 5.0, 4.0];
-    packed.bind(&program, PLANES);
-    let wide = packed.step(&program, &lengths);
+fn a_chunked_prefill_walks_only_the_planes_a_binding_holds() {
+    let chunked = Chunked::build(open(), Case::of(PLANES, QUERIES, KEYS, WIDTH).bound());
+    let program = chunked.compile();
+    let queries = [3.0f32, 2.0, 1.0, 1.0];
+    let keys = [7.0f32, 5.0, 3.0, 1.0];
+    chunked.bind(&program, PLANES);
+    let wide = chunked.step(&program, &queries, &keys);
     for planes in [PLANES - 1, 1] {
-        packed.bind(&program, planes);
-        let narrow = packed.step(&program, &lengths[..planes as usize]);
+        chunked.bind(&program, planes);
+        let narrow = chunked.step(
+            &program,
+            &queries[..planes as usize],
+            &keys[..planes as usize],
+        );
         for (narrow, wide) in narrow.iter().zip(&wide) {
             assert_eq!(
                 narrow,
@@ -421,5 +419,21 @@ fn a_packed_query_walks_only_the_planes_a_binding_holds() {
                 "the planes a binding holds walk the rows their own offsets close",
             );
         }
+    }
+}
+
+#[test]
+fn a_chunked_prefill_of_a_plane_longer_than_a_workgroup_trains_every_row() {
+    let chunked = Chunked::build(open(), Case::of(PLANES, 512, 512, WIDTH));
+    let program = chunked.compile_narrow();
+    chunked.step(&program, &[130.0, 70.0, 0.0, 5.0], &[300.0, 70.0, 1.0, 5.0]);
+}
+
+#[test]
+fn every_platform_backend_trains_a_chunked_prefill() {
+    for backends in Backends::PLATFORM {
+        let chunked = Chunked::over(backends, Case::of(PLANES, QUERIES, KEYS, WIDTH));
+        let program = chunked.compile();
+        chunked.step(&program, &[3.0, 2.0, 1.0, 0.0], &[7.0, 5.0, 3.0, 1.0]);
     }
 }

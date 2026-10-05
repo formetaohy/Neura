@@ -62,6 +62,7 @@ fn a_prefix_sum_is_no_ragged_axis() {
                     origin: None,
                     segments: Some(prefix.exclusive),
                     reach: None,
+                    query_segments: None,
                 },
             );
         }),

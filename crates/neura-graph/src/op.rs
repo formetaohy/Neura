@@ -273,6 +273,11 @@ impl<'g> Graph<'g> {
             );
         }
         let tracked = self.tracked(&[query, key, value]);
+        let queries = attention.query_segments.map(|offsets| self.own(offsets));
+        assert!(
+            queries.is_none() || segments.is_some(),
+            "a query axis walks the rows its own offsets close, and every row it walks weighs the keys of the plane its seat reaches; an attention without key segments holds no plane to seat a query in",
+        );
         let mut packed = false;
         if let Some(offsets) = segments {
             let axis = {
@@ -306,8 +311,43 @@ impl<'g> Graph<'g> {
                     && value_shape.dims()[1] == 1,
                 "a segmented attention packs the keys and values of every plane into their token axis, and keys of {key_shape:?} walk values of {value_shape:?}",
             );
-            packed = query_shape.free(2) == Some(axis.token);
-            if packed {
+            packed = queries.is_some() || query_shape.free(2) == Some(axis.token);
+            if let Some(query_offsets) = queries {
+                let query_axis = {
+                    let state = self.state.borrow();
+                    state.ragged.get(&query_offsets.id()).cloned()
+                }
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a segmented attention walks the queries of every plane in the rows its own offsets close, and value {} holds a table no ragged axis published; close the lengths of every plane with Graph::ragged",
+                        query_offsets.id(),
+                    )
+                });
+                assert_eq!(
+                    query_shape.free(2),
+                    Some(query_axis.token),
+                    "a segmented attention packs the queries of every plane into the token axis its offsets close, and the queries of {query_shape:?} walk free extent {:?} where the ragged axis closes free extent {}",
+                    query_shape.free(2),
+                    query_axis.token,
+                );
+                assert!(
+                    query_shape.dims()[0] == 1 && query_shape.dims()[1] == 1,
+                    "a segmented attention that packs its queries walks the rows of every plane in the free extent the offsets close, and {:?} holds {} planes beside it: the row a plane packs belongs to the plane its offset reaches",
+                    query_shape.dims(),
+                    query_shape.dims()[0] * query_shape.dims()[1],
+                );
+                assert!(
+                    origin.is_none(),
+                    "a query axis walks the rows its offsets close, and the row of a plane reaches the keys it packs; a cursor places rows the packing already places",
+                );
+                assert!(
+                    query_axis.planes.domain().meets(&axis.planes.domain())
+                        && query_axis.planes.elements() == axis.planes.elements(),
+                    "a segmented attention weighs the queries of {} planes against the keys of {} planes, and the device reads the row a query packs beside the key its own plane packs: one extent closes each axis and both axes walk the same planes",
+                    query_axis.planes.elements(),
+                    axis.planes.elements(),
+                );
+            } else if packed {
                 assert!(
                     query_shape.dims()[0] == 1 && query_shape.dims()[1] == 1,
                     "a segmented attention that packs its queries walks the rows of every plane in the free extent the offsets close, and {:?} holds {} planes beside it: the row a plane packs belongs to the plane its offset reaches",
@@ -420,7 +460,10 @@ impl<'g> Graph<'g> {
             );
         }
         assert!(
-            !attention.causal || origin.is_some() || query_shape.dims()[2] == key_shape.dims()[2],
+            !attention.causal
+                || origin.is_some()
+                || packed
+                || query_shape.dims()[2] == key_shape.dims()[2],
             "a causal attention walks {} queries over {} keys, and a cursor is what aligns them",
             query_shape.dims()[2],
             key_shape.dims()[2],
@@ -484,6 +527,7 @@ impl<'g> Graph<'g> {
         task.extra = log_sum_exp.id();
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.segments = segments.map_or(NO_VALUE, |offsets| offsets.id());
+        task.queries = queries.map_or(NO_VALUE, |offsets| offsets.id());
         task.param = attention.scale;
         task.slot = u32::from(attention.causal);
         task.reach = reach.unwrap_or(0);

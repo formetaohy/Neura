@@ -122,6 +122,7 @@ impl Batch {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
         for value in [

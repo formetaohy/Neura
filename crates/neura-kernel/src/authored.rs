@@ -167,7 +167,6 @@ mod device {
         refuse(refusal::TENSOR, refusal::EXTENT, 0u32);
         return 0u32;
     }
-
     fn live_segments(offsets: Value, total: u32) -> u32 {
         let mut segments = 0u32;
         loop {
@@ -207,19 +206,37 @@ mod device {
         }
     }
 
-    fn patch_ragged(task: Task, id: u32, segments: u32, live: u32) {
+    fn patch_ragged(
+        task: Task,
+        id: u32,
+        grid: Value,
+        segments: u32,
+        live: u32,
+        owns_keys: bool,
+        owns_tokens: bool,
+    ) {
         tasks[id].first = 0u32;
         tasks[id].count = 0u32;
-        tasks[id].keys = 0u32;
+        if owns_keys {
+            tasks[id].keys = 0u32;
+        }
+        if owns_tokens {
+            tasks[id].tokens = 0u32;
+        }
         if task.plane >= segments {
             return;
         }
-        let rows = segment_keys(task, live + 1u32);
+        let rows = axis_rows(grid, task.plane, live + 1u32, refusal::TENSOR);
         let first = walked_boundary(rows, task.index, task.group);
         let end = walked_boundary(rows, task.index + 1u32, task.group);
-        tasks[id].keys = rows;
         tasks[id].first = first;
         tasks[id].count = end - first;
+        if owns_keys {
+            tasks[id].keys = rows;
+        }
+        if owns_tokens {
+            tasks[id].tokens = rows;
+        }
     }
 
     fn patch_extents(patch: u32, lid: u32) {
@@ -255,19 +272,48 @@ mod device {
         for step in stride(lid, record.tasks_count, WORKGROUP_SIZE) {
             let id = patch_list[record.tasks + step];
             let task = tasks[id];
+            let owns_keys = record.segment != NO_VALUE && task.segment == record.segment;
+            let owns_tokens = record.segment != NO_VALUE && task.queries == record.segment;
+            let owns_grid = record.segment != NO_VALUE && task.grid == record.segment;
             if task.split == split::SEGMENT {
-                if record.segment != NO_VALUE && task.segment == record.segment {
+                if owns_keys {
                     patch_segment(task, id, segments, live);
                 }
             } else if task.split == split::RAGGED {
-                if record.segment != NO_VALUE && task.segment == record.segment {
-                    patch_ragged(task, id, segments, live);
+                if owns_grid {
+                    patch_ragged(
+                        task,
+                        id,
+                        values[task.grid],
+                        segments,
+                        live,
+                        task.grid == task.segment,
+                        owns_tokens,
+                    );
+                } else if owns_tokens {
+                    if task.plane < segments {
+                        tasks[id].tokens = axis_rows(
+                            values[task.queries],
+                            task.plane,
+                            live + 1u32,
+                            refusal::TENSOR,
+                        );
+                    } else {
+                        tasks[id].tokens = 0u32;
+                    }
+                }
+                if !owns_grid && owns_keys {
+                    if task.plane < segments {
+                        tasks[id].keys = segment_keys(task, live + 1u32);
+                    } else {
+                        tasks[id].keys = 0u32;
+                    }
                 }
             } else {
                 let count = span_count(task);
                 tasks[id].first = span_first(task);
                 tasks[id].count = count;
-                if record.segment != NO_VALUE && task.segment == record.segment {
+                if owns_keys {
                     if count > 0u32 && task.plane < segments {
                         tasks[id].keys = segment_keys(task, live + 1u32);
                     } else {

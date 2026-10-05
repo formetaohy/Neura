@@ -56,6 +56,7 @@ fn graph_of(
             origin: None,
             segments: None,
             reach: (shapes.reach > 0).then_some(shapes.reach),
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -274,6 +275,7 @@ fn an_attention_refuses_values_of_another_width() {
                     origin: None,
                     segments: None,
                     reach: None,
+                    query_segments: None,
                 },
             );
             graph.retain(out);
@@ -406,6 +408,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 origin: None,
                 segments: None,
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -420,6 +423,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 origin: None,
                 segments: None,
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -435,6 +439,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
                 origin: None,
                 segments: None,
                 reach: None,
+                query_segments: None,
             },
         );
     }));
@@ -458,6 +463,7 @@ fn a_fused_attention_leaves_no_room_for_a_score_it_cannot_carry() {
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -514,6 +520,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     let loss = graph.sum(out);
@@ -629,6 +636,7 @@ fn block<'g>(
                 origin: None,
                 segments: None,
                 reach: None,
+                query_segments: None,
             },
         )
     };

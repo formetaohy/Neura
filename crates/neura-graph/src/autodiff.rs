@@ -660,6 +660,7 @@ impl<'g> Graph<'g> {
                     grad.slot = task.slot;
                     grad.reach = task.reach;
                     grad.segments = task.segments;
+                    grad.queries = task.queries;
                     self.push(grad);
                     self.accumulate(grads, operand, out);
                 }

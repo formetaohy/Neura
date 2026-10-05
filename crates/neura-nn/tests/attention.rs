@@ -62,6 +62,7 @@ fn block(width: u32, heads: u32, key_heads: u32, input_heads: u32, causal: bool)
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     let input = graph.input(
@@ -230,6 +231,7 @@ fn rotary_block() -> Block {
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
         10000.0,
     );

@@ -62,7 +62,8 @@ mod device {
     }
 
     fn walks_the_rows_its_offsets_close(task: Task, query: Value, key: Value) -> bool {
-        return task.segment != NO_VALUE && slot_of(query.free, 2u32) == slot_of(key.free, 2u32);
+        return task.segment != NO_VALUE
+            && (task.queries != NO_VALUE || slot_of(query.free, 2u32) == slot_of(key.free, 2u32));
     }
 
     fn visible(at: u32, keys: u32, written: u32, position: u32, reach: u32, causal: bool) -> bool {
@@ -170,7 +171,11 @@ mod device {
         let segmented = task.segment != NO_VALUE;
         let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
-        let tokens = select(query.dims.z, keys, packed);
+        let tokens = select(
+            query.dims.z,
+            select(keys, task.tokens, task.queries != NO_VALUE),
+            packed,
+        );
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
@@ -183,33 +188,40 @@ mod device {
         let mut output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let mut statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let mut start = 0u32;
+        let mut query_start = 0u32;
+        let mut origin = 0u32;
         if segmented {
             let offsets = values[task.segment];
-            start = whole_index(
-                fetch(offsets, task.plane),
-                key.dims.z + 1u32,
-                kind::ATTENTION,
-                refusal::INDEX,
-            );
+            start = axis_start(offsets, task.plane, key.dims.z + 1u32, kind::ATTENTION);
+            let rows = axis_rows(offsets, task.plane, key.dims.z + 1u32, kind::ATTENTION);
             key_plane = start * key.strides.z;
             value_plane = start * value.strides.z;
             if packed {
-                query_plane = start * query.strides.z;
-                output_plane = start * output.strides.z;
-                statistic_plane = start * statistic.strides.z;
+                query_start = start;
+                if task.queries != NO_VALUE {
+                    let queries = values[task.queries];
+                    query_start =
+                        axis_start(queries, task.plane, query.dims.z + 1u32, kind::ATTENTION);
+                    if task.tokens > rows {
+                        refuse(kind::ATTENTION, refusal::EXTENT, 0u32);
+                    }
+                    origin = rows - min(rows, task.tokens);
+                }
+                query_plane = query_start * query.strides.z;
+                output_plane = query_start * output.strides.z;
+                statistic_plane = query_start * statistic.strides.z;
             }
         }
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
         let cursor_head = select(head, plane.x, segmented);
-        let mut origin = 0u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = block_origin(task, cursor_head, plane.y, keys, tokens);
+            origin = origin + block_origin(task, cursor_head, plane.y, keys, tokens);
         }
         let position = origin + row;
         let written = origin + tokens;
-        let reached = causal && task.origin == NO_VALUE;
+        let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
             blocks,
@@ -220,7 +232,7 @@ mod device {
         let window = select(
             0u32,
             plane.z - min(plane.z, back),
-            task.reach > 0u32 && task.origin == NO_VALUE,
+            task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
@@ -279,7 +291,12 @@ mod device {
         if inside {
             let carries_keys = total > 0.0;
             let normalized = select(0.0, 1.0 / total, carries_keys);
-            let at = uvec4(plane.x, plane.y, select(row, start + row, packed), 0u32);
+            let at = uvec4(
+                plane.x,
+                plane.y,
+                select(row, query_start + row, packed),
+                0u32,
+            );
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                 publish(
                     output,
@@ -313,7 +330,11 @@ mod device {
         let segmented = task.segment != NO_VALUE;
         let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
-        let tokens = select(query.dims.z, keys, packed);
+        let tokens = select(
+            query.dims.z,
+            select(keys, task.tokens, task.queries != NO_VALUE),
+            packed,
+        );
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(
             task.first,
@@ -329,35 +350,56 @@ mod device {
         let mut statistic_plane = plane.x * statistic.strides.x + plane.y * statistic.strides.y;
         let mut output_plane = plane.x * output.strides.x + plane.y * output.strides.y;
         let mut start = 0u32;
+        let mut query_start = 0u32;
+        let mut origin = 0u32;
         if segmented {
             let offsets = values[task.segment];
-            start = whole_index(
-                fetch(offsets, task.plane),
+            start = axis_start(
+                offsets,
+                task.plane,
                 key.dims.z + 1u32,
                 kind::ATTENTION_QUERY_GRAD,
-                refusal::INDEX,
+            );
+            let rows = axis_rows(
+                offsets,
+                task.plane,
+                key.dims.z + 1u32,
+                kind::ATTENTION_QUERY_GRAD,
             );
             key_plane = start * key.strides.z;
             value_plane = start * value.strides.z;
             if packed {
-                query_plane = start * query.strides.z;
-                gradient_plane = start * gradient.strides.z;
-                output_grad_plane = start * output_grad.strides.z;
-                statistic_plane = start * statistic.strides.z;
-                output_plane = start * output.strides.z;
+                query_start = start;
+                if task.queries != NO_VALUE {
+                    let queries = values[task.queries];
+                    query_start = axis_start(
+                        queries,
+                        task.plane,
+                        query.dims.z + 1u32,
+                        kind::ATTENTION_QUERY_GRAD,
+                    );
+                    if task.tokens > rows {
+                        refuse(kind::ATTENTION_QUERY_GRAD, refusal::EXTENT, 0u32);
+                    }
+                    origin = rows - min(rows, task.tokens);
+                }
+                query_plane = query_start * query.strides.z;
+                gradient_plane = query_start * gradient.strides.z;
+                output_grad_plane = query_start * output_grad.strides.z;
+                statistic_plane = query_start * statistic.strides.z;
+                output_plane = query_start * output.strides.z;
             }
         }
         let row = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
         let cursor_head = select(head, plane.x, segmented);
-        let mut origin = 0u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = block_origin(task, cursor_head, plane.y, keys, tokens);
+            origin = origin + block_origin(task, cursor_head, plane.y, keys, tokens);
         }
         let position = origin + row;
         let written = origin + tokens;
-        let reached = causal && task.origin == NO_VALUE;
+        let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
         let walked = select(
             blocks,
@@ -368,7 +410,7 @@ mod device {
         let window = select(
             0u32,
             plane.z - min(plane.z, back),
-            task.reach > 0u32 && task.origin == NO_VALUE,
+            task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
@@ -428,7 +470,12 @@ mod device {
             }
         }
         if inside {
-            let at = uvec4(plane.x, plane.y, select(row, start + row, packed), 0u32);
+            let at = uvec4(
+                plane.x,
+                plane.y,
+                select(row, query_start + row, packed),
+                0u32,
+            );
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                 publish(
                     output,
@@ -457,7 +504,11 @@ mod device {
         let segmented = task.segment != NO_VALUE;
         let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
-        let tokens = select(query.dims.z, keys, packed);
+        let tokens = select(
+            query.dims.z,
+            select(keys, task.tokens, task.queries != NO_VALUE),
+            packed,
+        );
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -466,30 +517,55 @@ mod device {
         let mut head = plane.x;
         let mut batch = plane.y;
         let mut start = 0u32;
+        let mut query_start = 0u32;
+        let mut origin = 0u32;
         if segmented {
             head = task.plane / query.dims.y;
             batch = task.plane % query.dims.y;
             let offsets = values[task.segment];
-            start = whole_index(
-                fetch(offsets, task.plane),
+            start = axis_start(
+                offsets,
+                task.plane,
                 key.dims.z + 1u32,
                 kind::ATTENTION_KEY_GRAD,
-                refusal::INDEX,
+            );
+            let rows = axis_rows(
+                offsets,
+                task.plane,
+                key.dims.z + 1u32,
+                kind::ATTENTION_KEY_GRAD,
             );
             key_plane = start * key.strides.z;
             value_plane = start * value.strides.z;
             output_plane = start * output.strides.z;
+            query_start = start;
+            if task.queries != NO_VALUE {
+                let queries = values[task.queries];
+                query_start = axis_start(
+                    queries,
+                    task.plane,
+                    query.dims.z + 1u32,
+                    kind::ATTENTION_KEY_GRAD,
+                );
+                if task.tokens > rows {
+                    refuse(kind::ATTENTION_KEY_GRAD, refusal::EXTENT, 0u32);
+                }
+                origin = rows - min(rows, task.tokens);
+            }
         }
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let mut origin = 0u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = block_origin(task, head, batch, keys, tokens);
+            origin = origin + block_origin(task, head, batch, keys, tokens);
         }
         let heads = select(groups, 1u32, segmented);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
+        let first = select(
+            0u32,
+            plane.z / ATTN_KEYS,
+            causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
+        );
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
         let mut values_row = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
@@ -510,22 +586,22 @@ mod device {
             let plane_batch = select(plane.y, batch, segmented);
             let query_plane = select(
                 plane_head * query.strides.x + plane_batch * query.strides.y,
-                start * query.strides.z,
+                query_start * query.strides.z,
                 packed,
             );
             let gradient_plane = select(
                 plane_head * gradient.strides.x + plane_batch * gradient.strides.y,
-                start * gradient.strides.z,
+                query_start * gradient.strides.z,
                 packed,
             );
             let output_grad_plane = select(
                 plane_head * output_grad.strides.x + plane_batch * output_grad.strides.y,
-                start * output_grad.strides.z,
+                query_start * output_grad.strides.z,
                 packed,
             );
             let statistic_plane = select(
                 plane_head * statistic.strides.x + plane_batch * statistic.strides.y,
-                start * statistic.strides.z,
+                query_start * statistic.strides.z,
                 packed,
             );
             for block in stride(first, blocks, 1u32) {
@@ -611,7 +687,11 @@ mod device {
         let segmented = task.segment != NO_VALUE;
         let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
-        let tokens = select(query.dims.z, keys, packed);
+        let tokens = select(
+            query.dims.z,
+            select(keys, task.tokens, task.queries != NO_VALUE),
+            packed,
+        );
         let groups = query.dims.x / key.dims.x;
         let plane = coordinates(task.first, uvec4(key.dims.x, key.dims.y, key.dims.z, 1u32));
         let mut key_plane = plane.x * key.strides.x + plane.y * key.strides.y;
@@ -619,29 +699,54 @@ mod device {
         let mut head = plane.x;
         let mut batch = plane.y;
         let mut start = 0u32;
+        let mut query_start = 0u32;
+        let mut origin = 0u32;
         if segmented {
             head = task.plane / query.dims.y;
             batch = task.plane % query.dims.y;
             let offsets = values[task.segment];
-            start = whole_index(
-                fetch(offsets, task.plane),
+            start = axis_start(
+                offsets,
+                task.plane,
                 key.dims.z + 1u32,
                 kind::ATTENTION_VALUE_GRAD,
-                refusal::INDEX,
+            );
+            let rows = axis_rows(
+                offsets,
+                task.plane,
+                key.dims.z + 1u32,
+                kind::ATTENTION_VALUE_GRAD,
             );
             key_plane = start * key.strides.z;
             output_plane = start * output.strides.z;
+            query_start = start;
+            if task.queries != NO_VALUE {
+                let queries = values[task.queries];
+                query_start = axis_start(
+                    queries,
+                    task.plane,
+                    query.dims.z + 1u32,
+                    kind::ATTENTION_VALUE_GRAD,
+                );
+                if task.tokens > rows {
+                    refuse(kind::ATTENTION_VALUE_GRAD, refusal::EXTENT, 0u32);
+                }
+                origin = rows - min(rows, task.tokens);
+            }
         }
         let column = plane.z + lid;
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
-        let mut origin = 0u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = block_origin(task, head, batch, keys, tokens);
+            origin = origin + block_origin(task, head, batch, keys, tokens);
         }
         let heads = select(groups, 1u32, segmented);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let first = select(0u32, plane.z / ATTN_KEYS, causal && task.origin == NO_VALUE);
+        let first = select(
+            0u32,
+            plane.z / ATTN_KEYS,
+            causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
+        );
         let mut keys_row = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
         if inside {
@@ -657,17 +762,17 @@ mod device {
             let plane_batch = select(plane.y, batch, segmented);
             let query_plane = select(
                 plane_head * query.strides.x + plane_batch * query.strides.y,
-                start * query.strides.z,
+                query_start * query.strides.z,
                 packed,
             );
             let gradient_plane = select(
                 plane_head * gradient.strides.x + plane_batch * gradient.strides.y,
-                start * gradient.strides.z,
+                query_start * gradient.strides.z,
                 packed,
             );
             let statistic_plane = select(
                 plane_head * statistic.strides.x + plane_batch * statistic.strides.y,
-                start * statistic.strides.z,
+                query_start * statistic.strides.z,
                 packed,
             );
             for block in stride(first, blocks, 1u32) {

@@ -43,6 +43,9 @@ pub(crate) struct Task {
     pub(crate) reach: u32,
     pub(crate) keys: u32,
     pub(crate) plane: u32,
+    pub(crate) queries: u32,
+    pub(crate) tokens: u32,
+    pub(crate) grid: u32,
 }
 
 impl Reads for Task {
@@ -67,6 +70,7 @@ impl Reads for Task {
             .chain(self.chain.iter().map(|step| step.operand))
             .chain(self.depends.iter().copied())
             .chain([self.segments])
+            .chain([self.queries])
             .filter(|value| *value != NO_VALUE)
     }
 }
@@ -101,6 +105,9 @@ impl Task {
             reach: unit.reach,
             keys: 0,
             plane: 0,
+            queries: unit.queries,
+            tokens: 0,
+            grid: NO_VALUE,
         }
     }
 }
@@ -356,9 +363,15 @@ fn schedule_unit(
             let tokens = rows[2];
             let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
+            let grid = if unit.queries != NO_VALUE {
+                unit.queries
+            } else {
+                unit.segments
+            };
             let packed = unit.segments != NO_VALUE
-                && plan.shape(unit.out).free(2).is_some()
-                && plan.shape(unit.out).free(2) == plan.shape(unit.inputs[1]).free(2);
+                && (unit.queries != NO_VALUE
+                    || (plan.shape(unit.out).free(2).is_some()
+                        && plan.shape(unit.out).free(2) == plan.shape(unit.inputs[1]).free(2)));
             let spans = if packed {
                 assert!(
                     rows[0] == 1 && rows[1] == 1,
@@ -366,11 +379,7 @@ fn schedule_unit(
                     rows,
                     rows[0] * rows[1],
                 );
-                ragged_spans(
-                    plan.shape(unit.segments).elements() - 1,
-                    tokens,
-                    profile.workgroup(),
-                )
+                ragged_spans(plan.shape(grid).elements() - 1, tokens, profile.workgroup())
             } else {
                 let measure = measured(plan, unit.out, Measure::Tokens);
                 attention_spans(tokens, rows[0] * rows[1], profile, measure)
@@ -380,6 +389,7 @@ fn schedule_unit(
                 task.geometry = geometry;
                 task.split = split;
                 task.plane = plane;
+                task.grid = if packed { grid } else { NO_VALUE };
                 plan.tasks.push(task);
             }
         }
@@ -405,6 +415,7 @@ fn schedule_unit(
                 task.geometry = geometry;
                 task.split = split;
                 task.plane = plane;
+                task.grid = if segmented { unit.segments } else { NO_VALUE };
                 plan.tasks.push(task);
             }
         }
@@ -587,6 +598,7 @@ fn schedule_unit(
                     group: 1,
                 };
                 task.plane = plane;
+                task.grid = unit.segments;
                 plan.tasks.push(task);
             }
         }
@@ -617,6 +629,7 @@ fn segment_sum(plan: &mut Plan, unit: &TaskInfo) {
                 group: chunks,
             };
             task.plane = plane;
+            task.grid = unit.segments;
             plan.tasks.push(task);
         }
     }

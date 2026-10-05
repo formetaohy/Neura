@@ -1616,6 +1616,7 @@ fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
             origin: Some(cursor),
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -1651,6 +1652,7 @@ fn a_cursor_holds_one_position_per_plane() {
         origin,
         segments: None,
         reach: None,
+        query_segments: None,
     };
     let _ = graph.attention(queries, keys, keys, options(None));
     let _ = graph.attention(queries, keys, keys, options(Some(positions([1, 1, 1, 1]))));
@@ -1717,6 +1719,7 @@ fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -1756,6 +1759,7 @@ fn a_head_too_wide_for_one_thread_is_refused() {
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     assert!(
@@ -2120,6 +2124,7 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
             origin: None,
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     let probabilities = graph.softmax(attended);
@@ -2316,6 +2321,7 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -2452,6 +2458,7 @@ fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -2720,6 +2727,7 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     let loss = graph.sum(out);
@@ -2831,6 +2839,7 @@ fn a_packed_query_walks_the_rows_its_offsets_close() {
             origin: None,
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     let loss = graph.sum(out);
@@ -2933,6 +2942,7 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
             origin: Some(cursor),
             segments: Some(ragged.offsets),
             reach: None,
+            query_segments: None,
         },
     );
     let rows = graph.rows(ragged);
@@ -3027,6 +3037,7 @@ fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
                 reach: None,
+                query_segments: None,
             },
         );
         let summed = graph.sum(out);
@@ -3253,4 +3264,153 @@ fn a_per_plane_sum_opens_the_prelude_of_the_tensor_it_folds() {
             .any(|task| Kind::of(task.kind) == Kind::Binary && task.out == scales.id()),
         "the folded product stands in the prelude of the sum",
     );
+}
+
+#[test]
+fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
+    let graph = Graph::new();
+    let query_lengths = graph.input(Shape::vector(4), Element::Single);
+    let key_lengths = graph.input(Shape::vector(4), Element::Single);
+    let query_bound = 128;
+    let key_bound = 256;
+    let queries = graph.ragged(query_bound, query_lengths);
+    let keys = graph.ragged(key_bound, key_lengths);
+    let packed_queries = Shape::of([1, 1, query_bound, 4]).freed(&[(2, queries.extent)]);
+    let packed_keys = Shape::of([1, 1, key_bound, 4]).freed(&[(2, keys.extent)]);
+    let query = graph.gradient_input(packed_queries, Element::Single);
+    let key = graph.gradient_input(packed_keys, Element::Single);
+    let value = graph.gradient_input(packed_keys, Element::Single);
+    let out = graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            scale: 0.5,
+            causal: true,
+            origin: None,
+            segments: Some(keys.offsets),
+            reach: None,
+            query_segments: Some(queries.offsets),
+        },
+    );
+    let loss = graph.sum(out);
+    let collected = graph.backward(loss);
+    for gradient in [collected.of(query), collected.of(key), collected.of(value)] {
+        graph.retain(gradient);
+    }
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patch_of = |segment: u32| {
+        plan.patches()
+            .iter()
+            .position(|patch| patch.segment == segment)
+            .unwrap_or_else(|| panic!("the patch that closes value {segment} walks no task"))
+    };
+    let query_patch = patch_of(queries.offsets.id());
+    let key_patch = patch_of(keys.offsets.id());
+    let patched = |patch: usize| {
+        let record = plan.patches()[patch];
+        plan.patch_list()[record.tasks as usize..(record.tasks + record.tasks_count) as usize]
+            .to_vec()
+    };
+    let author = |patch: usize| {
+        records
+            .iter()
+            .position(|task| task.patch as usize == patch)
+            .unwrap_or_else(|| {
+                panic!("the task that authors the count of patch {patch} stands in no segment")
+            })
+    };
+    let query_author = author(query_patch);
+    let key_author = author(key_patch);
+    let group = |bound: u32| bound.div_ceil(narrow().workgroup());
+    let mut forward = Vec::new();
+    let mut key_grads = Vec::new();
+    for (index, task) in records.iter().enumerate() {
+        let kind = Kind::of(task.kind);
+        let packed = matches!(kind, Kind::Attention | Kind::AttentionQueryGrad);
+        if !packed && !matches!(kind, Kind::AttentionKeyGrad | Kind::AttentionValueGrad) {
+            continue;
+        }
+        assert_eq!(
+            task.split,
+            neura_abi::split::RAGGED,
+            "task {index} of {kind:?} walks the rows one of its axes packs",
+        );
+        assert_eq!(
+            task.segment,
+            keys.offsets.id(),
+            "task {index} of {kind:?} weighs the keys of the axis its offsets close",
+        );
+        assert_eq!(
+            task.queries,
+            queries.offsets.id(),
+            "task {index} of {kind:?} reads the positions of the rows the query axis packs",
+        );
+        let rows = if packed {
+            queries.offsets.id()
+        } else {
+            keys.offsets.id()
+        };
+        assert_eq!(
+            task.grid, rows,
+            "task {index} of {kind:?} takes the rows of the axis whose offsets close them",
+        );
+        assert_eq!(
+            (task.first, task.count),
+            (0, 0),
+            "task {index} of {kind:?} takes the rows its plane holds at run time",
+        );
+        let (held, bound) = if packed {
+            (query_bound, query_bound)
+        } else {
+            (key_bound, key_bound)
+        };
+        assert_eq!(
+            task.group,
+            group(bound),
+            "task {index} of {kind:?} walks one of the {} chunks a plane of {held} rows holds",
+            group(bound),
+        );
+        assert!(
+            task.index < group(bound) && task.plane < 4,
+            "task {index} of {kind:?} walks chunk {} of plane {}",
+            task.index,
+            task.plane,
+        );
+        assert!(
+            patched(query_patch).contains(&(index as u32)),
+            "the patch that closes the queries hands task {index} of {kind:?} the rows of its plane",
+        );
+        assert!(
+            patched(key_patch).contains(&(index as u32)),
+            "the patch that closes the keys hands task {index} of {kind:?} the keys of its plane",
+        );
+        assert!(
+            follows(&plan, query_author, index),
+            "task {index} of {kind:?} walks the rows the closing task of the queries authors",
+        );
+        assert!(
+            follows(&plan, key_author, index),
+            "task {index} of {kind:?} weighs the keys the closing task of the keys authors",
+        );
+        if packed {
+            forward.push((task.plane, task.index));
+        } else {
+            key_grads.push((task.plane, task.index));
+        }
+    }
+    for (walked, chunks, name) in [
+        (forward, group(query_bound), "attention"),
+        (key_grads, group(key_bound), "key gradient"),
+    ] {
+        let mut walked = walked;
+        walked.sort_unstable();
+        walked.dedup();
+        assert_eq!(
+            walked.len(),
+            4 * chunks as usize,
+            "every plane of the {name} walks every chunk of the rows its bound holds, and one task covers one chunk",
+        );
+    }
 }

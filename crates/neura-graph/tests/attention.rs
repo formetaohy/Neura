@@ -19,6 +19,7 @@ fn windowed(reach: u32, causal: bool) -> Graph<'static> {
             origin: None,
             segments: None,
             reach: Some(reach),
+            query_segments: None,
         },
     );
     graph

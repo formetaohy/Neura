@@ -38,6 +38,7 @@ fn options(cursor: Value<'static>) -> AttentionOptions<'static> {
         origin: Some(cursor),
         segments: None,
         reach: None,
+        query_segments: None,
     }
 }
 
@@ -97,6 +98,7 @@ impl Decoder {
                 origin: Some(cursor),
                 segments: None,
                 reach,
+                query_segments: None,
             },
         );
         graph.retain(out);
@@ -330,6 +332,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
             origin: Some(cursor),
             segments: None,
             reach: None,
+            query_segments: None,
         },
     );
     graph.retain(out);
@@ -479,6 +482,7 @@ fn a_windowed_decode_gradient_reaches_the_keys_a_ring_exposes() {
             origin: Some(cursor),
             segments: None,
             reach: Some(REACH),
+            query_segments: None,
         },
     );
     let loss = graph.sum(out);

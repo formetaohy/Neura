@@ -52,6 +52,25 @@ mod device {
         return u32(value);
     }
 
+    fn axis_start(offsets: Value, plane: u32, bound: u32, subject: u32) -> u32 {
+        return whole_index(fetch(offsets, plane), bound, subject, refusal::INDEX);
+    }
+
+    fn axis_rows(offsets: Value, plane: u32, bound: u32, subject: u32) -> u32 {
+        let start = axis_start(offsets, plane, bound, subject);
+        let end = whole_index(
+            fetch(offsets, plane + 1u32),
+            bound,
+            subject,
+            refusal::EXTENT,
+        );
+        if end < start {
+            refuse(subject, refusal::EXTENT, 0u32);
+            return 0u32;
+        }
+        return end - start;
+    }
+
     fn base_of(value: Value) -> u32 {
         return select(
             placement.weights,
