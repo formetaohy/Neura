@@ -507,6 +507,19 @@ fn schedule_unit(
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
+            if unit.segments != NO_VALUE {
+                let planes = plan.shape(unit.segments).elements() - 1;
+                for (plane, first, count, split) in
+                    ragged_spans(planes, out.dims()[2], profile.workgroup())
+                {
+                    let mut task = Task::span(unit, first, count, 0);
+                    task.split = split;
+                    task.plane = plane;
+                    task.grid = unit.segments;
+                    plan.tasks.push(task);
+                }
+                return;
+            }
             let measure = measured(plan, unit.out, Measure::Elements);
             spread(
                 plan,

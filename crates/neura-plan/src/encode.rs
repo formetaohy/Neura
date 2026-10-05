@@ -210,6 +210,7 @@ impl Plan {
         assert_writers_precede_readers(values, &tasks);
         assert_units_keep_their_order(&tasks);
         assert_ragged_chunks_cover_their_plane(&tasks);
+        assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(values, &tasks);
         assert_a_segmented_attention_walks_the_planes_its_query_holds(values, &tasks);
         assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
@@ -941,6 +942,51 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
             chunks,
             (0..group).collect::<Vec<u32>>(),
             "plane {plane} of the ragged axis value {segment} walks {group} chunks, and the tasks that write value {out} walk {chunks:?}; every chunk of a plane is walked exactly once",
+        );
+    }
+}
+
+fn assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+    values: &[ValueInfo],
+    tasks: &[Task],
+) {
+    for task in tasks {
+        if !matches!(task.kind, Kind::Rope | Kind::RopeGrad) {
+            continue;
+        }
+        let packed = task.segments != NO_VALUE;
+        assert_eq!(
+            matches!(task.split, Split::Ragged { .. }),
+            packed,
+            "a {} task turns the rows an extent packs beside the rows one plane holds, and a packed task walks the rows of one plane at a time; a rotation of a packed tensor gathers its rows from a ragged axis and no plan hands it another range",
+            task.kind.name(),
+        );
+        if !packed {
+            continue;
+        }
+        let dims = values[task.out as usize].shape.dims();
+        assert!(
+            dims[0] == 1 && dims[1] == 1,
+            "a packed {} task turns the rows of one plane at a time, and value {} holds {} planes beside the rows the axis value {} packs into axis 2",
+            task.kind.name(),
+            task.out,
+            dims[0] * dims[1],
+            task.segments,
+        );
+        assert_eq!(
+            task.grid,
+            task.segments,
+            "a packed {} task walks the rows the axis value {} closes, and names value {} as the grid of its rows",
+            task.kind.name(),
+            task.segments,
+            task.grid,
+        );
+        assert_eq!(
+            task.queries,
+            NO_VALUE,
+            "a packed {} task turns the rows a key axis packs, and value {} closes the rows of a query chunk the device places at the end of the key plane its sequence already holds",
+            task.kind.name(),
+            task.queries,
         );
     }
 }

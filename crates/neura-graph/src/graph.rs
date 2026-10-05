@@ -188,6 +188,7 @@ pub(crate) struct GraphState {
 pub(crate) struct RaggedAxis {
     pub(crate) planes: Shape,
     pub(crate) token: u32,
+    pub(crate) queries: bool,
 }
 
 pub struct GraphSnapshot {
@@ -400,6 +401,38 @@ impl<'g> Graph<'g> {
             .any(|slot| walked.binary_search(&slot).is_err())
     }
 
+    pub(crate) fn packed_axis(&self, shape: Shape) -> Option<(u32, RaggedAxis)> {
+        let slot = shape.free(2)?;
+        let state = self.state.borrow();
+        state
+            .ragged
+            .iter()
+            .find(|(_, axis)| axis.token == slot)
+            .map(|(offsets, axis)| (*offsets, axis.clone()))
+    }
+
+    pub(crate) fn mark_query_axis(&self, offsets: u32) {
+        let mut state = self.state.borrow_mut();
+        let axis = state
+            .ragged
+            .get_mut(&offsets)
+            .expect("a query axis is a ragged axis the graph publishes");
+        axis.queries = true;
+        let token = axis.token;
+        for task in &state.tasks {
+            if !matches!(task.kind, Kind::Rope | Kind::RopeGrad) {
+                continue;
+            }
+            if state.values[task.out as usize].shape.free(2) != Some(token) {
+                continue;
+            }
+            panic!(
+                "value {} turns the rows the query axis value {offsets} closes by their own plane's offsets, and the device places the row of a query chunk at the end of the key plane its sequence already holds; rotate the row of a chunk before the packing gathers it, so that a rotated row stands where the key it weighs stands",
+                task.out,
+            );
+        }
+    }
+
     pub fn author(&self, free: Free, count: Value<'g>) {
         let count = self.own(count);
         let elements = self.shape(count).elements();
@@ -465,6 +498,7 @@ impl<'g> Graph<'g> {
             RaggedAxis {
                 planes,
                 token: extent.slot(),
+                queries: false,
             },
         );
         Ragged { extent, offsets }

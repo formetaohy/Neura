@@ -2376,6 +2376,85 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
 }
 
 #[test]
+fn a_packed_rope_turns_the_rows_of_one_plane_at_a_time() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let ragged = graph.ragged(256, lengths);
+    let packed = graph.input(
+        Shape::of([1, 1, 256, 4]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let turned = graph.rope(packed, None, 10_000.0);
+    let shape = Shape::of([1, 1, 256, 4]).freed(&[(2, ragged.extent)]);
+    let scaled = graph.mul(turned, graph.fill(shape, 2.0));
+    graph.retain(scaled);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let patch = plan
+        .patches()
+        .iter()
+        .find(|patch| patch.segment == ragged.offsets.id())
+        .expect("the ragged axis closes the rows a packed rotation walks")
+        .to_owned();
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let list = plan.patch_list();
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    let mut planes = Vec::new();
+    for at in patched {
+        let task = records[*at as usize];
+        if Kind::of(task.kind) != Kind::Rope {
+            continue;
+        }
+        assert_eq!(task.split, neura_abi::split::RAGGED);
+        assert_eq!(task.segment, ragged.offsets.id());
+        assert_eq!(task.grid, ragged.offsets.id());
+        assert_eq!(task.queries, neura_abi::NO_VALUE);
+        assert_eq!(
+            task.steps, 1,
+            "the epilogue that multiplies the turn rides the chain of the packed rope",
+        );
+        assert_eq!((task.first, task.count), (0, 0));
+        assert_eq!(
+            task.group, 4,
+            "a bound of 256 rows walks four chunks under a workgroup of 64"
+        );
+        assert!(task.plane < 4);
+        assert!(
+            follows(&plan, author, *at as usize),
+            "task {at} turns rows the closing task places",
+        );
+        planes.push((task.plane, task.index));
+    }
+    planes.sort_unstable();
+    assert_eq!(
+        planes,
+        [
+            (0, 0),
+            (0, 1),
+            (0, 2),
+            (0, 3),
+            (1, 0),
+            (1, 1),
+            (1, 2),
+            (1, 3),
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (3, 0),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+        ],
+        "every plane walks every chunk of its rows exactly once",
+    );
+}
+
+#[test]
 fn a_row_map_walks_the_planes_a_ragged_axis_closes() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);

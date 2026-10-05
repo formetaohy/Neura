@@ -323,6 +323,7 @@ impl<'g> Graph<'g> {
                         query_offsets.id(),
                     )
                 });
+                self.mark_query_axis(query_offsets.id());
                 assert_eq!(
                     query_shape.free(2),
                     Some(query_axis.token),
@@ -560,6 +561,26 @@ impl<'g> Graph<'g> {
             element.name(),
         );
         let origin = origin.map(|origin| self.own(origin));
+        let packed = self.packed_axis(shape);
+        if let Some((offsets, axis)) = &packed {
+            assert!(
+                shape.dims()[0] == 1 && shape.dims()[1] == 1,
+                "a rotation turns the rows of one plane at a time, and {:?} holds {} planes beside the rows the ragged axis value {offsets} packs into axis 2: a packed row stands in the plane its offset reaches",
+                shape.dims(),
+                shape.dims()[0] * shape.dims()[1],
+            );
+            assert!(
+                !axis.queries,
+                "value {offsets} closes the rows of a query chunk, and the device places the row of a chunk at the end of the key plane its sequence already holds; rotate the row of a chunk before the packing gathers it, so that a rotated row stands where the key it weighs stands",
+            );
+            assert!(
+                origin.is_none() || axis.planes.elements() == 1,
+                "a packed axis hands {offsets} the rows of {} planes one after another, and one cursor holds one position per {:?} plane of {:?}: a rotation of the rows of every plane needs the seat every plane's offset closes",
+                axis.planes.elements(),
+                [shape.dims()[0], shape.dims()[1], 1, 1],
+                shape.dims(),
+            );
+        }
         if let Some(origin) = origin {
             let positions = Shape::of([shape.dims()[0], shape.dims()[1], 1, 1]);
             assert!(
@@ -585,6 +606,7 @@ impl<'g> Graph<'g> {
         );
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.param = base;
+        task.segments = packed.map_or(NO_VALUE, |(offsets, _)| offsets);
         self.push(task);
         out
     }

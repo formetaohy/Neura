@@ -39,6 +39,43 @@ mod device {
         let output = values[task.out];
         let dims = output.dims;
         let half = dims.w / 2u32;
+        if task.segment != NO_VALUE {
+            if task.count == 0u32 {
+                return;
+            }
+            let start = axis_start(values[task.segment], task.plane, dims.z + 1u32, kind::ROPE);
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                for column in stride(lid, dims.w, WORKGROUP_SIZE) {
+                    let at = uvec4(0u32, 0u32, start + row, column);
+                    let high = column >= half;
+                    let angle = rope_angle(
+                        rope_position(task, at) + row,
+                        rope_channel(at, high, half),
+                        dims.w,
+                        task.param,
+                    );
+                    let value = fetch(source, read_address(at, source.strides));
+                    let pair = rope_pair(at, high, half);
+                    let partner = fetch(source, read_address(pair, source.strides));
+                    let cosine = cos(angle);
+                    let sine = sin(angle);
+                    publish(
+                        output,
+                        read_address(at, output.strides),
+                        chained(
+                            task,
+                            at,
+                            select(
+                                value * cosine - partner * sine,
+                                value * cosine + partner * sine,
+                                high,
+                            ),
+                        ),
+                    );
+                }
+            }
+            return;
+        }
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let at = coordinates(index, dims);
             let high = at.w >= half;
@@ -74,6 +111,48 @@ mod device {
         let output = values[task.out];
         let dims = output.dims;
         let half = dims.w / 2u32;
+        if task.segment != NO_VALUE {
+            if task.count == 0u32 {
+                return;
+            }
+            let start = axis_start(
+                values[task.segment],
+                task.plane,
+                dims.z + 1u32,
+                kind::ROPE_GRAD,
+            );
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                for column in stride(lid, dims.w, WORKGROUP_SIZE) {
+                    let at = uvec4(0u32, 0u32, start + row, column);
+                    let high = column >= half;
+                    let angle = rope_angle(
+                        rope_position(task, at) + row,
+                        rope_channel(at, high, half),
+                        dims.w,
+                        task.param,
+                    );
+                    let value = fetch(source, read_address(at, source.strides));
+                    let pair = rope_pair(at, high, half);
+                    let partner = fetch(source, read_address(pair, source.strides));
+                    let cosine = cos(angle);
+                    let sine = sin(angle);
+                    publish(
+                        output,
+                        read_address(at, output.strides),
+                        chained(
+                            task,
+                            at,
+                            select(
+                                value * cosine + partner * sine,
+                                value * cosine - partner * sine,
+                                high,
+                            ),
+                        ),
+                    );
+                }
+            }
+            return;
+        }
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let at = coordinates(index, dims);
             let high = at.w >= half;
