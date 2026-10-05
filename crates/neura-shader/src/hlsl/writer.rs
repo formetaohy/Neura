@@ -1,4 +1,5 @@
 use crate::hlsl::source::Source;
+use crate::instruction::leaves_a_loop;
 use crate::{
     Address, AtomicOp, Barrier, Constant, Function, Instruction, MathFun, Module, Scalar, Space,
     Target, Type, TypeId, UnaryOp, ValueId,
@@ -498,22 +499,40 @@ impl<'m> Writer<'m> {
                 default,
             } => {
                 let selector = self.value(*selector);
-                self.out.open(format!("switch ({selector})"));
-                for (value, body) in cases {
-                    self.out.open(format!("case {value}:"));
-                    self.block(body);
-                    if !terminates(body) {
+                if cases.iter().any(|(_, body)| leaves_a_loop(body)) || leaves_a_loop(default) {
+                    for (index, (value, body)) in cases.iter().enumerate() {
+                        let branch = if index == 0 { "if" } else { "else if" };
+                        self.out.open(format!("{branch} ({selector} == {value})"));
+                        self.block(body);
+                        self.out.close("}");
+                    }
+                    if !default.is_empty() {
+                        if cases.is_empty() {
+                            self.block(default);
+                        } else {
+                            self.out.open("else");
+                            self.block(default);
+                            self.out.close("}");
+                        }
+                    }
+                } else {
+                    self.out.open(format!("switch ({selector})"));
+                    for (value, body) in cases {
+                        self.out.open(format!("case {value}:"));
+                        self.block(body);
+                        if !terminates(body) {
+                            self.out.line("break;");
+                        }
+                        self.out.close("}");
+                    }
+                    self.out.open("default:");
+                    self.block(default);
+                    if !terminates(default) {
                         self.out.line("break;");
                     }
                     self.out.close("}");
+                    self.out.close("}");
                 }
-                self.out.open("default:");
-                self.block(default);
-                if !terminates(default) {
-                    self.out.line("break;");
-                }
-                self.out.close("}");
-                self.out.close("}");
             }
             Instruction::Loop { body, continuing } => {
                 let step = self.step(continuing);

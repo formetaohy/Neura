@@ -410,7 +410,24 @@ pub enum Instruction {
     Block(Block),
 }
 
+pub(crate) fn leaves_a_loop(body: &[Instruction]) -> bool {
+    body.iter().any(Instruction::leaves_a_loop)
+}
+
 impl Instruction {
+    pub(crate) fn leaves_a_loop(&self) -> bool {
+        match self {
+            Self::Break => true,
+            Self::If { accept, reject, .. } => leaves_a_loop(accept) || leaves_a_loop(reject),
+            Self::Switch { cases, default, .. } => {
+                cases.iter().any(|(_, body)| leaves_a_loop(body)) || leaves_a_loop(default)
+            }
+            Self::Block(body) => leaves_a_loop(body),
+            Self::Loop { .. } => false,
+            _ => false,
+        }
+    }
+
     pub const fn result(&self) -> Option<ValueId> {
         match self {
             Self::Argument { result, .. }

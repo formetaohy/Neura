@@ -205,3 +205,88 @@ fn every_platform_backend_takes_an_unsigned_remainder() {
         remainders(backends, false);
     }
 }
+
+#[kernel(workgroup_size = 8)]
+fn sums_before_zero(lid: u32, input: Read<u32>, out: ReadWrite<u32>) {
+    let mut total = 0u32;
+    let mut index = 0u32;
+    loop {
+        if index >= 8u32 {
+            break;
+        }
+        let at = lid * 8u32 + index;
+        match input[at] {
+            0u32 => {
+                break;
+            }
+            _ => {
+                total += input[at];
+            }
+        }
+        index += 1u32;
+    }
+    out[lid] = total;
+}
+
+fn breaks_out_of_a_match(backends: Backends) {
+    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+        backends,
+        ..Default::default()
+    }))
+    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    let device = context.device().clone();
+    let queue = context.queue().clone();
+    let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    let input = GpuBuffer::new(&device, "break input", 256, storage);
+    let output = GpuBuffer::new(
+        &device,
+        "break output",
+        256,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
+    let readback = GpuBuffer::new(
+        &device,
+        "break readback",
+        256,
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    );
+    let values = (0..64u32)
+        .map(|index| if index % 8 == index / 8 { 0 } else { index + 1 })
+        .collect::<Vec<_>>();
+    let expected = (0..8u32)
+        .map(|row| {
+            (0..8u32)
+                .take_while(|column| *column != row)
+                .map(|column| row * 8 + column + 1)
+                .sum::<u32>()
+        })
+        .collect::<Vec<_>>();
+    input.write_at(&queue, 0, bytemuck::cast_slice(&values));
+    let pipeline = context.declare(sums_before_zero());
+    let group = pipeline.bind_group(&[
+        Binding {
+            index: 0,
+            buffer: input.binding(0, 256),
+        },
+        Binding {
+            index: 1,
+            buffer: output.binding(0, 256),
+        },
+    ]);
+    let mut submission = Submission::new(&device, "break dispatch");
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
+    submission.submit(&queue);
+    let mut transfer = Submission::new(&device, "break transfer");
+    transfer.copy(&output, 0, &readback, 0, 256);
+    let index = transfer.submit(&queue);
+    let bytes = readback.read(&queue, index, 256);
+    let measured = bytemuck::cast_slice::<u8, u32>(&bytes);
+    assert_eq!(&measured[..8], expected.as_slice());
+}
+
+#[test]
+fn every_platform_backend_leaves_the_loop_a_match_breaks() {
+    for backends in Backends::PLATFORM {
+        breaks_out_of_a_match(backends);
+    }
+}
