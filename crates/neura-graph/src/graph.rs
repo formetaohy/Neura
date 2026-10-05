@@ -1134,9 +1134,6 @@ impl<'g> Graph<'g> {
             "a fold names one of the {MAX_RANK} axes of {:?}",
             shape.dims(),
         );
-        if shape.free(axis).is_none() && shape.dims()[axis as usize] == 1 {
-            return value;
-        }
         self.assert_axis_packs_one_plane(value, axis);
         self.fold(value, axis)
     }
@@ -1233,11 +1230,9 @@ impl<'g> Graph<'g> {
             "a fold names one of the {MAX_RANK} axes of {:?}",
             shape.dims(),
         );
-        assert!(
-            shape.dims()[axis as usize] > 1,
-            "folding axis {axis} of {:?} reduces a single element",
-            shape.dims(),
-        );
+        if shape.free(axis).is_none() && shape.dims()[axis as usize] == 1 {
+            return value;
+        }
         let out = self.fresh(
             shape.reduced(axis),
             Element::Single,

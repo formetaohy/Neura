@@ -548,6 +548,23 @@ fn a_ragged_axis_of_no_planes_closes_its_offsets_at_nothing() {
     assert_eq!(summed, 0.0);
 }
 
+#[test]
+fn a_ragged_axis_of_one_plane_walks_the_plane_a_binding_holds() {
+    let planes = Planes::of(1, WIDE_BOUND, WIDTH);
+    let program = planes.compile();
+    let (produced, scanned, _) = planes.run(&program, &[5.0]);
+    assert_eq!(produced.len(), WIDTH as usize);
+    assert_eq!(
+        scanned[..2],
+        [0.0, 5.0],
+        "the prefix closes one offset for the one plane the binding holds",
+    );
+    let (produced, scanned, summed) = planes.run(&program, &[]);
+    assert!(produced.is_empty());
+    assert_eq!(scanned[0], 0.0);
+    assert_eq!(summed, 0.0);
+}
+
 struct CountedPlanes {
     runtime: Runtime,
     graph: Graph<'static>,

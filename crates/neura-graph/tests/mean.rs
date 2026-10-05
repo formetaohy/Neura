@@ -77,6 +77,70 @@ fn a_length_of_a_fixed_axis_is_a_number_the_plan_carries() {
 }
 
 #[test]
+fn a_fold_of_one_number_hands_back_the_number_it_holds() {
+    let graph = Graph::new();
+    let values = graph.input(Shape::of([1, 1, 4, 1]), Element::Single);
+    assert_eq!(
+        graph.sum_rows(values).id(),
+        values.id(),
+        "a fold over the one number a fixed axis holds hands that number back",
+    );
+    assert_eq!(
+        graph.sum_axis(values, 3).id(),
+        values.id(),
+        "a fold names one number whichever entry point reaches the axis",
+    );
+    assert_eq!(
+        graph.mean_axis(values, 3).id(),
+        values.id(),
+        "a mean over the one number a fixed axis holds weighs it by one",
+    );
+}
+
+#[test]
+fn a_fold_of_a_free_axis_of_one_number_walks_the_length_its_binding_holds() {
+    let graph = Graph::new();
+    let single = graph.free(1);
+    let values = graph.input(
+        Shape::of([1, 1, 4, 1]).freed(&[(3, single)]),
+        Element::Single,
+    );
+    let folded = graph.sum_rows(values);
+    let tasks = graph.snapshot().tasks().to_vec();
+    let folds = tasks
+        .iter()
+        .filter(|task| task.kind == Kind::SumAxis)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        folds.len(),
+        1,
+        "a fold over a free axis of one number walks the length the binding holds",
+    );
+    assert_eq!(folds[0].inputs[0], values.id());
+    assert_eq!(folds[0].slot, 3, "the fold names the axis it walks");
+    assert!(
+        graph.shape(folded).free(3).is_none(),
+        "a fold lands on the axis it reduces",
+    );
+    let mean = graph.mean_axis(values, 3);
+    let tasks = graph.snapshot().tasks().to_vec();
+    let lengths = tasks
+        .iter()
+        .filter(|task| task.kind == Kind::Length)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lengths.len(),
+        1,
+        "a mean over a free axis of one number divides by the length the binding holds",
+    );
+    assert_eq!(lengths[0].slot, 3);
+    assert!(
+        graph.shape(mean).free(3).is_none(),
+        "a mean lands on the axis it weighs",
+    );
+}
+
+#[test]
 fn a_length_beyond_the_numbers_a_device_counts_exactly_is_refused() {
     let graph = Graph::new();
     let extent = graph.free(EXACT_WALK_LIMIT + 1);

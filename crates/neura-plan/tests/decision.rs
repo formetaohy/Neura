@@ -228,9 +228,6 @@ fn a_product_refuses_batches_that_do_not_meet() {
             graph.parameter(Shape::of([2, 1, 4, 5]), Init::Zero, Element::Single),
         );
     }));
-    assert!(refuses(|| {
-        let _ = graph.sum_rows(graph.parameter(Shape::matrix(4, 1), Init::Zero, Element::Single));
-    }));
 }
 
 #[test]

@@ -448,6 +448,79 @@ fn a_mean_family_weighs_the_length_every_binding_holds() {
     );
 }
 
+#[test]
+fn a_fold_of_one_number_walks_the_length_a_binding_holds() {
+    let runtime = open();
+    let graph = Graph::new();
+    let single = graph.free(1);
+    let values = graph.gradient_input(
+        Shape::of([1, 1, 4, 1]).freed(&[(3, single)]),
+        Element::Single,
+    );
+    let weight = graph.input(Shape::of([1, 1, 4, 1]), Element::Single);
+    let summed = graph.sum_rows(values);
+    let mean = graph.mean_axis(values, 3);
+    let loss = graph.sum(graph.mul(summed, weight));
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(values);
+    graph.retain(summed);
+    graph.retain(mean);
+    graph.retain(loss);
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+
+    let graph = Graph::new();
+    let fixed = graph.gradient_input(Shape::of([1, 1, 4, 1]), Element::Single);
+    let shared = graph.input(Shape::of([1, 1, 4, 1]), Element::Single);
+    let fixed_summed = graph.sum_rows(fixed);
+    let fixed_mean = graph.mean_axis(fixed, 3);
+    let fixed_loss = graph.sum(graph.mul(fixed_summed, shared));
+    let fixed_gradients = graph.backward(fixed_loss);
+    let fixed_gradient = fixed_gradients.of(fixed);
+    graph.retain(fixed_summed);
+    graph.retain(fixed_mean);
+    graph.retain(fixed_loss);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+
+    let values_data = data(4, 41);
+    let weight_data = data(4, 43);
+    runtime.write(&program, fixed, &values_data);
+    runtime.write(&program, shared, &weight_data);
+    runtime.run(&program);
+    let expected_summed = runtime.read(&program, fixed_summed);
+    let expected_mean = runtime.read(&program, fixed_mean);
+    let expected_loss = runtime.read(&program, fixed_loss);
+    let expected_gradient = runtime.read(&program, fixed_gradient);
+
+    runtime.bind(&family, &[1]);
+    runtime.write(&family, values, &values_data);
+    runtime.write(&family, weight, &weight_data);
+    runtime.run(&family);
+    assert_close(&runtime.read(&family, summed), &expected_summed, 1e-5);
+    assert_close(&runtime.read(&family, mean), &expected_mean, 1e-5);
+    assert_close(&runtime.read(&family, loss), &expected_loss, 1e-5);
+    assert_close(&runtime.read(&family, gradient), &expected_gradient, 1e-5);
+
+    runtime.bind(&family, &[0]);
+    runtime.write(&family, values, &[]);
+    runtime.write(&family, weight, &weight_data);
+    runtime.run(&family);
+    assert_close(&runtime.read(&family, summed), &[0.0; 4], 1e-6);
+    assert_close(&runtime.read(&family, loss), &[0.0], 1e-6);
+    assert!(
+        runtime
+            .read(&family, mean)
+            .iter()
+            .all(|value| value.is_nan()),
+        "a mean of the no numbers a free axis of one holds divides an empty sum by an empty length",
+    );
+    assert!(
+        runtime.read(&family, gradient).is_empty(),
+        "a gradient of a tensor that holds no number reads back no number",
+    );
+}
+
 fn mean_family(
     graph: &Graph<'static>,
     shape: Shape,

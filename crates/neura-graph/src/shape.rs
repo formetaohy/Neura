@@ -47,8 +47,7 @@ impl Domain {
         for axis in axes {
             let dim = shape.dims()[axis as usize];
             match shape.free(axis) {
-                Some(slot) if dim > 1 => frees.push((slot, dim)),
-                Some(_) => {}
+                Some(slot) => frees.push((slot, dim)),
                 None => statics *= dim,
             }
         }

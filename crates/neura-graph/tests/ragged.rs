@@ -113,6 +113,38 @@ fn a_segmented_attention_walks_the_planes_its_ragged_axis_closes() {
 }
 
 #[test]
+fn a_segmented_attention_weighs_the_planes_one_free_extent_holds() {
+    let graph = Graph::new();
+    let single = graph.free(1);
+    let lengths = graph.input(
+        Shape::of([1, 1, 1, 1]).freed(&[(1, single)]),
+        Element::Single,
+    );
+    let ragged = graph.ragged(BOUND, lengths);
+    let cache = graph.input(
+        Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let query = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(query, cache, cache, causal(ragged.offsets));
+        }),
+        "a query of one fixed plane walked the segments a ragged axis closes over the planes of a free extent a binding holds",
+    );
+    let query = graph.input(
+        Shape::of([1, 1, 1, WIDTH]).freed(&[(1, single)]),
+        Element::Single,
+    );
+    let out = graph.attention(query, cache, cache, causal(ragged.offsets));
+    assert_eq!(
+        graph.shape(out).free(1),
+        Some(single.slot()),
+        "the queries a segmented attention weighs walk the free extent the ragged axis closes",
+    );
+}
+
+#[test]
 fn a_segmented_attention_weighs_one_segment_of_every_plane_it_walks() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
