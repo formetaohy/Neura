@@ -1,6 +1,7 @@
 mod arithmetic;
 pub mod hlsl;
 pub mod instruction;
+mod literal;
 pub mod module;
 pub mod msl;
 pub mod program;

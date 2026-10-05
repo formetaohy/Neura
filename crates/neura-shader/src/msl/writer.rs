@@ -736,19 +736,7 @@ impl<'m> Writer<'m> {
         match self.module.constant_of(value) {
             Some(Constant::U32(number)) => format!("{number}u"),
             Some(Constant::I32(number)) => format!("{number}"),
-            Some(Constant::F32(number)) => {
-                assert!(
-                    number.is_finite(),
-                    "a device program carries the non-finite literal {number}"
-                );
-                if number == number.trunc() && number.abs() < 1e7 {
-                    format!("{number:.1}")
-                } else if number == 0.0 {
-                    "0.0".to_owned()
-                } else {
-                    format!("{number:e}")
-                }
-            }
+            Some(Constant::F32(number)) => crate::literal::float(number),
             Some(Constant::Bool(flag)) => format!("{flag}"),
             Some(Constant::Zero(ty)) => {
                 let declared = self.value_type(ty);

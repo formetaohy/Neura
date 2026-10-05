@@ -108,6 +108,11 @@ fn rust_source_compiles_into_three_native_shader_formats() {
         assert!(source.contains("register(u2)"));
         assert!(source.contains("register(u4)"));
         assert!(source.contains("register(t5)"));
+        let bare = bare_float_literals(&source);
+        assert!(
+            bare.is_empty(),
+            "an HLSL program leaves these float literals to the compiler's default type: {bare:?}"
+        );
         let ShaderTranslation::Msl {
             source,
             entry,
@@ -120,6 +125,11 @@ fn rust_source_compiles_into_three_native_shader_formats() {
         assert!(size_bindings.is_empty());
         assert!(source.contains("[[buffer(2)]]"));
         assert!(source.contains("[[buffer(7)]]"));
+        let bare = bare_float_literals(&source);
+        assert!(
+            bare.is_empty(),
+            "MSL reads a bare decimal as a 64-bit double, and this program leaves these float literals bare: {bare:?}"
+        );
     }
 }
 
@@ -548,4 +558,56 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         ) * WORD_BYTES,
         "a device program stages the widest attention tile it carries",
     );
+}
+
+fn bare_float_literals(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut bare = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let starts = bytes[at].is_ascii_digit() && (at == 0 || !word(bytes[at - 1]))
+            || bytes[at] == b'-'
+                && at + 1 < bytes.len()
+                && bytes[at + 1].is_ascii_digit()
+                && (at == 0 || !word(bytes[at - 1]));
+        if !starts {
+            at += 1;
+            continue;
+        }
+        let mut cursor = at + usize::from(bytes[at] == b'-');
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+        let mut fractional = false;
+        if cursor < bytes.len() && bytes[cursor] == b'.' {
+            fractional = true;
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+        }
+        if cursor < bytes.len() && matches!(bytes[cursor], b'e' | b'E') {
+            let mut exponent = cursor + 1;
+            if exponent < bytes.len() && matches!(bytes[exponent], b'+' | b'-') {
+                exponent += 1;
+            }
+            if exponent < bytes.len() && bytes[exponent].is_ascii_digit() {
+                fractional = true;
+                cursor = exponent;
+                while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                    cursor += 1;
+                }
+            }
+        }
+        if !fractional {
+            at = cursor;
+            continue;
+        }
+        if !matches!(bytes.get(cursor), Some(b'f' | b'F')) {
+            bare.push(text[at..cursor].to_owned());
+        }
+        at = cursor + 1;
+    }
+    bare
 }
