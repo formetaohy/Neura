@@ -73,6 +73,38 @@ fn a_row_wider_than_the_workgroup_folds_with_it() {
 }
 
 #[test]
+fn a_row_whose_largest_number_is_its_identity_picks_that_number() {
+    let runtime = open();
+    let rows = 3;
+    let classes = 512;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    let weights = runtime.weights(&graph);
+    let mut data = vec![f32::NEG_INFINITY; (rows * classes) as usize];
+    data[7] = f32::MIN;
+    data[classes as usize + 5] = f32::MIN;
+    data[classes as usize + 300] = f32::MIN;
+    let expected = argmax_reference(&data, rows, classes);
+    assert_eq!(
+        expected,
+        vec![7.0, 5.0, 0.0],
+        "every row keeps the first of its maxima"
+    );
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, &weights, profile);
+        runtime.write(&program, logits, &data);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, action),
+            expected,
+            "the {profile:?} fold picks another index",
+        );
+    }
+}
+
+#[test]
 fn a_row_of_one_class_picks_that_class() {
     let runtime = open();
     let graph = Graph::new();

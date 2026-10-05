@@ -358,7 +358,7 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
     let taken = runtime.read(&program, action);
     let expected = (0..samples)
         .map(|row| {
-            let mut best = f32::MIN;
+            let mut best = f32::NEG_INFINITY;
             let mut index = 0.0f32;
             for column in 0..classes {
                 let value = scored[(row * classes + column) as usize];

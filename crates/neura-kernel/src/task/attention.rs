@@ -242,7 +242,7 @@ mod device {
         let mut queries = scalar_array(0.0, ATTN_WIDTH);
         let mut accumulated = scalar_array(0.0, ATTN_WIDTH);
         let mut weights = scalar_array(0.0, ATTN_KEYS);
-        let mut largest = -3.4028235e38;
+        let mut largest = max_identity();
         let mut total = 0.0;
         if inside {
             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
@@ -257,7 +257,7 @@ mod device {
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
             if inside {
-                let mut block_largest = -3.4028235e38;
+                let mut block_largest = max_identity();
                 let mut block_keys = 0u32;
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {
                     let at = block * ATTN_KEYS + column;
@@ -267,11 +267,11 @@ mod device {
                     }
                     let seen = visible(at, keys, written, position, task.reach, causal);
                     block_keys = block_keys + select(0u32, 1u32, seen);
-                    weights[column] = select(-3.4028235e38, score * task.param, seen);
+                    weights[column] = select(max_identity(), score * task.param, seen);
                     block_largest = max(block_largest, weights[column]);
                 }
                 let next = max(largest, block_largest);
-                let rescale = exp(largest - next);
+                let rescale = select(1.0, exp(largest - next), largest != max_identity());
                 largest = next;
                 let mut block_total = 0.0;
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {

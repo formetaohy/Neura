@@ -69,7 +69,7 @@ mod device {
         seed: u32,
         noised: bool,
     ) -> u32 {
-        let mut local = -3.4028235e38;
+        let mut local = max_identity();
         let mut local_index = 0u32;
         for column in stride(lid, columns, WORKGROUP_SIZE) {
             let weight = choice_weight(
@@ -94,7 +94,7 @@ mod device {
         seed: u32,
         noised: bool,
     ) -> u32 {
-        let mut local = -3.4028235e38;
+        let mut local = max_identity();
         let mut local_index = 0u32;
         for column in stride(0u32, columns, 1u32) {
             let weight = choice_weight(

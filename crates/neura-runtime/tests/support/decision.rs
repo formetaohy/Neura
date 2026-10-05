@@ -1,7 +1,7 @@
 pub fn argmax_reference(values: &[f32], rows: u32, columns: u32) -> Vec<f32> {
     (0..rows)
         .map(|row| {
-            let mut best = f32::MIN;
+            let mut best = f32::NEG_INFINITY;
             let mut index = 0.0f32;
             for column in 0..columns {
                 let value = values[(row * columns + column) as usize];

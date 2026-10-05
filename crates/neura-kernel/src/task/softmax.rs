@@ -15,7 +15,7 @@ mod device {
         }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
-            let mut local_max = -3.4028235e38;
+            let mut local_max = max_identity();
             for column in stride(lid, columns, WORKGROUP_SIZE) {
                 local_max = max(local_max, fetch(source, row * columns + column));
             }
@@ -85,7 +85,7 @@ mod device {
         }
         for row in stride(task.first, task.first + task.count, 1u32) {
             let row_at = coordinates(row * columns, output.dims);
-            let mut local_max = -3.4028235e38;
+            let mut local_max = max_identity();
             for column in stride(lid, columns, WORKGROUP_SIZE) {
                 local_max = max(local_max, fetch(source, row * columns + column));
             }

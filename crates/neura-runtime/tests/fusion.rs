@@ -165,13 +165,16 @@ fn an_opened_choice_picks_the_row_it_picked_before() {
             row.iter()
                 .map(|value| value.exp())
                 .enumerate()
-                .fold((0usize, f32::MIN), |(best, top), (index, value)| {
-                    if value > top {
-                        (index, value)
-                    } else {
-                        (best, top)
-                    }
-                })
+                .fold(
+                    (0usize, f32::NEG_INFINITY),
+                    |(best, top), (index, value)| {
+                        if value > top {
+                            (index, value)
+                        } else {
+                            (best, top)
+                        }
+                    },
+                )
                 .0 as f32
         })
         .collect::<Vec<_>>();

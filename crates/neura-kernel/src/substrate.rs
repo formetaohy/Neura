@@ -13,6 +13,10 @@ mod device {
         );
     }
 
+    fn max_identity() -> f32 {
+        return -bitcast_f32(0x7f800000u32);
+    }
+
     fn slot_of(packed: u32, axis: u32) -> u32 {
         return (packed >> (axis * 8u32)) & 0xffu32;
     }

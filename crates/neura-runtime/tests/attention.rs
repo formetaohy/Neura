@@ -180,6 +180,43 @@ fn an_attention_block_scores_every_row_it_weights() {
 }
 
 #[test]
+fn a_masked_key_weighs_nothing_where_a_row_scores_the_identity_of_the_maximum() {
+    let runtime = open();
+    let shapes = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 4,
+        keys: 4,
+        width: 4,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: 1.0,
+    };
+    let (graph, queries, keys, values, out) = graph_of(shapes);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let queries_data = [f32::MIN, 0.0, 0.0, 0.0].repeat(4);
+    let keys_data = [1.0, 0.0, 0.0, 0.0].repeat(4);
+    let values_data = (1..=16).map(|index| index as f32).collect::<Vec<_>>();
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    let (expected, _) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+    assert_close(&produced, &expected, 1e-5);
+    assert_close(
+        &produced,
+        &[
+            1.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0, 6.0, 5.0, 6.0, 7.0, 8.0, 7.0, 8.0, 9.0, 10.0,
+        ],
+        1e-5,
+    );
+}
+
+#[test]
 fn an_attention_reads_queries_and_keys_of_different_lengths() {
     run_forward(
         Shapes {
