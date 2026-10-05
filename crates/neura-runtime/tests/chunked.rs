@@ -10,6 +10,10 @@ mod support;
 
 use support::{assert_close, open};
 
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
 const WIDTH: u32 = 4;
 const PLANES: u32 = 4;
 const KEYS: u32 = 16;
@@ -356,13 +360,13 @@ impl Chunked {
         self.walk(program, query_lengths, key_lengths, cursors)
     }
 
-    fn walk(
+    fn load(
         &self,
         program: &Program<'_>,
         query_lengths: &[f32],
         key_lengths: &[f32],
         cursors: &[f32],
-    ) -> Vec<Vec<f32>> {
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
         let shape = |value| self.graph.shape(value).dims();
         let query_bound = shape(self.queries)[2];
         let key_bound = shape(self.keys)[2];
@@ -381,6 +385,19 @@ impl Chunked {
         self.runtime.write(program, self.values, &values);
         self.runtime.write(program, self.queries, &queries);
         self.runtime.write(program, self.weight, &weight);
+        (keys, values, queries, weight)
+    }
+
+    fn walk(
+        &self,
+        program: &Program<'_>,
+        query_lengths: &[f32],
+        key_lengths: &[f32],
+        cursors: &[f32],
+    ) -> Vec<Vec<f32>> {
+        let (keys, values, queries, weight) =
+            self.load(program, query_lengths, key_lengths, cursors);
+        let width = self.graph.shape(self.keys).dims()[3];
         self.runtime.run(program);
         let produced = self.runtime.read_many(
             program,
@@ -540,4 +557,21 @@ fn a_windowed_ring_chunked_prefill_reaches_back_from_the_slots_it_wrapped() {
             &[18.0, 10.0, 26.0, 2.0],
         );
     }
+}
+
+#[test]
+fn a_ring_of_no_window_refuses_the_slots_its_cursor_wrapped() {
+    let case = Case::of(PLANES, PLANES * 24, PLANES * KEYS, WIDTH).ringed();
+    let chunked = Chunked::build(open(), case);
+    let program = chunked.compile();
+    chunked.load(
+        &program,
+        &[20.0, 20.0, 20.0, 20.0],
+        &[16.0, 16.0, 16.0, 16.0],
+        &[8.0, 8.0, 8.0, 8.0],
+    );
+    chunked.runtime.run(&program);
+    assert!(refuses(|| {
+        let _ = chunked.runtime.read(&program, chunked.out);
+    }));
 }

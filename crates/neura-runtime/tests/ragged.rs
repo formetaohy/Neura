@@ -1109,9 +1109,9 @@ fn a_packed_attention_trains_the_queries_the_keys_and_the_values() {
 #[test]
 fn a_packed_attention_trains_every_head_and_every_query_of_a_plane() {
     for (rows, lengths) in [
-        (3, [3.0f32, 0.0, 5.0, 2.0].as_slice()),
+        (3, [3.0f32, 0.0, 5.0, 3.0].as_slice()),
         (2, [4.0, 4.0, 4.0, 4.0].as_slice()),
-        (5, [6.0, 5.0, 3.0, 2.0].as_slice()),
+        (5, [6.0, 5.0, 5.0, 0.0].as_slice()),
         (1, [3.0, 0.0, 5.0, 2.0].as_slice()),
     ] {
         let trainable = Trainable::shaped(PLANES, 2, rows, BOUND, WIDTH, 0);
