@@ -575,7 +575,13 @@ impl<'g> Graph<'g> {
         );
         let origin = origin.map(|origin| self.own(origin));
         let packed = self.packed_axis(shape);
-        if let Some((offsets, axis)) = &packed {
+        if let Some((axis, offsets, ragged)) = &packed {
+            assert_eq!(
+                *axis,
+                2,
+                "a rotation turns the rows of a packed tensor on axis 2, and the rows the ragged axis value {offsets} packs stand on axis {axis} of {:?}: a packed tensor lays the rows of every plane on axis 2 with axes 0 and 1 holding one plane, so that the row of a plane stands where the offsets of that plane reach",
+                shape.dims(),
+            );
             assert!(
                 shape.dims()[0] == 1 && shape.dims()[1] == 1,
                 "a rotation turns the rows of one plane at a time, and {:?} holds {} planes beside the rows the ragged axis value {offsets} packs into axis 2: a packed row stands in the plane its offset reaches",
@@ -583,13 +589,13 @@ impl<'g> Graph<'g> {
                 shape.dims()[0] * shape.dims()[1],
             );
             assert!(
-                !axis.queries,
+                !ragged.queries,
                 "value {offsets} closes the rows of a query chunk, and the device places the row of a chunk at the end of the key plane its sequence already holds; rotate the row of a chunk before the packing gathers it, so that a rotated row stands where the key it weighs stands",
             );
             assert!(
-                origin.is_none() || axis.planes.elements() == 1,
+                origin.is_none() || ragged.planes.elements() == 1,
                 "a packed axis hands {offsets} the rows of {} planes one after another, and one cursor holds one position per {:?} plane of {:?}: a rotation of the rows of every plane needs the seat every plane's offset closes",
-                axis.planes.elements(),
+                ragged.planes.elements(),
                 [shape.dims()[0], shape.dims()[1], 1, 1],
                 shape.dims(),
             );
@@ -619,7 +625,7 @@ impl<'g> Graph<'g> {
         );
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.param = base;
-        task.segments = packed.map_or(NO_VALUE, |(offsets, _)| offsets);
+        task.segments = packed.map_or(NO_VALUE, |(_, offsets, _)| offsets);
         self.push(task);
         out
     }

@@ -210,7 +210,6 @@ impl Plan {
         assert_writers_precede_readers(values, &tasks);
         assert_units_keep_their_order(&tasks);
         assert_ragged_chunks_cover_their_plane(&tasks);
-        assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(values, &tasks);
         assert_a_segmented_attention_walks_the_planes_its_query_holds(values, &tasks);
         assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
@@ -225,6 +224,11 @@ impl Plan {
             schedule.order(),
             &measures,
             &menu,
+        );
+        assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+            values,
+            &tasks,
+            &ragged_axes(&authored),
         );
         let order = schedule.order();
         let waves = schedule.waves();
@@ -946,24 +950,74 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
     }
 }
 
-fn assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+fn ragged_axes(authored: &authored::Authored) -> Vec<(u32, u32)> {
+    let list = authored.patch_list();
+    let mut axes = authored
+        .patches()
+        .iter()
+        .filter(|patch| patch.segment != NO_VALUE)
+        .flat_map(|patch| {
+            let first = patch.slots as usize;
+            list[first..first + patch.slots_count as usize]
+                .iter()
+                .map(|slot| (*slot, patch.segment))
+        })
+        .collect::<Vec<(u32, u32)>>();
+    axes.sort_unstable();
+    axes.dedup();
+    axes
+}
+
+pub(crate) fn assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
     values: &[ValueInfo],
     tasks: &[Task],
+    ragged: &[(u32, u32)],
 ) {
     for task in tasks {
         if !matches!(task.kind, Kind::Rope | Kind::RopeGrad) {
             continue;
         }
+        let shape = values[task.out as usize].shape;
+        let walked = (0..MAX_RANK).find_map(|at| {
+            let slot = shape.free(at)?;
+            let offsets = ragged
+                .iter()
+                .find(|(kept, _)| *kept == slot)
+                .map(|(_, offsets)| *offsets)?;
+            Some((at, slot, offsets))
+        });
         let packed = task.segments != NO_VALUE;
+        if !packed {
+            if let Some((at, _, offsets)) = walked {
+                panic!(
+                    "a {} task turns {:?} without the segments of a ragged axis, and axis {at} walks the extent the ragged axis value {offsets} packs; the device seats a packed row at the position its own plane's offsets name, so a rotation that names no segments turns every row from the plan's own range",
+                    task.kind.name(),
+                    shape.dims(),
+                );
+            }
+            continue;
+        }
+        let Some((at, _, offsets)) = walked else {
+            panic!(
+                "a packed {} task walks the segments of value {} and turns {:?}, which walks the extent of no ragged axis",
+                task.kind.name(),
+                task.segments,
+                shape.dims(),
+            );
+        };
+        assert_eq!(
+            at,
+            2,
+            "a packed {} task turns the rows of axis 2, and value {offsets} packs the rows of axis {at} of {:?}: a packed tensor lays the rows of every plane on axis 2 with axes 0 and 1 holding one plane, so that the row of a plane stands where the offsets of that plane reach",
+            task.kind.name(),
+            shape.dims(),
+        );
         assert_eq!(
             matches!(task.split, Split::Ragged { .. }),
             packed,
             "a {} task turns the rows an extent packs beside the rows one plane holds, and a packed task walks the rows of one plane at a time; a rotation of a packed tensor gathers its rows from a ragged axis and no plan hands it another range",
             task.kind.name(),
         );
-        if !packed {
-            continue;
-        }
         let dims = values[task.out as usize].shape.dims();
         assert!(
             dims[0] == 1 && dims[1] == 1,

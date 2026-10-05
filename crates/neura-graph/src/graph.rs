@@ -401,14 +401,16 @@ impl<'g> Graph<'g> {
             .any(|slot| walked.binary_search(&slot).is_err())
     }
 
-    pub(crate) fn packed_axis(&self, shape: Shape) -> Option<(u32, RaggedAxis)> {
-        let slot = shape.free(2)?;
+    pub(crate) fn packed_axis(&self, shape: Shape) -> Option<(u32, u32, RaggedAxis)> {
         let state = self.state.borrow();
-        state
-            .ragged
-            .iter()
-            .find(|(_, axis)| axis.token == slot)
-            .map(|(offsets, axis)| (*offsets, axis.clone()))
+        (0..MAX_RANK).find_map(|at| {
+            let slot = shape.free(at)?;
+            state
+                .ragged
+                .iter()
+                .find(|(_, axis)| axis.token == slot)
+                .map(|(offsets, axis)| (at, *offsets, axis.clone()))
+        })
     }
 
     pub(crate) fn mark_query_axis(&self, offsets: u32) {
@@ -423,7 +425,8 @@ impl<'g> Graph<'g> {
             if !matches!(task.kind, Kind::Rope | Kind::RopeGrad) {
                 continue;
             }
-            if state.values[task.out as usize].shape.free(2) != Some(token) {
+            let walked = state.values[task.out as usize].shape;
+            if (0..MAX_RANK).all(|at| walked.free(at) != Some(token)) {
                 continue;
             }
             panic!(

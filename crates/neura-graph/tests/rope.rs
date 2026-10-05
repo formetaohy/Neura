@@ -95,6 +95,57 @@ fn a_packed_rope_walks_the_rows_the_axis_places() {
 }
 
 #[test]
+fn a_packed_rope_refuses_the_rows_a_ragged_axis_packs_off_axis_two() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(4), Element::Single);
+    let ragged = graph.ragged(16, lengths);
+    let value = graph.gradient_input(
+        Shape::of([1, 1, 16, 4]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let turned = graph.rope(value, None, 10000.0);
+    let snapshot = graph.snapshot();
+    let task = snapshot
+        .tasks()
+        .iter()
+        .find(|task| task.kind == Kind::Rope)
+        .expect("a rotation of the rows a ragged axis packs into axis 2");
+    assert_eq!(
+        task.segments,
+        ragged.offsets.id(),
+        "a packed rotation walks the offsets the axis closes"
+    );
+    assert_eq!(graph.shape(turned).free(2), Some(ragged.extent.slot()));
+    let sideways = graph.permute(value, [2, 1, 0, 3]);
+    assert!(
+        refuses(|| {
+            graph.rope(sideways, None, 10000.0);
+        }),
+        "a permuted packed tensor packed its rows into axis 0, and the device seats a packed row by its own plane's offsets",
+    );
+    let first = graph.input(
+        Shape::of([16, 1, 1, 4]).freed(&[(0, ragged.extent)]),
+        Element::Single,
+    );
+    assert!(
+        refuses(|| {
+            graph.rope(first, None, 10000.0);
+        }),
+        "a packed tensor laid the rows of every plane on axis 0",
+    );
+    let second = graph.input(
+        Shape::of([1, 16, 1, 4]).freed(&[(1, ragged.extent)]),
+        Element::Single,
+    );
+    assert!(
+        refuses(|| {
+            graph.rope(second, None, 10000.0);
+        }),
+        "a packed tensor laid the rows of every plane on axis 1",
+    );
+}
+
+#[test]
 fn a_packed_rope_holds_no_plane_beside_the_rows_its_axis_packs() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);

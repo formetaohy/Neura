@@ -343,3 +343,97 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
         "a window walks the taps of its filter row by row over the reach the plan froze",
     );
 }
+
+fn rotation(out: u32, segments: u32) -> lower::Task {
+    lower::Task {
+        kind: Kind::Rope,
+        op: neura_pointwise::NONE,
+        geometry: 0,
+        first: 0,
+        count: 4,
+        slot: 0,
+        out,
+        extra: NO_VALUE,
+        inputs: [out, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        origin: NO_VALUE,
+        param: 10000.0,
+        window: Window::sliding([1, 1]),
+        splits: 1,
+        work: 0,
+        in_place: false,
+        axis: 0,
+        offset: 0,
+        prelude: Vec::new(),
+        chain: Vec::new(),
+        unit: 0,
+        split: span::Split::Range { first: 0, count: 4 },
+        depends: Vec::new(),
+        patch: NO_VALUE,
+        segments,
+        reach: 0,
+        keys: 0,
+        plane: 0,
+        queries: NO_VALUE,
+        tokens: 0,
+        grid: NO_VALUE,
+    }
+}
+
+#[test]
+fn a_rotation_of_a_packed_tensor_walks_the_segments_of_its_axis() {
+    let graph = Graph::new();
+    let extent = graph.free(4);
+    let ragged = [(extent.slot(), 7u32)];
+    let values = vec![
+        ValueInfo::derived(Shape::of([4, 1, 1, 2]).freed(&[(0, extent)]), 0),
+        ValueInfo::derived(Shape::of([1, 1, 4, 2]).freed(&[(2, extent)]), 1),
+    ];
+    let loose = rotation(0, NO_VALUE);
+    assert!(
+        refuses(
+            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+                &values,
+                std::slice::from_ref(&loose),
+                &ragged,
+            )
+        ),
+        "a rotation of the rows a ragged axis packs named no segments",
+    );
+    let mut sideways = loose;
+    sideways.segments = 7;
+    sideways.grid = 7;
+    sideways.split = span::Split::Ragged {
+        planes: 1,
+        plane: 0,
+        index: 0,
+        group: 1,
+    };
+    assert!(
+        refuses(
+            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+                &values,
+                std::slice::from_ref(&sideways),
+                &ragged,
+            )
+        ),
+        "a packed rotation packed the rows of every plane into axis 0",
+    );
+    let mut packed = rotation(1, 7);
+    packed.grid = 7;
+    packed.split = span::Split::Ragged {
+        planes: 1,
+        plane: 0,
+        index: 0,
+        group: 1,
+    };
+    assert!(
+        !refuses(
+            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+                &values,
+                std::slice::from_ref(&packed),
+                &ragged,
+            )
+        ),
+        "a rotation of the rows a ragged axis packs into axis 2",
+    );
+}
