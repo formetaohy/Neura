@@ -128,6 +128,39 @@ mod device {
         }
     }
 
+    fn run_segment_sum(task: Task, lid: u32) {
+        let source = values[task.a];
+        let partials = values[task.out];
+        if task.plane >= partials.dims.x * partials.dims.y {
+            return;
+        }
+        let head = task.plane / partials.dims.y;
+        let batch = task.plane % partials.dims.y;
+        let mut start = 0u32;
+        if task.count > 0u32 {
+            let offsets = values[task.segment];
+            start = whole_index(
+                fetch(offsets, task.plane),
+                source.dims.z + 1u32,
+                kind::SEGMENT_SUM,
+                refusal::INDEX,
+            );
+        }
+        let base = read_address(uvec4(head, batch, task.index, 0u32), partials.strides);
+        for column in stride(lid, partials.dims.w, WORKGROUP_SIZE) {
+            let mut total = 0.0;
+            for row in stride(0u32, task.count, 1u32) {
+                total = total
+                    + read_frame(
+                        task,
+                        source,
+                        uvec4(0u32, 0u32, start + task.first + row, column),
+                    );
+            }
+            publish(partials, base + column * partials.strides.w, total);
+        }
+    }
+
     fn run_sum_axis(task: Task, lid: u32) {
         let source = values[task.a];
         let target = values[task.out];

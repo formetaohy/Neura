@@ -249,6 +249,7 @@ fn only_a_reduction_that_reads_its_source_once_opens_a_prelude() {
             Kind::SumAxis,
             Kind::Argmax,
             Kind::Categorical,
+            Kind::SegmentSum,
         ],
         "a prelude replaces the tensor a task would have read, so only a task that reads it once opens one",
     );

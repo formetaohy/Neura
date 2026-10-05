@@ -1,5 +1,5 @@
-use crate::graph::{Graph, NORM_FLOOR, Residency, TaskInfo, Value, ValueInfo, advance};
-use crate::shape::Shape;
+use crate::graph::{Graph, NORM_FLOOR, Ragged, Residency, TaskInfo, Value, ValueInfo, advance};
+use crate::shape::{Free, Shape};
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
 use std::collections::{BTreeMap, HashMap};
@@ -594,6 +594,26 @@ impl<'g> Graph<'g> {
                 if self.tracked(&[source]) {
                     let out = self.broadcast(gradient, self.shape(source));
                     self.accumulate(grads, source, out);
+                }
+            }
+            Kind::SegmentSum => {
+                let packed = self.value_of(task.inputs[0]);
+                if self.tracked(&[packed]) {
+                    let shape = self.shape(packed);
+                    let slot = shape.free(2).unwrap_or_else(|| {
+                        panic!(
+                            "a per-plane sum walks the token axis its offsets close, and value {} packs no plane",
+                            packed.id(),
+                        )
+                    });
+                    let ragged = Ragged {
+                        extent: Free::of(slot, shape.dims()[2]),
+                        offsets: self.value_of(task.segments),
+                    };
+                    let rows = self.rows(ragged);
+                    let per_plane = self.sum_axis(gradient, 2);
+                    let contribution = self.gather(per_plane, rows.plane);
+                    self.accumulate(grads, packed, contribution);
                 }
             }
             Kind::Attention => {

@@ -1082,6 +1082,7 @@ impl<'g> Graph<'g> {
 
     pub fn sum_rows(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
+        self.assert_axis_packs_one_plane(value, MAX_RANK - 1);
         self.fold(value, MAX_RANK - 1)
     }
 
@@ -1096,7 +1097,29 @@ impl<'g> Graph<'g> {
         if shape.free(axis).is_none() && shape.dims()[axis as usize] == 1 {
             return value;
         }
+        self.assert_axis_packs_one_plane(value, axis);
         self.fold(value, axis)
+    }
+
+    fn assert_axis_packs_one_plane(&self, value: Value<'g>, axis: u32) {
+        let shape = self.shape(value);
+        let Some(slot) = shape.free(axis) else {
+            return;
+        };
+        let planes = {
+            let state = self.state.borrow();
+            state
+                .ragged
+                .values()
+                .find(|ragged| ragged.token == slot)
+                .map(|ragged| ragged.planes.elements())
+        };
+        if let Some(planes) = planes {
+            panic!(
+                "a fold over axis {axis} of {:?} walks the {planes} planes a ragged axis packs one after another, and one number stands for every sequence; sum the rows of each plane with Graph::segment_sum, and fold the planes of that result for one number per column",
+                shape.dims(),
+            );
+        }
     }
 
     pub fn mean_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {

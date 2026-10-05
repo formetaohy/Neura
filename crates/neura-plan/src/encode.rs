@@ -1035,6 +1035,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Extend
             | Kind::SumChunk
             | Kind::SumAxis
+            | Kind::SegmentSum
             | Kind::Softmax
             | Kind::SoftmaxGrad
             | Kind::LogSoftmax

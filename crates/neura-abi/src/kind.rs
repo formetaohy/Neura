@@ -522,4 +522,12 @@ kinds! {
         chain: true,
         origin: false,
     };
+    SegmentSum SEGMENT_SUM = "segment_sum" {
+        entry: "run_segment_sum",
+        modules: [Reduce],
+        geometry: None,
+        prelude: true,
+        chain: false,
+        origin: false,
+    };
 }

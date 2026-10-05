@@ -1,9 +1,12 @@
-use crate::graph::{AttentionOptions, Graph, Residency, TaskInfo, Value};
+use crate::graph::{AttentionOptions, Graph, Ragged, Residency, TaskInfo, Value};
 use crate::pool::Pool;
 use crate::shape::Shape;
 use crate::window::Window;
 use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
+
+const SEGMENT_CHUNK_ROWS: u32 = 512;
+const SEGMENT_CHUNK_LIMIT: u32 = 64;
 
 impl<'g> Graph<'g> {
     pub fn matmul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
@@ -140,6 +143,90 @@ impl<'g> Graph<'g> {
         unit.segments = segments.id();
         self.push(unit);
         out
+    }
+
+    pub fn segment_sum(&self, value: Value<'g>, ragged: Ragged<'g>) -> Value<'g> {
+        let value = self.own(value);
+        let offsets = self.own(ragged.offsets);
+        let axis = {
+            let state = self.state.borrow();
+            state.ragged.get(&offsets.id()).cloned()
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "a per-plane sum walks the segments a ragged axis closes, and value {} holds a table no ragged axis published; close the lengths of every plane with Graph::ragged",
+                offsets.id(),
+            )
+        });
+        assert_eq!(
+            axis.token,
+            ragged.extent.slot(),
+            "a per-plane sum walks the rows the {} planes a ragged axis packs beside free extent {}, and the axis hands it free extent {}",
+            axis.planes.elements(),
+            axis.token,
+            ragged.extent.slot(),
+        );
+        let shape = self.shape(value);
+        assert_eq!(
+            shape.free(2),
+            Some(axis.token),
+            "a per-plane sum packs the rows of every plane into the token axis its offsets close, and the rows of {shape:?} walk free extent {:?} where the ragged axis closes free extent {}",
+            shape.free(2),
+            axis.token,
+        );
+        assert!(
+            shape.dims()[0] == 1 && shape.dims()[1] == 1,
+            "a per-plane sum walks the rows of every plane in one packed axis, and {:?} holds {} planes of rows",
+            shape.dims(),
+            shape.dims()[0] * shape.dims()[1],
+        );
+        let lengths = axis.planes;
+        let structured = lengths.dims()[0] > 1 || lengths.dims()[1] > 1;
+        let planes = lengths.elements();
+        let (heads, batch) = if structured {
+            (lengths.dims()[0], lengths.dims()[1])
+        } else {
+            (1, planes)
+        };
+        let mut frees = [None; MAX_RANK as usize];
+        frees[3] = shape.free(3);
+        for axis in 0..MAX_RANK {
+            let Some(slot) = lengths.free(axis) else {
+                continue;
+            };
+            let placed = if structured && axis < 2 { axis } else { 1 };
+            let bound = lengths.dims()[axis as usize];
+            assert_eq!(
+                bound,
+                if placed == 0 { heads } else { batch },
+                "a per-plane sum walks the {planes} planes of {:?} in one axis, and the free extent of axis {axis} bounds it at {bound}",
+                lengths.dims(),
+            );
+            assert!(
+                frees[placed as usize].is_none(),
+                "a per-plane sum walks the planes of one free extent, and the lengths of {:?} walk two",
+                lengths.dims(),
+            );
+            frees[placed as usize] = Some(slot);
+        }
+        let chunks = shape.dims()[2]
+            .div_ceil(SEGMENT_CHUNK_ROWS)
+            .clamp(1, SEGMENT_CHUNK_LIMIT);
+        let partials = self.fresh(
+            Shape::from_axes([heads, batch, chunks, shape.dims()[3]], frees),
+            Element::Single,
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
+        let mut unit = TaskInfo::of(
+            Kind::SegmentSum,
+            op::NONE,
+            partials.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        unit.segments = offsets.id();
+        self.push(unit);
+        self.sum_axis(partials, 2)
     }
 
     pub fn attention(

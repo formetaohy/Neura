@@ -409,6 +409,7 @@ fn schedule_unit(
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::SumChunk => reduce(plan, unit, target),
         Kind::SumAxis => fold(plan, unit, profile),
+        Kind::SegmentSum => segment_sum(plan, unit),
         Kind::PrefixChunk => prefix(plan, unit, profile),
         Kind::Conv2d => {
             let out = plan.shape(unit.out);
@@ -578,6 +579,28 @@ fn schedule_unit(
         }
         Kind::PrefixClose => {
             panic!("the extent a walk authors closes the offsets of the two-level prefix it walks")
+        }
+    }
+}
+
+fn segment_sum(plan: &mut Plan, unit: &TaskInfo) {
+    let partials = plan.shape(unit.out);
+    let planes = partials.dims()[0] * partials.dims()[1];
+    let chunks = partials.dims()[2];
+    let width = partials.dims()[3];
+    let rows = plan.shape(unit.inputs[0]).dims()[2];
+    let per_chunk = rows.div_ceil(chunks).max(1);
+    for plane in 0..planes {
+        for index in 0..chunks {
+            let mut task = Task::span(unit, 0, 0, u64::from(per_chunk) * u64::from(width));
+            task.split = Split::Ragged {
+                planes,
+                plane,
+                index,
+                group: chunks,
+            };
+            task.plane = plane;
+            plan.tasks.push(task);
         }
     }
 }

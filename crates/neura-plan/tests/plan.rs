@@ -3047,3 +3047,109 @@ fn a_segmented_product_weighs_the_rows_of_every_segment_into_its_weight_gradient
         );
     }
 }
+
+#[test]
+fn a_per_plane_sum_walks_the_chunks_every_plane_closes() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(3), Element::Single);
+    let ragged = graph.ragged(1024, lengths);
+    let cache = graph.resident(
+        Shape::of([1, 1, 1024, 2]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let total = graph.segment_sum(cache, ragged);
+    graph.retain(total);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let at = records
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| Kind::of(task.kind) == Kind::SegmentSum)
+        .map(|(index, _)| index)
+        .collect::<Vec<usize>>();
+    assert_eq!(
+        at.len(),
+        6,
+        "a per-plane sum parts every plane into the packs a fold folds",
+    );
+    let patches = plan.patches();
+    assert_eq!(patches.len(), 1, "one slot is authored");
+    let patch = patches[0];
+    assert_eq!(patched_slots(&plan, patch), [ragged.extent.slot()]);
+    assert_eq!(patch.segment, ragged.offsets.id());
+    let author = records
+        .iter()
+        .position(|task| task.patch != neura_abi::NO_VALUE)
+        .expect("the closing task authors the extent");
+    assert_eq!(Kind::of(records[author].kind), Kind::PrefixClose);
+    let list = plan.patch_list();
+    let values = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+    assert!(
+        values.contains(&cache.id()),
+        "the packed axis takes the live rows of the axis: {values:?}",
+    );
+    let patched = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+    let partials = records[at[0]].out;
+    let mut walked = Vec::new();
+    for task in at {
+        assert_eq!(records[task].split, neura_abi::split::RAGGED);
+        assert_eq!(
+            (records[task].first, records[task].count),
+            (0, 0),
+            "the device hands every pack its rows",
+        );
+        assert_eq!(records[task].a, cache.id());
+        assert_eq!(records[task].segment, ragged.offsets.id());
+        assert_eq!(records[task].planes, 3);
+        assert_eq!(records[task].group, 2);
+        assert!(patched.contains(&(task as u32)));
+        assert!(
+            follows(&plan, author, task),
+            "a per-plane sum walks the offsets the closing task authors",
+        );
+        walked.push((records[task].plane, records[task].index));
+    }
+    walked.sort_unstable();
+    assert_eq!(walked, [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]);
+    let fold = records
+        .iter()
+        .enumerate()
+        .filter(|(_, task)| Kind::of(task.kind) == Kind::SumAxis)
+        .map(|(index, _)| index)
+        .collect::<Vec<usize>>();
+    assert_eq!(fold.len(), 1, "a per-plane sum folds the packs it walked");
+    assert_eq!(records[fold[0]].a, partials);
+    assert_eq!(records[fold[0]].out, total.id());
+}
+
+#[test]
+fn a_per_plane_sum_opens_the_prelude_of_the_tensor_it_folds() {
+    let graph = Graph::new();
+    let lengths = graph.input(Shape::vector(3), Element::Single);
+    let ragged = graph.ragged(1024, lengths);
+    let cache = graph.resident(
+        Shape::of([1, 1, 1024, 2]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let factor = graph.parameter(Shape::scalar(), Init::Zero, Element::Single);
+    let scales = graph.mul(cache, factor);
+    let total = graph.segment_sum(scales, ragged);
+    graph.retain(total);
+    let plan = plan(&graph);
+    let records = tasks(&plan);
+    let walked = records
+        .iter()
+        .find(|task| Kind::of(task.kind) == Kind::SegmentSum)
+        .expect("a per-plane sum walks the packs of a plane");
+    assert!(
+        walked.prelude_steps > 0,
+        "a per-plane sum opens the product it folds",
+    );
+    assert_eq!(walked.a, cache.id());
+    assert!(
+        !records
+            .iter()
+            .any(|task| Kind::of(task.kind) == Kind::Binary && task.out == scales.id()),
+        "the folded product stands in the prelude of the sum",
+    );
+}
