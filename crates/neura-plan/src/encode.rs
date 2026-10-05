@@ -211,6 +211,7 @@ impl Plan {
         assert_units_keep_their_order(&tasks);
         assert_ragged_chunks_cover_their_plane(&tasks);
         assert_a_segmented_attention_walks_the_planes_its_query_holds(values, &tasks);
+        assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         assert_a_task_needs_exact_lengths_the_plan_froze(values, &tasks);
         let mut authored =
@@ -950,6 +951,24 @@ fn assert_a_segmented_attention_walks_the_planes_its_query_holds(
             task.kind.name(),
             task.plane,
             query[0] * query[1],
+        );
+    }
+}
+
+fn assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values: &[ValueInfo], tasks: &[Task]) {
+    for task in tasks {
+        if task.kind != Kind::SegmentSum || task.segments == NO_VALUE {
+            continue;
+        }
+        let planes = values[task.segments as usize].shape.elements() - 1;
+        let partials = values[task.out as usize].shape.dims();
+        assert_eq!(
+            partials[0] * partials[1],
+            planes,
+            "a per-plane sum hands one number to each of the {planes} planes the offsets value {} closes, and value {} holds {} of them; the lengths of a ragged axis lay their planes out in one order, and the sum carries that order into the first two axes of its result",
+            task.segments,
+            task.out,
+            partials[0] * partials[1],
         );
     }
 }

@@ -1,6 +1,6 @@
 use crate::graph::{AttentionOptions, Graph, Ragged, Residency, TaskInfo, Value};
 use crate::pool::Pool;
-use crate::shape::Shape;
+use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
 use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
@@ -181,12 +181,17 @@ impl<'g> Graph<'g> {
             shape.dims()[0] * shape.dims()[1],
         );
         let lengths = axis.planes;
-        let structured = lengths.dims()[0] > 1 || lengths.dims()[1] > 1;
         let planes = lengths.elements();
-        let (heads, batch) = if structured {
-            (lengths.dims()[0], lengths.dims()[1])
-        } else {
-            (1, planes)
+        let layout = lengths.plane_layout().unwrap_or_else(|| {
+            panic!(
+                "a per-plane sum hands one number to each of the {planes} planes the lengths of {:?} walk, and the {} planes of its first two axes walk them in another order; lay the planes of a ragged axis on its first two axes, or walk one axis of planes",
+                lengths.dims(),
+                lengths.dims()[0] * lengths.dims()[1],
+            )
+        });
+        let (heads, batch) = match layout {
+            PlaneLayout::Grid { heads, batch } => (heads, batch),
+            PlaneLayout::Flat { planes } => (1, planes),
         };
         let mut frees = [None; MAX_RANK as usize];
         frees[3] = shape.free(3);
@@ -194,7 +199,10 @@ impl<'g> Graph<'g> {
             let Some(slot) = lengths.free(axis) else {
                 continue;
             };
-            let placed = if structured && axis < 2 { axis } else { 1 };
+            let placed = match layout {
+                PlaneLayout::Grid { .. } => axis.min(1),
+                PlaneLayout::Flat { .. } => 1,
+            };
             let bound = lengths.dims()[axis as usize];
             assert_eq!(
                 bound,

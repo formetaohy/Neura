@@ -28,6 +28,12 @@ impl Free {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PlaneLayout {
+    Grid { heads: u32, batch: u32 },
+    Flat { planes: u32 },
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Domain {
     statics: u32,
@@ -157,6 +163,18 @@ impl Shape {
 
     pub(crate) fn plane_domain(self) -> Domain {
         Domain::over(self, 0..2)
+    }
+
+    pub(crate) fn plane_layout(self) -> Option<PlaneLayout> {
+        if self.dims[2] * self.dims[3] == 1 {
+            return Some(PlaneLayout::Grid {
+                heads: self.dims[0],
+                batch: self.dims[1],
+            });
+        }
+        (self.dims[0] * self.dims[1] == 1).then_some(PlaneLayout::Flat {
+            planes: self.elements,
+        })
     }
 
     pub fn free(self, axis: u32) -> Option<u32> {

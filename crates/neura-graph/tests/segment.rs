@@ -195,3 +195,59 @@ fn a_per_plane_sum_trains_the_rows_of_every_plane() {
         "the backward pass hands every row the sum of its plane",
     );
 }
+
+#[test]
+fn a_per_plane_sum_hands_one_number_to_every_plane_the_lengths_walk() {
+    let graph = Graph::new();
+    for (dims, expected) in [
+        ([1, 1, PLANES, 1], [1, PLANES, 1, WIDTH]),
+        ([1, PLANES, 1, 1], [1, PLANES, 1, WIDTH]),
+        ([PLANES, 1, 1, 1], [PLANES, 1, 1, WIDTH]),
+        ([1, 1, PLANES, 2], [1, PLANES * 2, 1, WIDTH]),
+        ([PLANES, 2, 1, 1], [PLANES, 2, 1, WIDTH]),
+    ] {
+        let lengths = graph.input(Shape::of(dims), Element::Single);
+        let ragged = graph.ragged(BOUND, lengths);
+        let cache = graph.input(
+            Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+            Element::Single,
+        );
+        let total = graph.segment_sum(cache, ragged);
+        assert_eq!(graph.shape(total).dims(), expected, "{dims:?}");
+    }
+    let live = graph.free(PLANES * 2);
+    for (axis, dims) in [(1u32, [1, PLANES * 2, 1, 1]), (2, [1, 1, PLANES * 2, 1])] {
+        let lengths = graph.input(Shape::of(dims).freed(&[(axis, live)]), Element::Single);
+        let ragged = graph.ragged(BOUND, lengths);
+        let cache = graph.input(
+            Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+            Element::Single,
+        );
+        let total = graph.segment_sum(cache, ragged);
+        assert_eq!(graph.shape(total).dims(), [1, PLANES * 2, 1, WIDTH]);
+        assert_eq!(graph.shape(total).free(1), Some(live.slot()));
+    }
+}
+
+#[test]
+fn a_per_plane_sum_refuses_lengths_that_lay_their_planes_over_three_axes() {
+    let graph = Graph::new();
+    for dims in [[2, 1, 3, 1], [1, 2, 1, 3], [2, 3, 2, 1], [1, 1, 3, 2]] {
+        let lengths = graph.input(Shape::of(dims), Element::Single);
+        let ragged = graph.ragged(BOUND, lengths);
+        let cache = graph.input(
+            Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
+            Element::Single,
+        );
+        if dims[0] == 1 && dims[1] == 1 {
+            graph.segment_sum(cache, ragged);
+            continue;
+        }
+        assert!(
+            refuses(|| {
+                graph.segment_sum(cache, ragged);
+            }),
+            "the planes of {dims:?} lay over three axes",
+        );
+    }
+}
