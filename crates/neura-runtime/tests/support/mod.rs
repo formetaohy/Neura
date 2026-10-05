@@ -17,6 +17,9 @@ pub fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
         expected.len(),
     );
     for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        if actual == expected {
+            continue;
+        }
         assert!(
             (actual - expected).abs() <= tolerance,
             "element {index} came back as {actual} where {expected} was expected",

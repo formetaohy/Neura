@@ -39,7 +39,9 @@ pub fn pool2d_reference(
                                 * columns
                                 + used_column) as usize;
                             total += input[source];
-                            best = best.max(input[source]);
+                            if input[source] > best {
+                                best = input[source];
+                            }
                         }
                     }
                     let at = (((plane * channels + channel) * output_rows + row) * output_columns
@@ -74,7 +76,7 @@ pub fn max_pool2d_gradient(
             for row in 0..output_rows {
                 for column in 0..output_columns {
                     let mut best = f32::NEG_INFINITY;
-                    let mut chosen = (0u32, 0u32);
+                    let mut chosen = None;
                     for reach_row in 0..reach_rows {
                         let used_row = row * window.stride_rows() + reach_row;
                         if used_row < window.pad_rows() {
@@ -98,14 +100,16 @@ pub fn max_pool2d_gradient(
                                     + used_column) as usize];
                             if value > best {
                                 best = value;
-                                chosen = (used_row, used_column);
+                                chosen = Some((used_row, used_column));
                             }
                         }
                     }
                     let at = (((plane * channels + channel) * output_rows + row) * output_columns
                         + column) as usize;
-                    out[(((plane * channels + channel) * rows + chosen.0) * columns + chosen.1)
-                        as usize] += upstream[at];
+                    if let Some((chosen_row, chosen_column)) = chosen {
+                        out[(((plane * channels + channel) * rows + chosen_row) * columns
+                            + chosen_column) as usize] += upstream[at];
+                    }
                 }
             }
         }

@@ -9,8 +9,8 @@ mod device {
     fn window_max(source: Value, task: Task, window: uvec4) -> u32 {
         let rows = i32(source.dims.z);
         let columns = i32(source.dims.w);
-        let mut best = -3.4028235e38;
-        let mut chosen = 0u32;
+        let mut best = -bitcast_f32(0x7f800000u32);
+        let mut chosen = NO_VALUE;
         for reach_row in stride(0u32, task.reach_rows, 1u32) {
             let row = i32(window.z) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
             if row < 0i32 || row >= rows {
@@ -42,6 +42,14 @@ mod device {
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let at = coordinates(index, output.dims);
             let chosen = window_max(source, task, at);
+            if chosen == NO_VALUE {
+                publish(
+                    output,
+                    index,
+                    chained(task, at, -bitcast_f32(0x7f800000u32)),
+                );
+                continue;
+            }
             publish(output, index, chained(task, at, fetch(source, chosen)));
         }
     }

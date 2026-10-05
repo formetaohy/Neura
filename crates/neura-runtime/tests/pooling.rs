@@ -164,3 +164,106 @@ fn a_max_pooled_gradient_routes_through_the_number_the_window_took() {
     let expected = max_pool2d_gradient(&values, &scale_values, [2, 3, 6, 6], window);
     assert_close(&runtime.read(&program, slope), &expected, 1e-5);
 }
+
+#[test]
+fn a_max_pool_of_a_window_that_holds_no_number_takes_the_identity_of_the_maximum() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 2, 2]), Element::Single);
+    let window = Window::new([3, 3], [1, 1], [3, 3]);
+    let pooled = graph.pool2d(input, window, Pool::Max);
+    assert_eq!(pooled.shape(), Shape::of([1, 1, 6, 6]));
+    graph.retain(pooled);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = samples(4, 53);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let expected = pool2d_reference(&values, [1, 1, 2, 2], window, true);
+    assert_close(&runtime.read(&program, pooled), &expected, 1e-4);
+}
+
+#[test]
+fn a_max_pooled_gradient_of_a_window_that_holds_no_number_lands_on_no_element() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.parameter(
+        Shape::of([1, 1, 2, 2]),
+        Init::Uniform {
+            low: -1.0,
+            high: 1.0,
+        },
+        Element::Single,
+    );
+    let window = Window::new([3, 3], [1, 1], [3, 3]);
+    let pooled = graph.pool2d(input, window, Pool::Max);
+    let scale = graph.input(Shape::of([1, 1, 6, 6]), Element::Single);
+    let loss = graph.sum(graph.mul(pooled, scale));
+    let gradients = graph.backward(loss);
+    let slope = gradients.of(input);
+    graph.retain(slope);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = samples(4, 71);
+    let scale_values = (0..36)
+        .map(|index| 0.5 + 0.25 * (index as f32 * 0.061).sin())
+        .collect::<Vec<_>>();
+    runtime.write(&program, input, &values);
+    runtime.write(&program, scale, &scale_values);
+    runtime.run(&program);
+    let expected = max_pool2d_gradient(&values, &scale_values, [1, 1, 2, 2], window);
+    assert_close(&runtime.read(&program, slope), &expected, 1e-5);
+}
+
+#[test]
+fn a_max_pool_that_walks_the_smallest_number_takes_that_number() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.parameter(Shape::of([1, 1, 2, 2]), Init::Zero, Element::Single);
+    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let pooled = graph.pool2d(input, window, Pool::Max);
+    let scale = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let loss = graph.sum(graph.mul(pooled, scale));
+    let gradients = graph.backward(loss);
+    let slope = gradients.of(input);
+    graph.retain(pooled);
+    graph.retain(slope);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = vec![
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+        f32::MIN,
+    ];
+    runtime.write(&program, input, &values);
+    runtime.write(&program, scale, &[1.0]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, pooled), &[f32::MIN], 0.0);
+    let expected = max_pool2d_gradient(&values, &[1.0], [1, 1, 2, 2], window);
+    assert_close(&runtime.read(&program, slope), &expected, 0.0);
+}
+
+#[test]
+fn a_max_pool_of_a_window_of_negative_infinities_takes_the_identity_of_the_maximum() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.parameter(Shape::of([1, 1, 2, 2]), Init::Zero, Element::Single);
+    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let pooled = graph.pool2d(input, window, Pool::Max);
+    let scale = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let loss = graph.sum(graph.mul(pooled, scale));
+    let gradients = graph.backward(loss);
+    let slope = gradients.of(input);
+    graph.retain(pooled);
+    graph.retain(slope);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = vec![f32::NEG_INFINITY; 4];
+    runtime.write(&program, input, &values);
+    runtime.write(&program, scale, &[1.0]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, pooled), &[f32::NEG_INFINITY], 0.0);
+    let expected = max_pool2d_gradient(&values, &[1.0], [1, 1, 2, 2], window);
+    assert_close(&runtime.read(&program, slope), &expected, 0.0);
+}
