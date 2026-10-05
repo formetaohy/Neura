@@ -9,7 +9,7 @@ use crate::capability::{
     DeviceType, Limits,
 };
 use crate::submission::{Command, Write};
-use neura_shader::{ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};
+use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSArray, NSRange, NSString, NSURL};
@@ -241,10 +241,11 @@ impl Device {
                 AdapterPolicy::Power(_) => DeviceFailure::reason("no Metal compute device"),
             });
         };
+        let bytes = (raw.maxBufferLength() as u64).min(MAX_BINDING_BYTES);
         let limits = Limits {
             max_storage_buffers_per_shader_stage: u32::from(METAL_SIZE_BUFFER_SLOT),
-            max_storage_buffer_binding_size: raw.maxBufferLength().min(1 << 30) as u64,
-            max_buffer_size: raw.maxBufferLength().min(1 << 30) as u64,
+            max_storage_buffer_binding_size: bytes,
+            max_buffer_size: bytes,
             max_compute_invocations_per_workgroup: raw.maxThreadsPerThreadgroup().width as u32,
             max_compute_workgroup_size_x: raw.maxThreadsPerThreadgroup().width as u32,
             max_compute_workgroup_storage_size: raw.maxThreadgroupMemoryLength() as u32,

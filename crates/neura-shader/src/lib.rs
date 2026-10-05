@@ -19,7 +19,7 @@ pub use module::{
     element_name,
 };
 pub use program::{
-    Backend, BindingKind, BindingSpec, ComputeProgram, METAL_SIZE_BUFFER_SLOT, ShaderBinding,
-    ShaderTranslation, describe, reflect,
+    Backend, BindingKind, BindingSpec, ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT,
+    ShaderBinding, ShaderTranslation, describe, reflect,
 };
 pub use ty::{MatrixUse, Member, Scalar, Type, TypeId, ValueId};

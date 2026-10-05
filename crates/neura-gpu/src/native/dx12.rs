@@ -10,7 +10,7 @@ use crate::capability::{
 };
 use crate::submission::{Command, Write};
 use libloading::Library;
-use neura_shader::{ComputeProgram, ShaderTranslation};
+use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, ShaderTranslation};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::c_void;
@@ -272,11 +272,29 @@ fn describe(desc: &DXGI_ADAPTER_DESC1) -> AdapterInfo {
     }
 }
 
-fn limits() -> Limits {
+fn limits(device: &ID3D12Device) -> Limits {
+    let mut space = D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT::default();
+    unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT,
+            (&raw mut space).cast(),
+            size_of::<D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT>() as u32,
+        )
+    }
+    .unwrap_or_else(|error| {
+        panic!("querying the GPU virtual address space of a D3D12 device: {error}")
+    });
+    let bits = space.MaxGPUVirtualAddressBitsPerResource;
+    assert!(
+        bits >= 26,
+        "a D3D12 device addresses {bits} bits of one resource, and the {} byte buffer of the baseline does not fit",
+        Limits::BASELINE.max_buffer_size,
+    );
+    let bytes = MAX_BINDING_BYTES.min(1u64 << bits.min(63));
     Limits {
         max_storage_buffers_per_shader_stage: 30,
-        max_storage_buffer_binding_size: 1 << 30,
-        max_buffer_size: 1 << 30,
+        max_storage_buffer_binding_size: bytes,
+        max_buffer_size: bytes,
         max_compute_invocations_per_workgroup: 1024,
         max_compute_workgroup_size_x: 1024,
         max_compute_workgroup_storage_size: 32 << 10,
@@ -299,6 +317,7 @@ struct Candidate {
     device: ID3D12Device,
     info: AdapterInfo,
     order: u32,
+    limits: Limits,
 }
 
 fn shader_model(device: &ID3D12Device) -> bool {
@@ -346,10 +365,12 @@ fn candidates(
         } else {
             architecture(&raw)
         };
+        let limits = limits(&raw);
         candidates.push(Candidate {
             device: raw,
             info,
             order: order as u32,
+            limits,
         });
     }
     Ok((candidates, offered))
@@ -393,7 +414,12 @@ impl Device {
             }
         };
         let device = Self::assemble(candidate.device, artifacts)?;
-        Ok((device, candidate.info, limits(), Capability::default()))
+        Ok((
+            device,
+            candidate.info,
+            candidate.limits,
+            Capability::default(),
+        ))
     }
 
     fn assemble(raw: ID3D12Device, artifacts: ArtifactCache) -> Result<Arc<Device>, DeviceFailure> {

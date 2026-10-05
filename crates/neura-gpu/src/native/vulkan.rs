@@ -11,7 +11,7 @@ use crate::capability::{
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
-use neura_shader::ComputeProgram;
+use neura_shader::{ComputeProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString};
@@ -430,7 +430,7 @@ impl Device {
                     .0 as u32;
                 let ty = device_type(props.device_type);
                 let memory = unsafe { owner.raw.get_physical_device_memory_properties(*physical) };
-                let limits = limits(&props, &memory);
+                let limits = limits(&props, &memory, allocation(&owner, *physical, loaded));
                 Some((*physical, props, family, ty, limits, memory))
             })
             .collect::<Vec<_>>();
@@ -1180,9 +1180,30 @@ impl Device {
     }
 }
 
+fn allocation(owner: &InstanceOwner, physical: vk::PhysicalDevice, version: u32) -> u64 {
+    if version < vk::API_VERSION_1_1 {
+        return u64::MAX;
+    }
+    let properties2: Option<vk::PFN_vkGetPhysicalDeviceProperties2> =
+        instance_fn(owner, c"vkGetPhysicalDeviceProperties2KHR")
+            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceProperties2"));
+    let Some(properties2) = properties2 else {
+        return u64::MAX;
+    };
+    let mut maintenance = vk::PhysicalDeviceMaintenance3Properties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default();
+    properties = properties.push_next(&mut maintenance);
+    unsafe { properties2(physical, &mut properties) };
+    match maintenance.max_memory_allocation_size {
+        0 => u64::MAX,
+        bytes => bytes,
+    }
+}
+
 fn limits(
     properties: &vk::PhysicalDeviceProperties,
     memory: &vk::PhysicalDeviceMemoryProperties,
+    largest_allocation: u64,
 ) -> Limits {
     let gpu = &properties.limits;
     let local_bytes = memory.memory_heaps[..memory.memory_heap_count as usize]
@@ -1193,8 +1214,9 @@ fn limits(
         .unwrap_or(0);
     Limits {
         max_storage_buffers_per_shader_stage: gpu.max_per_stage_descriptor_storage_buffers.min(30),
-        max_storage_buffer_binding_size: u64::from(gpu.max_storage_buffer_range),
-        max_buffer_size: local_bytes.min(1 << 30),
+        max_storage_buffer_binding_size: u64::from(gpu.max_storage_buffer_range)
+            .min(MAX_BINDING_BYTES),
+        max_buffer_size: local_bytes.min(largest_allocation).min(MAX_BINDING_BYTES),
         max_compute_invocations_per_workgroup: gpu.max_compute_work_group_invocations,
         max_compute_workgroup_size_x: gpu.max_compute_work_group_size[0],
         max_compute_workgroup_storage_size: gpu.max_compute_shared_memory_size,

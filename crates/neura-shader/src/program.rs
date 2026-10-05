@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 pub const METAL_SIZE_BUFFER_SLOT: u8 = 30;
 
+pub const MAX_BINDING_BYTES: u64 = 1 << 34;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Backend {
     Vulkan,

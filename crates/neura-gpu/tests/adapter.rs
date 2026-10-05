@@ -48,3 +48,21 @@ fn an_absent_adapter_identity_is_refused() {
         Ok(device) => panic!("an absent adapter opened {}", device.adapter_info().name),
     }
 }
+
+#[test]
+fn a_binding_reaches_at_most_the_address_space_of_a_device_kernel() {
+    let device = open(AdapterPolicy::Power(PowerPreference::HighPerformance));
+    let limits = device.limits();
+    assert!(
+        limits.max_storage_buffer_binding_size <= neura_shader::MAX_BINDING_BYTES,
+        "a binding reaches {} bytes where a device kernel addresses at most {}",
+        limits.max_storage_buffer_binding_size,
+        neura_shader::MAX_BINDING_BYTES,
+    );
+    assert!(
+        limits.max_buffer_size <= neura_shader::MAX_BINDING_BYTES,
+        "a buffer holds {} bytes where a device kernel addresses at most {}",
+        limits.max_buffer_size,
+        neura_shader::MAX_BINDING_BYTES,
+    );
+}

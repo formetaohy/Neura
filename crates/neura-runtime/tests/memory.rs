@@ -1,5 +1,5 @@
 use neura_abi::{Element, Store};
-use neura_gpu::{BufferUsages, GpuBuffer, Submission};
+use neura_gpu::{BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission};
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
 
@@ -349,6 +349,49 @@ fn a_program_wider_than_the_heap_is_refused() {
             let _ = runtime.compile(&graph, &weights);
         }),
         "a plan whose tensors outrun the device heap was compiled",
+    );
+}
+
+#[test]
+fn a_heap_past_a_gigabyte_serves_a_program() {
+    let context = pollster::block_on(GpuContext::open(&GpuRequest::default())).expect("device");
+    let heap_bytes = (1u64 << 30) + (64 << 20);
+    if context.adapter_info().device_type == DeviceType::Cpu
+        || context.limits().max_storage_buffer_binding_size < heap_bytes
+    {
+        return;
+    }
+    drop(context);
+    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+        readback_bytes: 4 << 20,
+        heap_bytes,
+        ..Default::default()
+    }))
+    .expect("device");
+    assert_eq!(runtime.heap_bytes(), heap_bytes);
+    let graph = Graph::new();
+    let weight = graph.parameter(
+        Shape::matrix(4, 8),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let data = graph.input(Shape::matrix(2, 4), Element::Single);
+    let out = graph.matmul(data, weight);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let data_values = random(8, 7);
+    let weight_values = random(32, 11);
+    runtime.write(&program, data, &data_values);
+    runtime.write(&program, weight, &weight_values);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, out),
+        &matmul_reference(&data_values, &weight_values, 2, 4, 8),
+        1e-4,
     );
 }
 

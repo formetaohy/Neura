@@ -1,5 +1,7 @@
 use neura_compiler::{Read, ReadWrite, kernel};
-use neura_gpu::{Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission};
+use neura_gpu::{
+    Backends, Binding, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission,
+};
 
 #[kernel(workgroup_size = 64)]
 fn double(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
@@ -288,5 +290,94 @@ fn breaks_out_of_a_match(backends: Backends) {
 fn every_platform_backend_leaves_the_loop_a_match_breaks() {
     for backends in Backends::PLATFORM {
         breaks_out_of_a_match(backends);
+    }
+}
+
+#[kernel(workgroup_size = 1)]
+fn stamp_past_a_gigabyte(lid: u32, index: Read<u32>, storage: ReadWrite<u32>) {
+    storage[index[lid]] += 7u32;
+}
+
+fn past_a_gigabyte(backends: Backends) {
+    let backend = backends.backend();
+    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+        backends,
+        ..Default::default()
+    }))
+    .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
+    if context.adapter_info().device_type == DeviceType::Cpu {
+        return;
+    }
+    let bytes = (1u64 << 30) + 256;
+    let limits = context.limits();
+    assert!(
+        limits.max_storage_buffer_binding_size >= bytes,
+        "a {backend:?} device binds {} bytes in one storage binding, and the limit this device reports must reach the whole resource it addresses",
+        limits.max_storage_buffer_binding_size,
+    );
+    let device = context.device().clone();
+    let queue = context.queue().clone();
+    let far = 1u32 << 28;
+    let storage = GpuBuffer::new(
+        &device,
+        "native gigabyte storage",
+        bytes,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+    );
+    let index = GpuBuffer::new(
+        &device,
+        "native gigabyte index",
+        4,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
+    let readback = GpuBuffer::new(
+        &device,
+        "native gigabyte readback",
+        8,
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    );
+    index.write(&queue, &far.to_ne_bytes());
+    let pipeline = context.declare(stamp_past_a_gigabyte());
+    let group = pipeline.bind_group(&[
+        Binding {
+            index: 0,
+            buffer: index.binding(0, 4),
+        },
+        Binding {
+            index: 1,
+            buffer: storage.binding(0, bytes),
+        },
+    ]);
+    let mut setup = Submission::new(&device, "native gigabyte setup");
+    setup.clear(&storage, 0, 4);
+    setup.clear(&storage, 1 << 30, 4);
+    setup.submit(&queue);
+    let mut submission = Submission::new(&device, "native gigabyte dispatch");
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
+    submission.submit(&queue);
+    let mut transfer = Submission::new(&device, "native gigabyte transfer");
+    transfer.copy(&storage, 0, &readback, 0, 4);
+    transfer.copy(&storage, 1 << 30, &readback, 4, 4);
+    let index = transfer.submit(&queue);
+    drop(storage);
+    drop(context);
+    let measured = readback.read(&queue, index, 8);
+    assert_eq!(
+        u32::from_ne_bytes(measured[0..4].try_into().expect("four bytes")),
+        0,
+        "a task that stamps an element past a gigabyte leaves the first element alone",
+    );
+    assert_eq!(
+        u32::from_ne_bytes(measured[4..8].try_into().expect("four bytes")),
+        14,
+        "two tasks read and stamped the element one gigabyte into the binding",
+    );
+}
+
+#[test]
+fn every_platform_backend_reaches_past_a_gigabyte() {
+    for backends in Backends::PLATFORM {
+        past_a_gigabyte(backends);
     }
 }
