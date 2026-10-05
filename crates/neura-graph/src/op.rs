@@ -279,6 +279,7 @@ impl<'g> Graph<'g> {
             "a query axis walks the rows its own offsets close, and every row it walks weighs the keys of the plane its seat reaches; an attention without key segments holds no plane to seat a query in",
         );
         let mut packed = false;
+        let mut cursor_walks_the_planes = false;
         if let Some(offsets) = segments {
             let axis = {
                 let state = self.state.borrow();
@@ -337,10 +338,19 @@ impl<'g> Graph<'g> {
                     query_shape.dims(),
                     query_shape.dims()[0] * query_shape.dims()[1],
                 );
-                assert!(
-                    origin.is_none(),
-                    "a query axis walks the rows its offsets close, and the row of a plane reaches the keys it packs; a cursor places rows the packing already places",
-                );
+                if let Some(origin) = origin {
+                    assert_eq!(
+                        self.shape(origin),
+                        query_axis.planes,
+                        "a query axis value {} closes the rows of the {} planes its lengths walk, and the device seats the rows of every plane against the keys of the very plane its offset reaches; a cursor hands each of those planes the count of tokens written before the rows it packs, and value {} walks {:?} where those planes walk {:?}",
+                        query_offsets.id(),
+                        query_axis.planes.elements(),
+                        origin.id(),
+                        self.shape(origin).dims(),
+                        query_axis.planes.dims(),
+                    );
+                }
+                cursor_walks_the_planes = true;
                 assert!(
                     query_axis.planes.domain().meets(&axis.planes.domain())
                         && query_axis.planes.elements() == axis.planes.elements(),
@@ -357,7 +367,7 @@ impl<'g> Graph<'g> {
                 );
                 assert!(
                     origin.is_none(),
-                    "a packed query walks the rows its offsets close, and the row of a plane is the position it packs; a cursor places rows the packing already places",
+                    "a packed query weighs the very rows its offsets close, and every row stands in the slot its offset reaches: a ring overwrites the slots its window passed, so the row a plane holds is not the position a cursor names; weigh a chunk of new rows through a query axis of its own",
                 );
             } else {
                 let planes = query_shape.dims()[0] * query_shape.dims()[1];
@@ -435,25 +445,28 @@ impl<'g> Graph<'g> {
             Shape::of([key_shape.dims()[0], key_shape.dims()[1], 1, 1])
         };
         if let Some(origin) = origin {
-            assert!(
-                self.shape(origin).fits_within(planes),
-                "a cursor holds one position per {:?} plane, and value {} walks {:?}",
-                planes.dims(),
-                origin.id(),
-                self.shape(origin).dims(),
-            );
-            assert!(
-                query_shape.meets(key_shape, 2, 2) || query_shape.dims()[2] < key_shape.dims()[2],
-                "a cursor walks {} queries over {} keys, and the last query of a block reads every key before it",
-                query_shape.dims()[2],
-                key_shape.dims()[2],
-            );
-            assert!(
-                segments.is_none() || query_shape.dims()[2] <= key_shape.dims()[2],
-                "a cursor walks {} queries over a packed key axis of {} tokens",
-                query_shape.dims()[2],
-                key_shape.dims()[2],
-            );
+            if !cursor_walks_the_planes {
+                assert!(
+                    self.shape(origin).fits_within(planes),
+                    "a cursor holds one position per {:?} plane, and value {} walks {:?}",
+                    planes.dims(),
+                    origin.id(),
+                    self.shape(origin).dims(),
+                );
+                assert!(
+                    query_shape.meets(key_shape, 2, 2)
+                        || query_shape.dims()[2] < key_shape.dims()[2],
+                    "a cursor walks {} queries over {} keys, and the last query of a block reads every key before it",
+                    query_shape.dims()[2],
+                    key_shape.dims()[2],
+                );
+                assert!(
+                    segments.is_none() || query_shape.dims()[2] <= key_shape.dims()[2],
+                    "a cursor walks {} queries over a packed key axis of {} tokens",
+                    query_shape.dims()[2],
+                    key_shape.dims()[2],
+                );
+            }
         } else {
             assert!(
                 !attention.causal || segments.is_none() || packed,

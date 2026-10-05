@@ -110,14 +110,18 @@ mod device {
         if task.origin == NO_VALUE || keys == 0u32 {
             return 0u32;
         }
-        if keys < tokens {
+        if keys < tokens && task.reach == 0u32 {
             refuse(task.kind, refusal::ORIGIN, 0u32);
             return 0u32;
         }
         let cursor = values[task.origin];
-        let raw = fetch(
-            cursor,
-            read_address(uvec4(head, batch, 0u32, 0u32), cursor.strides),
+        let raw = select(
+            fetch(
+                cursor,
+                read_address(uvec4(head, batch, 0u32, 0u32), cursor.strides),
+            ),
+            fetch(cursor, task.plane),
+            task.queries != NO_VALUE,
         );
         let bound = select(keys - tokens + 1u32, EXACT_WALK_LIMIT, task.reach > 0u32);
         return whole_index(raw, bound, task.kind, refusal::ORIGIN);
@@ -202,7 +206,7 @@ mod device {
                     let queries = values[task.queries];
                     query_start =
                         axis_start(queries, task.plane, query.dims.z + 1u32, kind::ATTENTION);
-                    if task.tokens > rows {
+                    if task.tokens > rows && task.origin == NO_VALUE {
                         refuse(kind::ATTENTION, refusal::EXTENT, 0u32);
                     }
                     origin = rows - min(rows, task.tokens);
@@ -217,7 +221,8 @@ mod device {
         let causal = task.slot == 1u32;
         let cursor_head = select(head, plane.x, segmented);
         if keys >= tokens || task.reach > 0u32 {
-            origin = origin + block_origin(task, cursor_head, plane.y, keys, tokens);
+            let cursor = block_origin(task, cursor_head, plane.y, keys, tokens);
+            origin = select(origin + cursor, cursor, task.origin != NO_VALUE);
         }
         let position = origin + row;
         let written = origin + tokens;
@@ -254,17 +259,16 @@ mod device {
             workgroup_barrier();
             if inside {
                 let mut block_largest = -3.4028235e38;
+                let mut block_keys = 0u32;
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {
                     let at = block * ATTN_KEYS + column;
                     let mut score = 0.0;
                     for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
                         score = score + queries[depth] * scratch[column * ATTN_WIDTH + depth];
                     }
-                    weights[column] = select(
-                        -3.4028235e38,
-                        score * task.param,
-                        visible(at, keys, written, position, task.reach, causal),
-                    );
+                    let seen = visible(at, keys, written, position, task.reach, causal);
+                    block_keys = block_keys + select(0u32, 1u32, seen);
+                    weights[column] = select(-3.4028235e38, score * task.param, seen);
                     block_largest = max(block_largest, weights[column]);
                 }
                 let next = max(largest, block_largest);
@@ -272,7 +276,7 @@ mod device {
                 largest = next;
                 let mut block_total = 0.0;
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let weight = exp(weights[column] - largest);
+                    let weight = select(0.0, exp(weights[column] - largest), block_keys > 0u32);
                     weights[column] = weight;
                     block_total = block_total + weight;
                 }
@@ -378,7 +382,7 @@ mod device {
                         query.dims.z + 1u32,
                         kind::ATTENTION_QUERY_GRAD,
                     );
-                    if task.tokens > rows {
+                    if task.tokens > rows && task.origin == NO_VALUE {
                         refuse(kind::ATTENTION_QUERY_GRAD, refusal::EXTENT, 0u32);
                     }
                     origin = rows - min(rows, task.tokens);
@@ -395,7 +399,8 @@ mod device {
         let causal = task.slot == 1u32;
         let cursor_head = select(head, plane.x, segmented);
         if keys >= tokens || task.reach > 0u32 {
-            origin = origin + block_origin(task, cursor_head, plane.y, keys, tokens);
+            let cursor = block_origin(task, cursor_head, plane.y, keys, tokens);
+            origin = select(origin + cursor, cursor, task.origin != NO_VALUE);
         }
         let position = origin + row;
         let written = origin + tokens;
@@ -547,7 +552,7 @@ mod device {
                     query.dims.z + 1u32,
                     kind::ATTENTION_KEY_GRAD,
                 );
-                if task.tokens > rows {
+                if task.tokens > rows && task.origin == NO_VALUE {
                     refuse(kind::ATTENTION_KEY_GRAD, refusal::EXTENT, 0u32);
                 }
                 origin = rows - min(rows, task.tokens);
@@ -557,7 +562,8 @@ mod device {
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = origin + block_origin(task, head, batch, keys, tokens);
+            let cursor = block_origin(task, head, batch, keys, tokens);
+            origin = select(origin + cursor, cursor, task.origin != NO_VALUE);
         }
         let heads = select(groups, 1u32, segmented);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;
@@ -731,7 +737,7 @@ mod device {
                     query.dims.z + 1u32,
                     kind::ATTENTION_VALUE_GRAD,
                 );
-                if task.tokens > rows {
+                if task.tokens > rows && task.origin == NO_VALUE {
                     refuse(kind::ATTENTION_VALUE_GRAD, refusal::EXTENT, 0u32);
                 }
                 origin = rows - min(rows, task.tokens);
@@ -741,7 +747,8 @@ mod device {
         let inside = lid < task.count;
         let causal = task.slot == 1u32;
         if keys >= tokens || task.reach > 0u32 {
-            origin = origin + block_origin(task, head, batch, keys, tokens);
+            let cursor = block_origin(task, head, batch, keys, tokens);
+            origin = select(origin + cursor, cursor, task.origin != NO_VALUE);
         }
         let heads = select(groups, 1u32, segmented);
         let blocks = (tokens + ATTN_KEYS - 1u32) / ATTN_KEYS;

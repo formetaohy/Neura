@@ -56,6 +56,7 @@ struct Reference {
 fn reference(
     query_lengths: &[f32],
     key_lengths: &[f32],
+    cursors: &[f32],
     batch: Batch<'_>,
     reach: u32,
     causal: bool,
@@ -81,18 +82,33 @@ fn reference(
         let queries_in_plane = query_lengths[plane] as usize;
         let key_start = key_offsets[plane] as usize;
         let query_start = query_offsets[plane] as usize;
-        let shift = keys_in_plane - queries_in_plane;
+        let ringed = !cursors.is_empty();
+        let base = if ringed {
+            cursors[plane] as usize
+        } else {
+            keys_in_plane - queries_in_plane
+        };
+        let written = base + queries_in_plane;
         for row in 0..queries_in_plane {
             let at = (query_start + row) * width;
             let query = &queries[at..at + width];
             let dout = &weight[at..at + width];
-            let position = shift + row;
+            let position = base + row;
             let mut attended = Vec::new();
             let mut scores = Vec::new();
-            let last = if causal { position } else { keys_in_plane - 1 };
-            for key in 0..=last {
-                if reach > 0 && (position - key) as u32 >= reach {
-                    continue;
+            for key in 0..keys_in_plane {
+                let slot = if ringed {
+                    ring_position(key, keys_in_plane, written)
+                } else {
+                    key
+                };
+                if causal {
+                    if slot > position {
+                        continue;
+                    }
+                    if reach > 0 && (position - slot) as u32 >= reach {
+                        continue;
+                    }
                 }
                 let packed = (key_start + key) * width;
                 scores.push(
@@ -149,6 +165,13 @@ fn reference(
     }
 }
 
+fn ring_position(slot: usize, capacity: usize, written: usize) -> usize {
+    if written <= capacity {
+        return slot;
+    }
+    slot + capacity * ((written - 1 - slot) / capacity)
+}
+
 #[derive(Clone, Copy)]
 struct Case {
     planes: u32,
@@ -158,6 +181,7 @@ struct Case {
     reach: u32,
     causal: bool,
     binding: bool,
+    ringed: bool,
 }
 
 impl Case {
@@ -170,6 +194,7 @@ impl Case {
             reach: 0,
             causal: true,
             binding: false,
+            ringed: false,
         }
     }
 
@@ -187,6 +212,11 @@ impl Case {
         self.binding = true;
         self
     }
+
+    fn ringed(mut self) -> Self {
+        self.ringed = true;
+        self
+    }
 }
 
 struct Chunked {
@@ -198,6 +228,7 @@ struct Chunked {
     values: Value<'static>,
     queries: Value<'static>,
     weight: Value<'static>,
+    cursors: Option<Value<'static>>,
     query_offsets: Value<'static>,
     key_offsets: Value<'static>,
     out: Value<'static>,
@@ -219,6 +250,7 @@ impl Chunked {
             reach,
             causal,
             binding,
+            ringed,
         } = case;
         let graph: Graph<'static> = Graph::new();
         let live = binding.then(|| graph.free(planes));
@@ -231,6 +263,7 @@ impl Chunked {
         };
         let query_lengths = lengths(planes);
         let key_lengths = lengths(planes);
+        let cursors = ringed.then(|| lengths(planes));
         let query_axis = graph.ragged(queries, query_lengths);
         let key_axis = graph.ragged(keys, key_lengths);
         let packed_queries = Shape::of([1, 1, queries, width]).freed(&[(2, query_axis.extent)]);
@@ -245,7 +278,7 @@ impl Chunked {
             AttentionOptions {
                 scale: SCALE,
                 causal,
-                origin: None,
+                origin: cursors,
                 segments: Some(key_axis.offsets),
                 reach: (reach > 0).then_some(reach),
                 query_segments: Some(query_axis.offsets),
@@ -270,6 +303,7 @@ impl Chunked {
             values: value,
             queries: query,
             weight,
+            cursors,
             query_offsets: query_axis.offsets,
             key_offsets: key_axis.offsets,
             out,
@@ -305,6 +339,30 @@ impl Chunked {
         query_lengths: &[f32],
         key_lengths: &[f32],
     ) -> Vec<Vec<f32>> {
+        self.walk(program, query_lengths, key_lengths, &[])
+    }
+
+    fn step_ring(
+        &self,
+        program: &Program<'_>,
+        query_lengths: &[f32],
+        key_lengths: &[f32],
+        cursors: &[f32],
+    ) -> Vec<Vec<f32>> {
+        assert!(
+            self.case.ringed,
+            "only a ring weighs the slots its window wrapped",
+        );
+        self.walk(program, query_lengths, key_lengths, cursors)
+    }
+
+    fn walk(
+        &self,
+        program: &Program<'_>,
+        query_lengths: &[f32],
+        key_lengths: &[f32],
+        cursors: &[f32],
+    ) -> Vec<Vec<f32>> {
         let shape = |value| self.graph.shape(value).dims();
         let query_bound = shape(self.queries)[2];
         let key_bound = shape(self.keys)[2];
@@ -316,6 +374,9 @@ impl Chunked {
         self.runtime
             .write(program, self.query_lengths, query_lengths);
         self.runtime.write(program, self.key_lengths, key_lengths);
+        if let Some(cursor) = self.cursors {
+            self.runtime.write(program, cursor, cursors);
+        }
         self.runtime.write(program, self.keys, &keys);
         self.runtime.write(program, self.values, &values);
         self.runtime.write(program, self.queries, &queries);
@@ -345,6 +406,7 @@ impl Chunked {
         let expected = reference(
             query_lengths,
             key_lengths,
+            cursors,
             Batch {
                 keys: &keys,
                 values: &values,
@@ -435,5 +497,47 @@ fn every_platform_backend_trains_a_chunked_prefill() {
         let chunked = Chunked::over(backends, Case::of(PLANES, QUERIES, KEYS, WIDTH));
         let program = chunked.compile();
         chunked.step(&program, &[3.0, 2.0, 1.0, 0.0], &[7.0, 5.0, 3.0, 1.0]);
+    }
+}
+
+#[test]
+fn a_chunked_prefill_weighs_a_ring_by_the_count_its_slots_wrapped() {
+    for backends in Backends::PLATFORM {
+        let case = Case::of(PLANES, PLANES * QUERIES, PLANES * KEYS, WIDTH)
+            .windowed(KEYS)
+            .ringed();
+        let chunked = Chunked::over(backends, case);
+        let program = chunked.compile();
+        for (queries, keys, cursors) in [
+            (
+                [12.0f32, 4.0, 5.0, 3.0],
+                [16.0f32, 16.0, 16.0, 16.0],
+                [8.0f32, 12.0, 4.0, 21.0],
+            ),
+            (
+                [2.0, 2.0, 2.0, 2.0],
+                [16.0, 9.0, 16.0, 4.0],
+                [20.0, 7.0, 33.0, 2.0],
+            ),
+        ] {
+            chunked.step_ring(&program, &queries, &keys, &cursors);
+        }
+    }
+}
+
+#[test]
+fn a_windowed_ring_chunked_prefill_reaches_back_from_the_slots_it_wrapped() {
+    for reach in [1, 2, 5, KEYS] {
+        let case = Case::of(PLANES, PLANES * QUERIES, PLANES * KEYS, WIDTH)
+            .windowed(reach)
+            .ringed();
+        let chunked = Chunked::build(open(), case);
+        let program = chunked.compile();
+        chunked.step_ring(
+            &program,
+            &[6.0, 6.0, 6.0, 6.0],
+            &[16.0, 12.0, 16.0, 3.0],
+            &[18.0, 10.0, 26.0, 2.0],
+        );
     }
 }

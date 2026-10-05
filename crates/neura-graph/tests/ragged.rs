@@ -164,7 +164,7 @@ fn a_segmented_attention_walks_the_planes_a_packed_query_holds() {
 }
 
 #[test]
-fn a_cursor_places_no_row_of_a_packed_query() {
+fn a_cursor_places_no_row_a_packed_query_holds() {
     let graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
@@ -176,7 +176,7 @@ fn a_cursor_places_no_row_of_a_packed_query() {
         Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
-    let cursor = graph.input(Shape::of([1, PLANES, 1, 1]), Element::Single);
+    let cursor = graph.input(Shape::vector(PLANES), Element::Single);
     assert!(
         refuses(|| {
             graph.attention(
@@ -193,7 +193,7 @@ fn a_cursor_places_no_row_of_a_packed_query() {
                 },
             );
         }),
-        "a cursor placed the rows of a packed query, and the row of a plane is the position the packing already names",
+        "a cursor placed the rows a packed query holds, and every row of a packed query stands in the slot its offset reaches",
     );
 }
 
@@ -301,7 +301,33 @@ fn a_query_axis_packs_the_rows_of_the_extent_its_offsets_close() {
 }
 
 #[test]
-fn a_query_axis_asks_no_cursor_for_the_rows_it_packs() {
+fn a_query_axis_seats_a_cursor_beside_the_rows_it_packs() {
+    let graph = Graph::new();
+    let query_lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let key_lengths = graph.input(Shape::vector(PLANES), Element::Single);
+    let queries = graph.ragged(BOUND, query_lengths);
+    let keys = graph.ragged(BOUND, key_lengths);
+    let query = packed(&graph, queries.extent, BOUND);
+    let cache = packed(&graph, keys.extent, BOUND);
+    let cursor = graph.input(Shape::vector(PLANES), Element::Single);
+    let out = graph.attention(
+        query,
+        cache,
+        cache,
+        AttentionOptions {
+            origin: Some(cursor),
+            ..chunked(queries, keys)
+        },
+    );
+    assert_eq!(
+        graph.shape(out).free(2),
+        Some(queries.extent.slot()),
+        "a chunk sits at the position its plane's cursor names, and a ring weighs the slots its window wrapped through the count a cursor hands every plane",
+    );
+}
+
+#[test]
+fn a_query_axis_refuses_a_cursor_that_holds_no_count_per_plane() {
     let graph = Graph::new();
     let query_lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let key_lengths = graph.input(Shape::vector(PLANES), Element::Single);
@@ -322,7 +348,7 @@ fn a_query_axis_asks_no_cursor_for_the_rows_it_packs() {
                 },
             );
         }),
-        "a cursor placed the rows a query axis packs",
+        "a cursor walked a plane grid where the query axis closes one count per ragged plane",
     );
 }
 
