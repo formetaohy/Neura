@@ -142,3 +142,90 @@ fn a_gradient_walks_back_through_a_permutation() {
         .collect::<Vec<_>>();
     assert_close(&runtime.read(&program, gradients.of(weight)), &turned, 1e-6);
 }
+
+#[test]
+fn a_gradient_of_a_permuted_view_folds_the_axis_it_broadcast() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let bias = graph.input(Shape::of([3, 2, 5, 4]), Element::Single);
+    let turned = graph.permute(weight, [1, 0, 2, 3]);
+    let loss = graph.sum(graph.mul(turned, bias));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let bias_values = random(120, 23);
+    runtime.write(&program, bias, &bias_values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..2usize {
+        for plane in 0..3usize {
+            for column in 0..4usize {
+                let mut total = 0.0;
+                for depth in 0..5usize {
+                    total += bias_values[((plane * 2 + row) * 5 + depth) * 4 + column];
+                }
+                expected[(row * 3 + plane) * 4 + column] = total;
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &expected,
+        1e-5,
+    );
+}
+
+#[test]
+fn a_gradient_of_a_reshaped_view_folds_the_axis_it_broadcast() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let bias = graph.input(Shape::of([2, 3, 4, 5]), Element::Single);
+    let walked = graph.reshape(weight, Shape::of([2, 3, 4, 1]));
+    let loss = graph.sum(graph.mul(walked, bias));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let bias_values = random(120, 29);
+    runtime.write(&program, bias, &bias_values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..2usize {
+        for plane in 0..3usize {
+            for column in 0..4usize {
+                let mut total = 0.0;
+                for depth in 0..5usize {
+                    total += bias_values[((row * 3 + plane) * 4 + column) * 5 + depth];
+                }
+                expected[(row * 3 + plane) * 4 + column] = total;
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &expected,
+        1e-5,
+    );
+}
+
+#[test]
+fn a_gradient_of_a_permuted_view_spread_over_a_shape_folds_every_axis_it_spread() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let spread = graph.broadcast_to(graph.permute(weight, [1, 0, 2, 3]), Shape::of([3, 2, 5, 4]));
+    let loss = graph.sum(spread);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &[5.0; 24],
+        1e-5,
+    );
+}

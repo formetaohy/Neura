@@ -920,8 +920,8 @@ impl<'g> Graph<'g> {
     fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {
         let value = self.own(value);
         let owner = self.owner_of(value.id());
+        let contribution = self.reduced_to(contribution, value);
         let contribution = self.aligned(value, contribution);
-        let contribution = self.reduced_to(contribution, self.value_of(owner));
         grads[owner as usize] = Some(match grads[owner as usize] {
             None => self.landed(contribution).id(),
             Some(existing) => {
@@ -932,6 +932,15 @@ impl<'g> Graph<'g> {
     }
 
     fn aligned(&self, value: Value<'g>, contribution: Value<'g>) -> Value<'g> {
+        assert_eq!(
+            self.shape(contribution),
+            self.shape(value),
+            "a gradient lands in the layout of the storage that owns value {}, and value {} walks {:?} where that gradient walks {:?}; fold the axes the tensor spread over before its storage lays the gradient out",
+            value.id(),
+            contribution.id(),
+            self.shape(value).dims(),
+            self.shape(contribution).dims(),
+        );
         let owner = self.owner_of(value.id());
         if self.walks_a_prefix(value.id()) {
             assert!(
@@ -993,12 +1002,6 @@ impl<'g> Graph<'g> {
     fn extended(&self, view: Value<'g>, contribution: Value<'g>) -> Value<'g> {
         let view = self.own(view);
         let contribution = self.own(contribution);
-        let shape = self.shape(view);
-        let contribution = if self.shape(contribution) == shape {
-            contribution
-        } else {
-            self.reduced_to(contribution, view)
-        };
         let element = self.element(contribution);
         let owner = self.value_of(self.owner_of(view.id()));
         let out = self.stored(
