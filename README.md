@@ -21,7 +21,7 @@ Neura is a **deep learning framework designed for games**, making it easy to bui
 
 ## Quick Start
 
-Install **[NeuraSkill](https://github.com/formetaohy/NeuraSkill)** into your coding agent. That's it. Then you can build your own AI-native games :)
+Install **[NeuraSkill](https://github.com/formetaohy/NeuraSkill)** into your coding agent. That's it. Then go build your own AI-native games :)
 
 ## Documents
 
