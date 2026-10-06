@@ -101,3 +101,50 @@ fn a_gradient_folds_a_broadcast_before_it_lands_in_the_layout_of_a_view() {
         "the gradient of a view that spread over the axes around it holds the sum of every element it spread",
     );
 }
+
+#[test]
+fn a_shared_weight_learns_through_the_depth_its_planes_walk() {
+    let graph = Graph::new();
+    let batch = graph.free(4);
+    let observations = graph.gradient_input(
+        Shape::of([4, 1, 1, 8]).freed(&[(0, batch)]),
+        Element::Single,
+    );
+    let weight = graph.parameter(
+        Shape::of([1, 1, 8, 3]),
+        Init::Constant(1.0),
+        Element::Single,
+    );
+    let loss = graph.sum(graph.matmul(observations, weight));
+    let gradients = graph.backward(loss);
+    graph.retain(loss);
+    graph.retain(gradients.of(weight));
+    let snapshot = graph.snapshot();
+    let products = snapshot
+        .tasks()
+        .iter()
+        .filter(|task| task.kind == Kind::Matmul)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        products.len(),
+        3,
+        "a product that reaches both of its operands walks one product for each of them",
+    );
+    let weighed = products
+        .iter()
+        .find(|task| snapshot.values()[task.out as usize].shape.dims() == [1, 1, 8, 3])
+        .expect(
+            "the product that weighs a shared weight holds the shape of that weight, and no fan out of its planes stands between the two",
+        );
+    let operand = |slot: usize| {
+        snapshot.values()[weighed.inputs[slot] as usize]
+            .shape
+            .dims()
+    };
+    assert_eq!(
+        operand(0),
+        [1, 1, 8, 4],
+        "the gradient of the weight walks the planes of the product as its depth, so the fold behind it carries no plane at all",
+    );
+    assert_eq!(operand(1), [1, 1, 4, 3]);
+}

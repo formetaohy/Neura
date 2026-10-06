@@ -282,6 +282,61 @@ fn a_convolution_and_a_view_follow_every_binding() {
 }
 
 #[test]
+fn a_shared_weight_learns_from_every_row_a_binding_holds() {
+    let runtime = open();
+    let weight_data = data(64 * 16, 53);
+    for (bound, depth, classes, bindings) in [
+        (4u32, 8u32, 3u32, &[4u32, 3, 1][..]),
+        (128, 64, 16, &[128u32, 1][..]),
+    ] {
+        let graph = Graph::new();
+        let batch = graph.free(bound);
+        let observations = graph.gradient_input(
+            Shape::of([bound, 1, 1, depth]).freed(&[(0, batch)]),
+            Element::Single,
+        );
+        let weight = graph.parameter(
+            Shape::of([1, 1, depth, classes]),
+            weights(),
+            Element::Single,
+        );
+        let loss = graph.sum(graph.matmul(observations, weight));
+        let gradients = graph.backward(loss);
+        let gradient = gradients.of(weight);
+        graph.retain(loss);
+        let store = runtime.weights(&graph);
+        let family = runtime.compile(&graph, &store);
+        let weight_data = &weight_data[..(depth * classes) as usize];
+        for live in bindings {
+            let graph = Graph::new();
+            let fixed = graph.gradient_input(Shape::of([*live, 1, 1, depth]), Element::Single);
+            let shared = graph.parameter(
+                Shape::of([1, 1, depth, classes]),
+                weights(),
+                Element::Single,
+            );
+            let fixed_loss = graph.sum(graph.matmul(fixed, shared));
+            let fixed_gradients = graph.backward(fixed_loss);
+            let fixed_gradient = fixed_gradients.of(shared);
+            graph.retain(fixed_loss);
+            let store = runtime.weights(&graph);
+            let reference = runtime.compile(&graph, &store);
+            let walked = data(*live * depth, 41);
+            runtime.write(&reference, fixed, &walked);
+            runtime.write(&reference, shared, weight_data);
+            runtime.run(&reference);
+            let expected = runtime.read(&reference, fixed_gradient);
+
+            runtime.bind(&family, &[*live]);
+            runtime.write(&family, observations, &walked);
+            runtime.write(&family, weight, weight_data);
+            runtime.run(&family);
+            assert_close(&runtime.read(&family, gradient), &expected, 1e-5);
+        }
+    }
+}
+
+#[test]
 fn a_convolution_weight_gradient_weighs_every_position_a_binding_holds() {
     let runtime = open();
     let graph = Graph::new();

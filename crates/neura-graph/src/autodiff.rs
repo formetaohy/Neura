@@ -514,8 +514,7 @@ impl<'g> Graph<'g> {
                         self.accumulate(grads, left, contribution);
                     }
                     if self.tracked(&[right]) {
-                        let transposed = self.permute(left, [0, 1, 3, 2]);
-                        let contribution = self.matmul(transposed, gradient);
+                        let contribution = self.weighed(left, gradient, right);
                         self.accumulate(grads, right, contribution);
                     }
                 }
@@ -916,6 +915,34 @@ impl<'g> Graph<'g> {
             }
         }
         folded
+    }
+
+    fn weighed(&self, left: Value<'g>, gradient: Value<'g>, weight: Value<'g>) -> Value<'g> {
+        let left_shape = self.shape(left);
+        let gradient_shape = self.shape(gradient);
+        let planes = self.shape(weight).dims();
+        let both_planes_are_shared = planes[0] == 1 && planes[1] == 1;
+        let second_plane_is_shared = planes[1] == 1;
+        let contractible = |axis: u32| match axis {
+            0 => both_planes_are_shared,
+            1 => second_plane_is_shared,
+            _ => true,
+        };
+        let mut depth = 2u32;
+        for axis in 0..3 {
+            let wider = left_shape.dims()[axis as usize] > left_shape.dims()[depth as usize];
+            if contractible(axis) && wider && left_shape.meets(gradient_shape, axis, axis) {
+                depth = axis;
+            }
+        }
+        let (first, second) = match depth {
+            0 => (1, 2),
+            1 => (0, 2),
+            _ => (0, 1),
+        };
+        let reduced = self.permute(left, [first, second, 3, depth]);
+        let walked = self.permute(gradient, [first, second, depth, 3]);
+        self.matmul(reduced, walked)
     }
 
     fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {

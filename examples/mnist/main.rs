@@ -22,7 +22,7 @@ const GALLERY: u32 = 6;
 const PER_ROW: usize = 3;
 const RATE: f32 = 1e-3;
 const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
-const HEAP_BYTES: u64 = 1 << 28;
+const HEAP_BYTES: u64 = 1 << 26;
 
 struct Model<'g> {
     conv1: Conv2d<'g>,

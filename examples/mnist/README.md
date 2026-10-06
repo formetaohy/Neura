@@ -30,14 +30,14 @@ The archives stay compressed on disk and are parsed in process, so no separate e
 ```
 device: NVIDIA GeForce RTX 2060 (Numeric { vendor: 4318, device: 7957 }, Discrete, Dx12)
 dataset: 60000 training and 10000 held out digits of 28 by 28, cached in target/mnist
-training graph: 5632 tasks in 23 waves, 35.8 MB of tensors beside 0.6 MB of weights on a 268 MB heap
-inference graph: 732 tasks in 8 waves, 4.4 MB of tensors beside 0.6 MB of weights on a 268 MB heap
+training graph: 3133 tasks in 23 waves, 13.6 MB of tensors beside 0.6 MB of weights on a 67 MB heap
+inference graph: 732 tasks in 8 waves, 4.4 MB of tensors beside 0.6 MB of weights on a 67 MB heap
 device: 2 device programs for 2 plans
-epoch 1/4: loss 0.5172, held out loss 0.1193, accuracy 96.20% over 10000 digits in 5.2 s (1916 digits a second)
+epoch 1/4: loss 0.5171, held out loss 0.1190, accuracy 96.21% over 10000 digits in 4.0 s (2472 digits a second)
 ...
 ```
 
-Accuracy reaches about 98% on the held out digits in about twenty seconds.
+Accuracy reaches about 98% on the held out digits in about seventeen seconds.
 
 ## The two graphs
 
