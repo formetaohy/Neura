@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="784" height="238" viewBox="0 0 392.0 119.0" role="img" aria-label="Neura — deep-learning framework">
+<title>Neura — deep-learning framework</title>
+<rect width="392.0" height="119.0" fill="#101117"/><g color="#FFFFFF" transform="translate(13.0 9.48)"><g fill="none" stroke="currentColor" stroke-width="6.0" stroke-linecap="round" stroke-linejoin="round"><path class="strand s1" pathLength="100" d="M20 76V23C20 17 22.8 15.8 27 20L59 52C63.2 56.2 66 55 66 49V24"/><path class="strand s2" pathLength="100" d="M34 76V51C34 45 36.8 43.8 41 48L73 80C77.2 84.2 80 83 80 77V24"/></g><g transform="translate(112 15.5) scale(1.3)"><g fill="none" stroke="currentColor" stroke-width="4.62" stroke-linecap="round" stroke-linejoin="round"><path class="glyph g1" pathLength="100" d="M5 47V5L34 47V5"/><path class="glyph g2" pathLength="100" d="M51 33H77C77 15 49 15 49 33C49 48 66 51 75 42"/><path class="glyph g3" pathLength="100" d="M91 22V35C91 52 115 52 115 35V22M115 35V47"/><path class="glyph g4" pathLength="100" d="M130 47V22M130 32C132 23 139 20 146 23"/><path class="glyph g5" pathLength="100" d="M180 29C175 17 155 19 155 34C155 50 175 52 180 38M180 22V47"/></g></g></g><style>
+  .strand, .glyph { animation: neura-draw .78s cubic-bezier(.62,.04,.34,1) both }
+  .s1 { animation-delay: 0s } .s2 { animation-delay: .26s }
+  .g1 { animation-delay: .78s } .g2 { animation-delay: .95s } .g3 { animation-delay: 1.12s }
+  .g4 { animation-delay: 1.28s } .g5 { animation-delay: 1.44s }
+  @keyframes neura-draw { from { stroke-dasharray: 101; stroke-dashoffset: 101 }
+                          to { stroke-dasharray: 101; stroke-dashoffset: 0 } }
+  @media (prefers-reduced-motion: reduce) { .strand, .glyph { animation: none } }
+</style>
+</svg>
