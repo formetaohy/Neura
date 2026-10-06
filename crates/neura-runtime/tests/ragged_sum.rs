@@ -96,12 +96,12 @@ impl Sums {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<f32> {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Vec<f32> {
         assert_eq!(lengths.len(), self.planes as usize);
         let cache = data(self.bound * self.width, 17);
         self.runtime.write(program, self.lengths, lengths);

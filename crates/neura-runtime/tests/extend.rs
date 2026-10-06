@@ -99,7 +99,7 @@ fn reference(tokens: &[f32], gate: &[f32], live: u32) -> (f32, Vec<f32>, Vec<f32
 
 fn check(
     runtime: &Runtime,
-    program: &Program<'_>,
+    program: &Program,
     model: &Extent,
     tokens: &[f32],
     gate: &[f32],

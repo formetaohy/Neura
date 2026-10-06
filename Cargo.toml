@@ -15,7 +15,6 @@ half = "2"
 syn = { version = "2", features = ["full", "visit-mut", "extra-traits"] }
 quote = "1"
 proc-macro2 = "1"
-pollster = "0.4"
 flate2 = "1"
 bitflags = "2"
 ash = "0.38"
@@ -67,7 +66,6 @@ workspace = true
 
 [dev-dependencies]
 flate2 = { workspace = true }
-pollster = { workspace = true }
 
 [profile.dev.package."*"]
 opt-level = 3

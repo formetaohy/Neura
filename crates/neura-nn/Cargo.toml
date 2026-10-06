@@ -15,4 +15,3 @@ neura-graph = { workspace = true }
 
 [dev-dependencies]
 neura-runtime = { workspace = true }
-pollster = { workspace = true }

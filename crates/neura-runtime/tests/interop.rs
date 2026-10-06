@@ -2,7 +2,7 @@ use neura_abi::Element;
 use neura_compiler::{ReadWrite, kernel};
 use neura_gpu::{Backends, Binding, GpuRequest, Submission};
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 #[kernel(workgroup_size = 64)]
 fn seed(lid: u32, arena: ReadWrite<f32>) {
@@ -13,10 +13,13 @@ fn seed(lid: u32, arena: ReadWrite<f32>) {
 
 #[test]
 fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 12,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 12,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("native compute device");
     let graph = Graph::new();
     let observation = graph.resident(Shape::vector(4), Element::Single);
@@ -36,13 +39,13 @@ fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
 }
 
 fn narrow_precision_inference(backends: Backends, element: Element) {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+    let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
             backends,
             ..Default::default()
         },
         ..Default::default()
-    }))
+    })
     .expect("a native compute device");
     let graph = Graph::new();
     let weight = graph.parameter(Shape::matrix(4, 4), Init::Zero, element);
@@ -77,13 +80,13 @@ fn every_platform_backend_runs_narrow_precision_rust_kernels() {
 }
 
 fn training_tape(backends: Backends) {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+    let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
             backends,
             ..Default::default()
         },
         ..Default::default()
-    }))
+    })
     .expect("a native compute device");
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(4, 512), Init::Zero, Element::Single);

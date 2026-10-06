@@ -23,7 +23,7 @@ pub(crate) fn dataset(train: &Dataset, test: &Dataset, directory: &Path) {
     );
 }
 
-pub(crate) fn program(label: &str, program: &Program<'_>) {
+pub(crate) fn program(label: &str, program: &Program) {
     println!(
         "{label}: {} tasks in {} waves, {:.1} MB of tensors beside {:.1} MB of weights on a {:.0} MB heap",
         program.task_count(),

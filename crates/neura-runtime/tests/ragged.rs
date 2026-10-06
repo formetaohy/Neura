@@ -170,12 +170,12 @@ impl Ragged {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32], width: u32) -> (Vec<f32>, Vec<f32>) {
+    fn step(&self, program: &Program, lengths: &[f32], width: u32) -> (Vec<f32>, Vec<f32>) {
         let bound = self.graph.shape(self.cache).dims()[2];
         let cache = data(bound * width, 17);
         let query = data(lengths.len() as u32 * width, 29);
@@ -475,12 +475,12 @@ impl Planes {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn run(&self, program: &Program<'_>, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, f32) {
+    fn run(&self, program: &Program, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, f32) {
         let width = self.graph.shape(self.cache).dims()[3];
         let bound = self.graph.shape(self.cache).dims()[2];
         let planes = self.graph.shape(self.cursor).dims()[1];
@@ -628,17 +628,12 @@ impl CountedPlanes {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn run(
-        &self,
-        program: &Program<'_>,
-        planes: u32,
-        lengths: &[f32],
-    ) -> (Vec<f32>, Vec<f32>, f32) {
+    fn run(&self, program: &Program, planes: u32, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, f32) {
         let width = self.graph.shape(self.cache).dims()[3];
         let bound = self.graph.shape(self.cache).dims()[2];
         let cursor_planes = self.graph.shape(self.cursor).dims()[1];
@@ -1013,12 +1008,12 @@ impl Trainable {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn compile_narrow(&self) -> Program<'_> {
+    fn compile_narrow(&self) -> Program {
         let runtime = &self.runtime;
         let narrow = runtime
             .profiles()
@@ -1029,11 +1024,11 @@ impl Trainable {
         runtime.compile_chosen(&self.graph, &weights, narrow, &[])
     }
 
-    fn bind(&self, program: &Program<'_>, planes: u32) {
+    fn bind(&self, program: &Program, planes: u32) {
         self.runtime.bind(program, &[planes]);
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32], reach: u32) -> Vec<Vec<f32>> {
+    fn step(&self, program: &Program, lengths: &[f32], reach: u32) -> Vec<Vec<f32>> {
         let width = self.graph.shape(self.keys).dims()[3];
         let bound = self.graph.shape(self.keys).dims()[2];
         let cursor_dims = self.graph.shape(self.cursor).dims();

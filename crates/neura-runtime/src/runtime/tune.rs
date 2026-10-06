@@ -10,7 +10,7 @@ const PLAN_WARMUP: u32 = 1;
 const PLAN_ROUNDS: u32 = 4;
 
 impl Runtime {
-    pub fn tune<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
+    pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
         let scratch = graph.updates_weights().then(|| self.scratch_weights(graph));
         let measuring = scratch.as_ref().unwrap_or(weights);
         let products = self.products(graph);
@@ -49,10 +49,10 @@ impl Runtime {
             .to_vec()
     }
 
-    fn fastest_plan<'r>(
-        &'r self,
+    fn fastest_plan(
+        &self,
         graph: &Graph,
-        weights: &Weights<'r>,
+        weights: &Weights,
         candidates: &[(Profile, Vec<(Product, MatmulTile)>)],
     ) -> usize {
         let reference = self.compile_chosen(graph, weights, candidates[0].0, &candidates[0].1);
@@ -83,8 +83,8 @@ impl Runtime {
 
     fn score(
         &self,
-        reference: &Program<'_>,
-        batch: &[(usize, Program<'_>)],
+        reference: &Program,
+        batch: &[(usize, Program)],
         best: &mut usize,
         seconds: &mut f64,
     ) {
@@ -125,7 +125,7 @@ impl Runtime {
     fn verified(
         &self,
         graph: &Graph,
-        weights: &Weights<'_>,
+        weights: &Weights,
         incumbent: (Profile, Vec<(Product, MatmulTile)>),
         challenger: (Profile, Vec<(Product, MatmulTile)>),
     ) -> (Profile, Vec<(Product, MatmulTile)>) {
@@ -230,12 +230,7 @@ impl Runtime {
         fastest
     }
 
-    fn program<'r>(
-        &'r self,
-        graph: &Graph,
-        weights: &Weights<'r>,
-        tile: MatmulTile,
-    ) -> Program<'r> {
+    fn program(&self, graph: &Graph, weights: &Weights, tile: MatmulTile) -> Program {
         self.compile_chosen(graph, weights, Profile::of(&[tile]), &[])
     }
 }

@@ -268,12 +268,12 @@ impl Packed {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn compile_narrow(&self) -> Program<'_> {
+    fn compile_narrow(&self) -> Program {
         let runtime = &self.runtime;
         let narrow = runtime
             .profiles()
@@ -284,12 +284,12 @@ impl Packed {
         runtime.compile_chosen(&self.graph, &weights, narrow, &[])
     }
 
-    fn bind(&self, program: &Program<'_>, planes: u32) {
+    fn bind(&self, program: &Program, planes: u32) {
         assert!(self.case.binding, "only a bound plane axis binds a length");
         self.runtime.bind(program, &[planes]);
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<Vec<f32>> {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Vec<Vec<f32>> {
         let bound = self.graph.shape(self.keys).dims()[2];
         let width = self.graph.shape(self.keys).dims()[3];
         let keys = data(bound * width, 43);

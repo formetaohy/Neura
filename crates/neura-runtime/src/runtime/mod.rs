@@ -15,20 +15,20 @@ use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 mod tune;
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
+pub const DEFAULT_READBACK_SLOTS: usize = 2;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
-pub const READBACK_SLOTS: u64 = 2;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
-pub struct Readout<'r> {
-    brand: PhantomData<&'r ()>,
+pub struct Readout {
+    readback: Arc<Readback>,
+    queue: Queue,
     slot: usize,
     submission: SubmissionIndex,
     spans: Vec<(Span, u64, u64)>,
@@ -36,37 +36,67 @@ pub struct Readout<'r> {
     refusal: u64,
 }
 
-pub struct Run<'r> {
-    brand: PhantomData<&'r ()>,
+impl Readout {
+    pub fn collect(self) -> Vec<Vec<f32>> {
+        let bytes = self
+            .readback
+            .finish(&self.queue, self.slot, self.submission, self.total);
+        let refusal = u32::from_ne_bytes(
+            bytes[self.refusal as usize..(self.refusal + WORD_BYTES) as usize]
+                .try_into()
+                .expect("a word was copied back"),
+        );
+        assert_eq!(refusal, 0, "{}", refusal_message(refusal));
+        self.spans
+            .iter()
+            .map(|(span, offset, length)| {
+                let start = *offset as usize;
+                unpack(
+                    span.element,
+                    span.elements as usize,
+                    &bytes[start..start + *length as usize],
+                )
+            })
+            .collect()
+    }
+}
+
+pub struct Run {
     queue: Queue,
     submission: SubmissionIndex,
 }
 
-impl Run<'_> {
+impl Run {
     pub fn seconds(self) -> f64 {
         self.queue.seconds(self.submission)
     }
 }
 
-pub struct RuntimeRequest {
-    pub gpu: GpuRequest,
+pub struct MemoryRequest {
     pub readback_bytes: u64,
+    pub readback_slots: usize,
     pub heap_bytes: u64,
 }
 
-impl Default for RuntimeRequest {
+impl Default for MemoryRequest {
     fn default() -> Self {
         Self {
-            gpu: GpuRequest::default(),
             readback_bytes: DEFAULT_READBACK_BYTES,
+            readback_slots: DEFAULT_READBACK_SLOTS,
             heap_bytes: DEFAULT_HEAP_BYTES,
         }
     }
 }
 
+#[derive(Default)]
+pub struct RuntimeRequest {
+    pub gpu: GpuRequest,
+    pub memory: MemoryRequest,
+}
+
 pub struct Runtime {
     context: GpuContext,
-    readback: Readback,
+    readback: Arc<Readback>,
     heap: Arc<Heap>,
     pool: Arc<Pool>,
     artifacts: Artifacts,
@@ -74,37 +104,34 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub async fn open(request: RuntimeRequest) -> Result<Self, GpuUnavailable> {
-        let context = GpuContext::open(&request.gpu).await?;
-        Ok(Self::of_context(
-            context,
-            request.readback_bytes,
-            request.heap_bytes,
-        ))
+    pub fn open(request: RuntimeRequest) -> Result<Self, GpuUnavailable> {
+        let context = GpuContext::open(&request.gpu)?;
+        Ok(Self::from_device(context.device().clone(), request.memory))
     }
 
-    pub fn from_device(device: Device, heap_bytes: u64) -> Self {
-        Self::of_context(
-            GpuContext::of_device(device),
-            DEFAULT_READBACK_BYTES,
-            heap_bytes,
-        )
+    pub fn from_device(device: Device, memory: MemoryRequest) -> Self {
+        Self::of_context(GpuContext::of_device(device), memory)
     }
 
     pub fn heap_bytes(&self) -> u64 {
         self.heap.bytes()
     }
 
-    fn of_context(context: GpuContext, readback_bytes: u64, heap_bytes: u64) -> Self {
+    fn of_context(context: GpuContext, memory: MemoryRequest) -> Self {
         assert!(
-            heap_bytes <= context.limits().max_storage_buffer_binding_size,
-            "a device heap of {heap_bytes} bytes outruns the {} bytes one storage binding holds",
+            memory.heap_bytes <= context.limits().max_storage_buffer_binding_size,
+            "a device heap of {} bytes outruns the {} bytes one storage binding holds",
+            memory.heap_bytes,
             context.limits().max_storage_buffer_binding_size,
         );
         Self {
             alignment: context.binding_alignment(),
-            readback: Readback::new(context.device(), readback_bytes, READBACK_SLOTS),
-            heap: Arc::new(Heap::new(&context, heap_bytes)),
+            readback: Arc::new(Readback::new(
+                context.device(),
+                memory.readback_bytes,
+                memory.readback_slots,
+            )),
+            heap: Arc::new(Heap::new(&context, memory.heap_bytes)),
             pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
             artifacts: Artifacts::new(),
             context,
@@ -157,21 +184,21 @@ impl Runtime {
             .expect("the device offers no workgroup the framework can schedule")
     }
 
-    pub fn weights(&self, graph: &Graph) -> Weights<'_> {
+    pub fn weights(&self, graph: &Graph) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
         self.seed(&layout, &weights);
         weights
     }
 
-    pub fn load(&self, graph: &Graph, checkpoint: &Checkpoint) -> Weights<'_> {
+    pub fn load(&self, graph: &Graph, checkpoint: &Checkpoint) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
         self.pour(&layout, &weights, checkpoint);
         weights
     }
 
-    pub fn restore(&self, weights: &Weights<'_>, checkpoint: &Checkpoint) {
+    pub fn restore(&self, weights: &Weights, checkpoint: &Checkpoint) {
         self.context.assert_alive();
         assert!(
             weights.lives_on(&self.heap),
@@ -183,7 +210,7 @@ impl Runtime {
             .write_at(self.context.queue(), weights.offset(), &store);
     }
 
-    pub fn checkpoint(&self, weights: &Weights<'_>) -> Checkpoint {
+    pub fn checkpoint(&self, weights: &Weights) -> Checkpoint {
         self.context.assert_alive();
         assert!(
             weights.lives_on(&self.heap),
@@ -216,14 +243,14 @@ impl Runtime {
         Checkpoint::pack(&tensors)
     }
 
-    fn parameter_store(&self, graph: &Graph) -> (Weights<'_>, Layout) {
+    fn parameter_store(&self, graph: &Graph) -> (Weights, Layout) {
         let layout = Layout::of(graph, self.alignment);
         let store = self.heap.allocate(layout.words());
         let weights = Weights::new(store, layout.weights().clone(), layout.state().clone());
         (weights, layout)
     }
 
-    fn seed(&self, layout: &Layout, weights: &Weights<'_>) {
+    fn seed(&self, layout: &Layout, weights: &Weights) {
         let store = weights.allocation();
         let placement = Placement::new(0, store.word());
         let queue = self.context.queue();
@@ -238,14 +265,14 @@ impl Runtime {
         }
     }
 
-    fn pour(&self, layout: &Layout, weights: &Weights<'_>, checkpoint: &Checkpoint) {
+    fn pour(&self, layout: &Layout, weights: &Weights, checkpoint: &Checkpoint) {
         let store = checkpoint.pour(layout.weights(), layout.state(), layout.words());
         weights
             .buffer()
             .write_at(self.context.queue(), weights.offset(), &store);
     }
 
-    pub fn rebind(&self, weights: &Weights<'_>, graph: &Graph<'_>) {
+    pub fn rebind(&self, weights: &Weights, graph: &Graph<'_>) {
         self.context.assert_alive();
         let layout = Layout::of(graph, self.alignment);
         assert_eq!(
@@ -265,7 +292,7 @@ impl Runtime {
         );
     }
 
-    pub fn compile<'r>(&'r self, graph: &Graph, weights: &Weights<'r>) -> Program<'r> {
+    pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
         self.compile_with(graph, weights, self.default_profile())
     }
 
@@ -287,22 +314,17 @@ impl Runtime {
         self.context.assert_alive();
     }
 
-    pub fn compile_with<'r>(
-        &'r self,
-        graph: &Graph,
-        weights: &Weights<'r>,
-        profile: Profile,
-    ) -> Program<'r> {
+    pub fn compile_with(&self, graph: &Graph, weights: &Weights, profile: Profile) -> Program {
         self.compile_chosen(graph, weights, profile, &[])
     }
 
-    pub fn compile_chosen<'r>(
-        &'r self,
+    pub fn compile_chosen(
+        &self,
         graph: &Graph,
-        weights: &Weights<'r>,
+        weights: &Weights,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
-    ) -> Program<'r> {
+    ) -> Program {
         self.assert_profile(profile);
         assert!(
             weights.lives_on(&self.heap),
@@ -396,14 +418,14 @@ impl Runtime {
             })
     }
 
-    fn scratch_weights(&self, graph: &Graph) -> Weights<'_> {
+    fn scratch_weights(&self, graph: &Graph) -> Weights {
         self.context.assert_alive();
         let (scratch, layout) = self.parameter_store(graph);
         self.seed(&layout, &scratch);
         scratch
     }
 
-    pub fn measure(&self, program: &Program<'_>) -> f64 {
+    pub fn measure(&self, program: &Program) -> f64 {
         for _ in 0..TUNE_WARMUP {
             self.run(program);
         }
@@ -414,14 +436,14 @@ impl Runtime {
         measured / f64::from(TUNE_ROUNDS)
     }
 
-    pub fn bind(&self, program: &Program<'_>, extents: &[u32]) {
+    pub fn bind(&self, program: &Program, extents: &[u32]) {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
         program.bind(extents);
     }
 
-    pub fn run(&self, program: &Program<'_>) -> Run<'_> {
+    pub fn run(&self, program: &Program) -> Run {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
@@ -449,13 +471,12 @@ impl Runtime {
         );
         let submission = submission.submit(self.context.queue());
         Run {
-            brand: PhantomData,
             queue: self.context.queue().clone(),
             submission,
         }
     }
 
-    pub fn write(&self, program: &Program<'_>, value: Value<'_>, data: &[f32]) {
+    pub fn write(&self, program: &Program, value: Value<'_>, data: &[f32]) {
         self.assert_owns(program);
         program.assert_current();
         let span = program.span(value);
@@ -488,16 +509,16 @@ impl Runtime {
         }
     }
 
-    pub fn read(&self, program: &Program<'_>, value: Value<'_>) -> Vec<f32> {
-        let mut values = self.collect(self.pull(program, &[value]));
+    pub fn read(&self, program: &Program, value: Value<'_>) -> Vec<f32> {
+        let mut values = self.pull(program, &[value]).collect();
         values.pop().expect("one tensor was read")
     }
 
-    pub fn read_many(&self, program: &Program<'_>, values: &[Value<'_>]) -> Vec<Vec<f32>> {
-        self.collect(self.pull(program, values))
+    pub fn read_many(&self, program: &Program, values: &[Value<'_>]) -> Vec<Vec<f32>> {
+        self.pull(program, values).collect()
     }
 
-    pub fn pull(&self, program: &Program<'_>, values: &[Value<'_>]) -> Readout<'_> {
+    pub fn pull(&self, program: &Program, values: &[Value<'_>]) -> Readout {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
@@ -547,7 +568,8 @@ impl Runtime {
         submission.copy(program.refusal.buffer(), 0, staging, at, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
-            brand: PhantomData,
+            readback: self.readback.clone(),
+            queue: self.context.queue().clone(),
             slot,
             submission,
             spans: collected,
@@ -556,7 +578,7 @@ impl Runtime {
         }
     }
 
-    fn walked_extents(&self, program: &Program<'_>) -> Vec<u32> {
+    fn walked_extents(&self, program: &Program) -> Vec<u32> {
         if !program.carries_authored() {
             return program.host_extents();
         }
@@ -589,36 +611,7 @@ impl Runtime {
         extents
     }
 
-    pub fn collect(&self, readout: Readout<'_>) -> Vec<Vec<f32>> {
-        self.context.assert_alive();
-        let bytes = self.readback.finish(
-            self.context.queue(),
-            readout.slot,
-            readout.submission,
-            readout.total,
-        );
-        self.context.assert_alive();
-        let refusal = u32::from_ne_bytes(
-            bytes[readout.refusal as usize..(readout.refusal + WORD_BYTES) as usize]
-                .try_into()
-                .expect("a word was copied back"),
-        );
-        assert_eq!(refusal, 0, "{}", refusal_message(refusal));
-        readout
-            .spans
-            .iter()
-            .map(|(span, offset, length)| {
-                let start = *offset as usize;
-                unpack(
-                    span.element,
-                    span.elements as usize,
-                    &bytes[start..start + *length as usize],
-                )
-            })
-            .collect()
-    }
-
-    fn assert_owns(&self, program: &Program<'_>) {
+    fn assert_owns(&self, program: &Program) {
         assert!(
             program.lives_on(&self.heap),
             "this program runs on the device heap of another runtime",

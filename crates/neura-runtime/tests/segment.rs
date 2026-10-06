@@ -92,22 +92,22 @@ impl Grouped {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn chosen(&self, profile: Profile, chosen: &[(Product, MatmulTile)]) -> Program<'_> {
+    fn chosen(&self, profile: Profile, chosen: &[(Product, MatmulTile)]) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime
             .compile_chosen(&self.graph, &weights, profile, chosen)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<f32> {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Vec<f32> {
         self.step_with(program, lengths, 1e-4)
     }
 
-    fn step_with(&self, program: &Program<'_>, lengths: &[f32], tolerance: f32) -> Vec<f32> {
+    fn step_with(&self, program: &Program, lengths: &[f32], tolerance: f32) -> Vec<f32> {
         let bound = self.graph.shape(self.left).dims()[2];
         let packed = data(bound * self.depth, 7);
         let weights = data(lengths.len() as u32 * self.depth * self.columns, 13);
@@ -238,12 +238,12 @@ impl Planes {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<f32> {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Vec<f32> {
         let packed = data(self.bound * self.depth, 7);
         let weights = data(self.planes * self.depth * self.columns, 13);
         let mut mask = vec![0.0f32; lengths.len() * self.bound as usize];
@@ -319,7 +319,7 @@ struct Fused {
 }
 
 impl Fused {
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
@@ -353,7 +353,7 @@ impl Fused {
         }
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Vec<f32> {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Vec<f32> {
         let bound = self.graph.shape(self.left).dims()[2];
         let packed = data(bound * self.depth, 7);
         let weights = data(lengths.len() as u32 * self.depth * self.columns, 13);

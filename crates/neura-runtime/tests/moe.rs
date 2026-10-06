@@ -138,12 +138,12 @@ impl Segmented {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    fn step(&self, program: &Program, lengths: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let left = data(self.bound * self.depth, 7);
         let weights = data(self.planes * self.depth * self.columns, 13);
         let weight = data(self.bound * self.columns, 29);
@@ -322,12 +322,12 @@ impl Mixture {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) {
+    fn step(&self, program: &Program, lengths: &[f32]) {
         let (planes, capacity) = (self.planes, self.capacity);
         let batched = data(planes * capacity * self.depth, 3);
         let weights = data(planes * self.depth * self.columns, 13);

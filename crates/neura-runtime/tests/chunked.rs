@@ -316,12 +316,12 @@ impl Chunked {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn compile_narrow(&self) -> Program<'_> {
+    fn compile_narrow(&self) -> Program {
         let runtime = &self.runtime;
         let narrow = runtime
             .profiles()
@@ -332,23 +332,18 @@ impl Chunked {
         runtime.compile_chosen(&self.graph, &weights, narrow, &[])
     }
 
-    fn bind(&self, program: &Program<'_>, planes: u32) {
+    fn bind(&self, program: &Program, planes: u32) {
         assert!(self.case.binding, "only a bound plane axis binds a length");
         self.runtime.bind(program, &[planes]);
     }
 
-    fn step(
-        &self,
-        program: &Program<'_>,
-        query_lengths: &[f32],
-        key_lengths: &[f32],
-    ) -> Vec<Vec<f32>> {
+    fn step(&self, program: &Program, query_lengths: &[f32], key_lengths: &[f32]) -> Vec<Vec<f32>> {
         self.walk(program, query_lengths, key_lengths, &[])
     }
 
     fn step_ring(
         &self,
-        program: &Program<'_>,
+        program: &Program,
         query_lengths: &[f32],
         key_lengths: &[f32],
         cursors: &[f32],
@@ -362,7 +357,7 @@ impl Chunked {
 
     fn load(
         &self,
-        program: &Program<'_>,
+        program: &Program,
         query_lengths: &[f32],
         key_lengths: &[f32],
         cursors: &[f32],
@@ -390,7 +385,7 @@ impl Chunked {
 
     fn walk(
         &self,
-        program: &Program<'_>,
+        program: &Program,
         query_lengths: &[f32],
         key_lengths: &[f32],
         cursors: &[f32],

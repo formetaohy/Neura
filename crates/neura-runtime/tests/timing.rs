@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_gpu::{Backends, GpuContext, GpuRequest, LimitsPolicy};
 use neura_graph::{Graph, Shape};
-use neura_runtime::{Program, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Program, Runtime, RuntimeRequest};
 use std::time::Instant;
 
 const HEAVY_ELEMENTS: u64 = 16 << 20;
@@ -12,17 +12,19 @@ fn heap_bytes(backends: Backends) -> u64 {
         backends,
         ..Default::default()
     };
-    let context =
-        pollster::block_on(GpuContext::open(&request)).expect("a device serves a heap probe");
+    let context = GpuContext::open(&request).expect("a device serves a heap probe");
     HEAP_BYTES.min(context.limits().max_storage_buffer_binding_size)
 }
 
 fn open() -> Runtime {
-    pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 4 << 20,
-        heap_bytes: heap_bytes(Backends::COMPILED),
+    Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 4 << 20,
+            heap_bytes: heap_bytes(Backends::COMPILED),
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
@@ -32,19 +34,22 @@ fn heavy_elements(runtime: &Runtime) -> u32 {
 }
 
 fn open_backend(backends: Backends) -> Runtime {
-    pollster::block_on(Runtime::open(RuntimeRequest {
+    Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
             backends,
             limits: LimitsPolicy::Adapter,
             ..Default::default()
         },
-        readback_bytes: 4 << 20,
-        heap_bytes: heap_bytes(backends),
-    }))
+        memory: MemoryRequest {
+            readback_bytes: 4 << 20,
+            heap_bytes: heap_bytes(backends),
+            ..Default::default()
+        },
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
-fn rectifier<'g>(runtime: &'g Runtime, graph: &Graph<'g>, elements: u32) -> Program<'g> {
+fn rectifier(runtime: &Runtime, graph: &Graph, elements: u32) -> Program {
     let data = graph.input(Shape::vector(elements), Element::Single);
     graph.retain(graph.relu(graph.mul(data, data)));
     let weights = runtime.weights(graph);

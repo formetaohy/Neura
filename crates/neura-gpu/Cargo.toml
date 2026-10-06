@@ -16,7 +16,6 @@ neura-shader = { workspace = true }
 [dev-dependencies]
 neura-compiler = { workspace = true }
 bytemuck = { workspace = true }
-pollster = { workspace = true }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "android"))'.dependencies]
 ash = { workspace = true }

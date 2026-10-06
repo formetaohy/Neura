@@ -11,26 +11,22 @@ use neura_kernel::{
 };
 use neura_plan::{Plan, Region, Span};
 use neura_profile::{MatmulTile, Profile};
-use std::cell::RefCell;
-use std::marker::PhantomData;
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 #[derive(Clone)]
-pub struct Weights<'r> {
+pub struct Weights {
     store: Allocation,
     weights: Region,
     state: Region,
-    brand: PhantomData<&'r ()>,
 }
 
-impl<'r> Weights<'r> {
+impl Weights {
     pub(crate) fn new(store: Allocation, weights: Region, state: Region) -> Self {
         Self {
             store,
             weights,
             state,
-            brand: PhantomData,
         }
     }
 
@@ -71,15 +67,14 @@ impl<'r> Weights<'r> {
     }
 }
 
-pub struct Program<'r> {
-    brand: PhantomData<&'r ()>,
+pub struct Program {
     pub(crate) resident: Arc<Resident>,
     extents: Option<Recycled>,
-    cached: RefCell<Option<Vec<u32>>>,
+    cached: Mutex<Option<Vec<u32>>>,
     pub(crate) refusal: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) tensors: Allocation,
-    pub(crate) weights: Weights<'r>,
+    pub(crate) weights: Weights,
     pub(crate) progress: Recycled,
     pub(crate) header: Vec<u8>,
     pub(crate) workgroups: u32,
@@ -87,7 +82,7 @@ pub struct Program<'r> {
     revision: Revision,
     tasks: Recycled,
     values: Recycled,
-    bound: RefCell<Bound>,
+    bound: Mutex<Bound>,
     plan: Arc<Plan>,
 }
 
@@ -106,13 +101,23 @@ impl Bound {
     }
 }
 
-impl<'r> Program<'r> {
+impl Program {
+    fn binding(&self) -> MutexGuard<'_, Bound> {
+        self.bound.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn extents_cache(&self) -> MutexGuard<'_, Option<Vec<u32>>> {
+        self.cached.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Program {
     pub(crate) fn of(
         context: &GpuContext,
         resident: Arc<Resident>,
         plan: Arc<Plan>,
         tensors: Allocation,
-        weights: Weights<'r>,
+        weights: Weights,
         revision: Revision,
     ) -> Self {
         let pool = resident.pool();
@@ -261,10 +266,9 @@ impl<'r> Program<'r> {
         }
         let group = resident.kernel.bind_group(&bindings);
         Self {
-            brand: PhantomData,
             resident,
             extents,
-            cached: RefCell::new(None),
+            cached: Mutex::new(None),
             refusal,
             group,
             tensors,
@@ -276,7 +280,7 @@ impl<'r> Program<'r> {
             revision,
             tasks,
             values,
-            bound: RefCell::new(Bound::of(&plan)),
+            bound: Mutex::new(Bound::of(&plan)),
             plan,
         }
     }
@@ -290,7 +294,7 @@ impl<'r> Program<'r> {
             host.len(),
             extents.len(),
         );
-        let mut bound = self.bound.borrow_mut();
+        let mut bound = self.binding();
         let mut values = bound
             .extents
             .clone()
@@ -304,7 +308,8 @@ impl<'r> Program<'r> {
         }
         bound.extents = Some(values);
         bound.written = false;
-        self.cached.borrow_mut().take();
+        drop(bound);
+        self.extents_cache().take();
     }
 
     pub fn carries_authored(&self) -> bool {
@@ -323,11 +328,11 @@ impl<'r> Program<'r> {
     }
 
     pub(crate) fn cached_extents(&self) -> Option<Vec<u32>> {
-        self.cached.borrow().clone()
+        self.extents_cache().clone()
     }
 
     pub(crate) fn cache_extents(&self, extents: Vec<u32>) {
-        *self.cached.borrow_mut() = Some(extents);
+        *self.extents_cache() = Some(extents);
     }
 
     pub(crate) fn write_extents(&self, queue: &Queue) {
@@ -337,11 +342,12 @@ impl<'r> Program<'r> {
         let extents = self.host_extents();
         self.extents_buffer()
             .write(queue, bytemuck::cast_slice(&extents));
-        self.cached.borrow_mut().take();
+        self.extents_cache().take();
     }
 
     pub(crate) fn host_extents(&self) -> Vec<u32> {
-        self.bound.borrow().extents.clone().unwrap_or_else(|| {
+        let bound = self.binding();
+        bound.extents.clone().unwrap_or_else(|| {
             panic!(
                 "a program of free extents runs the binding a run names, and no run has named one yet",
             )
@@ -359,12 +365,12 @@ impl<'r> Program<'r> {
     }
 
     pub(crate) fn records_pending(&self) -> bool {
-        let bound = self.bound.borrow();
+        let bound = self.binding();
         bound.extents.is_some() && !bound.written
     }
 
     pub(crate) fn records_written(&self) {
-        self.bound.borrow_mut().written = true;
+        self.binding().written = true;
     }
 
     pub fn stamp(&self) -> GraphStamp {
@@ -410,7 +416,7 @@ impl<'r> Program<'r> {
         self.plan.resident_bytes()
     }
 
-    pub fn weights(&self) -> &Weights<'r> {
+    pub fn weights(&self) -> &Weights {
         &self.weights
     }
 

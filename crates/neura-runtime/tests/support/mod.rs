@@ -1,10 +1,11 @@
 pub fn open() -> neura_runtime::Runtime {
-    pollster::block_on(neura_runtime::Runtime::open(
-        neura_runtime::RuntimeRequest {
+    neura_runtime::Runtime::open(neura_runtime::RuntimeRequest {
+        memory: neura_runtime::MemoryRequest {
             readback_bytes: 4 << 20,
             ..Default::default()
         },
-    ))
+        ..Default::default()
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 

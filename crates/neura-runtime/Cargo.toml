@@ -22,4 +22,3 @@ neura-kernel = { workspace = true }
 
 [dev-dependencies]
 neura-compiler = { workspace = true }
-pollster = { workspace = true }

@@ -10,7 +10,7 @@ pub struct Readback {
 }
 
 impl Readback {
-    pub fn new(device: &Device, bytes: u64, slots: u64) -> Self {
+    pub fn new(device: &Device, bytes: u64, slots: usize) -> Self {
         assert!(
             slots > 0 && bytes > 0 && bytes.is_multiple_of(4),
             "a readback needs aligned storage and at least one slot"
@@ -26,7 +26,7 @@ impl Readback {
                     )
                 })
                 .collect(),
-            free: Mutex::new((0..slots as usize).rev().collect()),
+            free: Mutex::new((0..slots).rev().collect()),
         }
     }
 
@@ -46,8 +46,9 @@ impl Readback {
             .pop();
         claimed.unwrap_or_else(|| {
             panic!(
-                "all {} readbacks of this runtime are in flight; collect one before pulling another, and map at most {} bytes into each",
-                self.slots.len(), self.capacity(),
+                "all {} readbacks of this runtime are in flight, each holding at most {} bytes; collect one before pulling another, or open the runtime with more readback slots",
+                self.slots.len(),
+                self.capacity(),
             )
         })
     }

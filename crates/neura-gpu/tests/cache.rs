@@ -18,11 +18,11 @@ fn directory(name: &str) -> PathBuf {
 
 fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
     let backend = backends.backend();
-    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+    let context = GpuContext::open(&GpuRequest {
         backends,
         artifacts: Some(directory.to_path_buf()),
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     assert_eq!(context.adapter_info().backend, backend);
     let device = context.device().clone();

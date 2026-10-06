@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
-use neura_runtime::{Backends, Runtime, RuntimeRequest};
+use neura_runtime::{Backends, MemoryRequest, Runtime, RuntimeRequest};
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -784,7 +784,7 @@ fn a_readout_holds_the_run_it_was_pulled_from() {
     runtime.write(&program, data, &[5.0, 6.0, 7.0, 8.0]);
     runtime.run(&program);
     assert_close(
-        &runtime.collect(first).pop().expect("one tensor came back"),
+        &first.collect().pop().expect("one tensor came back"),
         &[2.0, 4.0, 6.0, 8.0],
         1e-6,
     );
@@ -817,9 +817,9 @@ fn a_pull_without_a_collect_runs_out_of_readbacks() {
         "every readback of the runtime was in flight, and a pull was accepted",
     );
     let (slot, readout) = pulled.pop().expect("a readback was pulled");
-    runtime.collect(readout);
+    readout.collect();
     let next = runtime.pull(&program, &[out]);
-    runtime.collect(next);
+    next.collect();
     assert!(slot < runtime.readback_slots());
 }
 
@@ -843,10 +843,13 @@ fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
     let graph = Graph::new();
     let data = graph.input(Shape::vector(4096), Element::Single);
     let out = graph.mul(data, graph.fill(Shape::vector(4096), 1.0));
-    let runtime = pollster::block_on(Runtime::open(neura_runtime::RuntimeRequest {
-        readback_bytes: 256,
+    let runtime = Runtime::open(neura_runtime::RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 256,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("a device with a small staging buffer");
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -1171,11 +1174,13 @@ fn one_pool_lets_a_plan_stage_every_body_it_runs() {
 
 #[test]
 fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+    let runtime = Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest::default().minimum_limits(),
-        readback_bytes: 1 << 16,
-        ..Default::default()
-    }))
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            ..Default::default()
+        },
+    })
     .expect("a device with the baseline pool");
     let profiles = runtime.profiles();
     assert!(!profiles.is_empty(), "the baseline pool fits no profile");

@@ -80,12 +80,12 @@ impl Selection {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, live: u32, selected: &[u32], seed: u32) -> SelectionOut {
+    fn step(&self, program: &Program, live: u32, selected: &[u32], seed: u32) -> SelectionOut {
         let table = data(BOUND * WIDTH, seed);
         self.runtime.bind(program, &[live]);
         self.runtime
@@ -168,12 +168,12 @@ impl Prefix {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, numbers: &[f32]) -> (Vec<f32>, f32) {
+    fn step(&self, program: &Program, numbers: &[f32]) -> (Vec<f32>, f32) {
         self.runtime.bind(program, &[numbers.len() as u32]);
         self.runtime.write(program, self.value, numbers);
         self.runtime.run(program);

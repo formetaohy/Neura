@@ -4,8 +4,8 @@ mod source;
 
 use dataset::{Dataset, Order, materialize};
 use neura::{
-    AdamW, Conv2d, Element, Free, Graph, Init, Linear, Pool, Program, Runtime, RuntimeRequest,
-    Shape, Value, Window, cross_entropy,
+    AdamW, Conv2d, Element, Free, Graph, Init, Linear, MemoryRequest, Pool, Program, Runtime,
+    RuntimeRequest, Shape, Value, Window, cross_entropy,
 };
 use source::Split;
 use std::time::Instant;
@@ -131,10 +131,13 @@ fn main() {
     );
     let flattened = FILTERS[1] * (rows / 4) * (columns / 4);
 
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        heap_bytes: HEAP_BYTES,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            heap_bytes: HEAP_BYTES,
+            ..Default::default()
+        },
         ..RuntimeRequest::default()
-    }))
+    })
     .expect("a device to train on");
     report::device(runtime.context().adapter_info());
     report::dataset(&train, &test, &directory);
@@ -229,12 +232,7 @@ struct Held {
     confusion: [[u32; CLASSES as usize]; CLASSES as usize],
 }
 
-fn measure(
-    runtime: &Runtime,
-    program: &Program<'_>,
-    session: &Session<'_>,
-    test: &Dataset,
-) -> Held {
+fn measure(runtime: &Runtime, program: &Program, session: &Session<'_>, test: &Dataset) -> Held {
     let order = Order::ordered(test.len());
     let mut images = Vec::new();
     let mut labels = Vec::new();
@@ -274,7 +272,7 @@ struct Gallery {
 
 fn classify(
     runtime: &Runtime,
-    program: &Program<'_>,
+    program: &Program,
     session: &Session<'_>,
     test: &Dataset,
     count: u32,

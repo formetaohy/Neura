@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_gpu::Backend;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{GpuRequest, Runtime, RuntimeRequest};
+use neura_runtime::{GpuRequest, MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
 
 #[path = "support/reference.rs"]
@@ -16,14 +16,16 @@ fn directory() -> PathBuf {
 }
 
 fn open(directory: &Path) -> Runtime {
-    pollster::block_on(Runtime::open(RuntimeRequest {
+    Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
             artifacts: Some(directory.to_path_buf()),
             ..Default::default()
         },
-        readback_bytes: 1 << 16,
-        ..Default::default()
-    }))
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            ..Default::default()
+        },
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 

@@ -188,8 +188,7 @@ fn profile_name(profile: Profile) -> String {
 }
 
 fn main() {
-    let runtime =
-        pollster::block_on(Runtime::open(RuntimeRequest::default())).expect("a device to measure");
+    let runtime = Runtime::open(RuntimeRequest::default()).expect("a device to measure");
     let info = runtime.context().adapter_info();
     println!(
         "device: {} ({:?}, {:?})",

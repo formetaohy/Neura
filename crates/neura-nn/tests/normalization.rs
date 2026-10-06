@@ -2,13 +2,16 @@ use neura_abi::Element;
 use neura_graph::Value;
 use neura_graph::{Graph, Init, Shape};
 use neura_nn::{GroupNorm, LayerNorm, RmsNorm, mse_loss};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
-    pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 16,
+    Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 

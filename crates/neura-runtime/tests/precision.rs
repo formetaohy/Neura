@@ -3,7 +3,7 @@ use neura_graph::{AttentionOptions, Graph, Init, Pool, Shape, Value, Window};
 use neura_plan::{Layout, Plan};
 use neura_precision::{pack, unpack};
 use neura_profile::{Budget, Profile};
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -334,14 +334,16 @@ fn an_eight_bit_float_weight_feeds_a_product_a_quarter_of_the_bytes() {
 }
 
 fn rounding_contract(backends: neura_gpu::Backends) {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
+    let runtime = Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backends,
             ..Default::default()
         },
-        readback_bytes: 1 << 20,
-        ..Default::default()
-    }))
+        memory: MemoryRequest {
+            readback_bytes: 1 << 20,
+            ..Default::default()
+        },
+    })
     .expect("a device rounds the numbers the host would");
     for element in Element::ALL {
         match element {

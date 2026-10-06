@@ -157,12 +157,12 @@ impl Batch {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(&self, program: &Program<'_>, lengths: &[f32]) -> Produced {
+    fn step(&self, program: &Program, lengths: &[f32]) -> Produced {
         let planes = self.graph.shape(self.query).dims()[1];
         let bound = self.graph.shape(self.packed).dims()[2];
         let capacity = self.graph.shape(self.batched).dims()[2];

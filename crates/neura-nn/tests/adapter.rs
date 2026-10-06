@@ -1,13 +1,16 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
 use neura_nn::{AdamW, Adapter, Linear, mse_loss};
-use neura_runtime::{Program, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Program, Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
-    pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 16,
+    Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
@@ -28,7 +31,7 @@ fn plane(samples: u32) -> (Vec<f32>, Vec<f32>) {
     (inputs, targets)
 }
 
-fn step<'r>(runtime: &'r Runtime, frozen: bool) -> Program<'r> {
+fn step(runtime: &Runtime, frozen: bool) -> Program {
     let graph = Graph::new();
     let base = Linear::new(&graph, "base", 8, 8, Init::Constant(0.5), Element::Single);
     if frozen {

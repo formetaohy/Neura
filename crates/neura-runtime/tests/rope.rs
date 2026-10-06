@@ -101,7 +101,7 @@ impl<'a> Packed<'a> {
         }
     }
 
-    fn step(&self, program: &neura_runtime::Program<'_>, lengths: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    fn step(&self, program: &neura_runtime::Program, lengths: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let image = random(PACKED_BOUND * PACKED_WIDTH, 71);
         self.runtime.write(program, self.lengths, lengths);
         self.runtime.write(program, self.packed, &image);

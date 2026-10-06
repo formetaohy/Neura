@@ -11,7 +11,7 @@ use reference::{matmul_reference, random};
 use support::{assert_close, open};
 
 struct Sensor<'g> {
-    program: neura_runtime::Program<'g>,
+    program: neura_runtime::Program,
     input: Value<'g>,
     out: Value<'g>,
     weight: Value<'g>,

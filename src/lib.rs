@@ -13,6 +13,7 @@ pub use neura_nn::{
 };
 pub use neura_plan::{Layout, Region, Seed};
 pub use neura_runtime::{
-    Budget, Checkpoint, MatmulStrategy, MatmulTile, Placement, Profile, Program, Readout, Run,
-    Runtime, RuntimeRequest, Span, Weights,
+    Budget, Checkpoint, DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, DEFAULT_READBACK_SLOTS,
+    MatmulStrategy, MatmulTile, MemoryRequest, Placement, Profile, Program, Readout, Run, Runtime,
+    RuntimeRequest, Span, Weights,
 };

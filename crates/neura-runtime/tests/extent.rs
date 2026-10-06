@@ -199,7 +199,7 @@ fn reference(
     let graph = Graph::new();
     let model = build(&graph, batch, tokens, false);
     let store = runtime.weights(&graph);
-    let program: Program<'_> = runtime.compile(&graph, &store);
+    let program: Program = runtime.compile(&graph, &store);
     let observations = data(model.inputs[0].shape().elements(), seed);
     let parameter = data(model.parameter.shape().elements(), seed + 7);
     for input in &model.inputs {

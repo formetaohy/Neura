@@ -15,6 +15,6 @@ pub use neura_plan::{Product, Span};
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
 pub use program::{Program, Weights};
 pub use runtime::{
-    DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, READBACK_SLOTS, Readout, Run, Runtime,
-    RuntimeRequest,
+    DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES, DEFAULT_READBACK_SLOTS, MemoryRequest, Readout,
+    Run, Runtime, RuntimeRequest,
 };

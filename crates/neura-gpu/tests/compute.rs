@@ -10,10 +10,10 @@ fn double(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
 
 fn compute(backends: Backends) {
     let backend = backends.backend();
-    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+    let context = GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     assert_eq!(context.adapter_info().backend, backend);
     let device = context.device().clone();
@@ -115,10 +115,10 @@ fn remainder(left: u32, right: u32, signed: bool) -> u32 {
 }
 
 fn remainders(backends: Backends, signed: bool) {
-    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+    let context = GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
@@ -231,10 +231,10 @@ fn sums_before_zero(lid: u32, input: Read<u32>, out: ReadWrite<u32>) {
 }
 
 fn breaks_out_of_a_match(backends: Backends) {
-    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+    let context = GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
@@ -300,10 +300,10 @@ fn stamp_past_a_gigabyte(lid: u32, index: Read<u32>, storage: ReadWrite<u32>) {
 
 fn past_a_gigabyte(backends: Backends) {
     let backend = backends.backend();
-    let context = pollster::block_on(GpuContext::open(&GpuRequest {
+    let context = GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     if context.adapter_info().device_type == DeviceType::Cpu {
         return;

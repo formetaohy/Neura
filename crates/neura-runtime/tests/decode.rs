@@ -114,18 +114,12 @@ impl Decoder {
         }
     }
 
-    fn compile(&self) -> Program<'_> {
+    fn compile(&self) -> Program {
         let weights = self.runtime.weights(&self.graph);
         self.runtime.compile(&self.graph, &weights)
     }
 
-    fn step(
-        &self,
-        program: &Program<'_>,
-        cursors: &[f32],
-        rows: &[f32],
-        queries: &[f32],
-    ) -> Vec<f32> {
+    fn step(&self, program: &Program, cursors: &[f32], rows: &[f32], queries: &[f32]) -> Vec<f32> {
         self.runtime.write(program, self.cursor, cursors);
         self.runtime
             .write(program, self.slot, &slots(self.ring, cursors));
@@ -176,7 +170,7 @@ fn a_decode_step_reads_the_keys_its_cursor_reaches() {
         &cached,
     );
     let width = WIDTH as usize;
-    let pass = |program: &Program<'_>| {
+    let pass = |program: &Program| {
         for step in 0..TOKENS {
             let at = step as usize * width;
             let produced = decoder.step(

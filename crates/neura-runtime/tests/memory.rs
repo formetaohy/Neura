@@ -7,7 +7,7 @@ fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
 }
 use neura_plan::Plan;
-use neura_runtime::{Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
 mod reference;
@@ -292,10 +292,13 @@ fn a_resident_tensor_survives_every_run() {
 
 #[test]
 fn the_engine_writes_a_resident_tensor_without_the_host() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 12,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 12,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     let graph = Graph::new();
     let observation = graph.resident(Shape::vector(4), Element::Single);
@@ -334,11 +337,14 @@ fn the_engine_writes_a_resident_tensor_without_the_host() {
 
 #[test]
 fn a_program_wider_than_the_heap_is_refused() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 12,
-        heap_bytes: 1 << 12,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 12,
+            heap_bytes: 1 << 12,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     let graph = Graph::new();
     let data = graph.input(Shape::vector(4096), Element::Single);
@@ -354,7 +360,7 @@ fn a_program_wider_than_the_heap_is_refused() {
 
 #[test]
 fn a_heap_past_a_gigabyte_serves_a_program() {
-    let context = pollster::block_on(GpuContext::open(&GpuRequest::default())).expect("device");
+    let context = GpuContext::open(&GpuRequest::default()).expect("device");
     let heap_bytes = (1u64 << 30) + (64 << 20);
     if context.adapter_info().device_type == DeviceType::Cpu
         || context.limits().max_storage_buffer_binding_size < heap_bytes
@@ -362,11 +368,14 @@ fn a_heap_past_a_gigabyte_serves_a_program() {
         return;
     }
     drop(context);
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 4 << 20,
-        heap_bytes,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 4 << 20,
+            heap_bytes,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     assert_eq!(runtime.heap_bytes(), heap_bytes);
     let graph = Graph::new();
@@ -397,11 +406,14 @@ fn a_heap_past_a_gigabyte_serves_a_program() {
 
 #[test]
 fn a_dropped_program_returns_its_tensors_to_the_heap() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 20,
-        heap_bytes: 1 << 20,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 20,
+            heap_bytes: 1 << 20,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 256, 256);
@@ -428,11 +440,14 @@ fn a_dropped_program_returns_its_tensors_to_the_heap() {
 
 #[test]
 fn a_dropped_store_returns_its_words_to_the_heap() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 12,
-        heap_bytes: 64 << 10,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 12,
+            heap_bytes: 64 << 10,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 96, 96);
@@ -453,11 +468,14 @@ fn a_dropped_store_returns_its_words_to_the_heap() {
 
 #[test]
 fn a_program_keeps_the_store_it_was_built_with() {
-    let runtime = pollster::block_on(Runtime::open(RuntimeRequest {
-        readback_bytes: 1 << 12,
-        heap_bytes: 40 << 10,
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 12,
+            heap_bytes: 40 << 10,
+            ..Default::default()
+        },
         ..Default::default()
-    }))
+    })
     .expect("device");
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 64, 64);

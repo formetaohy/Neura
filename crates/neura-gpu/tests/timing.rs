@@ -1,10 +1,10 @@
 use neura_gpu::{Backends, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission};
 
 fn context(backends: Backends) -> GpuContext {
-    pollster::block_on(GpuContext::open(&GpuRequest {
+    GpuContext::open(&GpuRequest {
         backends,
         ..Default::default()
-    }))
+    })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
