@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <strong>Deep learning for games</strong>
+</p>
+
+<p align="center">
   <a href="https://crates.io/crates/neura"><img src="https://img.shields.io/crates/v/neura.svg?color=blue" alt="Crate version"></a>
   <a href="https://github.com/formetaohy/Neura/actions/workflows/ci.yml"><img src="https://github.com/formetaohy/Neura/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/language-Rust-orange?logo=rust" alt="Rust"></a>
