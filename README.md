@@ -21,7 +21,7 @@ Neura is a **deep learning framework designed for games**, making it easy to bui
 
 ## Document
 
-**[Examples](examples/)**: Runnable examples for learning Neura and exploring specific concepts.
+**[Examples](examples/README.md)**: Runnable examples for learning Neura and exploring specific concepts.
 
 ## Contact
 
