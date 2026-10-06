@@ -61,14 +61,6 @@ neura-runtime = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }
 
-[[example]]
-name = "train"
-path = "examples/train.rs"
-
-[[example]]
-name = "benchmark"
-path = "examples/benchmark.rs"
-
 [lints]
 workspace = true
 
