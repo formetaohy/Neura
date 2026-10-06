@@ -16,6 +16,21 @@ use std::time::Duration;
 
 pub(crate) const FRAMES_IN_FLIGHT: usize = 4;
 pub(crate) const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn hang_deadline(
+    frames: impl IntoIterator<Item = (u64, bool)>,
+    index: u64,
+    timeout: Duration,
+) -> Duration {
+    let waits_for_a_first_dispatch = frames
+        .into_iter()
+        .any(|(frame, first_dispatch)| first_dispatch && frame <= index);
+    if waits_for_a_first_dispatch {
+        Duration::MAX
+    } else {
+        timeout
+    }
+}
 pub(crate) const STAGING_BYTES: u64 = 256 << 10;
 pub(crate) const TIME_SLOTS: usize = 4096;
 
@@ -216,14 +231,19 @@ impl NativeDevice {
         }
     }
 
-    pub(crate) fn submit(&self, writes: &[Write], commands: &[Command]) -> u64 {
+    pub(crate) fn submit(
+        &self,
+        writes: &[Write],
+        commands: &[Command],
+        first_dispatch: bool,
+    ) -> u64 {
         match self {
             #[cfg(vulkan_backend)]
-            Self::Vulkan(device) => device.submit(writes, commands),
+            Self::Vulkan(device) => device.submit(writes, commands, first_dispatch),
             #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.submit(writes, commands),
+            Self::Dx12(device) => device.submit(writes, commands, first_dispatch),
             #[cfg(metal_backend)]
-            Self::Metal(device) => device.submit(writes, commands),
+            Self::Metal(device) => device.submit(writes, commands, first_dispatch),
         }
     }
 

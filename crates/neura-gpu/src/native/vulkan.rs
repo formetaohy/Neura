@@ -1,6 +1,6 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
-    STAGING_BYTES, TIME_SLOTS,
+    STAGING_BYTES, TIME_SLOTS, hang_deadline,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
@@ -33,6 +33,7 @@ impl Drop for InstanceOwner {
 
 struct Frame {
     index: u64,
+    first_dispatch: bool,
     command: vk::CommandBuffer,
     fence: vk::Fence,
     staging: Arc<BufferResource>,
@@ -59,6 +60,7 @@ impl Frame {
         .unwrap_or_else(|error| panic!("creating a Vulkan completion fence: {error:?}"));
         Self {
             index: 0,
+            first_dispatch: false,
             command,
             fence,
             staging: device.allocate(STAGING_BYTES, vk::BufferUsageFlags::TRANSFER_SRC, true),
@@ -850,7 +852,12 @@ impl Device {
         }
     }
 
-    pub(crate) fn submit(&self, writes: &[Write], commands: &[Command]) -> u64 {
+    pub(crate) fn submit(
+        &self,
+        writes: &[Write],
+        commands: &[Command],
+        first_dispatch: bool,
+    ) -> u64 {
         let mut state = self
             .state
             .lock()
@@ -868,6 +875,7 @@ impl Device {
         let frame = &mut state.frames[slot];
         frame.begin(&self.raw);
         frame.index = index;
+        frame.first_dispatch = first_dispatch;
         let command = frame.command;
         unsafe {
             self.raw
@@ -1110,6 +1118,14 @@ impl Device {
             .find(|frame| frame.index == index)
             .expect("an unfinished submission owns a fence")
             .fence;
+        let timeout = hang_deadline(
+            state
+                .frames
+                .iter()
+                .map(|frame| (frame.index, frame.first_dispatch)),
+            index,
+            timeout,
+        );
         unsafe {
             self.raw.wait_for_fences(
                 &[fence],

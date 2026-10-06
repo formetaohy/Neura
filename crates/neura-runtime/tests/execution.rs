@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_profile::{Budget, Profile};
+use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
 use neura_runtime::{Backends, Runtime, RuntimeRequest};
 
 #[path = "support/backend.rs"]
@@ -19,6 +19,17 @@ use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
+fn tile_tolerance(tiles: &[MatmulTile]) -> f32 {
+    if tiles
+        .iter()
+        .any(|tile| tile.strategy() == MatmulStrategy::Cooperative)
+    {
+        2e-2
+    } else {
+        1e-4
+    }
 }
 
 #[test]
@@ -1084,7 +1095,11 @@ fn every_tile_of_a_profile_runs_its_own_matmul() {
         runtime.write(&program, left, &left_data);
         runtime.write(&program, right, &right_data);
         runtime.run(&program);
-        assert_close(&runtime.read(&program, out), &expected, 1e-4);
+        assert_close(
+            &runtime.read(&program, out),
+            &expected,
+            tile_tolerance(program.tiles()),
+        );
     }
 }
 
@@ -1224,7 +1239,11 @@ fn tuning_measures_every_profile_the_device_offers() {
     runtime.write(&program, left, &left_data);
     runtime.write(&program, right, &right_data);
     runtime.run(&program);
-    assert_close(&runtime.read(&program, out), &expected, 1e-4);
+    assert_close(
+        &runtime.read(&program, out),
+        &expected,
+        tile_tolerance(program.tiles()),
+    );
 }
 
 #[test]

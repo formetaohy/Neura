@@ -1,16 +1,34 @@
 use neura_abi::Element;
-use neura_gpu::{Backends, GpuRequest, LimitsPolicy};
+use neura_gpu::{Backends, GpuContext, GpuRequest, LimitsPolicy};
 use neura_graph::{Graph, Shape};
 use neura_runtime::{Program, Runtime, RuntimeRequest};
 use std::time::Instant;
 
+const HEAVY_ELEMENTS: u64 = 16 << 20;
+const HEAP_BYTES: u64 = 256 << 20;
+
+fn heap_bytes(backends: Backends) -> u64 {
+    let request = GpuRequest {
+        backends,
+        ..Default::default()
+    };
+    let context =
+        pollster::block_on(GpuContext::open(&request)).expect("a device serves a heap probe");
+    HEAP_BYTES.min(context.limits().max_storage_buffer_binding_size)
+}
+
 fn open() -> Runtime {
     pollster::block_on(Runtime::open(RuntimeRequest {
         readback_bytes: 4 << 20,
-        heap_bytes: 256 << 20,
+        heap_bytes: heap_bytes(Backends::COMPILED),
         ..Default::default()
     }))
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
+}
+
+fn heavy_elements(runtime: &Runtime) -> u32 {
+    u32::try_from((runtime.heap_bytes() / 16).min(HEAVY_ELEMENTS))
+        .expect("a heavy workload fits one word")
 }
 
 fn open_backend(backends: Backends) -> Runtime {
@@ -21,7 +39,7 @@ fn open_backend(backends: Backends) -> Runtime {
             ..Default::default()
         },
         readback_bytes: 4 << 20,
-        heap_bytes: 256 << 20,
+        heap_bytes: heap_bytes(backends),
     }))
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
@@ -41,7 +59,7 @@ fn a_device_time_counts_the_work_and_not_the_round_trip() {
     let graph = Graph::new();
     let heavy_graph = Graph::new();
     let tiny = rectifier(&runtime, &graph, 1024);
-    let heavy = rectifier(&runtime, &heavy_graph, 16 << 20);
+    let heavy = rectifier(&runtime, &heavy_graph, heavy_elements(&runtime));
     let mut tiny_seconds = f64::MAX;
     let mut heavy_seconds = f64::MAX;
     for _ in 0..6 {
@@ -70,7 +88,7 @@ fn a_device_time_counts_the_work_and_not_the_round_trip() {
 fn a_measured_program_reports_the_time_of_its_own_runs() {
     let runtime = open();
     let graph = Graph::new();
-    let program = rectifier(&runtime, &graph, 16 << 20);
+    let program = rectifier(&runtime, &graph, heavy_elements(&runtime));
     let run = runtime.run(&program).seconds();
     let measured = runtime.measure(&program);
     assert!(
@@ -85,7 +103,7 @@ fn every_backend_a_machine_offers_times_the_same_work() {
     for backends in Backends::PLATFORM {
         let runtime = open_backend(backends);
         let graph = Graph::new();
-        let program = rectifier(&runtime, &graph, 16 << 20);
+        let program = rectifier(&runtime, &graph, heavy_elements(&runtime));
         let mut fastest = f64::MAX;
         for _ in 0..6 {
             fastest = fastest.min(runtime.run(&program).seconds());

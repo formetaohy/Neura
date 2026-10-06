@@ -1,6 +1,6 @@
 use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
-    STAGING_BYTES, TIME_SLOTS,
+    STAGING_BYTES, TIME_SLOTS, hang_deadline,
 };
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
@@ -47,6 +47,7 @@ impl Drop for CompletionEvent {
 
 struct Frame {
     index: u64,
+    first_dispatch: bool,
     allocator: ID3D12CommandAllocator,
     list: ID3D12GraphicsCommandList,
     staging: Arc<BufferResource>,
@@ -68,6 +69,7 @@ impl Frame {
             .unwrap_or_else(|error| panic!("closing a D3D12 compute command list: {error}"));
         Self {
             index: 0,
+            first_dispatch: false,
             allocator,
             list,
             staging: allocate(device, STAGING_BYTES, D3D12_HEAP_TYPE_UPLOAD, false),
@@ -665,7 +667,12 @@ impl Device {
         unsafe { list.ResourceBarrier(&[barrier]) };
     }
 
-    pub(crate) fn submit(&self, writes: &[Write], commands: &[Command]) -> u64 {
+    pub(crate) fn submit(
+        &self,
+        writes: &[Write],
+        commands: &[Command],
+        first_dispatch: bool,
+    ) -> u64 {
         let mut state = self
             .state
             .lock()
@@ -683,6 +690,7 @@ impl Device {
         let frame = &mut state.frames[slot];
         frame.begin();
         frame.index = index;
+        frame.first_dispatch = first_dispatch;
         let list = frame.list.clone();
         unsafe { list.EndQuery(&self.stamps, D3D12_QUERY_TYPE_TIMESTAMP, (slot * 2) as u32) };
         for write in writes {
@@ -929,6 +937,14 @@ impl Device {
         }
         unsafe { self.fence.SetEventOnCompletion(index, self.event.0) }
             .map_err(|error| format!("arming the D3D12 compute fence: {error}"))?;
+        let timeout = hang_deadline(
+            state
+                .frames
+                .iter()
+                .map(|frame| (frame.index, frame.first_dispatch)),
+            index,
+            timeout,
+        );
         let result = unsafe {
             WaitForSingleObject(
                 self.event.0,

@@ -4,6 +4,7 @@ use crate::context::Device;
 use crate::native::{NativeGroup, NativePipeline};
 use neura_shader::ComputeProgram;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy)]
 pub struct Binding<'a> {
@@ -22,6 +23,7 @@ pub(crate) struct Slot {
     pub(crate) native: NativePipeline,
     pub(crate) program: Arc<ComputeProgram>,
     pub(crate) device: Device,
+    pub(crate) dispatched: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -48,6 +50,7 @@ impl PipelineHandle {
                 device: device.clone(),
                 program,
                 native,
+                dispatched: AtomicBool::new(false),
             }),
         }
     }
@@ -122,5 +125,9 @@ impl PipelineHandle {
             .device
             .native()
             .compile(&self.slot.native, &self.slot.program);
+    }
+
+    pub(crate) fn first_dispatch(&self) -> bool {
+        !self.slot.dispatched.swap(true, Ordering::Relaxed)
     }
 }

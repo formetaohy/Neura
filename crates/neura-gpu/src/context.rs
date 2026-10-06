@@ -206,7 +206,14 @@ impl Queue {
             .writes
             .lock()
             .expect("the compute queue is never poisoned");
-        let index = self.device.native().submit(&writes, commands);
+        let first_dispatch = commands.iter().any(|command| match command {
+            Command::Dispatch { pipeline, .. } => pipeline.first_dispatch(),
+            Command::Copy { .. } | Command::Clear { .. } => false,
+        });
+        let index = self
+            .device
+            .native()
+            .submit(&writes, commands, first_dispatch);
         writes.clear();
         SubmissionIndex(index)
     }

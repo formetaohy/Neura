@@ -142,8 +142,9 @@ impl<'r> Program<'r> {
             queue,
             bytemuck::cast_slice(&progress::words(segments, plan.wave_tasks())),
         );
-        let mut clearing = Submission::new(context.device(), "neura tensors");
+        let mut clearing = Submission::new(context.device(), "neura tensors and refusal");
         clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
+        clearing.clear(refusal.buffer(), 0, refusal.buffer().size());
         clearing.submit(queue);
         for quantum in plan.quanta() {
             tensors.buffer().write_at(

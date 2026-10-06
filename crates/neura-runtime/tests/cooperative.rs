@@ -22,7 +22,7 @@ fn open() -> Runtime {
     .unwrap_or_else(|error| panic!("no Vulkan device runs the tests: {error}"))
 }
 
-fn cooperative_tiles(runtime: &Runtime) -> Option<Vec<MatmulTile>> {
+fn cooperative_tile(runtime: &Runtime, fragments: (u32, u32)) -> Option<MatmulTile> {
     let capability = runtime.capability().cooperative_matrix?;
     let fragment = CooperativeMatrix::new(
         capability.subgroup,
@@ -31,18 +31,23 @@ fn cooperative_tiles(runtime: &Runtime) -> Option<Vec<MatmulTile>> {
         capability.depth,
     );
     let subgroups = WORKGROUP / capability.subgroup;
+    if subgroups == 0 {
+        return None;
+    }
+    let subgroups_rows = (subgroups / fragments.1).max(1);
+    let tile = CooperativeTile::new(
+        fragment,
+        (subgroups_rows, subgroups / subgroups_rows),
+        fragments,
+        fragment.depth(),
+    );
+    (tile.threads() == WORKGROUP).then_some(MatmulTile::cooperative(tile))
+}
+
+fn cooperative_tiles(runtime: &Runtime) -> Option<Vec<MatmulTile>> {
     let tiles = [(2u32, 2u32), (2, 1), (1, 1)]
         .into_iter()
-        .filter_map(|(rows, columns)| {
-            let subgroups_rows = (subgroups / columns).max(1);
-            let tile = CooperativeTile::new(
-                fragment,
-                (subgroups_rows, subgroups / subgroups_rows),
-                (rows, columns),
-                fragment.depth(),
-            );
-            (tile.threads() == WORKGROUP).then_some(MatmulTile::cooperative(tile))
-        })
+        .filter_map(|fragments| cooperative_tile(runtime, fragments))
         .collect::<Vec<_>>();
     (!tiles.is_empty()).then_some(tiles)
 }
@@ -109,17 +114,10 @@ fn a_cooperative_product_matches_a_cpu_reference() {
 #[test]
 fn a_product_shortlists_one_tile_of_every_strategy_its_profile_offers() {
     let runtime = open();
-    let Some(capability) = runtime.capability().cooperative_matrix else {
+    let Some(tile) = cooperative_tile(&runtime, (2, 2)) else {
         return;
     };
-    let fragment = CooperativeMatrix::new(
-        capability.subgroup,
-        capability.rows,
-        capability.columns,
-        capability.depth,
-    );
-    let tile = CooperativeTile::new(fragment, (4, 2), (2, 2), fragment.depth());
-    let profile = cooperative_profile(MatmulTile::cooperative(tile));
+    let profile = cooperative_profile(tile);
     let product = Product::of(1, 512, 512, 512);
     let shortlist = product.shortlist(profile);
     assert_eq!(shortlist.len(), 2, "a product shortlists two tiles");
