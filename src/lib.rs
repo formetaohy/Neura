@@ -4,7 +4,8 @@ pub use neura_gpu::{
     GpuUnavailable, PowerPreference, Queue,
 };
 pub use neura_graph::{
-    AttentionOptions, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value, Window,
+    AttentionOptions, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,
+    Window,
 };
 pub use neura_nn::{
     AdamW, Adapter, Conv2d, Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments,

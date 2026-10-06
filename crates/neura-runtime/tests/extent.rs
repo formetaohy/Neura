@@ -282,6 +282,49 @@ fn a_convolution_and_a_view_follow_every_binding() {
 }
 
 #[test]
+fn a_convolution_weight_gradient_weighs_every_position_a_binding_holds() {
+    let runtime = open();
+    let graph = Graph::new();
+    let batch = graph.free(4);
+    let input = graph.input(
+        Shape::of([4, 2, 6, 6]).freed(&[(0, batch)]),
+        Element::Single,
+    );
+    let filter = graph.parameter(Shape::of([3, 2, 3, 3]), weights(), Element::Single);
+    let convolved = graph.conv2d(input, filter, Window::sliding([3, 3]));
+    let loss = graph.sum(convolved);
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(filter);
+    graph.retain(loss);
+    let store = runtime.weights(&graph);
+    let family = runtime.compile(&graph, &store);
+
+    let filter_data = data(54, 17);
+    for live in [4u32, 3, 1] {
+        let graph = Graph::new();
+        let fixed = graph.input(Shape::of([live, 2, 6, 6]), Element::Single);
+        let shared = graph.parameter(Shape::of([3, 2, 3, 3]), weights(), Element::Single);
+        let fixed_loss = graph.sum(graph.conv2d(fixed, shared, Window::sliding([3, 3])));
+        let fixed_gradients = graph.backward(fixed_loss);
+        let fixed_gradient = fixed_gradients.of(shared);
+        graph.retain(fixed_loss);
+        let store = runtime.weights(&graph);
+        let reference = runtime.compile(&graph, &store);
+        let observations = data(live * 72, 29);
+        runtime.write(&reference, fixed, &observations);
+        runtime.write(&reference, shared, &filter_data);
+        runtime.run(&reference);
+        let expected = runtime.read(&reference, fixed_gradient);
+
+        runtime.bind(&family, &[live]);
+        runtime.write(&family, input, &observations);
+        runtime.write(&family, filter, &filter_data);
+        runtime.run(&family);
+        assert_close(&runtime.read(&family, gradient), &expected, 1e-5);
+    }
+}
+
+#[test]
 fn a_quantized_image_reads_back_the_quantum_its_storage_holds() {
     let runtime = open();
     let graph = Graph::new();

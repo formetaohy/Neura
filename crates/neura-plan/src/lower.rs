@@ -748,11 +748,7 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let positions = input.dims()[0] * gradient.dims()[2] * gradient.dims()[3];
     let per_task = task_elements(filters, device_workgroups(profile));
     let spans_per_chunk = filters.div_ceil(per_task);
-    let chunks = if plan.values[unit.inputs[0] as usize].shape.dynamic() {
-        1
-    } else {
-        (device_workgroups(profile) / spans_per_chunk).clamp(1, positions)
-    };
+    let chunks = (device_workgroups(profile) / spans_per_chunk).clamp(1, positions);
     let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
     for chunk in 0..chunks {
         for (first, count) in spans(filters, per_task) {

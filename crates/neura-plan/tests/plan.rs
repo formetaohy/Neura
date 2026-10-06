@@ -1,7 +1,8 @@
 use neura_abi::{
     Element, Kind, PatchRecord, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES,
+    strategy,
 };
-use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
+use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_pointwise as op;
 use neura_profile::{
     AttentionTile, Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
@@ -3509,4 +3510,68 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
             "every plane of the {name} walks every chunk of the rows its bound holds, and one task covers one chunk",
         );
     }
+}
+
+#[test]
+fn a_convolution_weight_gradient_walks_the_positions_of_every_workgroup() {
+    let chunks_of = |dynamic: bool| {
+        let graph = Graph::new();
+        let batch = graph.free(8);
+        let shape = if dynamic {
+            Shape::of([8, 2, 6, 6]).freed(&[(0, batch)])
+        } else {
+            Shape::of([8, 2, 6, 6])
+        };
+        let input = graph.input(shape, Element::Single);
+        let filter = graph.parameter(
+            Shape::of([3, 2, 3, 3]),
+            Init::Uniform {
+                low: -1.0,
+                high: 1.0,
+            },
+            Element::Single,
+        );
+        let convolved = graph.conv2d(input, filter, Window::sliding([3, 3]));
+        let loss = graph.sum(convolved);
+        graph.retain(loss);
+        let gradients = graph.backward(loss);
+        graph.retain(gradients.of(filter));
+        let plan = plan(&graph);
+        let walked = tasks(&plan);
+        let values = records::<ValueRecord>(plan.values(), size_of::<ValueRecord>());
+        let chunks = walked
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Conv2dWeightGrad)
+            .filter(|task| task.geometry == strategy::WEIGHT_CHUNK)
+            .collect::<Vec<_>>();
+        let bound = values[chunks[0].a as usize].dims[0];
+        let gradient = values[chunks[0].b as usize].dims;
+        let positions = bound * gradient[2] * gradient[3];
+        let expected = narrow().workgroups().min(positions);
+        assert_eq!(
+            chunks.len(),
+            expected as usize,
+            "a weight gradient splits its {positions} positions into one chunk per device workgroup, and one chunk leaves the whole walk to a single task",
+        );
+        let mut slots = chunks.iter().map(|task| task.slot).collect::<Vec<_>>();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..expected).collect::<Vec<_>>());
+        assert_eq!(
+            values[chunks[0].out as usize].dims[2], expected,
+            "the partials hold one plane per chunk",
+        );
+        let folded = walked
+            .iter()
+            .filter(|task| task.geometry == strategy::WEIGHT_FOLD)
+            .collect::<Vec<_>>();
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].slot, 0);
+        assert_eq!(folded[0].count, 54);
+        expected
+    };
+    assert_eq!(
+        chunks_of(true),
+        chunks_of(false),
+        "a walk of a free extent and a walk of a static length chunk the positions of their weight gradient alike",
+    );
 }
