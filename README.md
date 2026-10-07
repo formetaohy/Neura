@@ -23,13 +23,10 @@ Neura is a **deep learning framework designed for games**, making it easy to bui
 - **Cross-platform Deployment**: Use your game's native graphics API directly — Neura runs right alongside your game.
 - **Kernel Compiler**: Write custom kernels in Rust; Neura generates SPIR-V, HLSL, and MSL, so you do not maintain separate shader implementations.
 
-## Quick Start
-
-Install **[NeuraSkill](https://github.com/formetaohy/NeuraSkill)** into your coding agent. That's it. Then go build your own AI-native games :)
-
 ## Documents
 
-**[Examples](examples)**: Runnable examples for learning Neura and exploring specific concepts.
+- **[NeuraSkill](https://github.com/formetaohy/NeuraSkill)**: An official agent skill for developers using Neura.
+- **[Examples](examples)**: Runnable examples for learning Neura and exploring specific concepts.
 
 ## Contact
 
