@@ -3,7 +3,7 @@ use super::{
     STAGING_BYTES, TIME_SLOTS, hang_deadline,
 };
 use crate::buffer::GpuBuffer;
-use crate::cache::ArtifactCache;
+use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
     DeviceType, Limits,
@@ -107,7 +107,6 @@ pub(crate) struct Device {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
     artifacts: ArtifactCache,
-    archive: Option<Archive>,
 }
 
 struct BufferResource {
@@ -141,11 +140,15 @@ unsafe impl Send for Archive {}
 unsafe impl Sync for Archive {}
 
 impl Archive {
-    fn of(device: &ProtocolObject<dyn MTLDevice>, artifacts: &ArtifactCache) -> Option<Self> {
-        let key = format!("metal/archive-{}.bin", device.registryID());
+    fn of(
+        device: &ProtocolObject<dyn MTLDevice>,
+        artifacts: &ArtifactCache,
+        program: &str,
+    ) -> Option<Self> {
+        let key = format!("metal/{}/archive-{program}.bin", device.registryID());
         let file = artifacts.file(&key)?;
         let descriptor = MTLBinaryArchiveDescriptor::new();
-        if artifacts.load(&key).is_some() {
+        if artifacts.holds(&key) {
             let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
             descriptor.setUrl(Some(&url));
         }
@@ -257,7 +260,6 @@ impl Device {
         let queue = raw
             .newCommandQueue()
             .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
-        let archive = Archive::of(&raw, &artifacts);
         let capability = capability(&raw);
         Ok((
             Arc::new(Self {
@@ -265,7 +267,6 @@ impl Device {
                 queue,
                 state: Mutex::new(QueueState::default()),
                 artifacts,
-                archive,
             }),
             info,
             limits,
@@ -326,11 +327,15 @@ impl Device {
             let function = library
                 .newFunctionWithName(&NSString::from_str(&entry))
                 .unwrap_or_else(|| panic!("{} has no Metal entry named {entry}", program.label()));
+            let archive = Archive::of(
+                &self.raw,
+                &self.artifacts,
+                &fingerprint(&[source.as_bytes(), entry.as_bytes()]),
+            );
             let descriptor = MTLComputePipelineDescriptor::new();
             descriptor.setLabel(Some(&NSString::from_str(program.label())));
             descriptor.setComputeFunction(Some(&function));
-            let archives = self
-                .archive
+            let archives = archive
                 .as_ref()
                 .map(|archive| NSArray::from_retained_slice(std::slice::from_ref(&archive.raw)));
             if let Some(archives) = &archives {
@@ -349,7 +354,7 @@ impl Device {
                         program.label()
                     )
                 });
-            if let Some(archive) = &self.archive {
+            if let Some(archive) = &archive {
                 archive
                     .raw
                     .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
@@ -370,6 +375,7 @@ impl Device {
                     .unwrap_or_else(|error| {
                         panic!("writing the Metal archive {}: {error}", file.display())
                     });
+                self.artifacts.record(&archive.key);
             }
             let workgroup = program.workgroup_size();
             assert!(

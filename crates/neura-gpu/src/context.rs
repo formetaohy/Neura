@@ -1,5 +1,5 @@
 use crate::buffer::GpuBuffer;
-use crate::cache::ArtifactCache;
+use crate::cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Backends, Capability, Limits, PowerPreference,
 };
@@ -25,6 +25,7 @@ pub struct GpuRequest {
     pub adapter: AdapterPolicy,
     pub limits: LimitsPolicy,
     pub artifacts: Option<PathBuf>,
+    pub artifact_bytes: u64,
 }
 
 impl Default for GpuRequest {
@@ -34,6 +35,7 @@ impl Default for GpuRequest {
             adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
             artifacts: None,
+            artifact_bytes: DEFAULT_ARTIFACT_BYTES,
         }
     }
 }
@@ -126,8 +128,8 @@ impl Device {
 
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
         let artifacts = match &request.artifacts {
-            Some(root) => ArtifactCache::at(root.clone()),
-            None => ArtifactCache::default_location(),
+            Some(root) => ArtifactCache::bounded(root.clone(), request.artifact_bytes),
+            None => ArtifactCache::default_location(request.artifact_bytes),
         };
         let (native, info, limits, capability) = native::open(request, artifacts.clone())?;
         if !limits.supports(&Limits::BASELINE) {

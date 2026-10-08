@@ -10,15 +10,24 @@ mod reference;
 use reference::{matmul_reference, random};
 
 fn directory() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("neura-precompile-{}", std::process::id()));
+    directory_named("precompile")
+}
+
+fn directory_named(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("neura-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
     path
 }
 
 fn open(directory: &Path) -> Runtime {
+    open_bounded(directory, GpuRequest::default().artifact_bytes)
+}
+
+fn open_bounded(directory: &Path, artifact_bytes: u64) -> Runtime {
     Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
             artifacts: Some(directory.to_path_buf()),
+            artifact_bytes,
             ..Default::default()
         },
         memory: MemoryRequest {
@@ -114,6 +123,37 @@ fn a_precompiled_kernel_serves_every_shape_of_its_model() {
             cache.stores(),
             stored,
             "a precompiled kernel is not compiled a second time",
+        );
+    }
+    std::fs::remove_dir_all(&directory).expect("a test artifact directory is removable");
+}
+
+#[test]
+fn a_bounded_artifact_cache_recompiles_the_programs_it_evicted() {
+    let directory = directory_named("precompile-bounded");
+    let narrow = model(4);
+    let wide = model(16);
+    let budget = {
+        let runtime = open(&directory);
+        run(&runtime, &narrow, 4);
+        run(&runtime, &wide, 16);
+        let held = runtime.context().artifact_cache().bytes();
+        assert!(held > 0, "a compiled kernel writes an artifact");
+        held * 2 / 3
+    };
+    let runtime = open_bounded(&directory, budget);
+    let cache = runtime.context().artifact_cache();
+    assert!(
+        cache.evictions() >= 1,
+        "a cache smaller than what its directory holds reclaims room",
+    );
+    for samples in [4u32, 16, 4, 16] {
+        let model = if samples == 4 { &narrow } else { &wide };
+        run(&runtime, model, samples);
+        assert!(
+            cache.bytes() <= budget,
+            "a cache of a {budget} byte budget holds {} bytes",
+            cache.bytes(),
         );
     }
     std::fs::remove_dir_all(&directory).expect("a test artifact directory is removable");

@@ -1,7 +1,7 @@
 pub use neura_abi::{Element, Store};
 pub use neura_gpu::{
-    AdapterId, AdapterInfo, AdapterPolicy, ArtifactCache, Backend, Backends, Device, GpuRequest,
-    GpuUnavailable, PowerPreference, Queue,
+    AdapterId, AdapterInfo, AdapterPolicy, ArtifactCache, Backend, Backends,
+    DEFAULT_ARTIFACT_BYTES, Device, GpuRequest, GpuUnavailable, PowerPreference, Queue,
 };
 pub use neura_graph::{
     AttentionOptions, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,
