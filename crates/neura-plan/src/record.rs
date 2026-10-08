@@ -12,6 +12,10 @@ pub(crate) struct Recorded<'a> {
 }
 
 impl<'a> Recorded<'a> {
+    pub(crate) fn with(record: TaskRecord, steps: &'a [u8]) -> Self {
+        Self { record, steps }
+    }
+
     pub(crate) fn of(tasks: &'a [u8], steps: &'a [u8]) -> impl Iterator<Item = Self> + 'a {
         assert!(
             tasks.len().is_multiple_of(size_of::<TaskRecord>()),

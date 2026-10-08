@@ -80,12 +80,35 @@ impl Schedule {
             "a schedule of {} tasks gates {count} waves, and every wave opens on a task of its own",
             order.len(),
         );
-        Self {
+        let mut schedule = Self {
             order,
             segments,
             waves,
             count,
+        };
+        schedule.compact();
+        schedule
+    }
+
+    fn compact(&mut self) {
+        let mut ranks = std::collections::BTreeMap::new();
+        for wave in &self.waves {
+            let next = ranks.len() as u32;
+            ranks.entry(*wave).or_insert(next);
         }
+        for wave in &mut self.waves {
+            *wave = ranks[wave];
+        }
+        for segment in &mut self.segments {
+            segment.wave = ranks[&segment.wave];
+        }
+        self.count = ranks.len() as u32;
+        assert!(
+            self.count as usize <= self.order.len(),
+            "a schedule of {} tasks gates {} waves, and every wave opens on a task of its own",
+            self.order.len(),
+            self.count,
+        );
     }
 
     pub(crate) fn order(&self) -> &[u32] {
@@ -117,8 +140,9 @@ fn depths<T: Scheduled, V: region::Values>(
 ) -> Vec<u32> {
     let mut hazards = Hazards::of(values.len());
     let mut depths = vec![0u32; tasks.len()];
+    let mut touches = region::Touches::default();
     for (index, task) in tasks.iter().enumerate() {
-        let touches = region::touches(values, tiles, task, task.span());
+        region::touches(values, tiles, task, task.span(), &mut touches);
         let evidence = hazards.inspect(values, &touches, task.in_place());
         let mut deepest = evidence.deepest.map(|deepest| deepest + 1);
         for dependency in &barriers[index] {
@@ -126,7 +150,7 @@ fn depths<T: Scheduled, V: region::Values>(
             deepest = Some(deepest.map_or(carried, |deepest| deepest.max(carried)));
         }
         depths[index] = deepest.unwrap_or(0);
-        hazards.record(values, touches, &Hazard::deep(depths[index]));
+        hazards.record(values, &touches, &Hazard::deep(depths[index]));
     }
     depths
 }
@@ -237,9 +261,10 @@ fn pack<T: Scheduled, V: region::Values>(
     let mut stage = 0u32;
     let mut in_recompute = false;
     let mut entry = Hazard::default();
+    let mut touches = region::Touches::default();
     for index in 0..tasks.len() as u32 {
         let task = &tasks[index as usize];
-        let touches = region::touches(values, tiles, task, task.span());
+        region::touches(values, tiles, task, task.span(), &mut touches);
         let recomputed = touches
             .reads
             .iter()
@@ -258,32 +283,36 @@ fn pack<T: Scheduled, V: region::Values>(
         }
         let earliest = evidence.wave;
         let mut dependencies = std::mem::take(&mut evidence.segments);
-        for reached in &mut dependencies {
+        for reached in dependencies.as_mut_slice() {
             *reached = ancestry.root(*reached);
         }
-        dependencies.sort_unstable();
-        dependencies.dedup();
+        dependencies.settle();
         let folded = earliest
             .filter(|earliest| {
                 lonely[index as usize]
                     && !recomputed
                     && dependencies.len() == 1
-                    && segment_wave.get(dependencies[0] as usize).copied() == Some(*earliest)
+                    && segment_wave.get(dependencies.get(0) as usize).copied() == Some(*earliest)
             })
-            .map(|earliest| (earliest, dependencies[0]));
-        let placement = match folded {
-            Some((wave, segment)) => Placement::Fold { wave, segment },
-            None => close(
-                task.work(),
-                &dependencies,
-                earliest,
-                &work,
-                &created,
-                &rebuilt,
-                recomputed,
-                workgroups,
-                declared.get(index as usize).copied().unwrap_or(0),
-            ),
+            .map(|earliest| (earliest, dependencies.get(0)));
+        let placement = match dependencies.overflowed() {
+            true => Placement::Open {
+                wave: earliest.expect("a hazard that overflows names a wave") + 1,
+            },
+            false => match folded {
+                Some((wave, segment)) => Placement::Fold { wave, segment },
+                None => close(
+                    task.work(),
+                    dependencies.slice(),
+                    earliest,
+                    &work,
+                    &created,
+                    &rebuilt,
+                    recomputed,
+                    workgroups,
+                    declared.get(index as usize).copied().unwrap_or(0),
+                ),
+            },
         };
         let (wave, segment) = match placement {
             Placement::Fold { wave, segment } => (wave, segment),
@@ -299,7 +328,7 @@ fn pack<T: Scheduled, V: region::Values>(
                     segments[kept as usize].extend(moved);
                     ancestry.adopt(kept, *absorbed);
                 }
-                for reached in &mut dependencies {
+                for reached in dependencies.as_mut_slice() {
                     *reached = ancestry.root(*reached);
                 }
                 (wave, kept)
@@ -337,8 +366,8 @@ fn pack<T: Scheduled, V: region::Values>(
         prefix = prefix.max(wave);
         entry.wave = Some(wave);
         entry.segments.clear();
-        entry.segments.push(segment);
-        hazards.record(values, touches, &entry);
+        entry.segments.extend_from(&[segment]);
+        hazards.record(values, &touches, &entry);
     }
     Packed { waves, segments }
 }

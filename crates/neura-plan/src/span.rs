@@ -110,6 +110,14 @@ impl Extents {
         }
     }
 
+    pub(crate) fn planes(&self, measure: u32, extents: &[u32]) -> u32 {
+        let Measure::Tokens(value) = self.measures[measure as usize] else {
+            panic!("a plane walks the tokens of one value");
+        };
+        let actual = self.dims(value, extents);
+        actual[0] * actual[1]
+    }
+
     pub(crate) fn count(&self, measure: u32, extents: &[u32]) -> u32 {
         match self.measures[measure as usize] {
             Measure::Elements(value) => self.elements(value, extents),
@@ -206,7 +214,7 @@ pub(crate) fn boundary(total: u32, piece: u32, group: u32) -> u32 {
     piece * shared + piece.min(rest)
 }
 
-fn uniform(total: u32, index: u32, group: u32) -> (u32, u32) {
+pub(crate) fn uniform(total: u32, index: u32, group: u32) -> (u32, u32) {
     let first = boundary(total, index, group);
     (first, boundary(total, index + 1, group) - first)
 }

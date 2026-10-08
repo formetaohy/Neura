@@ -9,7 +9,7 @@ use crate::product::Product;
 use crate::record::{self, Recorded};
 use crate::region::{self, Resolved, TableRows, Touches, Values, Walk};
 use crate::schedule;
-use crate::span::{Extents, Split};
+use crate::span::{self, Extents, Split};
 use neura_abi::{
     Element, Geometry, Kind, MAX_RANK, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord,
     Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
@@ -729,6 +729,145 @@ impl Plan {
         }
     }
 
+    fn same_steps(&self, left: &Recorded<'_>, right: &Recorded<'_>) -> bool {
+        let step = size_of::<StepRecord>();
+        let slice = |at: u32, count: u32| {
+            let first = at as usize * step;
+            &self.steps[first..first + count as usize * step]
+        };
+        let (left, right) = (left.record(), right.record());
+        slice(left.prelude, left.prelude_steps) == slice(right.prelude, right.prelude_steps)
+            && slice(left.chain, left.steps) == slice(right.chain, right.steps)
+    }
+
+    fn depends_of(&self, index: usize) -> &[u32] {
+        &self.depends[self.depends_at[index] as usize..self.depends_at[index + 1] as usize]
+    }
+
+    fn dispatches(
+        &self,
+        index: usize,
+        split: Split,
+        span: (u32, u32),
+        recorded: &Recorded<'_>,
+    ) -> bool {
+        if span.1 > 0 || self.patches.owners[index] != NO_VALUE {
+            return true;
+        }
+        if matches!(split, Split::Ragged { .. } | Split::Segment { .. }) {
+            return true;
+        }
+        identity_kind(recorded.kind())
+    }
+
+    fn emit<'a>(
+        &'a self,
+        lengths: &[u32],
+        decoded: &'a [Recorded<'a>],
+        start: usize,
+        end: usize,
+        at_bound: bool,
+        emitted: &mut Emitted<'a, 'a>,
+    ) {
+        let split = self.splits[start];
+        let dependencies = self.depends_of(start);
+        let regrouped = !at_bound
+            && self.patches.owners[start] == NO_VALUE
+            && dependencies.is_empty()
+            && !matches!(split, Split::Ragged { .. } | Split::Segment { .. });
+        match split {
+            Split::Uniform { measure, group, .. }
+                if regrouped && (end - start) as u32 == group.max(1) =>
+            {
+                let bound = self.extents.count(measure, &self.slot_bounds);
+                let live = self.extents.count(measure, lengths);
+                let per_task = bound.div_ceil(group).max(1);
+                let pieces = live.div_ceil(per_task).max(1);
+                let base = self.extents.span(split, &self.slot_bounds).1.max(1);
+                let work = self.works[start];
+                for index in 0..pieces {
+                    let (first, count) = span::uniform(live, index, pieces);
+                    if count == 0 && !identity_kind(decoded[start].kind()) {
+                        continue;
+                    }
+                    let mut record = decoded[start].record();
+                    record.index = index;
+                    record.group = pieces;
+                    record.first = first;
+                    record.count = count;
+                    emitted.walks.push(Walked {
+                        recorded: Recorded::with(record, &self.steps),
+                        depends: dependencies,
+                        span: (first, count),
+                        work: scaled(work, count, base),
+                    });
+                    emitted.sources.push(start as u32);
+                    emitted
+                        .declared
+                        .push(self.declared_waves.get(start).copied().unwrap_or(0));
+                }
+            }
+            Split::Plane {
+                measure,
+                plane,
+                group,
+                ..
+            } if regrouped && (end - start) as u32 == group.max(1) => {
+                let planes = self.extents.planes(measure, lengths);
+                if plane >= planes {
+                    return;
+                }
+                let bound = self.extents.count(measure, &self.slot_bounds);
+                let live = self.extents.count(measure, lengths);
+                let per_task = bound.div_ceil(group).max(1);
+                let pieces = live.div_ceil(per_task).max(1);
+                let base = self.extents.span(split, &self.slot_bounds).1.max(1);
+                let work = self.works[start];
+                for index in 0..pieces {
+                    let (within, count) = span::uniform(live, index, pieces);
+                    if count == 0 && !identity_kind(decoded[start].kind()) {
+                        continue;
+                    }
+                    let first = plane * live + within;
+                    let mut record = decoded[start].record();
+                    record.index = index;
+                    record.group = pieces;
+                    record.first = first;
+                    record.count = count;
+                    emitted.walks.push(Walked {
+                        recorded: Recorded::with(record, &self.steps),
+                        depends: dependencies,
+                        span: (first, count),
+                        work: scaled(work, count, base),
+                    });
+                    emitted.sources.push(start as u32);
+                    emitted
+                        .declared
+                        .push(self.declared_waves.get(start).copied().unwrap_or(0));
+                }
+            }
+            _ => {
+                for (offset, recorded) in decoded[start..end].iter().enumerate() {
+                    let index = start + offset;
+                    let span = self.extents.span(self.splits[index], lengths);
+                    if !at_bound && !self.dispatches(index, self.splits[index], span, recorded) {
+                        continue;
+                    }
+                    emitted.walks.push(Walked {
+                        recorded: *recorded,
+                        depends: self.depends_of(index),
+                        span,
+                        work: self.works[index],
+                    });
+                    emitted.sources.push(index as u32);
+                    emitted
+                        .declared
+                        .push(self.declared_waves.get(index).copied().unwrap_or(0));
+                }
+            }
+        }
+    }
+
     pub(crate) fn deliver(&self, lengths: &[u32]) -> Encoding {
         let sized = Sized::of(&self.shapes, &self.extents, lengths, self.authored.slots());
         assert_eq!(
@@ -736,46 +875,61 @@ impl Plan {
             self.splits.len() + 1,
             "a plan carries one dependency run per task it schedules and one more for the end",
         );
-        let recorded = Recorded::of(&self.tasks, &self.steps).collect::<Vec<_>>();
-        let spans = (0..self.splits.len())
-            .map(|index| self.extents.span(self.splits[index], lengths))
-            .collect::<Vec<(u32, u32)>>();
-        let walks = recorded
-            .into_iter()
-            .enumerate()
-            .map(|(index, recorded)| Walked {
-                recorded,
-                depends: &self.depends
-                    [self.depends_at[index] as usize..self.depends_at[index + 1] as usize],
-                span: spans[index],
-                work: self.works[index],
-            })
-            .collect::<Vec<_>>();
+        let at_bound = lengths == self.slot_bounds.as_slice();
+        let decoded = Recorded::of(&self.tasks, &self.steps).collect::<Vec<_>>();
+        let mut emitted = Emitted {
+            walks: Vec::new(),
+            sources: Vec::new(),
+            declared: Vec::new(),
+        };
+        let mut start = 0usize;
+        while start < self.splits.len() {
+            let key = family_key(decoded[start].record());
+            let split = split_key(self.splits[start]);
+            let mut end = start + 1;
+            while end < self.splits.len()
+                && split_key(self.splits[end]) == split
+                && family_key(decoded[end].record()) == key
+                && self.same_steps(&decoded[start], &decoded[end])
+                && self.depends_of(end) == self.depends_of(start)
+            {
+                end += 1;
+            }
+            self.emit(lengths, &decoded, start, end, at_bound, &mut emitted);
+            start = end;
+        }
         let schedule = schedule::Schedule::of(
             &sized,
             self.profile.tiles(),
-            &walks,
+            &emitted.walks,
             self.profile.workgroups(),
-            &self.declared_waves,
+            &emitted.declared,
         );
-        let tables = authored::tables(&self.patches, schedule.order());
+        let order = schedule
+            .order()
+            .iter()
+            .map(|position| emitted.sources[*position as usize])
+            .collect::<Vec<u32>>();
+        let tables = authored::tables(&self.patches, &order);
         let mut task_bytes = Vec::with_capacity(schedule.order().len() * size_of::<TaskRecord>());
         let mut waves = Vec::with_capacity(schedule.order().len());
         for (position, index) in schedule.order().iter().enumerate() {
-            let mut record = walks[*index as usize].recorded.record();
-            if !matches!(walks[*index as usize].split(), Split::Range { .. }) {
-                record.first = spans[*index as usize].0;
-                record.count = spans[*index as usize].1;
+            let walked = &emitted.walks[*index as usize];
+            let source = emitted.sources[*index as usize] as usize;
+            let mut record = walked.recorded.record();
+            if !matches!(walked.split(), Split::Range { .. }) {
+                record.first = walked.span.0;
+                record.count = walked.span.1;
             }
             record.wave = schedule.waves()[position];
-            record.patch = self.patches.owners[*index as usize];
+            record.patch = self.patches.owners[source];
             task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
             waves.push(schedule.waves()[position]);
         }
         let ordered = schedule
             .order()
             .iter()
-            .map(|index| walks[*index as usize])
+            .map(|index| emitted.walks[*index as usize])
             .collect::<Vec<_>>();
         let live_values = storage_liveness(&sized, &ordered);
         let reserved = self.layout.tensors().bytes();
@@ -869,7 +1023,7 @@ impl Plan {
             lengths: lengths.to_vec(),
             arena_bytes: tensor_bytes - reserved,
             tensor_bytes,
-            order: schedule.order().to_vec(),
+            order,
             waves,
             segments: schedule.segments().to_vec(),
             wave_tasks: schedule.wave_tasks(),
@@ -1030,6 +1184,12 @@ impl Plan {
     pub fn work(&self) -> u64 {
         self.work
     }
+}
+
+struct Emitted<'a, 'b> {
+    walks: Vec<Walked<'a, 'b>>,
+    sources: Vec<u32>,
+    declared: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -1832,6 +1992,64 @@ fn declared_waves(encoding: &Encoding) -> Vec<u32> {
         waves[*index as usize] = encoding.waves()[position];
     }
     waves
+}
+
+fn family_key(mut record: TaskRecord) -> TaskRecord {
+    record.first = 0;
+    record.count = 0;
+    record.prelude = 0;
+    record.chain = 0;
+    record.index = 0;
+    record.group = 0;
+    record.wave = 0;
+    record.patch = 0;
+    record
+}
+
+fn split_key(split: Split) -> Split {
+    match split {
+        Split::Range { .. } => Split::Range { first: 0, count: 0 },
+        Split::Uniform { measure, .. } => Split::Uniform {
+            measure,
+            index: 0,
+            group: 0,
+        },
+        Split::Plane {
+            measure,
+            planes,
+            plane,
+            ..
+        } => Split::Plane {
+            measure,
+            planes,
+            plane,
+            index: 0,
+            group: 0,
+        },
+        Split::Segment { measure, plane, .. } => Split::Segment {
+            measure,
+            plane,
+            index: 0,
+            group: 0,
+        },
+        Split::Ragged { planes, plane, .. } => Split::Ragged {
+            planes,
+            plane,
+            index: 0,
+            group: 0,
+        },
+    }
+}
+
+fn identity_kind(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::SumChunk | Kind::PrefixChunk | Kind::PrefixScan | Kind::PrefixClose | Kind::Length
+    )
+}
+
+fn scaled(work: u64, count: u32, base: u32) -> u64 {
+    work.saturating_mul(u64::from(count)) / u64::from(base.max(1))
 }
 
 fn record_table(sized: &Sized<'_>, value: u32) -> u32 {

@@ -277,14 +277,13 @@ pub(crate) fn touches<W: Walk, V: Values>(
     tiles: &[MatmulTile],
     task: &W,
     span: (u32, u32),
-) -> Touches {
-    let mut touched = Touches::default();
+    touched: &mut Touches,
+) {
     if exact(values, task) {
-        walked(&mut touched, task, values, tiles, span, &[]);
+        walked(touched, task, values, tiles, span, &[]);
     } else {
-        whole(&mut touched, task, values);
+        whole(touched, task, values);
     }
-    touched
 }
 
 pub(crate) fn exact<W: Walk, V: Values>(values: &V, task: &W) -> bool {
@@ -339,7 +338,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
 fn empty<W: Walk, V: Values>(touched: &mut Touches, task: &W, values: &V) {
     let identity = matches!(
         task.kind(),
-        Kind::SumChunk | Kind::PrefixChunk | Kind::PrefixClose | Kind::Length
+        Kind::SumChunk | Kind::PrefixChunk | Kind::PrefixScan | Kind::PrefixClose | Kind::Length
     );
     if identity {
         for value in task.writes() {

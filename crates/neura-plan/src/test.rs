@@ -42,10 +42,10 @@ fn overlaps(left: Region, right: Region) -> bool {
 
 fn naive(entries: &[(Region, Hazard)], region: Region) -> Hazard {
     let mut hazard = Hazard::default();
-    let query = quanta(region, true);
+    let query = quanta(region, true).collect::<Vec<_>>();
     for (kept, carried) in entries {
         let whole = matches!((kept, region), (Region::Whole, _) | (_, Region::Whole));
-        let quantized = quanta(*kept, true);
+        let quantized = quanta(*kept, true).collect::<Vec<_>>();
         if whole
             || quantized
                 .iter()
@@ -138,7 +138,14 @@ fn a_product_narrows_every_operand_to_the_tile_it_walks() {
         tokens: 0,
         grid: NO_VALUE,
     };
-    let touched = region::touches(&values.as_slice(), &tiles, &task, (task.first, task.count));
+    let mut touched = region::Touches::default();
+    region::touches(
+        &values.as_slice(),
+        &tiles,
+        &task,
+        (task.first, task.count),
+        &mut touched,
+    );
     assert_eq!(
         touched.writes,
         vec![(
@@ -182,7 +189,7 @@ fn a_product_narrows_every_operand_to_the_tile_it_walks() {
 #[test]
 fn a_quantum_covers_every_run_a_band_names() {
     let mut chaos = Chaos(0x1c3);
-    assert!(quanta(Region::Whole, true).is_empty());
+    assert!(quanta(Region::Whole, true).next().is_none());
     for _ in 0..2000 {
         let left = chaos.region();
         let right = chaos.region();
@@ -193,14 +200,13 @@ fn a_quantum_covers_every_run_a_band_names() {
             let end = end.unwrap_or(u64::MAX);
             assert!(
                 quanta(left, true)
-                    .iter()
-                    .any(|(from, to)| { *from <= first && to.unwrap_or(u64::MAX) >= end }),
+                    .any(|(from, to)| { from <= first && to.unwrap_or(u64::MAX) >= end }),
                 "the quanta of {left:?} cover the run [{first}, {end})",
             );
         }
         if overlaps(left, right) && left != Region::Whole && right != Region::Whole {
-            let quantized_left = quanta(left, true);
-            let quantized_right = quanta(right, true);
+            let quantized_left = quanta(left, true).collect::<Vec<_>>();
+            let quantized_right = quanta(right, true).collect::<Vec<_>>();
             assert!(
                 quantized_left
                     .iter()
@@ -214,8 +220,8 @@ fn a_quantum_covers_every_run_a_band_names() {
 #[test]
 fn a_store_that_fits_a_quantum_widens_no_band() {
     let band = Region::band(3, 2, 5, 4);
-    assert_eq!(quanta(band, false), spans(band));
-    assert_ne!(quanta(band, true), spans(band));
+    assert_eq!(quanta(band, false).collect::<Vec<_>>(), spans(band));
+    assert_ne!(quanta(band, true).collect::<Vec<_>>(), spans(band));
 }
 
 #[test]
@@ -239,7 +245,7 @@ fn an_interval_map_answers_what_a_scan_of_every_access_answers() {
         let expected = naive(&entries, region);
         if choice == 0 {
             accesses.record(region, &hazard, true);
-            entries.push((region, hazard.clone()));
+            entries.push((region, hazard));
         } else {
             let found = accesses.query(region, true);
             assert_eq!(found.wave, expected.wave, "wave of {region:?}");
@@ -274,7 +280,7 @@ fn an_interval_map_keeps_every_run_exact() {
         let expected = naive(&entries, region);
         if choice == 0 {
             accesses.record(region, &hazard, true);
-            entries.push((region, hazard.clone()));
+            entries.push((region, hazard));
         } else {
             let found = accesses.query(region, true);
             assert_eq!(found.wave, expected.wave, "wave of {region:?}");
@@ -423,11 +429,13 @@ fn a_walk_a_binding_rules_touches_whole_storages() {
     let dynamic = lowered(true);
     let mut walking = 0;
     for task in &dynamic.tasks {
-        let touches = region::touches(
+        let mut touches = region::Touches::default();
+        region::touches(
             &dynamic.values.as_slice(),
             &dynamic.tiles,
             task,
             (task.first, task.count),
+            &mut touches,
         );
         for (storage, region) in touches.reads.iter().chain(&touches.writes) {
             assert_eq!(
@@ -449,11 +457,13 @@ fn a_walk_a_binding_rules_touches_whole_storages() {
         if task.kind != Kind::Binary {
             continue;
         }
-        let touches = region::touches(
+        let mut touches = region::Touches::default();
+        region::touches(
             &frozen.values.as_slice(),
             &frozen.tiles,
             task,
             (task.first, task.count),
+            &mut touches,
         );
         assert_eq!(
             touches.writes,

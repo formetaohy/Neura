@@ -243,12 +243,23 @@ fn a_bound_program_gates_the_waves_of_the_shape_it_binds() {
     training(&graph, bound, Some(bound));
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
+    let tasks = program.task_count();
     for rows in [bound, bound / 4, 1, 0] {
         runtime.bind(&program, &[rows]);
+        assert!(
+            program.task_count() <= tasks,
+            "a binding of {rows} rows walks {} tasks where the bound of {bound} walks {tasks}",
+            program.task_count(),
+        );
         assert!(
             program.wave_count() <= waves,
             "a binding of {rows} rows gates {} waves where the bound of {bound} gates {waves}",
             program.wave_count(),
         );
     }
+    runtime.bind(&program, &[1]);
+    assert!(
+        program.task_count() < tasks,
+        "a binding of one row walks every one of the {tasks} tasks the bound of {bound} rows walks",
+    );
 }

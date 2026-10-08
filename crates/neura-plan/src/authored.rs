@@ -252,11 +252,11 @@ pub(crate) fn tables(patches: &Patches, order: &[u32]) -> Tables {
         let values_count = list.len() as u32 - values_first;
         let tasks_first = list.len() as u32;
         for index in &counted.tasks {
-            assert_ne!(
-                seat[*index as usize], NO_VALUE,
-                "a task whose range a device count rules stands in no segment of the plan",
-            );
-            list.push(seat[*index as usize]);
+            let seat = seat[*index as usize];
+            if seat == NO_VALUE {
+                continue;
+            }
+            list.push(seat);
         }
         let tasks_count = list.len() as u32 - tasks_first;
         let record = PatchRecord::of(PatchFields {

@@ -194,16 +194,22 @@ fn a_free_plan_schedules_its_bound_length_the_way_a_static_plan_does() {
 }
 
 #[test]
-fn a_shorter_binding_gates_no_more_waves_than_the_bound() {
+fn a_shorter_binding_walks_the_tasks_its_lengths_open() {
     let plan = Plan::of(&training(128, Some(128)), ALIGNMENT, narrow());
     let bound = plan.encode(&[128]);
     let reserved = plan.tensor_bytes();
+    let mut tasks = bound.task_count();
     for length in [64u32, 16, 8, 1, 0] {
         let encoding = plan.encode(&[length]);
-        assert_eq!(
+        assert!(
+            encoding.task_count() <= tasks,
+            "a binding of {length} rows walks {} tasks where the binding before it walks {tasks}",
             encoding.task_count(),
-            plan.task_count(),
-            "a plan of a frozen decomposition walks every task of its bound at {length} rows",
+        );
+        assert!(
+            encoding.task_count() < bound.task_count(),
+            "a binding of {length} rows walks every one of the {} tasks the bound of 128 rows walks",
+            bound.task_count(),
         );
         assert!(
             encoding.wave_count() <= bound.wave_count(),
@@ -216,5 +222,18 @@ fn a_shorter_binding_gates_no_more_waves_than_the_bound() {
             "a binding of {length} rows holds {} bytes where the bound holds {reserved}",
             encoding.tensor_bytes(),
         );
+        tasks = encoding.task_count();
     }
+    assert_eq!(
+        bound.task_count(),
+        plan.task_count(),
+        "the binding of the declared bound walks every task the plan carries",
+    );
+    let one = plan.encode(&[1]);
+    assert!(
+        one.task_count() < bound.task_count(),
+        "a binding of one row walks {} tasks where the bound of 128 rows walks {}; a binding walks the tasks its own lengths open",
+        one.task_count(),
+        bound.task_count(),
+    );
 }
