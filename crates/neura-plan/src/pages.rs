@@ -65,10 +65,22 @@ fn pages_of_storage(
     };
     let elements = u64::from(info.shape.elements());
     let words = info.element.storage_words(elements);
-    let mut runs = vec![match region {
-        Region::Whole => (0, words),
-        Region::Run { first, count } => info.element.word_span(first, count),
-    }];
+    let mut runs = Vec::new();
+    match region {
+        Region::Whole => runs.push((0, words)),
+        Region::Run { first, count } => runs.push(info.element.word_span(first, count)),
+        Region::Band {
+            first,
+            span,
+            stride,
+            count,
+        } => {
+            for index in 0..count {
+                let at = first + index * stride;
+                runs.push(info.element.word_span(at, span));
+            }
+        }
+    }
     if info.element.quantized() {
         runs.push((info.element.payload_words(elements), words));
     }

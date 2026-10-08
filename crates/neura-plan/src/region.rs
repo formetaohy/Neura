@@ -8,7 +8,16 @@ use neura_profile::MatmulTile;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Region {
     Whole,
-    Run { first: u64, count: u64 },
+    Run {
+        first: u64,
+        count: u64,
+    },
+    Band {
+        first: u64,
+        span: u64,
+        stride: u64,
+        count: u64,
+    },
 }
 
 impl Region {
@@ -17,6 +26,25 @@ impl Region {
             return Self::Whole;
         }
         Self::Run { first, count }
+    }
+
+    pub(crate) fn band(first: u64, span: u64, stride: u64, count: u64) -> Self {
+        if span == 0 || count == 0 {
+            return Self::Whole;
+        }
+        if count == 1 || stride == 0 {
+            return Self::run(first, span);
+        }
+        if stride <= span {
+            let hull = (count - 1).saturating_mul(stride).saturating_add(span);
+            return Self::run(first, hull);
+        }
+        Self::Band {
+            first,
+            span,
+            stride,
+            count,
+        }
     }
 }
 
@@ -33,11 +61,11 @@ struct Narrowed {
 }
 
 impl Narrowed {
-    fn narrow_write(&mut self, value: u32, region: Region) {
+    fn write(&mut self, value: u32, region: Region) {
         self.writes.push((value, region));
     }
 
-    fn narrow_read(&mut self, value: u32, region: Region) {
+    fn read(&mut self, value: u32, region: Region) {
         self.reads.push((value, region));
     }
 
@@ -47,45 +75,45 @@ impl Narrowed {
         }
     }
 
-    fn region_of(regions: &[(u32, Region)], value: u32) -> Region {
-        regions
-            .iter()
-            .rev()
-            .find(|(kept, _)| *kept == value)
-            .map_or(Region::Whole, |(_, region)| *region)
+    fn push_regions(
+        out: &mut Vec<(u32, Region)>,
+        narrowed: &[(u32, Region)],
+        value: u32,
+        storage: u32,
+    ) {
+        let mut named = false;
+        for (kept, region) in narrowed {
+            if *kept == value {
+                out.push((storage, *region));
+                named = true;
+            }
+        }
+        if !named {
+            out.push((storage, Region::Whole));
+        }
     }
 }
 
 pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
     let narrowed = narrowed(values, tiles, task);
-    let touches = Touches {
-        writes: task
-            .writes()
-            .map(|value| {
-                (
-                    values[value as usize].storage,
-                    Narrowed::region_of(&narrowed.writes, value),
-                )
-            })
-            .collect(),
-        reads: task
-            .reads()
-            .map(|value| {
-                (
-                    values[value as usize].storage,
-                    Narrowed::region_of(&narrowed.reads, value),
-                )
-            })
-            .collect(),
-    };
+    let mut touches = Touches::default();
+    for value in task.writes() {
+        let storage = values[value as usize].storage;
+        Narrowed::push_regions(&mut touches.writes, &narrowed.writes, value, storage);
+    }
+    for value in task.reads() {
+        let storage = values[value as usize].storage;
+        Narrowed::push_regions(&mut touches.reads, &narrowed.reads, value, storage);
+    }
     assert_names_held_numbers(values, task, &touches);
     touches
 }
 
 fn assert_names_held_numbers(values: &[ValueInfo], task: &Task, touches: &Touches) {
     for (storage, region) in touches.reads.iter().chain(&touches.writes) {
-        let Region::Run { first, .. } = *region else {
-            continue;
+        let first = match *region {
+            Region::Whole => continue,
+            Region::Run { first, .. } | Region::Band { first, .. } => first,
         };
         let info = &values[*storage as usize];
         assert!(
@@ -155,7 +183,7 @@ fn elementwise(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     let out = &values[task.out as usize];
     let range = Region::run(u64::from(task.first), u64::from(task.count));
     for value in task.writes() {
-        narrowed.narrow_write(value, range);
+        narrowed.write(value, range);
     }
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
@@ -163,7 +191,7 @@ fn elementwise(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
         } else {
             Region::Whole
         };
-        narrowed.narrow_read(value, region);
+        narrowed.read(value, region);
     }
 }
 
@@ -171,6 +199,7 @@ fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, narrowed: &m
     let left = &values[task.inputs[0] as usize];
     let right = &values[task.inputs[1] as usize];
     let rows = u64::from(left.shape.dims()[2]);
+    let depth = u64::from(left.shape.dims()[3]);
     let columns = u64::from(right.shape.dims()[3]);
     let plane_columns = u64::from(left.shape.dims()[1].max(right.shape.dims()[1]));
     let planes = u64::from(left.shape.dims()[0].max(right.shape.dims()[0])) * plane_columns;
@@ -180,44 +209,176 @@ fn product(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task, narrowed: &m
     let tiles_per_plane = row_blocks * column_blocks;
     let plane = u64::from(task.first) / tiles_per_plane;
     let within = u64::from(task.first) % tiles_per_plane;
+    let plane_row = plane / plane_columns;
+    let plane_column = plane % plane_columns;
     let base_row = (within / column_blocks) * u64::from(tile.rows());
     let band_rows = u64::from(tile.rows()).min(rows - base_row);
-    narrowed.narrow_write(
+    let base_column = (within % column_blocks) * u64::from(tile.columns());
+    let band_columns = u64::from(tile.columns()).min(columns - base_column);
+    let split = task.splits.max(1);
+    let slot = if split > 1 { u64::from(task.slot) } else { 0 };
+    let depth_blocks = depth.div_ceil(u64::from(tile.depth()));
+    let first_block = slot * depth_blocks / u64::from(split);
+    let last_block = ((slot + 1) * depth_blocks / u64::from(split)).min(depth_blocks);
+    let base_depth = (first_block * u64::from(tile.depth())).min(depth);
+    let end_depth = (last_block * u64::from(tile.depth())).min(depth);
+    let band_depth = end_depth - base_depth;
+    let out_plane = (slot * planes + plane) * rows * columns;
+    narrowed.write(
         task.out,
-        Region::run(
-            (u64::from(task.slot) * planes + plane) * rows * columns + base_row * columns,
-            band_rows * columns,
+        spans(
+            out_plane + base_row * columns + base_column,
+            columns,
+            1,
+            band_rows,
+            band_columns,
         ),
     );
-    let strides = left.shape.strides();
-    let band = if dense(left) && left.shape.dims()[3] > 1 {
-        Region::run(
-            (plane / plane_columns) * u64::from(strides[0])
-                + (plane % plane_columns) * u64::from(strides[1])
-                + base_row * u64::from(strides[2]),
-            band_rows * u64::from(strides[2]),
-        )
-    } else {
-        Region::Whole
-    };
-    narrowed.narrow_read(task.inputs[0], band);
+    narrowed.read(
+        task.inputs[0],
+        plane_box(
+            left,
+            plane_row,
+            plane_column,
+            base_row,
+            band_rows,
+            base_depth,
+            band_depth,
+        ),
+    );
+    narrowed.read(
+        task.inputs[1],
+        plane_box(
+            right,
+            plane_row,
+            plane_column,
+            base_depth,
+            band_depth,
+            base_column,
+            band_columns,
+        ),
+    );
+    for step in &task.chain {
+        if step.operand == NO_VALUE {
+            continue;
+        }
+        let operand = &values[step.operand as usize];
+        narrowed.read(
+            step.operand,
+            plane_box(
+                operand,
+                plane_row,
+                plane_column,
+                base_row,
+                band_rows,
+                base_column,
+                band_columns,
+            ),
+        );
+    }
+    for step in &task.prelude {
+        if step.operand == NO_VALUE {
+            continue;
+        }
+        let operand = &values[step.operand as usize];
+        narrowed.read(
+            step.operand,
+            plane_box(
+                operand,
+                plane_row,
+                plane_column,
+                base_row,
+                band_rows,
+                base_depth,
+                band_depth,
+            ),
+        );
+    }
+}
+
+fn plane_box(
+    info: &ValueInfo,
+    plane_row: u64,
+    plane_column: u64,
+    base_outer: u64,
+    outer: u64,
+    base_inner: u64,
+    inner: u64,
+) -> Region {
+    let (x, y, z, w) = (
+        u64::from(info.strides[0]),
+        u64::from(info.strides[1]),
+        u64::from(info.strides[2]),
+        u64::from(info.strides[3]),
+    );
+    let base = plane_row
+        .saturating_mul(x)
+        .saturating_add(plane_column.saturating_mul(y))
+        .saturating_add(base_outer.saturating_mul(z))
+        .saturating_add(base_inner.saturating_mul(w));
+    spans(base, z, w, outer, inner)
+}
+
+fn spans(base: u64, outer_stride: u64, inner_stride: u64, outer: u64, inner: u64) -> Region {
+    if outer == 0 || inner == 0 {
+        return Region::run(base, 0);
+    }
+    if inner == 1 {
+        return match (outer, outer_stride) {
+            (1, _) | (_, 0) => Region::run(base, 1),
+            (_, stride) => Region::band(base, 1, stride, outer),
+        };
+    }
+    if outer == 1 {
+        return match inner_stride {
+            0 => Region::run(base, 1),
+            1 => Region::run(base, inner),
+            stride => Region::band(base, 1, stride, inner),
+        };
+    }
+    match (inner_stride, outer_stride) {
+        (0, 0) => Region::run(base, 1),
+        (0, stride) => Region::band(base, 1, stride, outer),
+        (1, 0) => Region::run(base, inner),
+        (1, 1) => Region::run(base, outer + inner - 1),
+        (1, stride) if stride >= inner => Region::band(base, inner, stride, outer),
+        (stride, 0) => Region::run(base, (inner - 1).saturating_mul(stride) + 1),
+        (stride, 1) if stride >= outer => Region::band(base, outer, stride, inner),
+        (stride, outer_stride) => {
+            let hull = (outer - 1)
+                .saturating_mul(outer_stride)
+                .saturating_add((inner - 1).saturating_mul(stride))
+                + 1;
+            Region::run(base, hull)
+        }
+    }
 }
 
 fn fold(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     let out = &values[task.out as usize];
     let elements = u64::from(out.shape.elements());
+    let count = u64::from(task.count);
+    let splits = u64::from(task.splits.max(1));
     let partials = &values[task.inputs[0] as usize];
-    let span = u64::from(task.splits) * elements;
-    narrowed.narrow_write(
-        task.out,
-        Region::run(u64::from(task.first), u64::from(task.count)),
-    );
+    narrowed.write(task.out, Region::run(u64::from(task.first), count));
     let read = if dense(partials) {
-        Region::run(u64::from(task.first), span - u64::from(task.first))
+        Region::band(u64::from(task.first), count, elements, splits)
     } else {
         Region::Whole
     };
-    narrowed.narrow_read(task.inputs[0], read);
+    narrowed.read(task.inputs[0], read);
+    for step in &task.chain {
+        if step.operand == NO_VALUE {
+            continue;
+        }
+        let value = step.operand;
+        let region = if walks_its_range(values, value, out) {
+            Region::run(u64::from(task.first), count)
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
 }
 
 fn convert(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
@@ -225,14 +386,14 @@ fn convert(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     let stride = out.element.elements_per_word();
     let first = u64::from(task.first) * stride;
     let count = u64::from(task.count) * stride;
-    narrowed.narrow_write(task.out, Region::run(first, count));
+    narrowed.write(task.out, Region::run(first, count));
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
             Region::run(first, count)
         } else {
             Region::Whole
         };
-        narrowed.narrow_read(value, region);
+        narrowed.read(value, region);
     }
 }
 
@@ -243,7 +404,7 @@ fn rope(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
     let count = u64::from(task.count);
     let range = Region::run(first, count);
     for value in task.writes() {
-        narrowed.narrow_write(value, range);
+        narrowed.write(value, range);
     }
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
@@ -251,7 +412,7 @@ fn rope(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
         } else {
             Region::Whole
         };
-        narrowed.narrow_read(value, region);
+        narrowed.read(value, region);
     }
 }
 
@@ -262,13 +423,13 @@ fn softmax(values: &[ValueInfo], task: &Task, narrowed: &mut Narrowed) {
         u64::from(task.first) * columns,
         u64::from(task.count) * columns,
     );
-    narrowed.narrow_write(task.out, range);
+    narrowed.write(task.out, range);
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
             range
         } else {
             Region::Whole
         };
-        narrowed.narrow_read(value, region);
+        narrowed.read(value, region);
     }
 }

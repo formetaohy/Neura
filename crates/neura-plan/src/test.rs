@@ -1,32 +1,56 @@
 use crate::encode;
-use crate::hazard::{Accesses, Hazard};
+use crate::hazard::{Accesses, Hazard, quanta};
 use crate::lower;
 use crate::region::{self, Region};
 use crate::span;
-use neura_abi::{Element, Kind, NO_VALUE};
+use neura_abi::{Element, Kind, NO_VALUE, StepFields, StepRecord};
 use neura_graph::{Graph, Shape, ValueInfo, Window};
-use neura_profile::{Budget, Profile};
+use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
+
+fn spans(region: Region) -> Vec<(u64, Option<u64>)> {
+    match region {
+        Region::Whole => vec![(0, None)],
+        Region::Run { first, count } => vec![(first, first.checked_add(count))],
+        Region::Band {
+            first,
+            span,
+            stride,
+            count,
+        } => (0..count)
+            .map(|index| {
+                let at = first + index * stride;
+                (at, at.checked_add(span))
+            })
+            .collect(),
+    }
+}
+
+fn overlaps_span(left: (u64, Option<u64>), right: (u64, Option<u64>)) -> bool {
+    let left_end = left.1.unwrap_or(u64::MAX);
+    let right_end = right.1.unwrap_or(u64::MAX);
+    left.0 < right_end && right.0 < left_end
+}
 
 fn overlaps(left: Region, right: Region) -> bool {
     match (left, right) {
         (Region::Whole, _) | (_, Region::Whole) => true,
-        (
-            Region::Run {
-                first: left,
-                count: l,
-            },
-            Region::Run {
-                first: right,
-                count: r,
-            },
-        ) => left < right + r && right < left + l,
+        _ => spans(left)
+            .iter()
+            .any(|l| spans(right).iter().any(|r| overlaps_span(*l, *r))),
     }
 }
 
 fn naive(entries: &[(Region, Hazard)], region: Region) -> Hazard {
     let mut hazard = Hazard::default();
+    let query = quanta(region, true);
     for (kept, carried) in entries {
-        if overlaps(*kept, region) {
+        let whole = matches!((kept, region), (Region::Whole, _) | (_, Region::Whole));
+        let quantized = quanta(*kept, true);
+        if whole
+            || quantized
+                .iter()
+                .any(|l| query.iter().any(|r| overlaps_span(*l, *r)))
+        {
             hazard.join(carried);
         }
     }
@@ -55,6 +79,143 @@ impl Chaos {
     fn below(&mut self, bound: u64) -> u64 {
         self.next() % bound
     }
+
+    fn region(&mut self) -> Region {
+        match self.below(4) {
+            0 => Region::Whole,
+            1 => Region::run(self.below(12000), self.below(5000).max(1)),
+            _ => {
+                let span = self.below(2000).max(1);
+                let stride = span + self.below(3000);
+                let count = self.below(4).max(1);
+                Region::band(self.below(12000), span, stride, count)
+            }
+        }
+    }
+}
+
+#[test]
+fn a_product_narrows_every_operand_to_the_tile_it_walks() {
+    let left = ValueInfo::derived(Shape::of([1, 1, 3, 4]), 0);
+    let right = ValueInfo::derived(Shape::of([1, 1, 4, 5]), 1);
+    let bias = ValueInfo::derived(Shape::of([1, 1, 1, 5]), 2);
+    let out = ValueInfo::derived(Shape::of([1, 1, 1, 30]), 3);
+    let values = vec![left, right, bias, out];
+    let tiles = vec![MatmulTile::new(MatmulStrategy::Staged, 2, 2, 2, 1, 1)];
+    let task = lower::Task {
+        kind: Kind::Matmul,
+        op: neura_pointwise::NONE,
+        geometry: 0,
+        first: 1,
+        count: 1,
+        slot: 1,
+        out: 3,
+        extra: NO_VALUE,
+        inputs: [0, 1, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        origin: NO_VALUE,
+        param: 0.0,
+        window: Window::sliding([1, 1]),
+        splits: 2,
+        work: 0,
+        in_place: false,
+        axis: 0,
+        offset: 0,
+        prelude: Vec::new(),
+        chain: vec![StepRecord::of(StepFields {
+            op: neura_pointwise::MUL,
+            operand: 2,
+            swapped: 0,
+        })],
+        unit: 0,
+        split: span::Split::Range { first: 1, count: 1 },
+        depends: Vec::new(),
+        patch: NO_VALUE,
+        segments: NO_VALUE,
+        reach: 0,
+        keys: 0,
+        plane: 0,
+        queries: NO_VALUE,
+        tokens: 0,
+        grid: NO_VALUE,
+    };
+    let touched = region::touches(&values, &tiles, &task);
+    assert_eq!(
+        touched.writes,
+        vec![(
+            3,
+            Region::Band {
+                first: 17,
+                span: 2,
+                stride: 5,
+                count: 2,
+            },
+        )],
+        "a product writes the tile it carries",
+    );
+    assert_eq!(
+        touched.reads,
+        vec![
+            (
+                0,
+                Region::Band {
+                    first: 2,
+                    span: 2,
+                    stride: 4,
+                    count: 2,
+                },
+            ),
+            (
+                1,
+                Region::Band {
+                    first: 12,
+                    span: 2,
+                    stride: 5,
+                    count: 2,
+                },
+            ),
+            (2, Region::Run { first: 2, count: 2 },),
+        ],
+        "a product reads the rows, the columns and the depth slice its tile walks",
+    );
+}
+
+#[test]
+fn a_quantum_covers_every_run_a_band_names() {
+    let mut chaos = Chaos(0x1c3);
+    assert!(quanta(Region::Whole, true).is_empty());
+    for _ in 0..2000 {
+        let left = chaos.region();
+        let right = chaos.region();
+        if left == Region::Whole {
+            continue;
+        }
+        for (first, end) in spans(left) {
+            let end = end.unwrap_or(u64::MAX);
+            assert!(
+                quanta(left, true)
+                    .iter()
+                    .any(|(from, to)| { *from <= first && to.unwrap_or(u64::MAX) >= end }),
+                "the quanta of {left:?} cover the run [{first}, {end})",
+            );
+        }
+        if overlaps(left, right) && left != Region::Whole && right != Region::Whole {
+            let quantized_left = quanta(left, true);
+            let quantized_right = quanta(right, true);
+            assert!(
+                quantized_left
+                    .iter()
+                    .any(|a| quantized_right.iter().any(|b| overlaps_span(*a, *b))),
+                "the quanta of {left:?} and {right:?} meet where the runs they widen meet",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_store_that_fits_a_quantum_widens_no_band() {
+    let band = Region::band(3, 2, 5, 4);
+    assert_eq!(quanta(band, false), spans(band));
+    assert_ne!(quanta(band, true), spans(band));
 }
 
 #[test]
@@ -64,12 +225,41 @@ fn an_interval_map_answers_what_a_scan_of_every_access_answers() {
     let mut entries = Vec::new();
     for _ in 0..4000 {
         let choice = chaos.below(4);
-        let width = chaos.below(9);
-        let first = chaos.below(9);
+        let region = chaos.region();
+        let hazard = if chaos.below(6) == 0 {
+            Hazard::deep(chaos.below(7) as u32)
+        } else {
+            Hazard::at(chaos.below(7) as u32, chaos.below(5) as u32)
+        };
+        if choice == 3 {
+            accesses.clear();
+            entries.clear();
+            continue;
+        }
+        let expected = naive(&entries, region);
+        if choice == 0 {
+            accesses.record(region, &hazard, true);
+            entries.push((region, hazard.clone()));
+        } else {
+            let found = accesses.query(region, true);
+            assert_eq!(found.wave, expected.wave, "wave of {region:?}");
+            assert_eq!(found.segments, expected.segments, "segments of {region:?}");
+            assert_eq!(found.deepest, expected.deepest, "deepest of {region:?}");
+        }
+    }
+}
+
+#[test]
+fn an_interval_map_keeps_every_run_exact() {
+    let mut chaos = Chaos(0x9a71);
+    let mut accesses = Accesses::default();
+    let mut entries = Vec::new();
+    for _ in 0..4000 {
+        let choice = chaos.below(4);
         let region = if chaos.below(8) == 0 {
             Region::Whole
         } else {
-            region(first, width.max(1))
+            region(chaos.below(9), chaos.below(9).max(1))
         };
         let hazard = if chaos.below(6) == 0 {
             Hazard::deep(chaos.below(7) as u32)
@@ -83,10 +273,10 @@ fn an_interval_map_answers_what_a_scan_of_every_access_answers() {
         }
         let expected = naive(&entries, region);
         if choice == 0 {
-            accesses.record(region, &hazard);
+            accesses.record(region, &hazard, true);
             entries.push((region, hazard.clone()));
         } else {
-            let found = accesses.query(region);
+            let found = accesses.query(region, true);
             assert_eq!(found.wave, expected.wave, "wave of {region:?}");
             assert_eq!(found.segments, expected.segments, "segments of {region:?}");
             assert_eq!(found.deepest, expected.deepest, "deepest of {region:?}");
@@ -97,30 +287,30 @@ fn an_interval_map_answers_what_a_scan_of_every_access_answers() {
 #[test]
 fn a_covering_write_forgets_every_reader_it_overwrites() {
     let mut accesses = Accesses::default();
-    accesses.record(region(0, 4), &Hazard::at(3, 1));
-    accesses.record(region(8, 4), &Hazard::at(5, 2));
-    let found = accesses.query(Region::Whole);
+    accesses.record(region(0, 4), &Hazard::at(3, 1), true);
+    accesses.record(region(8, 4), &Hazard::at(5, 2), true);
+    let found = accesses.query(Region::Whole, true);
     assert_eq!(found.wave, Some(5));
     assert_eq!(found.segments, vec![2]);
     accesses.clear();
-    assert_eq!(accesses.query(Region::Whole), Hazard::default());
-    accesses.record(region(2, 2), &Hazard::at(1, 3));
-    let found = accesses.query(region(1, 2));
+    assert_eq!(accesses.query(Region::Whole, true), Hazard::default());
+    accesses.record(region(2, 2), &Hazard::at(1, 3), true);
+    let found = accesses.query(region(1, 2), true);
     assert_eq!(found.wave, Some(1));
     assert_eq!(found.segments, vec![3]);
-    assert_eq!(accesses.query(region(0, 1)), Hazard::default());
+    assert_eq!(accesses.query(region(0, 1), true), Hazard::default());
 }
 
 #[test]
 fn a_wave_keeps_only_the_segments_that_reach_it() {
     let mut accesses = Accesses::default();
-    accesses.record(region(0, 8), &Hazard::at(1, 4));
-    accesses.record(region(2, 2), &Hazard::at(1, 2));
-    accesses.record(region(6, 2), &Hazard::at(7, 9));
-    let found = accesses.query(region(0, 8));
+    accesses.record(region(0, 8), &Hazard::at(1, 4), true);
+    accesses.record(region(2, 2), &Hazard::at(1, 2), true);
+    accesses.record(region(6, 2), &Hazard::at(7, 9), true);
+    let found = accesses.query(region(0, 8), true);
     assert_eq!(found.wave, Some(7));
     assert_eq!(found.segments, vec![9]);
-    let found = accesses.query(region(1, 3));
+    let found = accesses.query(region(1, 3), true);
     assert_eq!(found.wave, Some(1));
     assert_eq!(found.segments, vec![2, 4]);
     assert_eq!(found.deepest, None);

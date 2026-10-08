@@ -480,7 +480,7 @@ const CHURN_BATCH: u32 = 16;
 const CHURN_STEPS: u32 = 4;
 const CHURN_BYTES: u64 = 128 * (1 << 14);
 
-fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, u64) {
+fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, u64, u32) {
     let runtime = open(
         backends,
         MemoryRequest {
@@ -539,14 +539,15 @@ fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, 
         observed,
         weights.readback_pages(),
         weights.readback_transfers(),
+        program.weight_windows(),
     )
 }
 
 #[test]
 fn a_streamed_store_reads_the_pages_it_churns_back_in_windows() {
     for backends in Backends::PLATFORM {
-        let (resident, resident_loss, _, _) = churn_run(backends, MemoryRequest::default());
-        let (streamed, streamed_loss, pages, transfers) = churn_run(
+        let (resident, resident_loss, _, _, _) = churn_run(backends, MemoryRequest::default());
+        let (streamed, streamed_loss, pages, transfers, windows) = churn_run(
             backends,
             MemoryRequest {
                 resident_weight_bytes: Some(CHURN_BYTES),
@@ -571,6 +572,10 @@ fn a_streamed_store_reads_the_pages_it_churns_back_in_windows() {
         assert!(
             transfers * 16 <= pages,
             "a store read {pages} pages back in {transfers} transfers, and one transfer carries a window of pages",
+        );
+        assert!(
+            windows <= CHURN_LAYERS,
+            "a step of {CHURN_LAYERS} layers dispatched {windows} weight windows, and a window carries the tiles of many layers",
         );
     }
 }

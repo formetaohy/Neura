@@ -108,7 +108,7 @@ fn depths(
     let mut depths = vec![0u32; tasks.len()];
     for (index, task) in tasks.iter().enumerate() {
         let touches = region::touches(values, tiles, task);
-        let evidence = hazards.inspect(&touches, task.in_place);
+        let evidence = hazards.inspect(values, &touches, task.in_place);
         let mut deepest = evidence.deepest.map(|deepest| deepest + 1);
         for dependency in &barriers[index] {
             let carried = depths[*dependency as usize] + 1;
@@ -237,7 +237,7 @@ fn pack(
             stage = prefix + 1;
         }
         in_recompute = recomputed;
-        let mut evidence = hazards.inspect(&touches, task.in_place);
+        let mut evidence = hazards.inspect(values, &touches, task.in_place);
         for dependency in &barriers[index as usize] {
             evidence.join(&Hazard::at(
                 waves[*dependency as usize],

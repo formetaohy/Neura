@@ -626,6 +626,10 @@ impl Program {
         self.plan.wave_count()
     }
 
+    pub fn weight_windows(&self) -> u32 {
+        self.groups.len() as u32
+    }
+
     pub fn workgroups(&self) -> u32 {
         self.workgroups
     }

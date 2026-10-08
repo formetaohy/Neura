@@ -1,5 +1,9 @@
 use crate::region::{Region, Touches};
+use neura_abi::PAGE_WORDS;
 use neura_graph::ValueInfo;
+
+const QUANTUM: u64 = PAGE_WORDS;
+const QUANTUM_MASK: u64 = QUANTUM - 1;
 
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Hazard {
@@ -98,13 +102,18 @@ impl Accesses {
         }
     }
 
-    pub(crate) fn record(&mut self, region: Region, hazard: &Hazard) {
+    pub(crate) fn record(&mut self, region: Region, hazard: &Hazard, quantized: bool) {
         self.every.join(hazard);
-        let (first, end) = bounds(region);
-        if end.is_none() && first == 0 {
+        if matches!(region, Region::Whole) {
             self.whole.join(hazard);
             return;
         }
+        for (at, end) in quanta(region, quantized) {
+            self.record_span(at, end, hazard);
+        }
+    }
+
+    fn record_span(&mut self, first: u64, end: Option<u64>, hazard: &Hazard) {
         self.split(first);
         if let Some(end) = end {
             self.split(end);
@@ -118,18 +127,19 @@ impl Accesses {
         }
     }
 
-    pub(crate) fn query(&self, region: Region) -> Hazard {
-        let (first, end) = bounds(region);
-        if end.is_none() && first == 0 {
+    pub(crate) fn query(&self, region: Region, quantized: bool) -> Hazard {
+        if matches!(region, Region::Whole) {
             return self.every.clone();
         }
         let mut hazard = self.whole.clone();
-        let from = self.first_cell(first);
-        for (start, cell) in &self.cells[from..] {
-            if end.is_some_and(|end| *start >= end) {
-                break;
+        for (first, end) in quanta(region, quantized) {
+            let from = self.first_cell(first);
+            for (start, cell) in &self.cells[from..] {
+                if end.is_some_and(|end| *start >= end) {
+                    break;
+                }
+                hazard.gather(cell);
             }
-            hazard.gather(cell);
         }
         hazard.settle();
         hazard
@@ -142,10 +152,42 @@ impl Accesses {
     }
 }
 
-fn bounds(region: Region) -> (u64, Option<u64>) {
+pub(crate) fn quanta(region: Region, quantized: bool) -> Vec<(u64, Option<u64>)> {
     match region {
-        Region::Whole => (0, None),
-        Region::Run { first, count } => (first, first.checked_add(count)),
+        Region::Whole => Vec::new(),
+        Region::Run { first, count } => vec![(first, first.checked_add(count))],
+        Region::Band {
+            first,
+            span,
+            stride,
+            count,
+        } if quantized => {
+            let mut spans: Vec<(u64, u64)> = Vec::new();
+            for index in 0..count {
+                let at = first + index * stride;
+                let from = at & !QUANTUM_MASK;
+                let to = (at + span).next_multiple_of(QUANTUM);
+                match spans.last_mut() {
+                    Some((_, last)) if from <= *last => *last = (*last).max(to),
+                    _ => spans.push((from, to)),
+                }
+            }
+            spans
+                .into_iter()
+                .map(|(from, to)| (from, Some(to)))
+                .collect()
+        }
+        Region::Band {
+            first,
+            span,
+            stride,
+            count,
+        } => (0..count)
+            .map(|index| {
+                let at = first + index * stride;
+                (at, at.checked_add(span))
+            })
+            .collect(),
     }
 }
 
@@ -162,17 +204,25 @@ impl Hazards {
         }
     }
 
-    pub(crate) fn inspect(&self, touches: &Touches, in_place: bool) -> Hazard {
+    pub(crate) fn inspect(
+        &self,
+        values: &[ValueInfo],
+        touches: &Touches,
+        in_place: bool,
+    ) -> Hazard {
         let mut hazard = Hazard::default();
         for (storage, region) in &touches.reads {
-            hazard.gather(&self.writers[*storage as usize].query(*region));
+            let quantized = quantized(values, *storage);
+            hazard.gather(&self.writers[*storage as usize].query(*region, quantized));
         }
         for (storage, region) in &touches.writes {
-            hazard.gather(&self.readers[*storage as usize].query(*region));
+            let quantized = quantized(values, *storage);
+            hazard.gather(&self.readers[*storage as usize].query(*region, quantized));
         }
         if in_place {
             for (storage, region) in &touches.writes {
-                hazard.gather(&self.writers[*storage as usize].query(*region));
+                let quantized = quantized(values, *storage);
+                hazard.gather(&self.writers[*storage as usize].query(*region, quantized));
             }
         }
         hazard.settle();
@@ -181,15 +231,21 @@ impl Hazards {
 
     pub(crate) fn record(&mut self, values: &[ValueInfo], touches: Touches, hazard: &Hazard) {
         for (storage, region) in &touches.reads {
-            self.readers[*storage as usize].record(*region, hazard);
+            let quantized = quantized(values, *storage);
+            self.readers[*storage as usize].record(*region, hazard, quantized);
         }
         for (storage, region) in &touches.writes {
-            self.writers[*storage as usize].record(*region, hazard);
+            let quantized = quantized(values, *storage);
+            self.writers[*storage as usize].record(*region, hazard, quantized);
             if covers(values, *storage, *region) {
                 self.readers[*storage as usize].clear();
             }
         }
     }
+}
+
+fn quantized(values: &[ValueInfo], storage: u32) -> bool {
+    u64::from(values[storage as usize].shape.elements()) > QUANTUM
 }
 
 fn covers(values: &[ValueInfo], storage: u32, region: Region) -> bool {
@@ -198,5 +254,6 @@ fn covers(values: &[ValueInfo], storage: u32, region: Region) -> bool {
         Region::Run { first, count } => {
             first == 0 && count >= u64::from(values[storage as usize].shape.elements())
         }
+        Region::Band { .. } => false,
     }
 }
