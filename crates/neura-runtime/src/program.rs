@@ -7,7 +7,7 @@ use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, TASKS, VALUES};
-use neura_plan::{Plan, Region, Span, WeightPages};
+use neura_plan::{Plan, Region, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -175,6 +175,15 @@ impl WeightGroup {
     }
 }
 
+fn raise_or_declare(plan: &Plan) -> &'static str {
+    match plan.gather_tables().is_empty() {
+        true => "raise the resident weight budget",
+        false => {
+            "raise the resident weight budget, or name the rows a table walk reads with Runtime::declare_rows"
+        }
+    }
+}
+
 fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGroup> {
     let mut groups = Vec::new();
     let mut pages = Vec::<u32>::new();
@@ -190,7 +199,8 @@ fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGr
         if pages.len() + added > slots as usize {
             if pages.is_empty() {
                 panic!(
-                    "task {position} of this plan walks {added} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
+                    "task {position} of this plan walks {added} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
+                    raise_or_declare(plan),
                 );
             }
             groups.push(WeightGroup::of(
@@ -210,8 +220,9 @@ fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGr
         }
         assert!(
             pages.len() <= slots as usize,
-            "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
+            "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
             pages.len(),
+            raise_or_declare(plan),
         );
         for write in task.writes() {
             match writes.binary_search(write) {
@@ -233,6 +244,7 @@ fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGr
 struct Bound {
     extents: Option<Vec<u32>>,
     written: bool,
+    rows: Vec<(u32, Vec<u32>)>,
 }
 
 impl Bound {
@@ -241,6 +253,7 @@ impl Bound {
         Self {
             extents: ready.then(|| plan.host_extents()),
             written: ready,
+            rows: Vec::new(),
         }
     }
 }
@@ -346,10 +359,19 @@ impl Program {
         let bank_bytes = heap.bank_bytes();
         let paged = weights.paged();
         let bound = plan.host_extents();
-        let groups = if paged {
-            weight_groups(&plan, weights.resident_pages(), &plan.weight_pages(&bound))
-        } else {
-            Vec::new()
+        let preview = match paged && !plan.dynamic() && plan.gather_tables().is_empty() {
+            true => {
+                let groups = weight_groups(
+                    &plan,
+                    weights.resident_pages(),
+                    &plan.weight_pages(&bound, &[]),
+                );
+                Some(Windows {
+                    extents: bound,
+                    groups: Arc::new(groups),
+                })
+            }
+            false => None,
         };
         let mut bindings = vec![
             Binding {
@@ -447,10 +469,7 @@ impl Program {
             tasks,
             values,
             bound: Mutex::new(Bound::of(&plan)),
-            windows: Mutex::new(Some(Windows {
-                extents: bound,
-                groups: Arc::new(groups),
-            })),
+            windows: Mutex::new(preview),
             plan,
         }
     }
@@ -478,8 +497,43 @@ impl Program {
         }
         bound.extents = Some(values);
         bound.written = false;
+        bound.rows.clear();
         drop(bound);
         self.extents_cache().take();
+    }
+
+    pub(crate) fn declare_rows(&self, table: Value<'_>, rows: &[u32]) {
+        assert!(
+            self.plan.gather_tables().contains(&table.id()),
+            "value {} is no table this program gathers rows of, and a host declares the rows of a table a task of the plan walks",
+            table.id(),
+        );
+        assert!(
+            !rows.is_empty(),
+            "a host declares the rows a table walk reads, and the table of value {} declares none",
+            table.id(),
+        );
+        let held = self.plan.table_rows(table.id());
+        let mut declared = rows.to_vec();
+        declared.sort_unstable();
+        declared.dedup();
+        assert!(
+            declared[declared.len() - 1] < held,
+            "a host declares row {} of the {held} rows value {} holds",
+            declared[declared.len() - 1],
+            table.id(),
+        );
+        let mut bound = self.binding();
+        match bound.rows.iter_mut().find(|(kept, _)| *kept == table.id()) {
+            Some((_, kept)) => *kept = declared,
+            None => bound.rows.push((table.id(), declared)),
+        }
+        drop(bound);
+        *self.windows.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    fn declared_rows(&self) -> Vec<(u32, Vec<u32>)> {
+        self.binding().rows.clone()
     }
 
     pub fn carries_authored(&self) -> bool {
@@ -530,15 +584,20 @@ impl Program {
 
     pub(crate) fn windows(&self) -> Arc<Vec<WeightGroup>> {
         let extents = self.host_extents();
+        let declared = self.declared_rows();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(kept) = windows.as_ref().filter(|kept| kept.extents == extents) {
             return kept.groups.clone();
         }
+        let rows = declared
+            .iter()
+            .map(|(table, rows)| TableRows::new(*table, rows))
+            .collect::<Vec<TableRows<'_>>>();
         let groups = Arc::new(match self.weights.paged() {
             true => weight_groups(
                 &self.plan,
                 self.weights.resident_pages(),
-                &self.plan.weight_pages(&extents),
+                &self.plan.weight_pages(&extents, &rows),
             ),
             false => Vec::new(),
         });

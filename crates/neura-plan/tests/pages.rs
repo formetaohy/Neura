@@ -1,6 +1,6 @@
 use neura_abi::{Element, PAGE_WORDS};
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::Plan;
+use neura_plan::{Plan, TableRows};
 use neura_profile::{Budget, Profile};
 use std::collections::BTreeSet;
 
@@ -28,7 +28,7 @@ fn a_plan_names_the_weight_pages_of_every_task_it_schedules() {
     graph.add_into(weight, upward);
     let plan = plan(&graph);
     assert_eq!(plan.store_words(), u64::from(WIDTH) * u64::from(WIDTH));
-    let tasks = plan.weight_pages(plan.slot_bounds());
+    let tasks = plan.weight_pages(plan.slot_bounds(), &[]);
     assert_eq!(tasks.len(), plan.task_count() as usize);
     let mut widest = 0;
     let mut walked = BTreeSet::new();
@@ -93,7 +93,7 @@ fn a_free_walk_pages_the_tile_a_binding_walks() {
     let rows_per_page = PAGE_WORDS as u32 / WIDTH;
     let reach = slice_rows.div_ceil(rows_per_page) + 1;
     for live in [ROWS, ROWS / 2, 1] {
-        let tasks = plan.weight_pages(&[live]);
+        let tasks = plan.weight_pages(&[live], &[]);
         let widest = tasks
             .iter()
             .map(|task| task.pages().len())
@@ -113,7 +113,7 @@ fn a_free_walk_pages_the_tile_a_binding_walks() {
         }
     }
     let empty = plan
-        .weight_pages(&[0])
+        .weight_pages(&[0], &[])
         .iter()
         .map(|task| task.pages().len())
         .sum::<usize>();
@@ -131,9 +131,68 @@ fn a_plan_without_weights_names_no_weight_page() {
     let plan = plan(&graph);
     assert_eq!(plan.store_words(), 0);
     assert!(
-        plan.weight_pages(plan.slot_bounds())
+        plan.weight_pages(plan.slot_bounds(), &[])
             .iter()
             .all(|task| task.pages().is_empty() && task.writes().is_empty()),
         "a graph without a parameter holds no weight page",
+    );
+}
+
+#[test]
+fn a_table_walk_pages_the_rows_a_host_names() {
+    let rows = 4096u32;
+    let batch = 8u32;
+    let graph = Graph::new();
+    let table = graph.named_parameter(
+        "table",
+        Shape::matrix(rows, WIDTH),
+        Init::Zero,
+        Element::Single,
+    );
+    let extent = graph.free(batch);
+    let indices = graph.input(
+        Shape::of([1, batch, 1, 1]).freed(&[(1, extent)]),
+        Element::Single,
+    );
+    graph.retain(graph.gather(table, indices));
+    let plan = plan(&graph);
+    assert_eq!(
+        plan.gather_tables(),
+        &[table.id()],
+        "a plan names the tables its tasks gather rows of",
+    );
+    let whole = plan
+        .weight_pages(plan.slot_bounds(), &[])
+        .iter()
+        .map(|task| task.pages().len())
+        .max()
+        .expect("the gather of a table schedules a task");
+    assert_eq!(
+        whole,
+        (rows * WIDTH).div_ceil(PAGE_WORDS as u32) as usize,
+        "a table walk no host bounds reads every page of the table",
+    );
+    let declared = [0u32, 1, 2, 3, 1000, 1001];
+    let tasks = plan.weight_pages(&[batch], &[TableRows::new(table.id(), &declared)]);
+    let rows_per_page = PAGE_WORDS as u32 / WIDTH;
+    let named = BTreeSet::from([0u32, 1000 / rows_per_page]);
+    let mut walked = BTreeSet::new();
+    for task in &tasks {
+        for page in task.pages() {
+            assert!(
+                named.contains(page),
+                "a host that names rows {} walks page {page} of a table whose rows lie on pages {named:?}",
+                declared
+                    .iter()
+                    .map(|row| row.to_string())
+                    .collect::<Vec<String>>()
+                    .join(", "),
+            );
+            walked.insert(*page);
+        }
+    }
+    assert_eq!(
+        walked, named,
+        "the tasks of a table walk page every row a host names",
     );
 }

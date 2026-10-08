@@ -7,7 +7,7 @@ use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::record::{self, Recorded};
-use crate::region::{self, Resolved, Touches, Values};
+use crate::region::{self, Resolved, TableRows, Touches, Values};
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
@@ -168,6 +168,7 @@ pub struct Plan {
     slot_bounds: Vec<u32>,
     authored_walks: Vec<bool>,
     authored: authored::Authored,
+    gather_tables: Vec<u32>,
 }
 
 impl Plan {
@@ -503,6 +504,17 @@ impl Plan {
 
         let splits = tasks.iter().map(|task| task.split).collect::<Vec<_>>();
         let order = order.to_vec();
+        let gather_tables = {
+            let mut tables = tasks
+                .iter()
+                .filter(|task| task.kind == Kind::Gather)
+                .map(|task| task.inputs[0])
+                .filter(|table| values[*table as usize].storage == *table)
+                .collect::<Vec<u32>>();
+            tables.sort_unstable();
+            tables.dedup();
+            tables
+        };
         let extents = Extents::of(values, &menu, &measures);
         let slot_bounds = {
             let mut bounds = Vec::new();
@@ -545,11 +557,27 @@ impl Plan {
             slot_bounds,
             authored_walks,
             authored,
+            gather_tables,
         }
     }
 
     pub fn profile(&self) -> Profile {
         self.profile
+    }
+
+    pub fn gather_tables(&self) -> &[u32] {
+        &self.gather_tables
+    }
+
+    pub fn table_rows(&self, value: u32) -> u32 {
+        assert!(
+            self.gather_tables.binary_search(&value).is_ok(),
+            "value {value} is no table this plan gathers rows of, and a host names the rows of a table a task walks",
+        );
+        let offset = value as usize * size_of::<ValueRecord>();
+        let record: ValueRecord =
+            bytemuck::pod_read_unaligned(&self.values[offset..offset + size_of::<ValueRecord>()]);
+        record.dims[0] * record.dims[1] * record.dims[2]
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {
@@ -757,7 +785,7 @@ impl Plan {
         self.layout.weights()
     }
 
-    pub fn weight_pages(&self, extents: &[u32]) -> Vec<WeightPages> {
+    pub fn weight_pages(&self, extents: &[u32], rows: &[TableRows<'_>]) -> Vec<WeightPages> {
         let values = Resolved::of(&self.values, &self.extents, extents);
         let tiles = self.profile.tiles();
         let mut touched = Touches::default();
@@ -774,6 +802,7 @@ impl Plan {
                         &values,
                         tiles,
                         task.walked(&self.extents, extents),
+                        rows,
                     ),
                     false => region::whole(&mut touched, &task, &values),
                 }

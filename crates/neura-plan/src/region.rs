@@ -198,10 +198,49 @@ impl Values for Resolved {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableRows<'a> {
+    value: u32,
+    rows: &'a [u32],
+}
+
+impl<'a> TableRows<'a> {
+    pub fn new(value: u32, rows: &'a [u32]) -> Self {
+        assert!(
+            !rows.is_empty(),
+            "a host declares the rows of a table walk, and value {value} holds none",
+        );
+        let mut sorted = true;
+        for pair in rows.windows(2) {
+            sorted &= pair[0] < pair[1];
+        }
+        assert!(
+            sorted,
+            "a host names the rows of a table walk once each and in order, and the rows of value {value} repeat or descend",
+        );
+        Self { value, rows }
+    }
+
+    pub const fn value(self) -> u32 {
+        self.value
+    }
+
+    pub const fn rows(self) -> &'a [u32] {
+        self.rows
+    }
+}
+
 pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
     let mut touched = Touches::default();
     if frozen(values, task) {
-        walked(&mut touched, task, &values, tiles, (task.first, task.count));
+        walked(
+            &mut touched,
+            task,
+            &values,
+            tiles,
+            (task.first, task.count),
+            &[],
+        );
     } else {
         whole(&mut touched, task, &values);
     }
@@ -214,6 +253,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
     values: &V,
     tiles: &[MatmulTile],
     span: (u32, u32),
+    rows: &[TableRows<'_>],
 ) {
     touched.clear();
     let (first, count) = span;
@@ -226,7 +266,15 @@ pub(crate) fn walked<W: Walk, V: Values>(
         narrowed,
         narrowed_reads,
     } = touched;
-    narrow(task, values, tiles, first, count, narrowed, narrowed_reads);
+    narrow(
+        task,
+        values,
+        tiles,
+        (first, count),
+        rows,
+        narrowed,
+        narrowed_reads,
+    );
     for value in task.writes() {
         push_regions(writes, narrowed, value, values.storage(value));
     }
@@ -337,16 +385,18 @@ fn narrow<W: Walk, V: Values>(
     task: &W,
     values: &V,
     tiles: &[MatmulTile],
-    first: u32,
-    count: u32,
+    span: (u32, u32),
+    rows: &[TableRows<'_>],
     writes: &mut Vec<(u32, Region)>,
     reads: &mut Vec<(u32, Region)>,
 ) {
+    let (first, count) = span;
     let mut narrowed = Narrowed { writes, reads };
     match task.kind() {
         Kind::Matmul => product(values, tiles, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
         Kind::Convert => convert(values, task, first, count, &mut narrowed),
+        Kind::Gather => gather(values, task, rows, &mut narrowed),
         Kind::Rope | Kind::RopeGrad => rope(values, task, first, count, &mut narrowed),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
@@ -366,6 +416,48 @@ fn narrow<W: Walk, V: Values>(
 
 fn walks_its_range<V: Values>(values: &V, value: u32, out: u32) -> bool {
     values.dims(value) == values.dims(out) && values.dense(value) && values.owned(value)
+}
+
+fn gather<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    rows: &[TableRows<'_>],
+    narrowed: &mut Narrowed<'_>,
+) {
+    let table = task.input(0);
+    let Some(declared) = rows
+        .iter()
+        .find(|declared| declared.value() == table)
+        .map(|declared| declared.rows())
+    else {
+        return;
+    };
+    if !values.owned(table) {
+        return;
+    }
+    let columns = u64::from(values.dims(table)[3]);
+    let held = values.elements(table) / columns.max(1);
+    let mut first = u64::from(declared[0]);
+    let mut last = first;
+    for row in &declared[1..] {
+        let row = u64::from(*row);
+        if row == last + 1 {
+            last = row;
+            continue;
+        }
+        narrowed.read(table, row_span(first, last, columns, held));
+        first = row;
+        last = row;
+    }
+    narrowed.read(table, row_span(first, last, columns, held));
+}
+
+fn row_span(first: u64, last: u64, columns: u64, held: u64) -> Region {
+    assert!(
+        last < held,
+        "a host declares row {last} of a table that holds {held} of them",
+    );
+    Region::run(first * columns, (last - first + 1) * columns)
 }
 
 fn elementwise<W: Walk, V: Values>(

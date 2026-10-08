@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_graph::{Graph, Init, Shape, Value};
+use neura_graph::{Free, Graph, Init, Shape, Value};
 use neura_runtime::{Backends, MemoryRequest, Runtime, RuntimeRequest};
 
 const ROWS: u32 = 16;
@@ -821,5 +821,290 @@ fn a_streamed_store_pages_a_model_a_device_count_rules() {
                 "a store of a model a device count rules reached {observed} where the resident store reached {expected} at {at}",
             );
         }
+    }
+}
+
+const TABLE_ROWS: u32 = 4096;
+const TABLE_WIDTH: u32 = 8;
+const TABLE_BYTES: u64 = 2 * (1 << 14);
+const _: () = assert!(TABLE_ROWS as u64 * TABLE_WIDTH as u64 * 4 > TABLE_BYTES);
+
+fn table_graph(
+    graph: &Graph<'static>,
+    extent: Free,
+    bound: u32,
+) -> (Value<'static>, Value<'static>, Value<'static>) {
+    let indices = graph.input(
+        Shape::of([1, bound, 1, 1]).freed(&[(1, extent)]),
+        Element::Single,
+    );
+    let table = graph.named_parameter(
+        "table",
+        Shape::matrix(TABLE_ROWS, TABLE_WIDTH),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let gathered = graph.gather(table, indices);
+    graph.retain(gathered);
+    (indices, table, gathered)
+}
+
+fn table_walk(
+    backends: Backends,
+    memory: MemoryRequest,
+    steps: &[&[u32]],
+) -> (Vec<Vec<f32>>, Vec<u32>) {
+    let runtime = open(backends, memory);
+    let bound = steps.iter().map(|rows| rows.len()).max().expect("a step") as u32;
+    let graph: Graph<'static> = Graph::new();
+    let extent = graph.free(bound);
+    let (indices, table, gathered) = table_graph(&graph, extent, bound);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let mut walked = Vec::new();
+    let mut windows = Vec::new();
+    for rows in steps {
+        runtime.bind(&program, &[rows.len() as u32]);
+        runtime.declare_rows(&program, table, rows);
+        runtime.write(
+            &program,
+            indices,
+            &rows.iter().map(|row| *row as f32).collect::<Vec<f32>>(),
+        );
+        runtime.run(&program);
+        walked.push(runtime.read(&program, gathered));
+        windows.push(program.weight_windows());
+    }
+    (walked, windows)
+}
+
+#[test]
+fn a_streamed_table_reads_the_rows_a_host_names() {
+    for backends in Backends::PLATFORM {
+        let first: Vec<u32> = (0..8).collect();
+        let second: Vec<u32> = (0..8).map(|row| 512 + row).collect();
+        let third: Vec<u32> = vec![0, 512, 1, 513];
+        let steps: Vec<&[u32]> = vec![&first, &second, &third];
+        let (resident, _) = table_walk(backends, MemoryRequest::default(), &steps);
+        let (streamed, windows) = table_walk(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(TABLE_BYTES),
+                ..Default::default()
+            },
+            &steps,
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (step, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert_eq!(expected.len(), observed.len());
+            for (at, (expected, observed)) in expected.iter().zip(observed).enumerate() {
+                assert!(
+                    (expected - observed).abs() <= 1e-5,
+                    "step {step} of a table walk reached {observed} where the resident store reached {expected} at {at}",
+                );
+            }
+        }
+        assert_eq!(
+            windows,
+            vec![1; steps.len()],
+            "a table walk of rows a host names dispatches one weight window by the pages those rows lie on",
+        );
+    }
+}
+
+#[test]
+fn a_table_walk_a_host_leaves_unnamed_refuses() {
+    for backends in Backends::PLATFORM {
+        let runtime = open(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(TABLE_BYTES),
+                ..Default::default()
+            },
+        );
+        let graph: Graph<'static> = Graph::new();
+        let extent = graph.free(4);
+        let (indices, table, gathered) = table_graph(&graph, extent, 4);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        runtime.bind(&program, &[4]);
+        runtime.write(&program, indices, &[0.0, 1.0, 2.0, 3.0]);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.run(&program);
+            }))
+            .is_err(),
+            "a table of {TABLE_ROWS} rows walks more pages than the resident budget holds while no host names the rows it reads",
+        );
+
+        let elsewhere = [512u32, 513, 514, 515];
+        runtime.declare_rows(&program, table, &elsewhere);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.run(&program);
+                runtime.read(&program, gathered);
+            }))
+            .is_err(),
+            "a host that names rows {elsewhere:?} of a table whose indices read page 0 of refuses",
+        );
+
+        let named = [0u32, 1, 2, 3];
+        runtime.declare_rows(&program, table, &named);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, gathered).len(),
+            4 * TABLE_WIDTH as usize
+        );
+
+        runtime.write(&program, indices, &[0.0, 512.0, 1024.0, 1536.0]);
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.run(&program);
+                runtime.read(&program, gathered);
+            }))
+            .is_err(),
+            "a host that names rows {named:?} of a table cannot read rows on four pages of it, and the device refuses the pages it does not hold",
+        );
+
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.declare_rows(&program, table, &[TABLE_ROWS]);
+            }))
+            .is_err(),
+            "a host names no row beyond the {TABLE_ROWS} a table holds",
+        );
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runtime.declare_rows(&program, indices, &named);
+            }))
+            .is_err(),
+            "a host names the rows of a table a task gathers, and value {indices:?} is no table",
+        );
+    }
+}
+
+fn table_training(backends: Backends, memory: MemoryRequest) -> Vec<f32> {
+    let runtime = open(backends, memory);
+    let graph: Graph<'static> = Graph::new();
+    let extent = graph.free(8);
+    let (indices, table, gathered) = table_graph(&graph, extent, 8);
+    let target = graph.input(
+        Shape::of([1, 8, 1, TABLE_WIDTH]).freed(&[(1, extent)]),
+        Element::Single,
+    );
+    let difference = graph.sub(gathered, target);
+    let loss = graph.sum(graph.mul(difference, difference));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    graph.add_into(
+        table,
+        graph.mul(gradients.of(table), graph.fill(Shape::scalar(), -0.01)),
+    );
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let rows: Vec<u32> = (0..8).collect();
+    let targets = (0..(8 * TABLE_WIDTH))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    for _ in 0..4 {
+        runtime.bind(&program, &[8]);
+        runtime.declare_rows(&program, table, &rows);
+        runtime.write(
+            &program,
+            indices,
+            &rows.iter().map(|row| *row as f32).collect::<Vec<f32>>(),
+        );
+        runtime.write(&program, target, &targets);
+        runtime.run(&program);
+    }
+    runtime.read(&program, table)
+}
+
+#[test]
+fn a_streamed_table_trains_the_rows_a_host_names() {
+    for backends in Backends::PLATFORM {
+        let resident = table_training(backends, MemoryRequest::default());
+        let streamed = table_training(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(TABLE_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a streamed table trained row {at} to {observed} where the resident table reached {expected}",
+            );
+        }
+        let moved = (0..8)
+            .flat_map(|row| {
+                (0..TABLE_WIDTH)
+                    .map(move |column| (row as usize) * TABLE_WIDTH as usize + column as usize)
+            })
+            .any(|at| resident[at] != 0.0);
+        assert!(
+            moved,
+            "a step over a streamed table moves the rows it weighed",
+        );
+    }
+}
+
+fn static_table(backends: Backends, memory: MemoryRequest, rows: &[u32]) -> (Vec<f32>, u32) {
+    let runtime = open(backends, memory);
+    let graph: Graph<'static> = Graph::new();
+    let count = rows.len() as u32;
+    let indices = graph.input(Shape::of([1, count, 1, 1]), Element::Single);
+    let table = graph.named_parameter(
+        "table",
+        Shape::matrix(TABLE_ROWS, TABLE_WIDTH),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let gathered = graph.gather(table, indices);
+    graph.retain(gathered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.declare_rows(&program, table, rows);
+    runtime.write(
+        &program,
+        indices,
+        &rows.iter().map(|row| *row as f32).collect::<Vec<f32>>(),
+    );
+    runtime.run(&program);
+    (runtime.read(&program, gathered), program.weight_windows())
+}
+
+#[test]
+fn a_streamed_table_reads_the_rows_a_host_names_at_a_fixed_shape() {
+    for backends in Backends::PLATFORM {
+        let rows: Vec<u32> = (0..8).collect();
+        let (resident, _) = static_table(backends, MemoryRequest::default(), &rows);
+        let (streamed, windows) = static_table(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(TABLE_BYTES),
+                ..Default::default()
+            },
+            &rows,
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a fixed shape table walk reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert_eq!(
+            windows, 1,
+            "a table walk of rows a host names dispatches one weight window",
+        );
     }
 }

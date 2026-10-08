@@ -488,6 +488,13 @@ impl Runtime {
         program.bind(extents);
     }
 
+    pub fn declare_rows(&self, program: &Program, table: Value<'_>, rows: &[u32]) {
+        self.assert_owns(program);
+        program.assert_current();
+        self.context.assert_alive();
+        program.declare_rows(table, rows);
+    }
+
     pub fn run(&self, program: &Program) -> Run {
         self.assert_owns(program);
         program.assert_current();

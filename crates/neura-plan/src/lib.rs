@@ -16,6 +16,7 @@ pub use encode::{Plan, Quantum, Span};
 pub use layout::{Layout, Region, Seed};
 pub use pages::WeightPages;
 pub use product::Product;
+pub use region::TableRows;
 
 #[cfg(test)]
 mod test;
