@@ -1286,6 +1286,32 @@ fn an_operand_folded_into_a_subtraction_keeps_its_side() {
 }
 
 #[test]
+fn a_masked_row_weighs_only_the_columns_that_hold_a_number() {
+    let logits_values = [0.0, f32::NEG_INFINITY, f32::NEG_INFINITY, 1.0, 2.0, 3.0];
+    for backends in Backends::PLATFORM {
+        let runtime = open_with(backends);
+        let graph = Graph::new();
+        let logits = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
+        let probabilities = graph.softmax(logits);
+        let log_probabilities = graph.log_softmax(logits);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        runtime.write(&program, logits, &logits_values);
+        runtime.run(&program);
+        assert_close(
+            &runtime.read(&program, probabilities),
+            &softmax_reference(&logits_values, 3),
+            1e-6,
+        );
+        assert_close(
+            &runtime.read(&program, log_probabilities),
+            &log_softmax_reference(&logits_values, 3),
+            1e-6,
+        );
+    }
+}
+
+#[test]
 fn a_log_softmax_row_holds_its_log_probabilities() {
     let graph = Graph::new();
     let logits = graph.parameter(Shape::matrix(6, 9), Init::Zero, Element::Single);

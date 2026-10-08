@@ -1,12 +1,15 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
-use neura_runtime::Runtime;
+use neura_runtime::{Backends, Runtime};
 
+#[path = "support/backend.rs"]
+mod backend;
 #[path = "support/attention.rs"]
 mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
+use backend::open_with;
 use reference::{Shapes, attention_backward, attention_forward};
 use support::{assert_close, open};
 
@@ -214,6 +217,47 @@ fn a_masked_key_weighs_nothing_where_a_row_scores_the_identity_of_the_maximum() 
         ],
         1e-5,
     );
+}
+
+#[test]
+fn a_masked_key_weighs_nothing_on_every_platform_backend() {
+    let shapes = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 5,
+        keys: 5,
+        width: 4,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: 0.5,
+    };
+    for backends in Backends::PLATFORM {
+        let runtime = open_with(backends);
+        let (graph, queries, keys, values, out) = graph_of(shapes);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        let queries_data = data(
+            shapes.heads * shapes.batch * shapes.queries * shapes.width,
+            17,
+        );
+        let keys_data = data(
+            shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+            29,
+        );
+        let values_data = data(
+            shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+            43,
+        );
+        runtime.write(&program, queries, &queries_data);
+        runtime.write(&program, keys, &keys_data);
+        runtime.write(&program, values, &values_data);
+        runtime.run(&program);
+        let produced = runtime.read(&program, out);
+        let (expected, _) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+        assert_close(&produced, &expected, 1e-5);
+    }
 }
 
 #[test]

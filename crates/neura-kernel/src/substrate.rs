@@ -17,6 +17,22 @@ mod device {
         return -bitcast_f32(0x7f800000u32);
     }
 
+    fn exp_underflow() -> f32 {
+        return -104.0;
+    }
+
+    fn softmax_exp(argument: f32) -> f32 {
+        return exp(max(argument, exp_underflow()));
+    }
+
+    fn positive_log(value: f32) -> f32 {
+        let mut logarithm = max_identity();
+        if value > 0.0 {
+            logarithm = log(value);
+        }
+        return logarithm;
+    }
+
     fn slot_of(packed: u32, axis: u32) -> u32 {
         return (packed >> (axis * 8u32)) & 0xffu32;
     }

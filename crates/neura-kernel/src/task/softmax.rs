@@ -22,7 +22,8 @@ mod device {
             let row_max = workgroup_max(lid, local_max);
             let mut local_sum = 0.0;
             for column in stride(lid, columns, WORKGROUP_SIZE) {
-                local_sum = local_sum + exp(fetch(source, row * columns + column) - row_max);
+                local_sum =
+                    local_sum + softmax_exp(fetch(source, row * columns + column) - row_max);
             }
             let row_sum = workgroup_sum(lid, local_sum);
             for column in stride(lid, columns, WORKGROUP_SIZE) {
@@ -33,7 +34,7 @@ mod device {
                     chained(
                         task,
                         row_at + uvec4(0u32, 0u32, 0u32, column),
-                        exp(fetch(source, row * columns + column) - row_max) / row_sum,
+                        softmax_exp(fetch(source, row * columns + column) - row_max) / row_sum,
                     ),
                 );
             }
@@ -92,10 +93,11 @@ mod device {
             let row_max = workgroup_max(lid, local_max);
             let mut local_sum = 0.0;
             for column in stride(lid, columns, WORKGROUP_SIZE) {
-                local_sum = local_sum + exp(fetch(source, row * columns + column) - row_max);
+                local_sum =
+                    local_sum + softmax_exp(fetch(source, row * columns + column) - row_max);
             }
             let row_sum = workgroup_sum(lid, local_sum);
-            let normalizer = log(row_sum);
+            let normalizer = positive_log(row_sum);
             for column in stride(lid, columns, WORKGROUP_SIZE) {
                 let index = row * output.dims.w + column;
                 publish(
@@ -137,7 +139,7 @@ mod device {
                     chained(
                         task,
                         row_at + uvec4(0u32, 0u32, 0u32, column),
-                        g - exp(y) * row_total,
+                        g - softmax_exp(y) * row_total,
                     ),
                 );
             }

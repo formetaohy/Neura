@@ -271,11 +271,15 @@ mod device {
                     block_largest = max(block_largest, weights[column]);
                 }
                 let next = max(largest, block_largest);
-                let rescale = select(1.0, exp(largest - next), largest != max_identity());
+                let rescale = select(1.0, softmax_exp(largest - next), largest != max_identity());
                 largest = next;
                 let mut block_total = 0.0;
                 for column in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let weight = select(0.0, exp(weights[column] - largest), block_keys > 0u32);
+                    let weight = select(
+                        0.0,
+                        softmax_exp(weights[column] - largest),
+                        block_keys > 0u32,
+                    );
                     weights[column] = weight;
                     block_total = block_total + weight;
                 }
@@ -314,7 +318,7 @@ mod device {
             publish(
                 statistic,
                 statistic_plane + row * statistic.strides.z,
-                select(0.0, largest + log(total), carries_keys),
+                select(0.0, largest + positive_log(total), carries_keys),
             );
         }
     }
@@ -456,7 +460,7 @@ mod device {
                     }
                     let weight = select(
                         0.0,
-                        exp(score * task.param - normalizer),
+                        softmax_exp(score * task.param - normalizer),
                         visible(at, keys, written, position, task.reach, causal),
                     );
                     let mut weighted = 0.0;
@@ -633,8 +637,13 @@ mod device {
                             }
                             let weight = select(
                                 0.0,
-                                exp(score * task.param
-                                    - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                                softmax_exp(
+                                    score * task.param
+                                        - fetch(
+                                            statistic,
+                                            statistic_plane + at * statistic.strides.z,
+                                        ),
+                                ),
                                 attended(at, tokens, keys, column, origin, task.reach, causal),
                             );
                             let mut weighted = 0.0;
@@ -808,8 +817,13 @@ mod device {
                             }
                             let weight = select(
                                 0.0,
-                                exp(score * task.param
-                                    - fetch(statistic, statistic_plane + at * statistic.strides.z)),
+                                softmax_exp(
+                                    score * task.param
+                                        - fetch(
+                                            statistic,
+                                            statistic_plane + at * statistic.strides.z,
+                                        ),
+                                ),
                                 attended(at, tokens, keys, column, origin, task.reach, causal),
                             );
                             for depth in unroll(0u32, ATTN_WIDTH, 1u32) {
