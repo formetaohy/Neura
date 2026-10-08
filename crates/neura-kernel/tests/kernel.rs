@@ -22,7 +22,7 @@ fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
         .map(|(index, tile)| (index as u32, *tile))
         .collect()
 }
-use neura_kernel::{BINDINGS, Kernel};
+use neura_kernel::{Banks, Kernel, bindings};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
@@ -42,6 +42,7 @@ fn all(profile: usize) -> &'static Kernel {
                         &[],
                     ),
                     false,
+                    Banks::SINGLE,
                 )
             })
             .collect()
@@ -60,6 +61,7 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
             &[],
         ),
         false,
+        Banks::SINGLE,
     )
 }
 
@@ -152,6 +154,74 @@ fn every_task_compiles_for_every_native_backend() {
     }
 }
 
+fn peek_switch(program: &ComputeProgram, name: &str) -> (Vec<u32>, bool) {
+    let function = program
+        .module()
+        .functions()
+        .iter()
+        .find(|function| function.name == name)
+        .unwrap_or_else(|| panic!("a device program declares {name}"));
+    function
+        .body
+        .iter()
+        .find_map(|instruction| match instruction {
+            Instruction::Switch { cases, default, .. } => Some((
+                cases.iter().map(|(value, _)| *value).collect::<Vec<_>>(),
+                !default.is_empty(),
+            )),
+            _ => None,
+        })
+        .unwrap_or((Vec::new(), false))
+}
+
+#[test]
+fn a_heap_of_one_bank_splits_no_address() {
+    let program = selected(profiles()[0], &[Kind::Matmul], &[Element::Single]).program();
+    assert_eq!(peek_switch(&program, "peek").0, Vec::<u32>::new());
+    assert_eq!(peek_switch(&program, "poke").0, Vec::<u32>::new());
+}
+
+#[test]
+fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
+    let banks = Banks::of(3, 11);
+    let profile = profiles()[0];
+    let kernel = Kernel::assemble(
+        &[Kind::Matmul],
+        &[Element::Single],
+        Geometry::of(
+            profile.workgroup(),
+            profile.shared_bytes(),
+            &walked(profile),
+            &[],
+        ),
+        false,
+        banks,
+    );
+    let expected = bindings(false, banks);
+    assert_eq!(expected.len(), 2 + banks.count() as usize + 5);
+    assert_eq!(kernel.bindings().len(), expected.len());
+    for (binding, reflected) in expected.iter().zip(kernel.bindings()) {
+        assert_eq!(binding.name, reflected.name);
+        assert_eq!(binding.binding, reflected.binding);
+        assert_eq!(binding.kind, reflected.kind);
+    }
+    assert_eq!(kernel.bindings()[2].name, "heap0");
+    assert_eq!(kernel.bindings()[4].name, "heap2");
+    assert_eq!(kernel.bindings()[5].name, "refusal");
+    let program = kernel.program();
+    assert_eq!(peek_switch(&program, "peek"), (vec![0, 1, 2], true));
+    assert_eq!(peek_switch(&program, "poke"), (vec![0, 1, 2], true));
+    let ShaderTranslation::Msl { source, .. } = program.translate(Backend::Metal) else {
+        panic!("Metal requires MSL");
+    };
+    for bank in 0..3 {
+        assert!(
+            source.contains(&format!("[[buffer({})]]", 2 + bank)),
+            "the MSL of a device program binds no bank {bank}",
+        );
+    }
+}
+
 #[test]
 fn every_profile_compiles_the_rust_abi_and_bindings() {
     {
@@ -160,9 +230,16 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
             let program = kernel.program();
             assert_eq!(kernel.workgroup_size(), profile.workgroup());
             assert_eq!(kernel.geometry().walked(), &walked(*profile)[..]);
-            assert_eq!(kernel.bindings().len(), BINDINGS.len());
-            assert_eq!(program.bindings().len(), BINDINGS.len());
-            for (binding, reflected) in BINDINGS.iter().zip(kernel.bindings()) {
+            assert_eq!(
+                kernel.bindings().len(),
+                bindings(false, Banks::SINGLE).len()
+            );
+            assert_eq!(
+                program.bindings().len(),
+                bindings(false, Banks::SINGLE).len()
+            );
+            for (binding, reflected) in bindings(false, Banks::SINGLE).iter().zip(kernel.bindings())
+            {
                 assert_eq!(binding.name, reflected.name);
                 assert_eq!(binding.binding, reflected.binding);
                 assert_eq!(binding.kind, reflected.kind);
@@ -400,7 +477,13 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             &walked(profile),
             &[],
         );
-        let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
+        let kernel = Kernel::assemble(
+            Kind::ALL,
+            Element::ALL,
+            geometry.clone(),
+            false,
+            Banks::SINGLE,
+        );
         let program = kernel.program();
         assert_eq!(
             workgroup_bytes(&program),
@@ -434,7 +517,13 @@ fn a_device_program_carries_only_the_tiles_its_plan_walks() {
     let menu = walked(profile);
     let walked = &menu[..2];
     let geometry = Geometry::of(profile.workgroup(), profile.shared_bytes(), walked, &[]);
-    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
+    let kernel = Kernel::assemble(
+        Kind::ALL,
+        Element::ALL,
+        geometry.clone(),
+        false,
+        Banks::SINGLE,
+    );
     let program = kernel.program();
     let names = functions(&program);
     for (index, _) in walked {
@@ -490,7 +579,13 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         &walked(profile),
         &attention,
     );
-    let kernel = Kernel::assemble(Kind::ALL, Element::ALL, geometry.clone(), false);
+    let kernel = Kernel::assemble(
+        Kind::ALL,
+        Element::ALL,
+        geometry.clone(),
+        false,
+        Banks::SINGLE,
+    );
     let used = workgroup_bytes(&kernel.program());
     assert_eq!(
         used,
@@ -528,6 +623,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         &[Element::Single],
         Geometry::of(profile.workgroup(), profile.shared_bytes(), &[], &attention),
         false,
+        Banks::SINGLE,
     );
     let program = kernel.program();
     let names = functions(&program);

@@ -2,7 +2,7 @@ use crate::pool::{Pool, Recycled};
 use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle, WARM_PROGRAMS};
 use neura_graph::GraphStamp;
-use neura_kernel::Kernel;
+use neura_kernel::{Banks, Kernel};
 use neura_plan::{Plan, Product};
 use neura_profile::Geometry;
 use std::collections::HashMap;
@@ -112,6 +112,7 @@ struct KernelIdentity {
     elements: Vec<Element>,
     geometry: Geometry,
     authored: bool,
+    banks: Banks,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -252,6 +253,7 @@ impl Artifacts {
         elements: &[Element],
         geometry: Geometry,
         authored: bool,
+        banks: Banks,
         assemble: impl FnOnce() -> Kernel,
     ) -> Arc<Kernel> {
         let identity = KernelIdentity {
@@ -259,6 +261,7 @@ impl Artifacts {
             elements: elements.to_vec(),
             geometry,
             authored,
+            banks,
         };
         let mut kernels = self
             .kernels

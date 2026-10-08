@@ -16,131 +16,201 @@ use neura_shader::{BindingKind, BindingSpec, ComputeProgram, ShaderBinding};
 pub const TASKS: u32 = 0;
 pub const VALUES: u32 = 1;
 pub const HEAP: u32 = 2;
-pub const REFUSAL: u32 = 3;
-pub const PROGRESS: u32 = 4;
-pub const STEPS: u32 = 5;
-pub const PLACEMENT: u32 = 6;
-pub const SEGMENTS: u32 = 7;
-pub const EXTENTS: u32 = 8;
-pub const MEASURES: u32 = 9;
-pub const PATCHES: u32 = 10;
-pub const PATCH_LIST: u32 = 11;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Banks {
+    count: u32,
+    shift: u32,
+}
+
+impl Banks {
+    pub const SINGLE: Self = Self { count: 1, shift: 0 };
+
+    pub fn of(count: u32, shift: u32) -> Self {
+        assert!(count >= 1, "a heap spans no bank");
+        if count == 1 {
+            return Self::SINGLE;
+        }
+        assert!(
+            shift < 32,
+            "a bank of {} words beyond the device word address splits no address",
+            1u64 << shift,
+        );
+        Self { count, shift }
+    }
+
+    pub const fn count(self) -> u32 {
+        self.count
+    }
+
+    pub const fn shift(self) -> u32 {
+        self.shift
+    }
+}
+
+pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
+
+pub const fn refusal(banks: Banks) -> u32 {
+    HEAP + banks.count()
+}
+
+pub const fn progress(banks: Banks) -> u32 {
+    refusal(banks) + 1
+}
+
+pub const fn steps(banks: Banks) -> u32 {
+    progress(banks) + 1
+}
+
+pub const fn placement(banks: Banks) -> u32 {
+    steps(banks) + 1
+}
+
+pub const fn segments(banks: Banks) -> u32 {
+    placement(banks) + 1
+}
+
+pub const fn extents(banks: Banks) -> u32 {
+    segments(banks) + 1
+}
+
+pub const fn measures(banks: Banks) -> u32 {
+    extents(banks) + 1
+}
+
+pub const fn patches(banks: Banks) -> u32 {
+    measures(banks) + 1
+}
+
+pub const fn patch_list(banks: Banks) -> u32 {
+    patches(banks) + 1
+}
+
+pub const fn bank_ceiling(slots: u32) -> u32 {
+    slots.saturating_sub(BINDINGS_WITHOUT_HEAP)
+}
+
+const _: () = assert!(segments(Banks::SINGLE) + 1 == BINDINGS_WITHOUT_HEAP + 1);
+
 pub struct KernelBinding {
     pub binding: u32,
     pub kind: BindingKind,
-    pub name: &'static str,
+    pub name: String,
     pub element: &'static str,
     pub array: bool,
 }
 
-pub const BINDINGS: &[KernelBinding] = &[
+fn binding(
+    binding: u32,
+    kind: BindingKind,
+    name: &str,
+    element: &'static str,
+    array: bool,
+) -> KernelBinding {
     KernelBinding {
-        binding: TASKS,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "tasks",
-        element: "Task",
-        array: true,
-    },
-    KernelBinding {
-        binding: VALUES,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "values",
-        element: "Value",
-        array: true,
-    },
-    KernelBinding {
-        binding: HEAP,
-        kind: BindingKind::ReadWriteStorage,
-        name: "heap",
-        element: "f32",
-        array: true,
-    },
-    KernelBinding {
-        binding: REFUSAL,
-        kind: BindingKind::ReadWriteStorage,
-        name: "refusal",
-        element: "AtomicU32",
-        array: true,
-    },
-    KernelBinding {
-        binding: PROGRESS,
-        kind: BindingKind::ReadWriteStorage,
-        name: "progress",
-        element: "AtomicU32",
-        array: true,
-    },
-    KernelBinding {
-        binding: STEPS,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "steps",
-        element: "Step",
-        array: true,
-    },
-    KernelBinding {
-        binding: PLACEMENT,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "placement",
-        element: "Placement",
-        array: false,
-    },
-    KernelBinding {
-        binding: SEGMENTS,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "segments",
-        element: "Segment",
-        array: true,
-    },
-];
+        binding,
+        kind,
+        name: name.to_owned(),
+        element,
+        array,
+    }
+}
 
-pub const AUTHORED_BINDINGS: &[KernelBinding] = &[
-    KernelBinding {
-        binding: EXTENTS,
-        kind: BindingKind::ReadWriteStorage,
-        name: "extents",
-        element: "u32",
-        array: true,
-    },
-    KernelBinding {
-        binding: MEASURES,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "measures",
-        element: "Measure",
-        array: true,
-    },
-    KernelBinding {
-        binding: PATCHES,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "patches",
-        element: "Patch",
-        array: true,
-    },
-    KernelBinding {
-        binding: PATCH_LIST,
-        kind: BindingKind::ReadOnlyStorage,
-        name: "patch_list",
-        element: "u32",
-        array: true,
-    },
-];
-
-pub fn bindings(authored: bool) -> Vec<KernelBinding> {
-    BINDINGS
-        .iter()
-        .map(|binding| {
-            let patched = authored && matches!(binding.binding, TASKS | VALUES);
-            KernelBinding {
-                kind: if patched {
-                    BindingKind::TableStorage
-                } else {
-                    binding.kind
-                },
-                ..*binding
-            }
-        })
-        .chain(AUTHORED_BINDINGS.iter().copied().filter(|_| authored))
-        .collect()
+pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
+    let tables = if authored {
+        BindingKind::TableStorage
+    } else {
+        BindingKind::ReadOnlyStorage
+    };
+    let mut list = vec![
+        binding(TASKS, tables, "tasks", "Task", true),
+        binding(VALUES, tables, "values", "Value", true),
+    ];
+    for bank in 0..banks.count() {
+        list.push(binding(
+            HEAP + bank,
+            BindingKind::ReadWriteStorage,
+            &format!("heap{bank}"),
+            "f32",
+            true,
+        ));
+    }
+    list.push(binding(
+        refusal(banks),
+        BindingKind::ReadWriteStorage,
+        "refusal",
+        "AtomicU32",
+        true,
+    ));
+    list.push(binding(
+        progress(banks),
+        BindingKind::ReadWriteStorage,
+        "progress",
+        "AtomicU32",
+        true,
+    ));
+    list.push(binding(
+        steps(banks),
+        BindingKind::ReadOnlyStorage,
+        "steps",
+        "Step",
+        true,
+    ));
+    list.push(binding(
+        placement(banks),
+        BindingKind::ReadOnlyStorage,
+        "placement",
+        "Placement",
+        false,
+    ));
+    list.push(binding(
+        segments(banks),
+        BindingKind::ReadOnlyStorage,
+        "segments",
+        "Segment",
+        true,
+    ));
+    if authored {
+        list.push(binding(
+            extents(banks),
+            BindingKind::ReadWriteStorage,
+            "extents",
+            "u32",
+            true,
+        ));
+        list.push(binding(
+            measures(banks),
+            BindingKind::ReadOnlyStorage,
+            "measures",
+            "Measure",
+            true,
+        ));
+        list.push(binding(
+            patches(banks),
+            BindingKind::ReadOnlyStorage,
+            "patches",
+            "Patch",
+            true,
+        ));
+        list.push(binding(
+            patch_list(banks),
+            BindingKind::ReadOnlyStorage,
+            "patch_list",
+            "u32",
+            true,
+        ));
+    }
+    let slots = if authored {
+        patch_list(banks) + 1
+    } else {
+        segments(banks) + 1
+    };
+    assert_eq!(
+        list.len() as u32,
+        slots,
+        "a program binds the {slots} storage buffers its slots name",
+    );
+    list
 }
 
 pub struct Kernel {
@@ -155,6 +225,7 @@ impl Kernel {
         elements: &[Element],
         geometry: Geometry,
         authored: bool,
+        banks: Banks,
     ) -> Self {
         assert!(
             !kinds.is_empty(),
@@ -226,15 +297,15 @@ impl Kernel {
         for kind in Kind::ALL {
             compiler.constant(kind.symbol(), kind.code());
         }
-        for binding in bindings(authored) {
+        for binding in bindings(authored, banks) {
             let spec = BindingSpec {
                 binding: binding.binding,
                 kind: binding.kind,
             };
             if binding.array {
-                compiler.storage_array(binding.name, binding.element, spec);
+                compiler.storage_array(&binding.name, binding.element, spec);
             } else {
-                compiler.storage_record(binding.name, binding.element, spec);
+                compiler.storage_record(&binding.name, binding.element, spec);
             }
         }
         compiler.workgroup_bytes("claim", "u32", CLAIM_BYTES);
@@ -248,7 +319,7 @@ impl Kernel {
         }
         authored::install(&mut compiler, authored);
         scheduler::install(&mut compiler);
-        substrate::install(&mut compiler);
+        substrate::install(&mut compiler, banks);
         element::install(&mut compiler, elements);
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
@@ -297,7 +368,7 @@ impl Kernel {
             scheduler::ENTRY,
             geometry.workgroup(),
         );
-        for (expected, reflected) in bindings(authored).iter().zip(program.reflected()) {
+        for (expected, reflected) in bindings(authored, banks).iter().zip(program.reflected()) {
             assert_eq!(
                 expected.name, reflected.name,
                 "a device binding has an incorrect name"

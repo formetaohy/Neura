@@ -1,11 +1,87 @@
-use neura_compiler::Compiler;
+use crate::Banks;
+use neura_compiler::{Compiler, ast};
 
-pub(crate) fn install(compiler: &mut Compiler) {
+pub(crate) fn install(compiler: &mut Compiler, banks: Banks) {
     device::define(compiler);
+    if banks.count() == 1 {
+        compiler.select("peek_single", "peek");
+        compiler.select("poke_single", "poke");
+        return;
+    }
+    let shift = banks.shift();
+    let mask = (1u32 << shift) - 1;
+    compiler.specialize("template_peek", "peek_by_bank", &[("BANK_SHIFT", shift)]);
+    compiler.specialize("template_poke", "poke_by_bank", &[("BANK_SHIFT", shift)]);
+    for bank in 0..banks.count() {
+        compiler.insert_case("peek_by_bank", peek_case(bank, mask));
+        compiler.insert_case("poke_by_bank", poke_case(bank, mask));
+    }
+    compiler.select("peek_by_bank", "peek");
+    compiler.select("poke_by_bank", "poke");
+}
+
+fn bank_offset(mask: u32) -> ast::Expression {
+    ast::Expression::Binary {
+        op: ast::BinaryOperator::BitAnd,
+        left: Box::new(ast::Expression::name("address")),
+        right: Box::new(ast::Expression::u32(mask)),
+    }
+}
+
+fn heap_word(bank: u32, mask: u32) -> ast::Expression {
+    ast::Expression::Index {
+        base: Box::new(ast::Expression::name(format!("heap{bank}"))),
+        index: Box::new(bank_offset(mask)),
+    }
+}
+
+fn peek_case(bank: u32, mask: u32) -> ast::Arm {
+    ast::Arm {
+        pattern: ast::Pattern::Integer(bank),
+        body: vec![ast::Statement::Return(Some(heap_word(bank, mask)))],
+    }
+}
+
+fn poke_case(bank: u32, mask: u32) -> ast::Arm {
+    ast::Arm {
+        pattern: ast::Pattern::Integer(bank),
+        body: vec![ast::Statement::Assign {
+            place: heap_word(bank, mask),
+            value: ast::Expression::name("data"),
+            operator: None,
+        }],
+    }
 }
 
 #[neura_compiler::module]
 mod device {
+    fn peek_single(address: u32) -> f32 {
+        return heap0[address];
+    }
+
+    fn poke_single(address: u32, data: f32) {
+        heap0[address] = data;
+    }
+
+    fn template_peek(address: u32) -> f32 {
+        let bank = address >> BANK_SHIFT;
+        match bank {
+            _ => {
+                refuse(refusal::TENSOR, refusal::INDEX, 0u32);
+                return 0.0;
+            }
+        }
+    }
+
+    fn template_poke(address: u32, data: f32) {
+        let bank = address >> BANK_SHIFT;
+        match bank {
+            _ => {
+                refuse(refusal::TENSOR, refusal::INDEX, 0u32);
+            }
+        }
+    }
+
     fn refuse(subject: u32, category: u32, code: u32) {
         if atomic_add(&refusal[0u32], 0u32) == 0u32 {
             atomic_store(
@@ -110,10 +186,10 @@ mod device {
     }
 
     fn publish(value: Value, at: u32, data: f32) {
-        heap[word_of(value, at)] = data;
+        poke(word_of(value, at), data);
     }
 
     fn publish_word(value: Value, word: u32, packed: u32) {
-        heap[word_of(value, word)] = bitcast_f32(packed);
+        poke(word_of(value, word), bitcast_f32(packed));
     }
 }

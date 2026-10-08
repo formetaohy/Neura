@@ -1,5 +1,7 @@
 use neura_abi::{Element, Store};
-use neura_gpu::{BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission};
+use neura_gpu::{
+    Backends, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission,
+};
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
 
@@ -401,6 +403,128 @@ fn a_heap_past_a_gigabyte_serves_a_program() {
         &runtime.read(&program, out),
         &matmul_reference(&data_values, &weight_values, 2, 4, 8),
         1e-4,
+    );
+}
+
+#[test]
+fn a_heap_within_one_binding_needs_no_bank() {
+    let runtime = open();
+    assert_eq!(runtime.heap_banks(), 1);
+    assert!(
+        runtime.heap_bytes() <= runtime.heap_bank_bytes(),
+        "a heap of {} bytes spans banks of {}",
+        runtime.heap_bytes(),
+        runtime.heap_bank_bytes(),
+    );
+}
+
+#[test]
+fn a_heap_across_banks_addresses_the_words_of_every_bank() {
+    const ROWS: u32 = 1536;
+    const WIDTH: u32 = 4;
+    for backends in Backends::PLATFORM {
+        let runtime = Runtime::open(RuntimeRequest {
+            gpu: GpuRequest {
+                backends,
+                ..Default::default()
+            },
+            memory: MemoryRequest {
+                readback_bytes: 1 << 12,
+                heap_bytes: 32 << 10,
+                heap_bank_bytes: Some(16 << 10),
+                ..Default::default()
+            },
+        })
+        .unwrap_or_else(|error| panic!("no device runs the tests over {backends:?}: {error}"));
+        assert_eq!(runtime.heap_banks(), 2);
+        assert_eq!(runtime.heap_bank_bytes(), 16 << 10);
+
+        let graph = Graph::new();
+        let table = graph.parameter(Shape::matrix(ROWS, WIDTH), Init::Zero, Element::Single);
+        let indices = graph.input(Shape::matrix(2, 1), Element::Single);
+        let out = graph.gather(table, indices);
+        graph.retain(out);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        assert!(
+            program.span(table).image_bytes() > runtime.heap_bank_bytes(),
+            "a table of {} bytes spans no bank of {}",
+            program.span(table).image_bytes(),
+            runtime.heap_bank_bytes(),
+        );
+
+        let values = random(ROWS * WIDTH, 7);
+        runtime.write(&program, table, &values);
+        runtime.write(&program, indices, &[1023.0, 1024.0]);
+        runtime.run(&program);
+
+        let mut expected = Vec::new();
+        for row in [1023, 1024] {
+            let start = (row * WIDTH) as usize;
+            expected.extend_from_slice(&values[start..start + WIDTH as usize]);
+        }
+        assert_close(&runtime.read(&program, out), &expected, 1e-6);
+    }
+}
+
+#[test]
+fn a_heap_bank_that_splits_no_word_is_refused() {
+    assert!(
+        refuses(|| {
+            let _ = Runtime::open(RuntimeRequest {
+                memory: MemoryRequest {
+                    heap_bank_bytes: Some(4000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }),
+        "a heap bank that is no power of two opened a device",
+    );
+    assert!(
+        refuses(|| {
+            let _ = Runtime::open(RuntimeRequest {
+                memory: MemoryRequest {
+                    heap_bank_bytes: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }),
+        "a heap bank of no bytes opened a device",
+    );
+}
+
+#[test]
+fn a_heap_bank_beyond_one_binding_is_refused() {
+    assert!(
+        refuses(|| {
+            let _ = Runtime::open(RuntimeRequest {
+                gpu: GpuRequest::default().minimum_limits(),
+                memory: MemoryRequest {
+                    heap_bank_bytes: Some(32 << 20),
+                    ..Default::default()
+                },
+            });
+        }),
+        "a heap bank beyond one storage binding opened a device",
+    );
+}
+
+#[test]
+fn a_heap_that_outruns_the_banks_a_device_binds_is_refused() {
+    assert!(
+        refuses(|| {
+            let _ = Runtime::open(RuntimeRequest {
+                gpu: GpuRequest::default().minimum_limits(),
+                memory: MemoryRequest {
+                    heap_bytes: 64 << 10,
+                    heap_bank_bytes: Some(4 << 10),
+                    ..Default::default()
+                },
+            });
+        }),
+        "a heap of more banks than a program binds opened a device",
     );
 }
 

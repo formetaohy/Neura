@@ -1,6 +1,15 @@
 use neura_abi::WORD_BYTES;
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext};
+use neura_kernel::Banks;
 use std::sync::{Arc, Mutex};
+
+pub(crate) fn default_bank_bytes(binding_bytes: u64) -> u64 {
+    assert!(
+        binding_bytes > 0,
+        "a device binding of no bytes splits no device heap",
+    );
+    1 << (63 - binding_bytes.leading_zeros())
+}
 
 #[derive(Clone, Copy)]
 struct Block {
@@ -11,18 +20,41 @@ struct Block {
 pub(crate) struct Heap {
     buffer: GpuBuffer,
     words: u64,
+    bank_bytes: u64,
+    banks: Banks,
     stride: u64,
     free: Mutex<Vec<Block>>,
 }
 
 impl Heap {
-    pub(crate) fn new(context: &GpuContext, bytes: u64) -> Self {
+    pub(crate) fn new(context: &GpuContext, bytes: u64, bank_bytes: u64) -> Self {
         let words = bytes / WORD_BYTES;
         assert!(
             words > 0,
             "a device heap of {bytes} bytes holds no word a plan can address",
         );
-        let stride = (context.binding_alignment() / WORD_BYTES).max(1);
+        let alignment = context.binding_alignment();
+        assert!(
+            bank_bytes.is_power_of_two(),
+            "a heap bank of {bank_bytes} bytes splits no device word address",
+        );
+        assert!(
+            bank_bytes.is_multiple_of(alignment),
+            "a heap bank of {bank_bytes} bytes is no multiple of the {alignment} bytes a storage binding demands",
+        );
+        assert!(
+            bank_bytes <= context.limits().max_storage_buffer_binding_size,
+            "a heap bank of {bank_bytes} bytes outruns the {} bytes one storage binding of this device holds",
+            context.limits().max_storage_buffer_binding_size,
+        );
+        let bank_words = bank_bytes / WORD_BYTES;
+        let banks = Banks::of(
+            u32::try_from(words.div_ceil(bank_words)).unwrap_or_else(|_| {
+                panic!("a heap of {bytes} bytes spans more banks than a device address holds")
+            }),
+            bank_words.trailing_zeros(),
+        );
+        let stride = (alignment / WORD_BYTES).max(1);
         let buffer = GpuBuffer::new(
             context.device(),
             "neura heap",
@@ -32,6 +64,8 @@ impl Heap {
         Self {
             buffer,
             words,
+            bank_bytes,
+            banks,
             stride,
             free: Mutex::new(vec![Block { word: 0, words }]),
         }
@@ -39,6 +73,14 @@ impl Heap {
 
     pub(crate) fn buffer(&self) -> &GpuBuffer {
         &self.buffer
+    }
+
+    pub(crate) fn banks(&self) -> Banks {
+        self.banks
+    }
+
+    pub(crate) fn bank_bytes(&self) -> u64 {
+        self.bank_bytes
     }
 
     pub(crate) fn bytes(&self) -> u64 {

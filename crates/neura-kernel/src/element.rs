@@ -65,16 +65,16 @@ fn fetch_of(element: Element) -> &'static str {
 #[neura_compiler::module]
 mod device {
     fn fetch_single(value: Value, at: u32) -> f32 {
-        return heap[word_of(value, at)];
+        return peek(word_of(value, at));
     }
 
     fn fetch_half(value: Value, at: u32) -> f32 {
-        let pair = unpack2x16float(bitcast_u32(heap[word_of(value, at >> 1u32)]));
+        let pair = unpack2x16float(bitcast_u32(peek(word_of(value, at >> 1u32))));
         return select(pair.x, pair.y, (at & 1u32) == 1u32);
     }
 
     fn fetch_bfloat16(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 1u32)]);
+        let word = bitcast_u32(peek(word_of(value, at >> 1u32)));
         return select(
             bitcast_f32(word << 16u32),
             bitcast_f32(word & 0xffff0000u32),
@@ -83,14 +83,14 @@ mod device {
     }
 
     fn fetch_int8(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
+        let word = bitcast_u32(peek(word_of(value, at >> 2u32)));
         let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
         return (f32(byte) - select(0.0, 256.0, byte >= 128u32))
-            * heap[word_of(value, value.table)];
+            * peek(word_of(value, value.table));
     }
 
     fn template_fetch_fp4(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 3u32)]);
+        let word = bitcast_u32(peek(word_of(value, at >> 3u32)));
         let nibble = (word >> ((at & 7u32) * 4u32)) & 0xfu32;
         let code = ((nibble & 0x8u32) << 4u32) | (nibble & 0x7u32);
         let decoded = fp8_value(
@@ -101,14 +101,14 @@ mod device {
             FP8_NAN,
             FP8_INFINITY,
         );
-        return decoded * heap[word_of(value, value.table + (at / FP4_BLOCK))];
+        return decoded * peek(word_of(value, value.table + (at / FP4_BLOCK)));
     }
 
     fn fetch_int4(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 3u32)]);
+        let word = bitcast_u32(peek(word_of(value, at >> 3u32)));
         let nibble = (word >> ((at & 7u32) * 4u32)) & 0xfu32;
         return (f32(nibble) - select(0.0, 16.0, nibble >= 8u32))
-            * heap[word_of(value, value.table + (at / INT4_BLOCK))];
+            * peek(word_of(value, value.table + (at / INT4_BLOCK)));
     }
 
     fn fp8_value(
@@ -144,7 +144,7 @@ mod device {
     }
 
     fn template_fetch_fp8(value: Value, at: u32) -> f32 {
-        let word = bitcast_u32(heap[word_of(value, at >> 2u32)]);
+        let word = bitcast_u32(peek(word_of(value, at >> 2u32)));
         let byte = (word >> ((at & 3u32) * 8u32)) & 0xffu32;
         return fp8_value(
             byte,

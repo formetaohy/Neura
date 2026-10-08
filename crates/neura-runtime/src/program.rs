@@ -5,10 +5,7 @@ use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD
 use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
-use neura_kernel::{
-    EXTENTS, HEAP, MEASURES, PATCH_LIST, PATCHES, PLACEMENT, PROGRESS, REFUSAL, SEGMENTS, STEPS,
-    TASKS, VALUES,
-};
+use neura_kernel::{HEAP, TASKS, VALUES};
 use neura_plan::{Plan, Region, Span};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
@@ -197,6 +194,9 @@ impl Program {
                 .write(queue, bytemuck::cast_slice(&plan.host_extents()));
         }
         let workgroups = segments.min(plan.profile().workgroups()).max(1);
+        let heap = tensors.heap();
+        let banks = heap.banks();
+        let bank_bytes = heap.bank_bytes();
         let mut bindings = vec![
             Binding {
                 index: TASKS,
@@ -206,39 +206,45 @@ impl Program {
                 index: VALUES,
                 buffer: values.buffer().binding(0, values.buffer().size()),
             },
+        ];
+        for bank in 0..banks.count() {
+            let offset = u64::from(bank) * bank_bytes;
+            let size = (heap.bytes() - offset).min(bank_bytes);
+            bindings.push(Binding {
+                index: HEAP + bank,
+                buffer: tensors.buffer().binding(offset, size),
+            });
+        }
+        bindings.extend([
             Binding {
-                index: HEAP,
-                buffer: tensors.buffer().binding(0, tensors.buffer().size()),
-            },
-            Binding {
-                index: REFUSAL,
+                index: neura_kernel::refusal(banks),
                 buffer: refusal.buffer().binding(0, refusal.buffer().size()),
             },
             Binding {
-                index: PROGRESS,
+                index: neura_kernel::progress(banks),
                 buffer: progress_buffer
                     .buffer()
                     .binding(0, progress_buffer.buffer().size()),
             },
             Binding {
-                index: STEPS,
+                index: neura_kernel::steps(banks),
                 buffer: resident
                     .steps
                     .buffer()
                     .binding(0, resident.steps.buffer().size()),
             },
             Binding {
-                index: PLACEMENT,
+                index: neura_kernel::placement(banks),
                 buffer: placement.buffer().binding(0, placement.buffer().size()),
             },
             Binding {
-                index: SEGMENTS,
+                index: neura_kernel::segments(banks),
                 buffer: resident
                     .segments
                     .buffer()
                     .binding(0, resident.segments.buffer().size()),
             },
-        ];
+        ]);
         if let (Some(extents), Some(measures), Some(patches), Some(patch_list)) = (
             extents.as_ref(),
             resident.measures.as_ref(),
@@ -247,19 +253,19 @@ impl Program {
         ) {
             bindings.extend([
                 Binding {
-                    index: EXTENTS,
+                    index: neura_kernel::extents(banks),
                     buffer: extents.buffer().binding(0, extents.buffer().size()),
                 },
                 Binding {
-                    index: MEASURES,
+                    index: neura_kernel::measures(banks),
                     buffer: measures.buffer().binding(0, measures.buffer().size()),
                 },
                 Binding {
-                    index: PATCHES,
+                    index: neura_kernel::patches(banks),
                     buffer: patches.buffer().binding(0, patches.buffer().size()),
                 },
                 Binding {
-                    index: PATCH_LIST,
+                    index: neura_kernel::patch_list(banks),
                     buffer: patch_list.buffer().binding(0, patch_list.buffer().size()),
                 },
             ]);

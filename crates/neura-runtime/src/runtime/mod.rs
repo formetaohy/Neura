@@ -3,7 +3,7 @@ use crate::checkpoint::{Checkpoint, TensorData};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
-use neura_abi::{Kind, Placement, Refusal, WORD_BYTES};
+use neura_abi::{Kind, Placement, Refusal, TENSOR, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback, Submission,
     SubmissionIndex,
@@ -76,6 +76,7 @@ pub struct MemoryRequest {
     pub readback_bytes: u64,
     pub readback_slots: usize,
     pub heap_bytes: u64,
+    pub heap_bank_bytes: Option<u64>,
 }
 
 impl Default for MemoryRequest {
@@ -84,6 +85,7 @@ impl Default for MemoryRequest {
             readback_bytes: DEFAULT_READBACK_BYTES,
             readback_slots: DEFAULT_READBACK_SLOTS,
             heap_bytes: DEFAULT_HEAP_BYTES,
+            heap_bank_bytes: None,
         }
     }
 }
@@ -117,12 +119,33 @@ impl Runtime {
         self.heap.bytes()
     }
 
+    pub fn heap_banks(&self) -> u32 {
+        self.heap.banks().count()
+    }
+
+    pub fn heap_bank_bytes(&self) -> u64 {
+        self.heap.bank_bytes().min(self.heap.bytes())
+    }
+
     fn of_context(context: GpuContext, memory: MemoryRequest) -> Self {
+        let limits = context.limits();
         assert!(
-            memory.heap_bytes <= context.limits().max_storage_buffer_binding_size,
-            "a device heap of {} bytes outruns the {} bytes one storage binding holds",
+            memory.heap_bytes <= limits.max_buffer_size,
+            "a device heap of {} bytes outruns the {} bytes one device buffer holds",
             memory.heap_bytes,
-            context.limits().max_storage_buffer_binding_size,
+            limits.max_buffer_size,
+        );
+        let bank_bytes = memory.heap_bank_bytes.unwrap_or_else(|| {
+            crate::heap::default_bank_bytes(limits.max_storage_buffer_binding_size)
+        });
+        let heap = Arc::new(Heap::new(&context, memory.heap_bytes, bank_bytes));
+        let ceiling = neura_kernel::bank_ceiling(limits.max_storage_buffers_per_shader_stage);
+        assert!(
+            heap.banks().count() <= ceiling,
+            "a heap of {} bytes spans {} banks of {bank_bytes} bytes, and this device binds {ceiling} of them beside the {} storage buffers a program already carries",
+            memory.heap_bytes,
+            heap.banks().count(),
+            neura_kernel::BINDINGS_WITHOUT_HEAP,
         );
         Self {
             alignment: context.binding_alignment(),
@@ -131,7 +154,7 @@ impl Runtime {
                 memory.readback_bytes,
                 memory.readback_slots,
             )),
-            heap: Arc::new(Heap::new(&context, memory.heap_bytes)),
+            heap,
             pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
             artifacts: Artifacts::new(),
             context,
@@ -412,9 +435,10 @@ impl Runtime {
             plan.attention(),
         );
         let authored = plan.carries_authored();
+        let banks = self.heap.banks();
         self.artifacts
-            .kernel(&kinds, &elements, geometry.clone(), authored, || {
-                Kernel::assemble(&kinds, &elements, geometry, authored)
+            .kernel(&kinds, &elements, geometry.clone(), authored, banks, || {
+                Kernel::assemble(&kinds, &elements, geometry, authored, banks)
             })
     }
 
@@ -682,6 +706,15 @@ fn refusal_message(word: u32) -> String {
     }
     if category == Refusal::Empty {
         return "the device refused a coordinate in a dimension of no numbers".to_owned();
+    }
+    if subject == TENSOR {
+        return match category {
+            Refusal::Index => {
+                "the device refused an address beyond the banks the heap of this program spans"
+                    .to_owned()
+            }
+            _ => format!("the device refused {} {code} of a tensor", category.name(),),
+        };
     }
     if subject >= Kind::COUNT {
         return format!(
