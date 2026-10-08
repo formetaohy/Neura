@@ -1,5 +1,5 @@
 use crate::lower;
-use neura_abi::Element;
+use neura_abi::{Element, NO_VALUE};
 use neura_graph::{Shape, ValueInfo};
 use neura_profile::MatmulTile;
 
@@ -49,6 +49,7 @@ struct Extent {
     strides_source: Option<[u8; 4]>,
     storage: u32,
     element: Element,
+    recomputes: Option<u32>,
 }
 
 pub(crate) struct Extents {
@@ -67,6 +68,7 @@ impl Extents {
                     strides_source: info.strides_source,
                     storage: info.storage,
                     element: info.element,
+                    recomputes: info.recomputes,
                 })
                 .collect(),
             measures: measures.to_vec(),
@@ -76,6 +78,21 @@ impl Extents {
 
     pub(crate) fn dims(&self, value: u32, extents: &[u32]) -> [u32; 4] {
         self.values[value as usize].shape.actual_dims(extents)
+    }
+
+    pub(crate) fn recomputes(&self, value: u32) -> Option<u32> {
+        self.values[value as usize].recomputes
+    }
+
+    pub(crate) fn sealed(&self, value: u32, authored: &[u32]) -> bool {
+        (0..neura_abi::MAX_RANK).all(|axis| {
+            self.values[value as usize]
+                .shape
+                .free(axis)
+                .is_none_or(|slot| {
+                    authored.get(slot as usize).copied().unwrap_or(NO_VALUE) == NO_VALUE
+                })
+        })
     }
 
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {

@@ -516,14 +516,15 @@ impl Runtime {
         if program.windows().is_empty() {
             let device = self.context.device();
             let mut submission = Submission::new(device, "neura program");
+            let header = program.header();
             program
                 .progress
                 .buffer()
-                .write_at(self.context.queue(), 0, &program.header);
+                .write_at(self.context.queue(), 0, &header);
             submission.dispatch(
                 &program.resident.kernel,
                 &program.group,
-                [program.workgroups, 1, 1],
+                [program.workgroups(), 1, 1],
             );
             let submission = submission.submit(self.context.queue());
             program.used(submission);
@@ -558,7 +559,7 @@ impl Runtime {
             submission.dispatch(
                 &program.resident.kernel,
                 &program.group,
-                [program.workgroups, 1, 1],
+                [program.workgroups(), 1, 1],
             );
             let submission = submission.submit(queue);
             program.used(submission);

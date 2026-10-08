@@ -65,6 +65,7 @@ pub(crate) trait Walk: Reads {
     fn prelude(&self) -> impl Iterator<Item = u32>;
     fn chain(&self) -> impl Iterator<Item = u32>;
     fn depends(&self) -> impl Iterator<Item = u32>;
+    fn split(&self) -> Split;
 }
 
 impl Walk for Task {
@@ -99,14 +100,22 @@ impl Walk for Task {
     fn depends(&self) -> impl Iterator<Item = u32> {
         self.depends.iter().copied()
     }
+
+    fn split(&self) -> Split {
+        self.split
+    }
 }
 
 pub(crate) trait Values {
+    fn len(&self) -> usize;
     fn dims(&self, value: u32) -> [u32; 4];
     fn strides(&self, value: u32) -> [u32; 4];
     fn bounds(&self, value: u32) -> [u32; 4];
     fn element(&self, value: u32) -> Element;
     fn storage(&self, value: u32) -> u32;
+    fn recomputes(&self, value: u32) -> Option<u32>;
+
+    fn exact(&self, value: u32) -> bool;
 
     fn elements(&self, value: u32) -> u64 {
         self.dims(value).iter().map(|dim| u64::from(*dim)).product()
@@ -122,6 +131,10 @@ pub(crate) trait Values {
 }
 
 impl Values for &[ValueInfo] {
+    fn len(&self) -> usize {
+        <[ValueInfo]>::len(self)
+    }
+
     fn dims(&self, value: u32) -> [u32; 4] {
         self[value as usize].shape.dims()
     }
@@ -141,6 +154,15 @@ impl Values for &[ValueInfo] {
     fn storage(&self, value: u32) -> u32 {
         self[value as usize].storage
     }
+
+    fn recomputes(&self, value: u32) -> Option<u32> {
+        self[value as usize].recomputes
+    }
+
+    fn exact(&self, value: u32) -> bool {
+        let info = &self[value as usize];
+        !info.shape.dynamic() && !self[info.storage as usize].shape.dynamic()
+    }
 }
 
 pub(crate) struct Resolved {
@@ -149,10 +171,12 @@ pub(crate) struct Resolved {
     bounds: Vec<[u32; 4]>,
     storage: Vec<u32>,
     element: Vec<Element>,
+    recomputes: Vec<Option<u32>>,
+    exact: Vec<bool>,
 }
 
 impl Resolved {
-    pub(crate) fn of(records: &[u8], extents: &Extents, bound: &[u32]) -> Self {
+    pub(crate) fn of(records: &[u8], extents: &Extents, bound: &[u32], authored: &[u32]) -> Self {
         let count = records.len() / size_of::<neura_abi::ValueRecord>();
         let mut resolved = Self {
             dims: Vec::with_capacity(count),
@@ -160,6 +184,8 @@ impl Resolved {
             bounds: Vec::with_capacity(count),
             storage: Vec::with_capacity(count),
             element: Vec::with_capacity(count),
+            recomputes: Vec::with_capacity(count),
+            exact: Vec::with_capacity(count),
         };
         for value in 0..count as u32 {
             let at = value as usize * size_of::<neura_abi::ValueRecord>();
@@ -169,14 +195,22 @@ impl Resolved {
             resolved.bounds.push(record.bounds);
             resolved.storage.push(record.storage);
             resolved.element.push(Element::of(record.element));
+            resolved.recomputes.push(extents.recomputes(value));
             resolved.dims.push(extents.dims(value, bound));
             resolved.strides.push(extents.strides(value, bound));
+            resolved
+                .exact
+                .push(extents.sealed(value, authored) && extents.sealed(record.storage, authored));
         }
         resolved
     }
 }
 
 impl Values for Resolved {
+    fn len(&self) -> usize {
+        self.dims.len()
+    }
+
     fn dims(&self, value: u32) -> [u32; 4] {
         self.dims[value as usize]
     }
@@ -195,6 +229,14 @@ impl Values for Resolved {
 
     fn storage(&self, value: u32) -> u32 {
         self.storage[value as usize]
+    }
+
+    fn recomputes(&self, value: u32) -> Option<u32> {
+        self.recomputes[value as usize]
+    }
+
+    fn exact(&self, value: u32) -> bool {
+        self.exact[value as usize]
     }
 }
 
@@ -230,21 +272,30 @@ impl<'a> TableRows<'a> {
     }
 }
 
-pub(crate) fn touches(values: &[ValueInfo], tiles: &[MatmulTile], task: &Task) -> Touches {
+pub(crate) fn touches<W: Walk, V: Values>(
+    values: &V,
+    tiles: &[MatmulTile],
+    task: &W,
+    span: (u32, u32),
+) -> Touches {
     let mut touched = Touches::default();
-    if frozen(values, task) {
-        walked(
-            &mut touched,
-            task,
-            &values,
-            tiles,
-            (task.first, task.count),
-            &[],
-        );
+    if exact(values, task) {
+        walked(&mut touched, task, values, tiles, span, &[]);
     } else {
-        whole(&mut touched, task, &values);
+        whole(&mut touched, task, values);
     }
     touched
+}
+
+pub(crate) fn exact<W: Walk, V: Values>(values: &V, task: &W) -> bool {
+    let out = task.out();
+    values.owned(out)
+        && values.dense(out)
+        && !matches!(task.split(), Split::Ragged { .. })
+        && task
+            .reads()
+            .chain(task.writes())
+            .all(|value| values.exact(value))
 }
 
 pub(crate) fn walked<W: Walk, V: Values>(
@@ -258,6 +309,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
     touched.clear();
     let (first, count) = span;
     if count == 0 {
+        empty(touched, task, values);
         return;
     }
     let Touches {
@@ -282,6 +334,33 @@ pub(crate) fn walked<W: Walk, V: Values>(
         push_regions(reads, narrowed_reads, value, values.storage(value));
     }
     assert_names_held_numbers(values, task, writes, reads);
+}
+
+fn empty<W: Walk, V: Values>(touched: &mut Touches, task: &W, values: &V) {
+    let identity = matches!(
+        task.kind(),
+        Kind::SumChunk | Kind::PrefixChunk | Kind::PrefixClose | Kind::Length
+    );
+    if identity {
+        for value in task.writes() {
+            let storage = values.storage(value);
+            let at = match task.kind() {
+                Kind::SumChunk | Kind::PrefixChunk => u64::from(task.slot()),
+                _ => 0,
+            };
+            touched.writes.push((
+                storage,
+                if at < values.elements(storage) {
+                    Region::run(at, 1)
+                } else {
+                    Region::Whole
+                },
+            ));
+        }
+    }
+    for count in task.depends() {
+        touched.reads.push((values.storage(count), Region::Whole));
+    }
 }
 
 pub(crate) fn whole<W: Walk, V: Values>(touched: &mut Touches, task: &W, values: &V) {
@@ -339,25 +418,6 @@ fn assert_names_held_numbers<W: Walk, V: Values>(
             values.elements(*storage),
         );
     }
-}
-
-fn frozen(values: &[ValueInfo], task: &Task) -> bool {
-    matches!(task.split, Split::Range { .. })
-        && values[task.out as usize].storage == task.out
-        && dense(&values[task.out as usize])
-        && task
-            .reads()
-            .chain(task.writes())
-            .all(|value| !walks_a_free_axis(values, value))
-}
-
-fn walks_a_free_axis(values: &[ValueInfo], value: u32) -> bool {
-    let info = &values[value as usize];
-    info.shape.dynamic() || values[info.storage as usize].shape.dynamic()
-}
-
-fn dense(info: &ValueInfo) -> bool {
-    info.strides == info.shape.strides()
 }
 
 struct Narrowed<'a> {

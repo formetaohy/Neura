@@ -83,6 +83,9 @@ fn every_record_of_a_binding_addresses_that_binding() {
             if record.store != Store::Tensors.code() || record.storage != id {
                 continue;
             }
+            if !encoding.holds(id) {
+                continue;
+            }
             let elements = record.dims.iter().map(|dim| u64::from(*dim)).product();
             let element = Element::of(record.element);
             let reach =
@@ -107,4 +110,111 @@ fn a_static_plan_holds_the_arena_it_derives() {
         plan.tensor_bytes(),
         "a plan of one shape derives the tensors it declares",
     );
+}
+
+fn training(rows: u32, free: Option<u32>) -> Graph<'static> {
+    let graph = Graph::new();
+    let (observations, targets) = match free {
+        Some(bound) => {
+            let batch = graph.free(bound);
+            let shape = Shape::matrix(bound, 64).freed(&[(2, batch)]);
+            (
+                graph.input(shape, Element::Single),
+                graph.input(shape, Element::Single),
+            )
+        }
+        None => (
+            graph.input(Shape::matrix(rows, 64), Element::Single),
+            graph.input(Shape::matrix(rows, 64), Element::Single),
+        ),
+    };
+    let mut carried = observations;
+    let mut parameters = Vec::new();
+    for layer in 0..3 {
+        let weight = graph.named_parameter(
+            &format!("w{layer}"),
+            Shape::matrix(64, 64),
+            Init::Uniform {
+                low: -0.2,
+                high: 0.2,
+            },
+            Element::Single,
+        );
+        let bias = graph.named_parameter(
+            &format!("b{layer}"),
+            Shape::matrix(1, 64),
+            Init::Zero,
+            Element::Single,
+        );
+        parameters.push(weight);
+        parameters.push(bias);
+        carried = graph.relu(graph.add(graph.matmul(carried, weight), bias));
+    }
+    let difference = graph.sub(carried, targets);
+    let loss = graph.sum(graph.mul(difference, difference));
+    let gradients = graph.backward(loss);
+    let rate = graph.fill(Shape::scalar(), -0.005);
+    for parameter in parameters {
+        graph.add_into(parameter, graph.mul(gradients.of(parameter), rate));
+    }
+    graph.retain(loss);
+    graph
+}
+
+#[test]
+fn a_free_plan_schedules_its_bound_length_the_way_a_static_plan_does() {
+    let free = Plan::of(&training(128, Some(128)), ALIGNMENT, narrow());
+    let fixed = Plan::of(&training(128, None), ALIGNMENT, narrow());
+    assert_eq!(
+        free.task_count(),
+        fixed.task_count(),
+        "a free plan of a bound of 128 rows schedules {} tasks where the static plan schedules {}",
+        free.task_count(),
+        fixed.task_count(),
+    );
+    assert_eq!(
+        free.wave_count(),
+        fixed.wave_count(),
+        "a free plan of a bound of 128 rows gates {} waves where the static plan gates {}; the schedule of a binding walks the lengths that binding names",
+        free.wave_count(),
+        fixed.wave_count(),
+    );
+    assert_eq!(
+        free.segments().len(),
+        fixed.segments().len(),
+        "a free plan of a bound of 128 rows dispatches {} segments where the static plan dispatches {}",
+        free.segments().len(),
+        fixed.segments().len(),
+    );
+    assert_eq!(
+        free.encode(&[128]).wave_count(),
+        fixed.wave_count(),
+        "a binding of the declared bound gates the waves the static plan of that shape gates",
+    );
+}
+
+#[test]
+fn a_shorter_binding_gates_no_more_waves_than_the_bound() {
+    let plan = Plan::of(&training(128, Some(128)), ALIGNMENT, narrow());
+    let bound = plan.encode(&[128]);
+    let reserved = plan.tensor_bytes();
+    for length in [64u32, 16, 8, 1, 0] {
+        let encoding = plan.encode(&[length]);
+        assert_eq!(
+            encoding.task_count(),
+            plan.task_count(),
+            "a plan of a frozen decomposition walks every task of its bound at {length} rows",
+        );
+        assert!(
+            encoding.wave_count() <= bound.wave_count(),
+            "a binding of {length} rows gates {} waves where the bound gates {}",
+            encoding.wave_count(),
+            bound.wave_count(),
+        );
+        assert!(
+            encoding.tensor_bytes() <= reserved,
+            "a binding of {length} rows holds {} bytes where the bound holds {reserved}",
+            encoding.tensor_bytes(),
+        );
+    }
 }

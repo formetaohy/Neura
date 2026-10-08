@@ -138,7 +138,7 @@ fn a_product_narrows_every_operand_to_the_tile_it_walks() {
         tokens: 0,
         grid: NO_VALUE,
     };
-    let touched = region::touches(&values, &tiles, &task);
+    let touched = region::touches(&values.as_slice(), &tiles, &task, (task.first, task.count));
     assert_eq!(
         touched.writes,
         vec![(
@@ -423,7 +423,12 @@ fn a_walk_a_binding_rules_touches_whole_storages() {
     let dynamic = lowered(true);
     let mut walking = 0;
     for task in &dynamic.tasks {
-        let touches = region::touches(&dynamic.values, &dynamic.tiles, task);
+        let touches = region::touches(
+            &dynamic.values.as_slice(),
+            &dynamic.tiles,
+            task,
+            (task.first, task.count),
+        );
         for (storage, region) in touches.reads.iter().chain(&touches.writes) {
             assert_eq!(
                 *region,
@@ -444,7 +449,12 @@ fn a_walk_a_binding_rules_touches_whole_storages() {
         if task.kind != Kind::Binary {
             continue;
         }
-        let touches = region::touches(&frozen.values, &frozen.tiles, task);
+        let touches = region::touches(
+            &frozen.values.as_slice(),
+            &frozen.tiles,
+            task,
+            (task.first, task.count),
+        );
         assert_eq!(
             touches.writes,
             vec![(

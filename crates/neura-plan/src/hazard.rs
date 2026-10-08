@@ -1,6 +1,5 @@
-use crate::region::{Region, Touches};
+use crate::region::{Region, Touches, Values};
 use neura_abi::PAGE_WORDS;
-use neura_graph::ValueInfo;
 
 const QUANTUM: u64 = PAGE_WORDS;
 const QUANTUM_MASK: u64 = QUANTUM - 1;
@@ -204,9 +203,9 @@ impl Hazards {
         }
     }
 
-    pub(crate) fn inspect(
+    pub(crate) fn inspect<V: Values>(
         &self,
-        values: &[ValueInfo],
+        values: &V,
         touches: &Touches,
         in_place: bool,
     ) -> Hazard {
@@ -229,7 +228,7 @@ impl Hazards {
         hazard
     }
 
-    pub(crate) fn record(&mut self, values: &[ValueInfo], touches: Touches, hazard: &Hazard) {
+    pub(crate) fn record<V: Values>(&mut self, values: &V, touches: Touches, hazard: &Hazard) {
         for (storage, region) in &touches.reads {
             let quantized = quantized(values, *storage);
             self.readers[*storage as usize].record(*region, hazard, quantized);
@@ -244,16 +243,14 @@ impl Hazards {
     }
 }
 
-fn quantized(values: &[ValueInfo], storage: u32) -> bool {
-    u64::from(values[storage as usize].shape.elements()) > QUANTUM
+fn quantized<V: Values>(values: &V, storage: u32) -> bool {
+    values.elements(storage) > QUANTUM
 }
 
-fn covers(values: &[ValueInfo], storage: u32, region: Region) -> bool {
+fn covers<V: Values>(values: &V, storage: u32, region: Region) -> bool {
     match region {
         Region::Whole => true,
-        Region::Run { first, count } => {
-            first == 0 && count >= u64::from(values[storage as usize].shape.elements())
-        }
+        Region::Run { first, count } => first == 0 && count >= values.elements(storage),
         Region::Band { .. } => false,
     }
 }

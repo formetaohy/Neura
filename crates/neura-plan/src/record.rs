@@ -5,6 +5,7 @@ use neura_abi::{Kind, NO_VALUE, StepRecord, TaskRecord, split};
 use neura_graph::Window;
 use std::mem::size_of;
 
+#[derive(Clone, Copy)]
 pub(crate) struct Recorded<'a> {
     record: TaskRecord,
     steps: &'a [u8],
@@ -31,7 +32,11 @@ impl<'a> Recorded<'a> {
         }
     }
 
-    fn split(&self) -> Split {
+    pub(crate) fn record(&self) -> TaskRecord {
+        self.record
+    }
+
+    pub(crate) fn split(&self) -> Split {
         let record = &self.record;
         match record.split {
             split::RANGE => Split::Range {
@@ -155,6 +160,10 @@ impl Walk for Recorded<'_> {
 
     fn depends(&self) -> impl Iterator<Item = u32> {
         std::iter::empty()
+    }
+
+    fn split(&self) -> Split {
+        self.split()
     }
 }
 

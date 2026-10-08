@@ -150,3 +150,105 @@ fn a_binding_the_heap_cannot_hold_refuses() {
         program.tensor_bytes(),
     );
 }
+
+struct Training<'g> {
+    inputs: [Value<'g>; 2],
+    loss: Value<'g>,
+}
+
+fn training<'g>(graph: &Graph<'g>, rows: u32, bound: Option<u32>) -> Training<'g> {
+    let (observations, targets) = match bound {
+        Some(bound) => {
+            let batch = graph.free(bound);
+            let shape = Shape::matrix(bound, WIDTH).freed(&[(2, batch)]);
+            (
+                graph.input(shape, Element::Single),
+                graph.input(shape, Element::Single),
+            )
+        }
+        None => (
+            graph.input(Shape::matrix(rows, WIDTH), Element::Single),
+            graph.input(Shape::matrix(rows, WIDTH), Element::Single),
+        ),
+    };
+    let mut carried = observations;
+    let mut parameters = Vec::new();
+    for layer in 0..LAYERS {
+        let weight = graph.named_parameter(
+            &format!("w{layer}"),
+            Shape::matrix(WIDTH, WIDTH),
+            Init::Uniform {
+                low: -0.02,
+                high: 0.02,
+            },
+            Element::Single,
+        );
+        let bias = graph.named_parameter(
+            &format!("b{layer}"),
+            Shape::matrix(1, WIDTH),
+            Init::Zero,
+            Element::Single,
+        );
+        parameters.push(weight);
+        parameters.push(bias);
+        carried = graph.relu(graph.add(graph.matmul(carried, weight), bias));
+    }
+    let difference = graph.sub(carried, targets);
+    let loss = graph.sum(graph.mul(difference, difference));
+    let gradients = graph.backward(loss);
+    let rate = graph.fill(Shape::scalar(), -0.005);
+    for parameter in parameters {
+        graph.add_into(parameter, graph.mul(gradients.of(parameter), rate));
+    }
+    graph.retain(loss);
+    Training {
+        inputs: [observations, targets],
+        loss,
+    }
+}
+
+#[test]
+fn a_bound_program_gates_the_waves_of_the_shape_it_binds() {
+    let runtime = open();
+    let bound = 32u32;
+    let graph = Graph::new();
+    let family = training(&graph, bound, Some(bound));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let probes = observations(bound);
+    let targets = observations(bound);
+    runtime.bind(&program, &[bound]);
+    runtime.write(&program, family.inputs[0], &probes);
+    runtime.write(&program, family.inputs[1], &targets);
+    runtime.run(&program);
+    let loss = runtime.read(&program, family.loss);
+    let waves = program.wave_count();
+
+    let graph = Graph::new();
+    let fixed = training(&graph, bound, None);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, fixed.inputs[0], &probes);
+    runtime.write(&program, fixed.inputs[1], &targets);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, fixed.loss), &loss, 1e-4);
+    assert_eq!(
+        program.wave_count(),
+        waves,
+        "a free program bound to the {bound} rows a static program declares gates {} waves where that program gates {waves}",
+        program.wave_count(),
+    );
+
+    let graph = Graph::new();
+    training(&graph, bound, Some(bound));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    for rows in [bound, bound / 4, 1, 0] {
+        runtime.bind(&program, &[rows]);
+        assert!(
+            program.wave_count() <= waves,
+            "a binding of {rows} rows gates {} waves where the bound of {bound} gates {waves}",
+            program.wave_count(),
+        );
+    }
+}

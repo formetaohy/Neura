@@ -2,7 +2,9 @@ use crate::cache::Resident;
 use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::store::WeightStore;
-use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
+use neura_abi::{
+    Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, SegmentRecord, WORD_BYTES, progress,
+};
 use neura_gpu::Queue;
 use neura_gpu::{
     BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, READBACK_TIMEOUT, Submission,
@@ -100,9 +102,10 @@ pub struct Program {
     pub(crate) group: BindGroup,
     pub(crate) weights: Weights,
     pub(crate) progress: Recycled,
-    pub(crate) header: Vec<u8>,
-    pub(crate) workgroups: u32,
     placement: Recycled,
+    segments: Recycled,
+    patches: Option<Recycled>,
+    patch_list: Option<Recycled>,
     revision: Revision,
     tasks: Recycled,
     values: Recycled,
@@ -156,8 +159,14 @@ pub(crate) struct WeightGroup {
 }
 
 impl WeightGroup {
-    fn of(plan: &Plan, first_task: u32, last_task: u32, pages: Vec<u32>, writes: Vec<u32>) -> Self {
-        let segments = plan.segments();
+    fn of(
+        encoding: &Encoding,
+        first_task: u32,
+        last_task: u32,
+        pages: Vec<u32>,
+        writes: Vec<u32>,
+    ) -> Self {
+        let segments = encoding.segments();
         let first = segments
             .iter()
             .position(|segment| segment.first + segment.count > first_task)
@@ -215,7 +224,12 @@ fn raise_or_declare(plan: &Plan) -> &'static str {
     }
 }
 
-fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGroup> {
+fn weight_groups(
+    plan: &Plan,
+    encoding: &Encoding,
+    slots: u32,
+    tasks: &[WeightPages],
+) -> Vec<WeightGroup> {
     let mut groups = Vec::new();
     let mut pages = Vec::<u32>::new();
     let mut writes = Vec::<u32>::new();
@@ -235,7 +249,7 @@ fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGr
                 );
             }
             groups.push(WeightGroup::of(
-                plan,
+                encoding,
                 start,
                 position,
                 std::mem::take(&mut pages),
@@ -263,7 +277,7 @@ fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGr
         }
     }
     groups.push(WeightGroup::of(
-        plan,
+        encoding,
         start,
         tasks.len() as u32,
         pages,
@@ -322,19 +336,34 @@ impl Program {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
-        let waves = plan.wave_count();
-        let segments = plan.segments().len() as u32;
-        let header = progress::header(segments, waves);
         let progress_buffer = Recycled::claim(
             pool,
             "neura progress",
-            progress::bytes(waves),
+            progress::bytes(plan.task_count()),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
-        progress_buffer.buffer().write(
-            queue,
-            bytemuck::cast_slice(&progress::words(segments, plan.wave_tasks())),
+        let segments = Recycled::claim(
+            pool,
+            "neura segments",
+            (plan.task_count() as u64 * size_of::<SegmentRecord>() as u64).max(4),
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
+        let patches = plan.carries_authored().then(|| {
+            Recycled::claim(
+                pool,
+                "neura patches",
+                (plan.patches().len() as u64 * size_of::<neura_abi::PatchRecord>() as u64).max(4),
+                BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            )
+        });
+        let patch_list = plan.carries_authored().then(|| {
+            Recycled::claim(
+                pool,
+                "neura patch list",
+                (plan.patch_list().len() as u64 * WORD_BYTES).max(4),
+                BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            )
+        });
         let tensors = Tensors {
             active: Some(tensors),
             retired: Vec::new(),
@@ -378,8 +407,27 @@ impl Program {
             plan.values().len() as u64,
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
-        tasks.buffer().write(queue, plan.tasks());
-        values.buffer().write(queue, plan.values());
+        let bound_encoding = plan.bound_encoding();
+        tasks.buffer().write(queue, bound_encoding.tasks());
+        values.buffer().write(queue, bound_encoding.values());
+        segments
+            .buffer()
+            .write(queue, bytemuck::cast_slice(bound_encoding.segments()));
+        progress_buffer.buffer().write(
+            queue,
+            bytemuck::cast_slice(&progress::words(
+                bound_encoding.segments().len() as u32,
+                bound_encoding.wave_tasks(),
+            )),
+        );
+        if let (Some(patches), Some(patch_list)) = (patches.as_ref(), patch_list.as_ref()) {
+            patches
+                .buffer()
+                .write(queue, bytemuck::cast_slice(bound_encoding.patches()));
+            patch_list
+                .buffer()
+                .write(queue, bytemuck::cast_slice(bound_encoding.patch_list()));
+        }
         let extents = plan.carries_authored().then(|| {
             Recycled::claim(
                 pool,
@@ -393,7 +441,6 @@ impl Program {
                 .buffer()
                 .write(queue, bytemuck::cast_slice(&plan.host_extents()));
         }
-        let workgroups = segments.min(plan.profile().workgroups()).max(1);
         let heap = arena.heap();
         let banks = heap.banks();
         let bank_bytes = heap.bank_bytes();
@@ -403,8 +450,9 @@ impl Program {
             true => {
                 let groups = weight_groups(
                     &plan,
+                    &bound_encoding,
                     weights.resident_pages(),
-                    &plan.weight_pages(&bound, &[]),
+                    &plan.weight_pages(&bound_encoding, &[]),
                 );
                 Some(Windows {
                     extents: bound,
@@ -461,17 +509,14 @@ impl Program {
             },
             Binding {
                 index: neura_kernel::segments(banks, paged),
-                buffer: resident
-                    .segments
-                    .buffer()
-                    .binding(0, resident.segments.buffer().size()),
+                buffer: segments.buffer().binding(0, segments.buffer().size()),
             },
         ]);
         if let (Some(extents), Some(measures), Some(patches), Some(patch_list)) = (
             extents.as_ref(),
             resident.measures.as_ref(),
-            resident.patches.as_ref(),
-            resident.patch_list.as_ref(),
+            patches.as_ref(),
+            patch_list.as_ref(),
         ) {
             bindings.extend([
                 Binding {
@@ -504,9 +549,10 @@ impl Program {
             tensors: Mutex::new(tensors),
             weights,
             progress: progress_buffer,
-            header,
-            workgroups,
             placement,
+            segments,
+            patches,
+            patch_list,
             revision,
             tasks,
             values,
@@ -634,7 +680,7 @@ impl Program {
         {
             return encoding.clone();
         }
-        let encoding = Arc::new(self.plan.encode(&lengths));
+        let encoding = self.plan.encode(&lengths);
         *self.encoding.lock().unwrap_or_else(PoisonError::into_inner) = Some(encoding.clone());
         encoding
     }
@@ -649,7 +695,7 @@ impl Program {
                 return;
             }
         }
-        let encoding = Arc::new(self.plan.encode(lengths));
+        let encoding = self.plan.encode(lengths);
         self.reserve(queue, encoding.tensor_bytes());
         self.publish(queue, &encoding);
         *self.encoding.lock().unwrap_or_else(PoisonError::into_inner) = Some(encoding);
@@ -729,11 +775,13 @@ impl Program {
             .iter()
             .map(|(table, rows)| TableRows::new(*table, rows))
             .collect::<Vec<TableRows<'_>>>();
+        let encoding = self.encoding();
         let groups = Arc::new(match self.weights.paged() {
             true => weight_groups(
                 &self.plan,
+                &encoding,
                 self.weights.resident_pages(),
-                &self.plan.weight_pages(&extents, &rows),
+                &self.plan.weight_pages(&encoding, &rows),
             ),
             false => Vec::new(),
         });
@@ -752,6 +800,25 @@ impl Program {
         let encoding = self.encoding();
         self.values.buffer().write(queue, encoding.values());
         self.tasks.buffer().write(queue, encoding.tasks());
+        self.segments
+            .buffer()
+            .write(queue, bytemuck::cast_slice(encoding.segments()));
+        self.progress.buffer().write(
+            queue,
+            bytemuck::cast_slice(&progress::words(
+                encoding.segments().len() as u32,
+                encoding.wave_tasks(),
+            )),
+        );
+        if let (Some(patches), Some(patch_list)) = (self.patches.as_ref(), self.patch_list.as_ref())
+        {
+            patches
+                .buffer()
+                .write(queue, bytemuck::cast_slice(encoding.patches()));
+            patch_list
+                .buffer()
+                .write(queue, bytemuck::cast_slice(encoding.patch_list()));
+        }
     }
 
     pub(crate) fn records_pending(&self) -> bool {
@@ -850,8 +917,8 @@ impl Program {
             .bytes()
             + self.tasks.buffer().size()
             + self.values.buffer().size()
+            + self.segments.buffer().size()
             + self.resident.steps.buffer().size()
-            + self.resident.segments.buffer().size()
             + self.refusal.buffer().size()
             + self.progress.buffer().size()
             + self.placement.buffer().size()
@@ -878,7 +945,7 @@ impl Program {
     }
 
     pub fn task_count(&self) -> u32 {
-        self.plan.task_count()
+        self.stored_encoding().task_count()
     }
 
     pub fn step_count(&self) -> u32 {
@@ -886,7 +953,7 @@ impl Program {
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.plan.wave_count()
+        self.stored_encoding().wave_count()
     }
 
     pub fn weight_windows(&self) -> u32 {
@@ -894,7 +961,22 @@ impl Program {
     }
 
     pub fn workgroups(&self) -> u32 {
-        self.workgroups
+        let encoding = self.stored_encoding();
+        (encoding.segments().len() as u32)
+            .min(self.plan.profile().workgroups())
+            .max(1)
+    }
+
+    pub(crate) fn header(&self) -> Vec<u8> {
+        self.stored_encoding().header()
+    }
+
+    fn stored_encoding(&self) -> Arc<Encoding> {
+        self.encoding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.plan.bound_encoding())
     }
 
     pub fn value_count(&self) -> u32 {
@@ -902,7 +984,7 @@ impl Program {
     }
 
     pub fn work(&self) -> u64 {
-        self.plan.work()
+        self.stored_encoding().work()
     }
 
     pub fn readable(&self, value: Value) -> bool {

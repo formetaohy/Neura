@@ -16,10 +16,7 @@ pub(crate) struct Resident {
     pub(crate) plan: Arc<Plan>,
     pub(crate) kernel: PipelineHandle,
     pub(crate) steps: Recycled,
-    pub(crate) segments: Recycled,
     pub(crate) measures: Option<Recycled>,
-    pub(crate) patches: Option<Recycled>,
-    pub(crate) patch_list: Option<Recycled>,
     pool: Arc<Pool>,
 }
 
@@ -51,48 +48,31 @@ impl Resident {
         }
         let kernel = context.declare(kernel.program());
         let steps_bytes = (plan.steps().len() as u64).max(size_of::<StepRecord>() as u64);
-        let segments_bytes = size_of_val(plan.segments()) as u64;
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let carries = plan.carries_authored();
-        let owned = |label: &str, bytes: usize| {
-            carries.then(|| Recycled::claim(pool, label, (bytes as u64).max(4), storage))
-        };
-        let measures = owned("neura measures", std::mem::size_of_val(plan.measures()));
-        let patches = owned("neura patches", std::mem::size_of_val(plan.patches()));
-        let patch_list = owned("neura patch list", std::mem::size_of_val(plan.patch_list()));
+        let measures = plan.carries_authored().then(|| {
+            Recycled::claim(
+                pool,
+                "neura measures",
+                (size_of_val(plan.measures()) as u64).max(4),
+                storage,
+            )
+        });
         let resident = Self {
             signature,
             plan,
             kernel,
             steps: Recycled::claim(pool, "neura steps", steps_bytes, storage),
-            segments: Recycled::claim(pool, "neura segments", segments_bytes, storage),
             measures,
-            patches,
-            patch_list,
             pool: pool.clone(),
         };
         let queue = context.queue();
         if !resident.plan.steps().is_empty() {
             resident.steps.buffer().write(queue, resident.plan.steps());
         }
-        resident
-            .segments
-            .buffer()
-            .write(queue, bytemuck::cast_slice(resident.plan.segments()));
-        if let (Some(measures), Some(patches), Some(patch_list)) = (
-            resident.measures.as_ref(),
-            resident.patches.as_ref(),
-            resident.patch_list.as_ref(),
-        ) {
+        if let Some(measures) = resident.measures.as_ref() {
             measures
                 .buffer()
                 .write(queue, bytemuck::cast_slice(resident.plan.measures()));
-            patches
-                .buffer()
-                .write(queue, bytemuck::cast_slice(resident.plan.patches()));
-            patch_list
-                .buffer()
-                .write(queue, bytemuck::cast_slice(resident.plan.patch_list()));
         }
         Arc::new(resident)
     }

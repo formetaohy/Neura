@@ -1,12 +1,15 @@
 use crate::access::Access;
 use crate::hazard::{Hazard, Hazards};
-use crate::lower::Task;
-use crate::region;
+use crate::region::{self, Walk};
 use neura_abi::{SegmentFields, SegmentRecord};
-use neura_graph::ValueInfo;
 use neura_profile::MatmulTile;
 
 const MERGE_SPREAD: u64 = 16;
+
+pub(crate) trait Scheduled: Walk {
+    fn span(&self) -> (u32, u32);
+    fn work(&self) -> u64;
+}
 
 pub(crate) struct Schedule {
     order: Vec<u32>,
@@ -21,15 +24,18 @@ struct Packed {
 }
 
 impl Schedule {
-    pub(crate) fn of(
-        values: &[ValueInfo],
+    pub(crate) fn of<T: Scheduled, V: region::Values>(
+        values: &V,
         tiles: &[MatmulTile],
-        tasks: &[Task],
+        tasks: &[T],
         workgroups: u32,
+        declared: &[u32],
     ) -> Self {
         let barriers = barriers(values, tasks);
         let depths = depths(values, tiles, tasks, &barriers);
-        let packed = pack(values, tiles, tasks, &barriers, &depths, workgroups);
+        let packed = pack(
+            values, tiles, tasks, &barriers, &depths, workgroups, declared,
+        );
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -69,6 +75,11 @@ impl Schedule {
             }
             count = count.max(wave + 1);
         }
+        assert!(
+            count as usize <= order.len(),
+            "a schedule of {} tasks gates {count} waves, and every wave opens on a task of its own",
+            order.len(),
+        );
         Self {
             order,
             segments,
@@ -98,17 +109,17 @@ impl Schedule {
     }
 }
 
-fn depths(
-    values: &[ValueInfo],
+fn depths<T: Scheduled, V: region::Values>(
+    values: &V,
     tiles: &[MatmulTile],
-    tasks: &[Task],
+    tasks: &[T],
     barriers: &[Vec<u32>],
 ) -> Vec<u32> {
     let mut hazards = Hazards::of(values.len());
     let mut depths = vec![0u32; tasks.len()];
     for (index, task) in tasks.iter().enumerate() {
-        let touches = region::touches(values, tiles, task);
-        let evidence = hazards.inspect(values, &touches, task.in_place);
+        let touches = region::touches(values, tiles, task, task.span());
+        let evidence = hazards.inspect(values, &touches, task.in_place());
         let mut deepest = evidence.deepest.map(|deepest| deepest + 1);
         for dependency in &barriers[index] {
             let carried = depths[*dependency as usize] + 1;
@@ -136,23 +147,23 @@ fn lonely(depths: &[u32]) -> Vec<bool> {
         .collect()
 }
 
-fn barriers(values: &[ValueInfo], tasks: &[Task]) -> Vec<Vec<u32>> {
+fn barriers<T: Scheduled, V: region::Values>(values: &V, tasks: &[T]) -> Vec<Vec<u32>> {
     let mut barriers = vec![Vec::new(); tasks.len()];
     if !tasks
         .iter()
-        .any(|task| values[task.out as usize].recomputes.is_some())
+        .any(|task| values.recomputes(task.out()).is_some())
     {
         return barriers;
     }
     let mut touched = vec![Vec::<u32>::new(); values.len()];
     for (index, task) in tasks.iter().enumerate() {
-        let access = Access::of(values, task);
+        let access = Access::over(|value| values.storage(value), task);
         for storage in access.reads().iter().chain(access.writes()) {
             touched[*storage as usize].push(index as u32);
         }
     }
     for (index, task) in tasks.iter().enumerate() {
-        let Some(original) = values[task.out as usize].recomputes else {
+        let Some(original) = values.recomputes(task.out()) else {
             continue;
         };
         for before in &touched[original as usize] {
@@ -202,13 +213,15 @@ enum Placement {
     Open { wave: u32 },
 }
 
-fn pack(
-    values: &[ValueInfo],
+#[allow(clippy::too_many_arguments)]
+fn pack<T: Scheduled, V: region::Values>(
+    values: &V,
     tiles: &[MatmulTile],
-    tasks: &[Task],
+    tasks: &[T],
     barriers: &[Vec<u32>],
     depths: &[u32],
     workgroups: u32,
+    declared: &[u32],
 ) -> Packed {
     let lonely = lonely(depths);
     let mut hazards = Hazards::of(values.len());
@@ -224,20 +237,19 @@ fn pack(
     let mut stage = 0u32;
     let mut in_recompute = false;
     let mut entry = Hazard::default();
-    for index in 0..tasks.len() {
-        let index = index as u32;
+    for index in 0..tasks.len() as u32 {
         let task = &tasks[index as usize];
-        let touches = region::touches(values, tiles, task);
+        let touches = region::touches(values, tiles, task, task.span());
         let recomputed = touches
             .reads
             .iter()
             .chain(&touches.writes)
-            .any(|(storage, _)| values[*storage as usize].recomputes.is_some());
+            .any(|(storage, _)| values.recomputes(*storage).is_some());
         if recomputed && !in_recompute {
             stage = prefix + 1;
         }
         in_recompute = recomputed;
-        let mut evidence = hazards.inspect(values, &touches, task.in_place);
+        let mut evidence = hazards.inspect(values, &touches, task.in_place());
         for dependency in &barriers[index as usize] {
             evidence.join(&Hazard::at(
                 waves[*dependency as usize],
@@ -262,7 +274,7 @@ fn pack(
         let placement = match folded {
             Some((wave, segment)) => Placement::Fold { wave, segment },
             None => close(
-                task,
+                task.work(),
                 &dependencies,
                 earliest,
                 &work,
@@ -270,6 +282,7 @@ fn pack(
                 &rebuilt,
                 recomputed,
                 workgroups,
+                declared.get(index as usize).copied().unwrap_or(0),
             ),
         };
         let (wave, segment) = match placement {
@@ -318,7 +331,7 @@ fn pack(
             }
             created[wave as usize] += 1;
         }
-        work[segment as usize] += task.work;
+        work[segment as usize] += task.work();
         rebuilt[segment as usize] |= recomputed;
         segments[segment as usize].push(index);
         prefix = prefix.max(wave);
@@ -332,7 +345,7 @@ fn pack(
 
 #[allow(clippy::too_many_arguments)]
 fn close(
-    task: &Task,
+    work_of_task: u64,
     dependencies: &[u32],
     earliest: Option<u32>,
     work: &[u64],
@@ -340,9 +353,10 @@ fn close(
     rebuilt: &[bool],
     recomputed: bool,
     workgroups: u32,
+    declared: u32,
 ) -> Placement {
     let Some(earliest) = earliest else {
-        return Placement::Open { wave: 0 };
+        return Placement::Open { wave: declared };
     };
     let heaviest = dependencies
         .iter()
@@ -366,7 +380,7 @@ fn close(
         && dependencies
             .iter()
             .all(|segment| !rebuilt[*segment as usize])
-        && claimed + task.work <= MERGE_SPREAD * heaviest
+        && claimed + work_of_task <= MERGE_SPREAD * heaviest
     {
         return Placement::Merge {
             wave: earliest,
@@ -376,7 +390,7 @@ fn close(
     Placement::Open { wave: earliest + 1 }
 }
 
-fn assert_barriers(tasks: &[Task], barriers: &[Vec<u32>], schedule: &Schedule) {
+fn assert_barriers<T: Scheduled>(tasks: &[T], barriers: &[Vec<u32>], schedule: &Schedule) {
     if barriers.iter().all(|dependencies| dependencies.is_empty()) {
         return;
     }

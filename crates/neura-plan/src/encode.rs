@@ -34,6 +34,14 @@ pub struct Encoding {
     lengths: Vec<u32>,
     arena_bytes: u64,
     tensor_bytes: u64,
+    order: Vec<u32>,
+    waves: Vec<u32>,
+    segments: Vec<SegmentRecord>,
+    wave_tasks: Vec<u32>,
+    work: u64,
+    patches: Vec<neura_abi::PatchRecord>,
+    patch_list: Vec<u32>,
+    held: Vec<bool>,
 }
 
 impl Encoding {
@@ -47,6 +55,14 @@ impl Encoding {
             lengths: Vec::new(),
             arena_bytes: 0,
             tensor_bytes: 0,
+            order: Vec::new(),
+            waves: Vec::new(),
+            segments: Vec::new(),
+            wave_tasks: Vec::new(),
+            work: 0,
+            patches: Vec::new(),
+            patch_list: Vec::new(),
+            held: Vec::new(),
         }
     }
 
@@ -76,6 +92,50 @@ impl Encoding {
 
     pub fn readable(&self, value: u32) -> bool {
         self.readable.get(value as usize).copied().unwrap_or(false)
+    }
+
+    pub fn order(&self) -> &[u32] {
+        &self.order
+    }
+
+    pub fn waves(&self) -> &[u32] {
+        &self.waves
+    }
+
+    pub fn segments(&self) -> &[SegmentRecord] {
+        &self.segments
+    }
+
+    pub fn wave_tasks(&self) -> &[u32] {
+        &self.wave_tasks
+    }
+
+    pub fn wave_count(&self) -> u32 {
+        self.wave_tasks.len() as u32
+    }
+
+    pub fn task_count(&self) -> u32 {
+        self.order.len() as u32
+    }
+
+    pub fn work(&self) -> u64 {
+        self.work
+    }
+
+    pub fn patches(&self) -> &[neura_abi::PatchRecord] {
+        &self.patches
+    }
+
+    pub fn patch_list(&self) -> &[u32] {
+        &self.patch_list
+    }
+
+    pub fn header(&self) -> Vec<u8> {
+        neura_abi::progress::header(self.segments.len() as u32, self.wave_count())
+    }
+
+    pub fn holds(&self, storage: u32) -> bool {
+        self.held.get(storage as usize).copied().unwrap_or(false)
     }
 
     pub(crate) fn placed(&self, value: u32) -> Option<Placed> {
@@ -201,8 +261,6 @@ pub struct Plan {
     elements: Vec<Element>,
     tasks: Vec<u8>,
     steps: Vec<u8>,
-    segments: Vec<SegmentRecord>,
-    wave_tasks: Vec<u32>,
     geometries: Vec<u32>,
     products: Vec<Product>,
     attention: Vec<AttentionTile>,
@@ -211,13 +269,14 @@ pub struct Plan {
     work: u64,
     extents: Extents,
     splits: Vec<Split>,
-    order: Vec<u32>,
-    waves: Vec<u32>,
+    works: Vec<u64>,
     slot_bounds: Vec<u32>,
     authored_walks: Vec<bool>,
     depends: Vec<u32>,
     depends_at: Vec<u32>,
     authored: authored::Authored,
+    patches: authored::Patches,
+    declared_waves: Vec<u32>,
     gather_tables: Vec<u32>,
     shapes: Arc<Vec<ValueInfo>>,
     alignment: u64,
@@ -276,28 +335,17 @@ impl Plan {
         assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         assert_a_task_needs_exact_lengths_the_plan_froze(values, &tasks);
-        let mut authored = authored::analyse(&authored_slots, values, &mut tasks, &measures, &menu);
-        let schedule = schedule::Schedule::of(values, &menu, &tasks, profile.workgroups());
-        authored::plan_patches(
-            &mut authored,
-            values,
-            &mut tasks,
-            schedule.order(),
-            &measures,
-            &menu,
-        );
+        let authored = authored::analyse(&authored_slots, values, &mut tasks, &measures, &menu);
+        let patches = authored::patches(&authored, values, &tasks);
         assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
             values,
             &tasks,
-            &ragged_axes(&authored),
+            &ragged_axes(&patches),
         );
-        let order = schedule.order();
-        let waves = schedule.waves();
         let authored_walks: Vec<bool> = tasks.iter().map(|task| !task.depends.is_empty()).collect();
         assert_authored_walks_read_the_counts_that_rule_them(
             values.len(),
-            &authored,
-            order,
+            &patches,
             &tasks,
             &authored_walks,
         );
@@ -306,8 +354,9 @@ impl Plan {
         let mut updates_weights = false;
         let mut geometries = vec![0u32; matmul_tiles.len()];
         let mut work = 0;
-        for (position, index) in order.iter().enumerate() {
-            let task = &tasks[*index as usize];
+        let mut splits = Vec::with_capacity(tasks.len());
+        let mut works = Vec::with_capacity(tasks.len());
+        for task in &tasks {
             let geometry = match task.kind.geometry() {
                 Geometry::Attention => {
                     assert!(
@@ -449,14 +498,14 @@ impl Plan {
                 axis: task.axis,
                 offset: task.offset,
                 in_place: u32::from(task.in_place),
-                wave: waves[position],
+                wave: 0,
                 split: split_kind,
                 measure: split_measure,
                 index,
                 group,
                 planes,
                 plane: task.plane,
-                patch: task.patch,
+                patch: NO_VALUE,
                 segment: task.segments,
                 keys: task.keys,
                 reach: task.reach,
@@ -472,13 +521,11 @@ impl Plan {
                 updates_weights = true;
             }
             work += task.work;
+            splits.push(task.split);
+            works.push(task.work);
             task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
         }
 
-        let segments = schedule.segments().to_vec();
-        record::assert_records_hold_the_tasks_they_carry(&tasks, order, &task_bytes, &steps);
-
-        let splits = tasks.iter().map(|task| task.split).collect::<Vec<_>>();
         let gather_tables = {
             let mut tables = tasks
                 .iter()
@@ -507,10 +554,10 @@ impl Plan {
             bounds
         };
         let mut depends = Vec::new();
-        let mut depends_at = Vec::with_capacity(order.len() + 1);
-        for index in order {
+        let mut depends_at = Vec::with_capacity(tasks.len() + 1);
+        for task in &tasks {
             depends_at.push(depends.len() as u32);
-            depends.extend_from_slice(&tasks[*index as usize].depends);
+            depends.extend_from_slice(&task.depends);
         }
         depends_at.push(depends.len() as u32);
         let mut plan = Self {
@@ -519,30 +566,39 @@ impl Plan {
             elements,
             tasks: task_bytes,
             steps,
-            segments,
-            wave_tasks: schedule.wave_tasks(),
             geometries,
-            products: products.clone(),
-            attention: attention.clone(),
+            products,
+            attention,
             layout,
             updates_weights,
             work,
             extents,
             splits,
-            order: order.to_vec(),
-            waves: waves.to_vec(),
+            works,
             slot_bounds,
             authored_walks,
             depends,
             depends_at,
             authored,
+            patches,
+            declared_waves: Vec::new(),
             gather_tables,
             shapes,
             alignment,
             bound: Arc::new(Encoding::empty()),
         };
-        let bound = plan.derive(&plan.slot_bounds);
+        let bound = plan.deliver(&plan.slot_bounds);
+        plan.declared_waves = declared_waves(&bound);
         plan.bound = Arc::new(bound);
+        for (task, owner) in tasks.iter_mut().zip(&plan.patches.owners) {
+            task.patch = *owner;
+        }
+        record::assert_records_hold_the_tasks_they_carry(
+            &tasks,
+            plan.bound.order(),
+            plan.bound.tasks(),
+            &plan.steps,
+        );
         plan
     }
 
@@ -603,10 +659,6 @@ impl Plan {
             .map(|(index, _)| (index as u32, self.tiles()[index]))
     }
 
-    pub fn tasks(&self) -> &[u8] {
-        &self.tasks
-    }
-
     pub fn dynamic(&self) -> bool {
         !self.slot_bounds.is_empty()
     }
@@ -652,18 +704,18 @@ impl Plan {
     }
 
     pub fn patches(&self) -> &[neura_abi::PatchRecord] {
-        self.authored.patches()
+        self.bound.patches()
     }
 
     pub fn patch_list(&self) -> &[u32] {
-        self.authored.patch_list()
+        self.bound.patch_list()
     }
 
     pub fn authored_values(&self, value: u32) -> &[u32] {
         self.authored.values_of(value)
     }
 
-    pub fn encode(&self, lengths: &[u32]) -> Encoding {
+    pub fn encode(&self, lengths: &[u32]) -> Arc<Encoding> {
         assert_eq!(
             lengths.len(),
             self.slot_bounds.len(),
@@ -671,27 +723,64 @@ impl Plan {
             self.slot_bounds.len(),
             lengths.len(),
         );
-        self.derive(lengths)
+        match lengths == self.slot_bounds.as_slice() {
+            true => self.bound.clone(),
+            false => Arc::new(self.deliver(lengths)),
+        }
     }
 
-    fn derive(&self, lengths: &[u32]) -> Encoding {
-        let sized = Sized::of(&self.shapes, &self.extents, lengths);
+    pub(crate) fn deliver(&self, lengths: &[u32]) -> Encoding {
+        let sized = Sized::of(&self.shapes, &self.extents, lengths, self.authored.slots());
         assert_eq!(
             self.depends_at.len(),
-            self.order.len() + 1,
+            self.splits.len() + 1,
             "a plan carries one dependency run per task it schedules and one more for the end",
         );
-        let recorded = Recorded::of(&self.tasks, &self.steps)
-            .zip(self.depends_at.windows(2))
-            .map(|(recorded, at)| Wired {
+        let recorded = Recorded::of(&self.tasks, &self.steps).collect::<Vec<_>>();
+        let spans = (0..self.splits.len())
+            .map(|index| self.extents.span(self.splits[index], lengths))
+            .collect::<Vec<(u32, u32)>>();
+        let walks = recorded
+            .into_iter()
+            .enumerate()
+            .map(|(index, recorded)| Walked {
                 recorded,
-                depends: &self.depends[at[0] as usize..at[1] as usize],
+                depends: &self.depends
+                    [self.depends_at[index] as usize..self.depends_at[index + 1] as usize],
+                span: spans[index],
+                work: self.works[index],
             })
             .collect::<Vec<_>>();
-        let live = storage_liveness(&sized, &recorded);
+        let schedule = schedule::Schedule::of(
+            &sized,
+            self.profile.tiles(),
+            &walks,
+            self.profile.workgroups(),
+            &self.declared_waves,
+        );
+        let tables = authored::tables(&self.patches, schedule.order());
+        let mut task_bytes = Vec::with_capacity(schedule.order().len() * size_of::<TaskRecord>());
+        let mut waves = Vec::with_capacity(schedule.order().len());
+        for (position, index) in schedule.order().iter().enumerate() {
+            let mut record = walks[*index as usize].recorded.record();
+            if !matches!(walks[*index as usize].split(), Split::Range { .. }) {
+                record.first = spans[*index as usize].0;
+                record.count = spans[*index as usize].1;
+            }
+            record.wave = schedule.waves()[position];
+            record.patch = self.patches.owners[*index as usize];
+            task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
+            waves.push(schedule.waves()[position]);
+        }
+        let ordered = schedule
+            .order()
+            .iter()
+            .map(|index| walks[*index as usize])
+            .collect::<Vec<_>>();
+        let live_values = storage_liveness(&sized, &ordered);
         let reserved = self.layout.tensors().bytes();
-        let (offsets, tensor_bytes) =
-            allocate(&sized, &live, &self.waves, self.alignment, reserved);
+        let (offsets, tensor_bytes, placed) =
+            allocate(&sized, &live_values, &waves, self.alignment, reserved);
         assert!(
             tensor_bytes.is_multiple_of(WORD_BYTES),
             "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
@@ -731,24 +820,9 @@ impl Plan {
             });
             records.extend_from_slice(bytemuck::bytes_of(&record));
         }
-        let mut task_bytes = self.tasks.to_vec();
-        for (position, index) in self.order.iter().enumerate() {
-            let split = self.splits[*index as usize];
-            if matches!(split, Split::Range { .. }) {
-                continue;
-            }
-            let (first, count) = self.extents.span(split, lengths);
-            let at = position * size_of::<TaskRecord>();
-            let mut record: TaskRecord =
-                bytemuck::pod_read_unaligned(&task_bytes[at..at + size_of::<TaskRecord>()]);
-            record.first = first;
-            record.count = count;
-            task_bytes[at..at + size_of::<TaskRecord>()]
-                .copy_from_slice(bytemuck::bytes_of(&record));
-        }
         let mut readable = vec![false; sized.len()];
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
-        for task in &recorded {
+        for task in &ordered {
             for out in task.writes() {
                 let storage = sized.storage(out);
                 if !sized.resident(storage) || sized.bytes(storage) == 0 {
@@ -764,7 +838,7 @@ impl Plan {
             }
             let storage = sized.storage(id);
             readable[id as usize] = sized.held(storage)
-                || sized.bytes(storage) == 0
+                || sized.elements(storage) == 0
                 || last_writer.get(&offsets[storage as usize]) == Some(&storage);
         }
         let mut spans = vec![None; sized.len()];
@@ -774,6 +848,9 @@ impl Plan {
                 continue;
             }
             let owner = sized.storage(id);
+            if !placed[owner as usize] && sized.bytes(owner) != 0 {
+                continue;
+            }
             spans[id as usize] = Some(Placed {
                 store: store_of(sized.residency(owner)),
                 address: self.layout.address(owner, sized.residency(owner), &offsets),
@@ -782,6 +859,7 @@ impl Plan {
                 table: sized.table(id),
             });
         }
+        let work = ordered.iter().map(|task| task.work).sum();
         Encoding {
             values: records,
             tasks: task_bytes,
@@ -791,6 +869,14 @@ impl Plan {
             lengths: lengths.to_vec(),
             arena_bytes: tensor_bytes - reserved,
             tensor_bytes,
+            order: schedule.order().to_vec(),
+            waves,
+            segments: schedule.segments().to_vec(),
+            wave_tasks: schedule.wave_tasks(),
+            work,
+            patches: tables.patches,
+            patch_list: tables.list,
+            held: placed,
         }
     }
 
@@ -807,15 +893,19 @@ impl Plan {
     }
 
     pub fn segments(&self) -> &[SegmentRecord] {
-        &self.segments
+        self.bound.segments()
     }
 
     pub fn wave_tasks(&self) -> &[u32] {
-        &self.wave_tasks
+        self.bound.wave_tasks()
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.wave_tasks.len() as u32
+        self.bound.wave_count()
+    }
+
+    pub fn tasks(&self) -> &[u8] {
+        self.bound.tasks()
     }
 
     pub fn span(&self, value: Value<'_>, placement: Placement) -> Span {
@@ -866,12 +956,17 @@ impl Plan {
         self.layout.weights()
     }
 
-    pub fn weight_pages(&self, extents: &[u32], rows: &[TableRows<'_>]) -> Vec<WeightPages> {
-        let values = Resolved::of(self.bound.values(), &self.extents, extents);
+    pub fn weight_pages(&self, encoding: &Encoding, rows: &[TableRows<'_>]) -> Vec<WeightPages> {
+        let values = Resolved::of(
+            encoding.values(),
+            &self.extents,
+            encoding.lengths(),
+            self.authored.slots(),
+        );
         let tiles = self.profile.tiles();
         let mut touched = Touches::default();
-        Recorded::of(&self.tasks, &self.steps)
-            .zip(&self.order)
+        Recorded::of(encoding.tasks(), &self.steps)
+            .zip(encoding.order())
             .map(|(task, index)| {
                 let walked = !self.authored_walks[*index as usize]
                     && values.owned(task.out())
@@ -882,7 +977,7 @@ impl Plan {
                         &task,
                         &values,
                         tiles,
-                        task.walked(&self.extents, extents),
+                        task.walked(&self.extents, encoding.lengths()),
                         rows,
                     ),
                     false => region::whole(&mut touched, &task, &values),
@@ -890,6 +985,10 @@ impl Plan {
                 pages::weight_pages(&touched, &values, &self.layout)
             })
             .collect()
+    }
+
+    pub fn weight_pages_at(&self, extents: &[u32], rows: &[TableRows<'_>]) -> Vec<WeightPages> {
+        self.weight_pages(&self.encode(extents), rows)
     }
 
     pub fn store_words(&self) -> u64 {
@@ -933,12 +1032,15 @@ impl Plan {
     }
 }
 
-struct Wired<'a, 'b> {
+#[derive(Clone, Copy)]
+struct Walked<'a, 'b> {
     recorded: Recorded<'a>,
     depends: &'b [u32],
+    span: (u32, u32),
+    work: u64,
 }
 
-impl Reads for Wired<'_, '_> {
+impl Reads for Walked<'_, '_> {
     fn out(&self) -> u32 {
         self.recorded.out()
     }
@@ -956,7 +1058,7 @@ impl Reads for Wired<'_, '_> {
     }
 }
 
-impl Walk for Wired<'_, '_> {
+impl Walk for Walked<'_, '_> {
     fn kind(&self) -> Kind {
         self.recorded.kind()
     }
@@ -988,17 +1090,38 @@ impl Walk for Wired<'_, '_> {
     fn depends(&self) -> impl Iterator<Item = u32> {
         self.depends.iter().copied()
     }
+
+    fn split(&self) -> Split {
+        self.recorded.split()
+    }
+}
+
+impl schedule::Scheduled for Walked<'_, '_> {
+    fn span(&self) -> (u32, u32) {
+        self.span
+    }
+
+    fn work(&self) -> u64 {
+        self.work
+    }
 }
 
 struct Sized<'a> {
     shapes: &'a [ValueInfo],
+    extents: &'a Extents,
+    authored: &'a [u32],
     dims: Vec<[u32; 4]>,
     strides: Vec<[u32; 4]>,
     elements: Vec<u64>,
 }
 
 impl<'a> Sized<'a> {
-    fn of(shapes: &'a [ValueInfo], extents: &Extents, lengths: &[u32]) -> Self {
+    fn of(
+        shapes: &'a [ValueInfo],
+        extents: &'a Extents,
+        lengths: &[u32],
+        authored: &'a [u32],
+    ) -> Self {
         let dims = (0..shapes.len())
             .map(|id| extents.dims(id as u32, lengths))
             .collect::<Vec<_>>();
@@ -1011,6 +1134,8 @@ impl<'a> Sized<'a> {
             .collect();
         Self {
             shapes,
+            extents,
+            authored,
             dims,
             strides,
             elements,
@@ -1099,6 +1224,43 @@ impl<'a> Sized<'a> {
             self.shapes[right as usize].shape,
         );
         (0..neura_abi::MAX_RANK).all(|axis| left.free(axis) == right.free(axis))
+    }
+}
+
+impl region::Values for Sized<'_> {
+    fn len(&self) -> usize {
+        Sized::len(self)
+    }
+
+    fn dims(&self, value: u32) -> [u32; 4] {
+        Sized::dims(self, value)
+    }
+
+    fn strides(&self, value: u32) -> [u32; 4] {
+        Sized::strides(self, value)
+    }
+
+    fn bounds(&self, value: u32) -> [u32; 4] {
+        self.shapes[value as usize].shape.dims()
+    }
+
+    fn element(&self, value: u32) -> Element {
+        Sized::element(self, value)
+    }
+
+    fn storage(&self, value: u32) -> u32 {
+        Sized::storage(self, value)
+    }
+
+    fn recomputes(&self, value: u32) -> Option<u32> {
+        self.shapes[value as usize].recomputes
+    }
+
+    fn exact(&self, value: u32) -> bool {
+        self.extents.sealed(value, self.authored)
+            && self
+                .extents
+                .sealed(Sized::storage(self, value), self.authored)
     }
 }
 
@@ -1279,18 +1441,12 @@ fn assert_ragged_chunks_cover_their_plane(tasks: &[Task]) {
     }
 }
 
-fn ragged_axes(authored: &authored::Authored) -> Vec<(u32, u32)> {
-    let list = authored.patch_list();
-    let mut axes = authored
-        .patches()
+fn ragged_axes(patches: &authored::Patches) -> Vec<(u32, u32)> {
+    let mut axes = patches
+        .counted
         .iter()
-        .filter(|patch| patch.segment != NO_VALUE)
-        .flat_map(|patch| {
-            let first = patch.slots as usize;
-            list[first..first + patch.slots_count as usize]
-                .iter()
-                .map(|slot| (*slot, patch.segment))
-        })
+        .filter(|counted| counted.segment != NO_VALUE)
+        .flat_map(|counted| counted.slots.iter().map(|slot| (*slot, counted.segment)))
         .collect::<Vec<(u32, u32)>>();
     axes.sort_unstable();
     axes.dedup();
@@ -1554,26 +1710,21 @@ fn exact_length(values: &[ValueInfo], task: &Task, value: u32, axis: u32) {
 
 fn assert_authored_walks_read_the_counts_that_rule_them(
     values: usize,
-    authored: &authored::Authored,
-    order: &[u32],
+    patches: &authored::Patches,
     tasks: &[Task],
     authored_walks: &[bool],
 ) {
-    if !authored.carries() {
+    if patches.counted.is_empty() {
         return;
     }
-    let list = authored.patch_list();
     let mut ruled = vec![false; values];
-    for patch in authored.patches() {
-        let values_of = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
-        for value in values_of {
+    for counted in &patches.counted {
+        for value in &counted.values {
             ruled[*value as usize] = true;
         }
-        let tasks_of = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
-        for seat in tasks_of {
-            let index = order[*seat as usize] as usize;
+        for index in &counted.tasks {
             assert!(
-                authored_walks[index],
+                authored_walks[*index as usize],
                 "task {index} walks a count the device authors, and the host predicts its walk only where no count rules it",
             );
         }
@@ -1675,6 +1826,14 @@ fn touch(
     }
 }
 
+fn declared_waves(encoding: &Encoding) -> Vec<u32> {
+    let mut waves = vec![0u32; encoding.order().len().max(1)];
+    for (position, index) in encoding.order().iter().enumerate() {
+        waves[*index as usize] = encoding.waves()[position];
+    }
+    waves
+}
+
 fn record_table(sized: &Sized<'_>, value: u32) -> u32 {
     if !sized.quantized(value) {
         return NO_VALUE;
@@ -1715,19 +1874,22 @@ fn allocate(
     waves: &[u32],
     alignment: u64,
     reserved: u64,
-) -> (Vec<u64>, u64) {
+) -> (Vec<u64>, u64, Vec<bool>) {
     let wave_of = |position: usize| waves[position];
     let mut arena = Blocks::with_base(reserved);
     let mut offsets = vec![0u64; live.len()];
+    let mut placed = vec![false; live.len()];
     let owners = (0..sized.len()).filter(|id| sized.storage(*id as u32) as usize == *id);
     for id in owners.clone() {
-        if !sized.resident(id as u32) {
-            continue;
-        }
-        if sized.held(id as u32) || sized.retained(id as u32) || sized.owns_its_quanta(id as u32) {
-            offsets[id] = arena.reserve(sized.bytes(id as u32), alignment);
+        let storage = id as u32;
+        if sized.held(storage) || sized.retained(storage) || sized.owns_its_quanta(storage) {
+            if sized.resident(storage) {
+                offsets[id] = arena.reserve(sized.bytes(storage), alignment);
+            }
+            placed[id] = true;
         }
     }
+
     let mut pending = live
         .iter()
         .enumerate()
@@ -1750,6 +1912,7 @@ fn allocate(
                 "a value read in place by one task hands that task a storage of another size",
             );
             offsets[storage] = held.offset;
+            placed[storage] = true;
             active.push(Active {
                 live,
                 offset: held.offset,
@@ -1768,11 +1931,12 @@ fn allocate(
         let bytes = sized.bytes(storage as u32);
         let offset = arena.reserve(bytes, alignment);
         offsets[storage] = offset;
+        placed[storage] = true;
         active.push(Active {
             live,
             offset,
             bytes,
         });
     }
-    (offsets, arena.bytes())
+    (offsets, arena.bytes(), placed)
 }

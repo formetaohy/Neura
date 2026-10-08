@@ -11,8 +11,6 @@ pub(crate) struct Authored {
     value_slots: Vec<Vec<u32>>,
     measure_slots: Vec<Vec<u32>>,
     measures: Vec<MeasureRecord>,
-    patches: Vec<PatchRecord>,
-    patch_list: Vec<u32>,
 }
 
 impl Authored {
@@ -30,14 +28,6 @@ impl Authored {
 
     pub(crate) fn measures(&self) -> &[MeasureRecord] {
         &self.measures
-    }
-
-    pub(crate) fn patches(&self) -> &[PatchRecord] {
-        &self.patches
-    }
-
-    pub(crate) fn patch_list(&self) -> &[u32] {
-        &self.patch_list
     }
 
     fn walks(&self, slot: u32) -> bool {
@@ -61,8 +51,6 @@ pub(crate) fn analyse(
         value_slots: vec![Vec::new(); values.len()],
         measure_slots: vec![Vec::new(); measures.len()],
         measures: Vec::new(),
-        patches: Vec::new(),
-        patch_list: Vec::new(),
     };
     if !authored.carries() {
         authored.measures = measure_records(measures, tiles);
@@ -129,32 +117,41 @@ pub(crate) fn analyse(
     authored
 }
 
-pub(crate) fn plan_patches(
-    authored: &mut Authored,
-    values: &[ValueInfo],
-    tasks: &mut [Task],
-    order: &[u32],
-    measures: &[Measure],
-    tiles: &[MatmulTile],
-) {
+pub(crate) struct Counted {
+    pub(crate) count: u32,
+    pub(crate) writer: u32,
+    pub(crate) slots: Vec<u32>,
+    pub(crate) segment: u32,
+    pub(crate) values: Vec<u32>,
+    pub(crate) tasks: Vec<u32>,
+}
+
+pub(crate) struct Patches {
+    pub(crate) owners: Vec<u32>,
+    pub(crate) counted: Vec<Counted>,
+}
+
+pub(crate) struct Tables {
+    pub(crate) patches: Vec<PatchRecord>,
+    pub(crate) list: Vec<u32>,
+}
+
+pub(crate) fn patches(authored: &Authored, values: &[ValueInfo], tasks: &[Task]) -> Patches {
+    let mut owners = vec![NO_VALUE; tasks.len()];
+    let mut counted = Vec::new();
     if !authored.carries() {
-        return;
+        return Patches { owners, counted };
     }
-    authored.measures = measure_records(measures, tiles);
-    let mut counted = BTreeMap::<u32, Vec<u32>>::new();
+    let mut grouped = BTreeMap::<u32, Vec<u32>>::new();
     for slot in 0..authored.slots.len() as u32 {
         if authored.walks(slot) {
-            counted
+            grouped
                 .entry(authored.count_of(slot))
                 .or_default()
                 .push(slot);
         }
     }
-    let mut seat = vec![NO_VALUE; tasks.len()];
-    for (position, task) in order.iter().enumerate() {
-        seat[*task as usize] = position as u32;
-    }
-    for (count, slots) in counted {
+    for (count, slots) in grouped {
         let writers = tasks
             .iter()
             .enumerate()
@@ -182,69 +179,101 @@ pub(crate) fn plan_patches(
         } else {
             NO_VALUE
         };
-        assert!(
-            order.contains(&(writer as u32)),
-            "the task that authors the count of value {count} stands in no segment of the plan",
-        );
-        let slots_first = authored.patch_list.len() as u32;
-        for slot in &slots {
-            authored.patch_list.push(*slot);
-        }
-        let slots_count = authored.patch_list.len() as u32 - slots_first;
-        let values_first = authored.patch_list.len() as u32;
-        for (id, ruled) in authored.value_slots.iter().enumerate() {
-            if ruled.iter().any(|slot| slots.contains(slot)) {
-                authored.patch_list.push(id as u32);
-            }
-        }
-        let values_count = authored.patch_list.len() as u32 - values_first;
-        let tasks_first = authored.patch_list.len() as u32;
-        for (index, task) in tasks.iter().enumerate() {
-            let walks_the_measure = split_measure(task.split).is_some_and(|measure| {
-                authored.measure_slots[measure as usize]
-                    .iter()
-                    .any(|slot| slots.contains(slot))
-            });
-            let walks_a_segment = (task.grid != NO_VALUE || task.segments != NO_VALUE)
-                && task.depends.contains(&count);
-            if walks_the_measure || walks_a_segment {
-                assert_ne!(
-                    seat[index], NO_VALUE,
-                    "a task whose range a device count rules stands in no segment of the plan",
-                );
-                authored.patch_list.push(seat[index]);
-            }
-        }
+        let values_ruled = authored
+            .value_slots
+            .iter()
+            .enumerate()
+            .filter(|(_, ruled)| ruled.iter().any(|slot| slots.contains(slot)))
+            .map(|(id, _)| id as u32)
+            .collect::<Vec<u32>>();
+        let tasks_ruled = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| {
+                let walks_the_measure = split_measure(task.split).is_some_and(|measure| {
+                    authored.measure_slots[measure as usize]
+                        .iter()
+                        .any(|slot| slots.contains(slot))
+                });
+                let walks_a_segment = (task.grid != NO_VALUE || task.segments != NO_VALUE)
+                    && task.depends.contains(&count);
+                walks_the_measure || walks_a_segment
+            })
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<u32>>();
         if segment != NO_VALUE {
             for (index, task) in tasks.iter().enumerate() {
                 if task.grid != segment && task.segments != segment {
                     continue;
                 }
                 assert!(
-                    authored.patch_list[tasks_first as usize..].contains(&seat[index]),
+                    tasks_ruled.contains(&(index as u32)),
                     "a {} task walks the segments value {} closes, and the patch that closes that axis hands it no rows; every task that walks a segment stands on the count that rules it",
                     task.kind.name(),
                     task.segments,
                 );
             }
         }
-        let tasks_count = authored.patch_list.len() as u32 - tasks_first;
-        let patch = authored.patches.len() as u32;
-        authored.patches.push(PatchRecord::of(PatchFields {
+        assert_eq!(
+            owners[writer], NO_VALUE,
+            "one task writes the counts of two device extents, and a task carries one patch",
+        );
+        owners[writer] = counted.len() as u32;
+        counted.push(Counted {
+            count,
+            writer: writer as u32,
+            slots,
+            segment,
+            values: values_ruled,
+            tasks: tasks_ruled,
+        });
+    }
+    Patches { owners, counted }
+}
+
+pub(crate) fn tables(patches: &Patches, order: &[u32]) -> Tables {
+    let mut seat = vec![NO_VALUE; patches.owners.len()];
+    for (position, task) in order.iter().enumerate() {
+        seat[*task as usize] = position as u32;
+    }
+    let mut list = Vec::<u32>::new();
+    let mut records = Vec::<PatchRecord>::new();
+    for counted in &patches.counted {
+        assert_ne!(
+            seat[counted.writer as usize], NO_VALUE,
+            "the task that authors the count of value {} stands in no segment of the plan",
+            counted.count,
+        );
+        let slots_first = list.len() as u32;
+        list.extend_from_slice(&counted.slots);
+        let slots_count = list.len() as u32 - slots_first;
+        let values_first = list.len() as u32;
+        list.extend_from_slice(&counted.values);
+        let values_count = list.len() as u32 - values_first;
+        let tasks_first = list.len() as u32;
+        for index in &counted.tasks {
+            assert_ne!(
+                seat[*index as usize], NO_VALUE,
+                "a task whose range a device count rules stands in no segment of the plan",
+            );
+            list.push(seat[*index as usize]);
+        }
+        let tasks_count = list.len() as u32 - tasks_first;
+        let record = PatchRecord::of(PatchFields {
             slots: slots_first,
             slots_count,
-            count,
-            segment,
+            count: counted.count,
+            segment: counted.segment,
             values: values_first,
             values_count,
             tasks: tasks_first,
             tasks_count,
-        }));
-        assert_eq!(
-            tasks[writer].patch, NO_VALUE,
-            "one task writes the counts of two device extents, and a task carries one patch",
-        );
-        tasks[writer].patch = patch;
+        });
+        records.push(record);
+    }
+    Tables {
+        patches: records,
+        list,
     }
 }
 
