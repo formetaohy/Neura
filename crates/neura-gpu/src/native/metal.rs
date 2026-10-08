@@ -627,6 +627,16 @@ impl Device {
         Ok(())
     }
 
+    pub(crate) fn complete(&self, index: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the Metal compute queue is never poisoned");
+        self.retire(&mut state)
+            .unwrap_or_else(|error| panic!("{error}"));
+        index <= state.completed
+    }
+
     pub(crate) fn seconds(&self, index: u64) -> f64 {
         let mut state = self
             .state

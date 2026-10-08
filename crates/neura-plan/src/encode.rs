@@ -1,4 +1,4 @@
-use crate::access::{self, Access, Reads};
+use crate::access::{Access, Reads};
 use crate::authored;
 use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
@@ -7,16 +7,17 @@ use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::record::{self, Recorded};
-use crate::region::{self, Resolved, TableRows, Touches, Values};
+use crate::region::{self, Resolved, TableRows, Touches, Values, Walk};
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
     Element, Geometry, Kind, MAX_RANK, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord,
     Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
-use neura_graph::{Graph, GraphSnapshot, Residency, Value, ValueInfo};
+use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
 use std::mem::size_of;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Quantum {
@@ -25,8 +26,61 @@ pub struct Quantum {
 }
 
 pub struct Encoding {
-    pub values: Vec<u8>,
-    pub tasks: Vec<u8>,
+    values: Vec<u8>,
+    tasks: Vec<u8>,
+    spans: Vec<Option<Placed>>,
+    readable: Vec<bool>,
+    quanta: Vec<Quantum>,
+    lengths: Vec<u32>,
+    arena_bytes: u64,
+    tensor_bytes: u64,
+}
+
+impl Encoding {
+    fn empty() -> Self {
+        Self {
+            values: Vec::new(),
+            tasks: Vec::new(),
+            spans: Vec::new(),
+            readable: Vec::new(),
+            quanta: Vec::new(),
+            lengths: Vec::new(),
+            arena_bytes: 0,
+            tensor_bytes: 0,
+        }
+    }
+
+    pub fn values(&self) -> &[u8] {
+        &self.values
+    }
+
+    pub fn tasks(&self) -> &[u8] {
+        &self.tasks
+    }
+
+    pub fn quanta(&self) -> &[Quantum] {
+        &self.quanta
+    }
+
+    pub fn lengths(&self) -> &[u32] {
+        &self.lengths
+    }
+
+    pub fn arena_bytes(&self) -> u64 {
+        self.arena_bytes
+    }
+
+    pub fn tensor_bytes(&self) -> u64 {
+        self.tensor_bytes
+    }
+
+    pub fn readable(&self, value: u32) -> bool {
+        self.readable.get(value as usize).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn placed(&self, value: u32) -> Option<Placed> {
+        self.spans.get(value as usize).copied().flatten()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -133,10 +187,9 @@ struct Active {
 }
 
 #[derive(Clone, Copy)]
-struct Placed {
+pub(crate) struct Placed {
     store: Store,
     address: u64,
-    elements: u32,
     element: Element,
     scale: f32,
     table: u64,
@@ -147,28 +200,28 @@ pub struct Plan {
     kinds: Vec<Kind>,
     elements: Vec<Element>,
     tasks: Vec<u8>,
-    values: Vec<u8>,
     steps: Vec<u8>,
     segments: Vec<SegmentRecord>,
     wave_tasks: Vec<u32>,
-    spans: Vec<Option<Placed>>,
-    readable: Vec<bool>,
     geometries: Vec<u32>,
     products: Vec<Product>,
     attention: Vec<AttentionTile>,
-    arena_bytes: u64,
-    tensor_bytes: u64,
-    quanta: Vec<Quantum>,
     layout: Layout,
     updates_weights: bool,
     work: u64,
     extents: Extents,
     splits: Vec<Split>,
     order: Vec<u32>,
+    waves: Vec<u32>,
     slot_bounds: Vec<u32>,
     authored_walks: Vec<bool>,
+    depends: Vec<u32>,
+    depends_at: Vec<u32>,
     authored: authored::Authored,
     gather_tables: Vec<u32>,
+    shapes: Arc<Vec<ValueInfo>>,
+    alignment: u64,
+    bound: Arc<Encoding>,
 }
 
 impl Plan {
@@ -195,7 +248,9 @@ impl Plan {
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
-        let lowered = lower::lower(state.values(), &fuse::fuse(state), profile, chosen);
+        let fused = fuse::fuse(state);
+        let authored_slots = state.authored().to_vec();
+        let lowered = lower::lower(state.values(), &fused, profile, chosen);
         let lower::Plan {
             values,
             mut tasks,
@@ -204,13 +259,14 @@ impl Plan {
             attention,
             measures,
         } = lowered;
-        let values = &values;
+        let shapes = Arc::new(values);
+        let values: &[ValueInfo] = &shapes;
         let matmul_tiles = profile.tiles();
 
         let kinds = carried_kinds(&tasks);
         let elements = carried_elements(values);
         let layout = Layout::of_values(values, alignment);
-        assert_authored_extents_cut_one_walk(values, state.authored());
+        assert_authored_extents_cut_one_walk(values, &authored_slots);
         assert_writes_match_their_element(values, &tasks);
         assert_quantized_scales_reconstruct(values);
         assert_writers_precede_readers(values, &tasks);
@@ -220,8 +276,7 @@ impl Plan {
         assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         assert_a_task_needs_exact_lengths_the_plan_froze(values, &tasks);
-        let mut authored =
-            authored::analyse(state.authored(), values, &mut tasks, &measures, &menu);
+        let mut authored = authored::analyse(&authored_slots, values, &mut tasks, &measures, &menu);
         let schedule = schedule::Schedule::of(values, &menu, &tasks, profile.workgroups());
         authored::plan_patches(
             &mut authored,
@@ -246,45 +301,6 @@ impl Plan {
             &tasks,
             &authored_walks,
         );
-        let live = storage_liveness(values, &tasks, order);
-        let reserved = layout.tensors().bytes();
-        let (offsets, tensor_bytes) = allocate(values, &live, waves, alignment, reserved);
-        let arena_bytes = tensor_bytes - reserved;
-        assert!(
-            tensor_bytes.is_multiple_of(WORD_BYTES),
-            "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
-        );
-
-        let mut records = Vec::new();
-        for (id, info) in values.iter().enumerate() {
-            let address = layout.address(values, &offsets, id as u32);
-            let mut free = [NO_SLOT; 4];
-            for axis in 0..neura_abi::MAX_RANK {
-                if let Some(slot) = info.shape.free(axis) {
-                    free[axis as usize] = slot;
-                }
-            }
-            let source = match info.strides_source {
-                Some(source) => source.map(u32::from),
-                None => [NO_SLOT; 4],
-            };
-            let record = ValueRecord::of(ValueFields {
-                base: u32::try_from(address).unwrap_or_else(|_| {
-                    panic!("value {id} lies at {address}, beyond the device address space")
-                }),
-                store: layout.store(values, id as u32).code(),
-                element: layout.element(values, id as u32).code(),
-                table: record_table(values, id as u32),
-                storage: info.storage,
-                bounds: info.shape.dims(),
-                free,
-                source,
-                dims: info.shape.dims(),
-                strides: info.strides,
-            });
-            records.extend_from_slice(bytemuck::bytes_of(&record));
-        }
-
         let mut task_bytes = Vec::with_capacity(tasks.len() * size_of::<TaskRecord>());
         let mut steps = Vec::new();
         let mut updates_weights = false;
@@ -462,48 +478,7 @@ impl Plan {
         let segments = schedule.segments().to_vec();
         record::assert_records_hold_the_tasks_they_carry(&tasks, order, &task_bytes, &steps);
 
-        let mut readable = vec![false; values.len()];
-        let mut last_writer = std::collections::HashMap::<u64, u32>::new();
-        for index in order {
-            let task = &tasks[*index as usize];
-            for out in task.writes() {
-                let storage = values[out as usize].storage as usize;
-                if !arena_resident(values, storage) {
-                    continue;
-                }
-                last_writer.insert(offsets[storage], out);
-            }
-        }
-        for (id, info) in values.iter().enumerate() {
-            if !addressed_as_its_storage(values, id) {
-                continue;
-            }
-            let storage = info.storage as usize;
-            readable[id] = match values[storage].residency {
-                Residency::Parameter | Residency::State | Residency::Resident => true,
-                _ => match last_writer.get(&offsets[storage]) {
-                    Some(writer) => *writer == storage as u32,
-                    None => held(values, storage),
-                },
-            };
-        }
-        let mut spans = vec![None; values.len()];
-        for (id, info) in values.iter().enumerate() {
-            if !addressed_as_its_storage(values, id) {
-                continue;
-            }
-            spans[id] = Some(Placed {
-                store: layout.store(values, id as u32),
-                address: layout.address(values, &offsets, id as u32),
-                elements: info.shape.elements(),
-                element: layout.element(values, id as u32),
-                scale: layout.scale(values, id as u32),
-                table: table_of(values, id as u32),
-            });
-        }
-
         let splits = tasks.iter().map(|task| task.split).collect::<Vec<_>>();
-        let order = order.to_vec();
         let gather_tables = {
             let mut tables = tasks
                 .iter()
@@ -531,34 +506,44 @@ impl Plan {
             }
             bounds
         };
-        Self {
+        let mut depends = Vec::new();
+        let mut depends_at = Vec::with_capacity(order.len() + 1);
+        for index in order {
+            depends_at.push(depends.len() as u32);
+            depends.extend_from_slice(&tasks[*index as usize].depends);
+        }
+        depends_at.push(depends.len() as u32);
+        let mut plan = Self {
             profile,
             kinds,
             elements,
             tasks: task_bytes,
-            values: records,
             steps,
             segments,
             wave_tasks: schedule.wave_tasks(),
-            spans,
-            readable,
             geometries,
             products: products.clone(),
             attention: attention.clone(),
-            arena_bytes,
-            tensor_bytes,
-            quanta: quanta(values, &offsets),
             layout,
             updates_weights,
             work,
             extents,
             splits,
-            order,
+            order: order.to_vec(),
+            waves: waves.to_vec(),
             slot_bounds,
             authored_walks,
+            depends,
+            depends_at,
             authored,
             gather_tables,
-        }
+            shapes,
+            alignment,
+            bound: Arc::new(Encoding::empty()),
+        };
+        let bound = plan.derive(&plan.slot_bounds);
+        plan.bound = Arc::new(bound);
+        plan
     }
 
     pub fn profile(&self) -> Profile {
@@ -575,8 +560,9 @@ impl Plan {
             "value {value} is no table this plan gathers rows of, and a host names the rows of a table a task walks",
         );
         let offset = value as usize * size_of::<ValueRecord>();
-        let record: ValueRecord =
-            bytemuck::pod_read_unaligned(&self.values[offset..offset + size_of::<ValueRecord>()]);
+        let record: ValueRecord = bytemuck::pod_read_unaligned(
+            &self.bound.values()[offset..offset + size_of::<ValueRecord>()],
+        );
         record.dims[0] * record.dims[1] * record.dims[2]
     }
 
@@ -657,6 +643,10 @@ impl Plan {
         self.slot_bounds.clone()
     }
 
+    pub fn awaits_a_binding(&self) -> bool {
+        !self.host_slots().is_empty()
+    }
+
     pub fn measures(&self) -> &[neura_abi::MeasureRecord] {
         self.authored.measures()
     }
@@ -673,54 +663,143 @@ impl Plan {
         self.authored.values_of(value)
     }
 
-    pub fn encode(&self, extents: &[u32]) -> Encoding {
-        assert!(
-            self.dynamic(),
-            "a plan of one shape carries the records of every run it serves",
+    pub fn encode(&self, lengths: &[u32]) -> Encoding {
+        assert_eq!(
+            lengths.len(),
+            self.slot_bounds.len(),
+            "this plan walks {} free extents and the host bound it to {} lengths",
+            self.slot_bounds.len(),
+            lengths.len(),
         );
-        let mut values = self.values.clone();
-        for id in 0..self.spans.len() {
-            let dims = self.extents.dims(id as u32, extents);
-            let strides = self.extents.strides(id as u32, extents);
-            let at = id * size_of::<ValueRecord>();
-            let mut record: ValueRecord =
-                bytemuck::pod_read_unaligned(&values[at..at + size_of::<ValueRecord>()]);
-            record.dims = dims;
-            record.strides = strides;
-            values[at..at + size_of::<ValueRecord>()].copy_from_slice(bytemuck::bytes_of(&record));
+        self.derive(lengths)
+    }
+
+    fn derive(&self, lengths: &[u32]) -> Encoding {
+        let sized = Sized::of(&self.shapes, &self.extents, lengths);
+        assert_eq!(
+            self.depends_at.len(),
+            self.order.len() + 1,
+            "a plan carries one dependency run per task it schedules and one more for the end",
+        );
+        let recorded = Recorded::of(&self.tasks, &self.steps)
+            .zip(self.depends_at.windows(2))
+            .map(|(recorded, at)| Wired {
+                recorded,
+                depends: &self.depends[at[0] as usize..at[1] as usize],
+            })
+            .collect::<Vec<_>>();
+        let live = storage_liveness(&sized, &recorded);
+        let reserved = self.layout.tensors().bytes();
+        let (offsets, tensor_bytes) =
+            allocate(&sized, &live, &self.waves, self.alignment, reserved);
+        assert!(
+            tensor_bytes.is_multiple_of(WORD_BYTES),
+            "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
+        );
+        let mut records = Vec::with_capacity(sized.len() * size_of::<ValueRecord>());
+        for id in 0..sized.len() {
+            let id = id as u32;
+            let owner = sized.storage(id);
+            assert!(
+                sized.element(id) == sized.element(owner) && sized.scale(id) == sized.scale(owner),
+                "value {id} holds numbers of another storage",
+            );
+            let address = self.layout.address(owner, sized.residency(owner), &offsets);
+            let mut free = [NO_SLOT; 4];
+            for axis in 0..neura_abi::MAX_RANK {
+                if let Some(slot) = self.shapes[id as usize].shape.free(axis) {
+                    free[axis as usize] = slot;
+                }
+            }
+            let source = match self.shapes[id as usize].strides_source {
+                Some(source) => source.map(u32::from),
+                None => [NO_SLOT; 4],
+            };
+            let record = ValueRecord::of(ValueFields {
+                base: u32::try_from(address).unwrap_or_else(|_| {
+                    panic!("value {id} lies at {address}, beyond the device address space")
+                }),
+                store: store_of(sized.residency(owner)).code(),
+                element: sized.element(id).code(),
+                table: record_table(&sized, id),
+                storage: owner,
+                bounds: self.shapes[id as usize].shape.dims(),
+                free,
+                source,
+                dims: sized.dims(id),
+                strides: sized.strides(id),
+            });
+            records.extend_from_slice(bytemuck::bytes_of(&record));
         }
-        let mut tasks = self.tasks.clone();
+        let mut task_bytes = self.tasks.to_vec();
         for (position, index) in self.order.iter().enumerate() {
             let split = self.splits[*index as usize];
             if matches!(split, Split::Range { .. }) {
                 continue;
             }
-            let (first, count) = self.extents.span(split, extents);
+            let (first, count) = self.extents.span(split, lengths);
             let at = position * size_of::<TaskRecord>();
             let mut record: TaskRecord =
-                bytemuck::pod_read_unaligned(&tasks[at..at + size_of::<TaskRecord>()]);
+                bytemuck::pod_read_unaligned(&task_bytes[at..at + size_of::<TaskRecord>()]);
             record.first = first;
             record.count = count;
-            tasks[at..at + size_of::<TaskRecord>()].copy_from_slice(bytemuck::bytes_of(&record));
+            task_bytes[at..at + size_of::<TaskRecord>()]
+                .copy_from_slice(bytemuck::bytes_of(&record));
         }
-        Encoding { values, tasks }
+        let mut readable = vec![false; sized.len()];
+        let mut last_writer = std::collections::HashMap::<u64, u32>::new();
+        for task in &recorded {
+            for out in task.writes() {
+                let storage = sized.storage(out);
+                if !sized.resident(storage) || sized.bytes(storage) == 0 {
+                    continue;
+                }
+                last_writer.insert(offsets[storage as usize], out);
+            }
+        }
+        for id in 0..sized.len() {
+            let id = id as u32;
+            if !sized.addressed_as_its_storage(id) {
+                continue;
+            }
+            let storage = sized.storage(id);
+            readable[id as usize] = sized.held(storage)
+                || sized.bytes(storage) == 0
+                || last_writer.get(&offsets[storage as usize]) == Some(&storage);
+        }
+        let mut spans = vec![None; sized.len()];
+        for id in 0..sized.len() {
+            let id = id as u32;
+            if !sized.addressed_as_its_storage(id) {
+                continue;
+            }
+            let owner = sized.storage(id);
+            spans[id as usize] = Some(Placed {
+                store: store_of(sized.residency(owner)),
+                address: self.layout.address(owner, sized.residency(owner), &offsets),
+                element: sized.element(id),
+                scale: sized.scale(id),
+                table: sized.table(id),
+            });
+        }
+        Encoding {
+            values: records,
+            tasks: task_bytes,
+            spans,
+            readable,
+            quanta: quanta(&sized, &offsets),
+            lengths: lengths.to_vec(),
+            arena_bytes: tensor_bytes - reserved,
+            tensor_bytes,
+        }
     }
 
-    pub fn span_at(&self, value: Value<'_>, placement: Placement, extents: &[u32]) -> Span {
-        let mut span = self.span(value, placement);
-        span.elements = self.extents.dims(value.id(), extents).iter().product();
-        assert!(
-            span.table_offset() >= span.payload_bytes(),
-            "a binding of {} numbers walks {} bytes of payload past the quantum table its bound places at {}",
-            span.elements,
-            span.payload_bytes(),
-            span.table_offset(),
-        );
-        span
+    pub fn bound_encoding(&self) -> Arc<Encoding> {
+        self.bound.clone()
     }
 
     pub fn values(&self) -> &[u8] {
-        &self.values
+        self.bound.values()
     }
 
     pub fn steps(&self) -> &[u8] {
@@ -740,17 +819,22 @@ impl Plan {
     }
 
     pub fn span(&self, value: Value<'_>, placement: Placement) -> Span {
-        let placed = self
-            .spans
-            .get(value.id() as usize)
-            .copied()
-            .flatten()
-            .unwrap_or_else(|| {
-                panic!(
-                    "{} elements of a view hold no storage of their own",
-                    value.shape().elements(),
-                )
-            });
+        self.span_at(&self.bound, value, placement, &self.slot_bounds)
+    }
+
+    pub fn span_at(
+        &self,
+        encoding: &Encoding,
+        value: Value<'_>,
+        placement: Placement,
+        lengths: &[u32],
+    ) -> Span {
+        let placed = encoding.placed(value.id()).unwrap_or_else(|| {
+            panic!(
+                "{} elements of a view hold no storage of their own",
+                value.shape().elements(),
+            )
+        });
         let offset = match placed.store {
             Store::Weights => (placement.weights() + placed.address) * WORD_BYTES,
             Store::Tensors => (placement.tensors() + placed.address) * WORD_BYTES,
@@ -759,7 +843,7 @@ impl Plan {
             store: placed.store,
             offset,
             word: placed.address,
-            elements: placed.elements,
+            elements: self.extents.dims(value.id(), lengths).iter().product(),
             element: placed.element,
             scale: placed.scale,
             table: placed.table,
@@ -767,18 +851,15 @@ impl Plan {
     }
 
     pub fn readable(&self, value: Value<'_>) -> bool {
-        self.readable
-            .get(value.id() as usize)
-            .copied()
-            .unwrap_or(false)
+        self.bound.readable(value.id())
     }
 
     pub fn arena_bytes(&self) -> u64 {
-        self.arena_bytes
+        self.bound.arena_bytes()
     }
 
     pub fn quanta(&self) -> &[Quantum] {
-        &self.quanta
+        self.bound.quanta()
     }
 
     pub fn weights(&self) -> &Region {
@@ -786,7 +867,7 @@ impl Plan {
     }
 
     pub fn weight_pages(&self, extents: &[u32], rows: &[TableRows<'_>]) -> Vec<WeightPages> {
-        let values = Resolved::of(&self.values, &self.extents, extents);
+        let values = Resolved::of(self.bound.values(), &self.extents, extents);
         let tiles = self.profile.tiles();
         let mut touched = Touches::default();
         Recorded::of(&self.tasks, &self.steps)
@@ -824,7 +905,7 @@ impl Plan {
     }
 
     pub fn tensor_bytes(&self) -> u64 {
-        self.tensor_bytes
+        self.bound.tensor_bytes()
     }
 
     pub fn resident_bytes(&self) -> u64 {
@@ -844,11 +925,180 @@ impl Plan {
     }
 
     pub fn value_count(&self) -> u32 {
-        (self.values.len() / size_of::<ValueRecord>()) as u32
+        (self.bound.values().len() / size_of::<ValueRecord>()) as u32
     }
 
     pub fn work(&self) -> u64 {
         self.work
+    }
+}
+
+struct Wired<'a, 'b> {
+    recorded: Recorded<'a>,
+    depends: &'b [u32],
+}
+
+impl Reads for Wired<'_, '_> {
+    fn out(&self) -> u32 {
+        self.recorded.out()
+    }
+
+    fn extra(&self) -> u32 {
+        self.recorded.extra()
+    }
+
+    fn in_place(&self) -> bool {
+        self.recorded.in_place()
+    }
+
+    fn reads(&self) -> impl Iterator<Item = u32> + '_ {
+        self.recorded.reads().chain(self.depends.iter().copied())
+    }
+}
+
+impl Walk for Wired<'_, '_> {
+    fn kind(&self) -> Kind {
+        self.recorded.kind()
+    }
+
+    fn geometry(&self) -> u32 {
+        self.recorded.geometry()
+    }
+
+    fn splits(&self) -> u32 {
+        self.recorded.splits()
+    }
+
+    fn slot(&self) -> u32 {
+        self.recorded.slot()
+    }
+
+    fn input(&self, slot: usize) -> u32 {
+        self.recorded.input(slot)
+    }
+
+    fn prelude(&self) -> impl Iterator<Item = u32> {
+        self.recorded.prelude()
+    }
+
+    fn chain(&self) -> impl Iterator<Item = u32> {
+        self.recorded.chain()
+    }
+
+    fn depends(&self) -> impl Iterator<Item = u32> {
+        self.depends.iter().copied()
+    }
+}
+
+struct Sized<'a> {
+    shapes: &'a [ValueInfo],
+    dims: Vec<[u32; 4]>,
+    strides: Vec<[u32; 4]>,
+    elements: Vec<u64>,
+}
+
+impl<'a> Sized<'a> {
+    fn of(shapes: &'a [ValueInfo], extents: &Extents, lengths: &[u32]) -> Self {
+        let dims = (0..shapes.len())
+            .map(|id| extents.dims(id as u32, lengths))
+            .collect::<Vec<_>>();
+        let strides = (0..shapes.len())
+            .map(|id| extents.strides(id as u32, lengths))
+            .collect::<Vec<_>>();
+        let elements = dims
+            .iter()
+            .map(|dims| dims.iter().map(|dim| u64::from(*dim)).product())
+            .collect();
+        Self {
+            shapes,
+            dims,
+            strides,
+            elements,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.shapes.len()
+    }
+
+    fn storage(&self, value: u32) -> u32 {
+        self.shapes[value as usize].storage
+    }
+
+    fn residency(&self, storage: u32) -> Residency {
+        self.shapes[storage as usize].residency
+    }
+
+    fn element(&self, value: u32) -> Element {
+        self.shapes[value as usize].element
+    }
+
+    fn scale(&self, value: u32) -> f32 {
+        self.shapes[value as usize].scale
+    }
+
+    fn retained(&self, value: u32) -> bool {
+        self.shapes[value as usize].retained
+    }
+
+    fn elements(&self, value: u32) -> u64 {
+        self.elements[value as usize]
+    }
+
+    fn dims(&self, value: u32) -> [u32; 4] {
+        self.dims[value as usize]
+    }
+
+    fn strides(&self, value: u32) -> [u32; 4] {
+        self.strides[value as usize]
+    }
+
+    fn bytes(&self, value: u32) -> u64 {
+        self.element(value).storage_words(self.elements(value)) * WORD_BYTES
+    }
+
+    fn table(&self, value: u32) -> u64 {
+        let owner = self.storage(value);
+        self.element(owner).payload_words(self.elements(owner))
+    }
+
+    fn quantized(&self, value: u32) -> bool {
+        self.element(value).quantized()
+    }
+
+    fn resident(&self, value: u32) -> bool {
+        matches!(self.residency(value), Residency::Input | Residency::Derived)
+    }
+
+    fn held(&self, value: u32) -> bool {
+        matches!(
+            self.residency(value),
+            Residency::Input | Residency::Parameter | Residency::State | Residency::Resident
+        )
+    }
+
+    fn owns_its_quanta(&self, value: u32) -> bool {
+        self.element(value).quantized()
+    }
+
+    fn addressed_as_its_storage(&self, value: u32) -> bool {
+        let owner = self.storage(value);
+        self.elements(value) == self.elements(owner)
+            && self.strides(value) == Shape::dense_strides(self.dims(value))
+    }
+
+    fn matches(&self, left: u32, right: u32) -> bool {
+        if self.dims(left) != self.dims(right)
+            || self.strides(left) != self.strides(right)
+            || self.element(left) != self.element(right)
+        {
+            return false;
+        }
+        let (left, right) = (
+            self.shapes[left as usize].shape,
+            self.shapes[right as usize].shape,
+        );
+        (0..neura_abi::MAX_RANK).all(|axis| left.free(axis) == right.free(axis))
     }
 }
 
@@ -1352,15 +1602,16 @@ fn assert_units_keep_their_order(tasks: &[Task]) {
     }
 }
 
-fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<Option<Live>> {
-    let mut live = vec![None::<Live>; values.len()];
+fn storage_liveness<T: Reads + Walk>(sized: &Sized<'_>, tasks: &[T]) -> Vec<Option<Live>> {
+    let mut live = vec![None::<Live>; sized.len()];
     let mut readers = Vec::new();
-    for (position, index) in order.iter().enumerate() {
-        let task = &tasks[*index as usize];
-        let writes = Access::of(values, task).writes().to_vec();
+    for (position, task) in tasks.iter().enumerate() {
+        let writes = Access::over(|value| sized.storage(value), task)
+            .writes()
+            .to_vec();
         let aliases = writes
             .first()
-            .is_some_and(|write| reads_every_element_in_place(values, task, *write));
+            .is_some_and(|write| reads_every_element_in_place(sized, task.kind(), task, *write));
         for write in &writes {
             touch(&mut live, *write, position, false, None);
         }
@@ -1370,7 +1621,7 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
                 continue;
             }
             readers.push(value);
-            let storage = access::storage(values, value);
+            let storage = sized.storage(value);
             let in_place = aliases && !writes.contains(&storage);
             touch(
                 &mut live,
@@ -1384,18 +1635,19 @@ fn storage_liveness(values: &[ValueInfo], tasks: &[Task], order: &[u32]) -> Vec<
     live
 }
 
-fn reads_every_element_in_place(values: &[ValueInfo], task: &Task, write: u32) -> bool {
+fn reads_every_element_in_place<T: Reads>(
+    sized: &Sized<'_>,
+    kind: Kind,
+    task: &T,
+    write: u32,
+) -> bool {
     if !matches!(
-        task.kind,
+        kind,
         Kind::Binary | Kind::Unary | Kind::Partial | Kind::Fill | Kind::Broadcast
     ) {
         return false;
     }
-    let out = &values[write as usize];
-    task.reads().all(|value| {
-        let value = &values[value as usize];
-        value.shape == out.shape && value.strides == out.strides && value.element == out.element
-    })
+    task.reads().all(|value| sized.matches(value, write))
 }
 
 fn touch(
@@ -1423,60 +1675,31 @@ fn touch(
     }
 }
 
-fn storage_bytes(values: &[ValueInfo], storage: usize) -> u64 {
-    let info = &values[storage];
-    info.element.storage_words(u64::from(info.shape.elements())) * WORD_BYTES
-}
-
-fn table_of(values: &[ValueInfo], value: u32) -> u64 {
-    let owner = &values[values[value as usize].storage as usize];
-    owner
-        .element
-        .payload_words(u64::from(owner.shape.elements()))
-}
-
-fn record_table(values: &[ValueInfo], value: u32) -> u32 {
-    if !values[value as usize].element.quantized() {
+fn record_table(sized: &Sized<'_>, value: u32) -> u32 {
+    if !sized.quantized(value) {
         return NO_VALUE;
     }
-    u32::try_from(table_of(values, value)).unwrap_or_else(|_| {
+    u32::try_from(sized.table(value)).unwrap_or_else(|_| {
         panic!("the quantum table of value {value} lies beyond the device address space")
     })
 }
 
-fn quanta(values: &[ValueInfo], offsets: &[u64]) -> Vec<Quantum> {
-    values
-        .iter()
-        .enumerate()
-        .filter(|(id, info)| {
-            info.storage as usize == *id && arena_resident(values, *id) && info.element.quantized()
+fn quanta(sized: &Sized<'_>, offsets: &[u64]) -> Vec<Quantum> {
+    (0..sized.len())
+        .filter(|id| {
+            sized.storage(*id as u32) as usize == *id
+                && sized.resident(*id as u32)
+                && sized.quantized(*id as u32)
         })
-        .map(|(id, info)| Quantum {
-            offset: offsets[id] + table_of(values, id as u32) * WORD_BYTES,
-            scale: info.scale,
+        .map(|id| Quantum {
+            offset: offsets[id] + sized.table(id as u32) * WORD_BYTES,
+            scale: sized.scale(id as u32),
         })
         .collect()
 }
 
 fn info_of(values: &[ValueInfo], value: u32) -> &ValueInfo {
     &values[values[value as usize].storage as usize]
-}
-
-fn addressed_as_its_storage(values: &[ValueInfo], id: usize) -> bool {
-    let info = &values[id];
-    let storage = &values[info.storage as usize];
-    info.shape.elements() == storage.shape.elements() && info.strides == info.shape.strides()
-}
-
-fn owns_its_quanta(values: &[ValueInfo], storage: usize) -> bool {
-    values[storage].element.quantized()
-}
-
-fn arena_resident(values: &[ValueInfo], storage: usize) -> bool {
-    matches!(
-        values[storage].residency,
-        Residency::Input | Residency::Derived
-    )
 }
 
 fn held(values: &[ValueInfo], storage: usize) -> bool {
@@ -1487,7 +1710,7 @@ fn held(values: &[ValueInfo], storage: usize) -> bool {
 }
 
 fn allocate(
-    values: &[ValueInfo],
+    sized: &Sized<'_>,
     live: &[Option<Live>],
     waves: &[u32],
     alignment: u64,
@@ -1496,20 +1719,20 @@ fn allocate(
     let wave_of = |position: usize| waves[position];
     let mut arena = Blocks::with_base(reserved);
     let mut offsets = vec![0u64; live.len()];
-    let owners = (0..values.len()).filter(|id| values[*id].storage as usize == *id);
+    let owners = (0..sized.len()).filter(|id| sized.storage(*id as u32) as usize == *id);
     for id in owners.clone() {
-        if !arena_resident(values, id) {
+        if !sized.resident(id as u32) {
             continue;
         }
-        if held(values, id) || values[id].retained || owns_its_quanta(values, id) {
-            offsets[id] = arena.reserve(storage_bytes(values, id), alignment);
+        if sized.held(id as u32) || sized.retained(id as u32) || sized.owns_its_quanta(id as u32) {
+            offsets[id] = arena.reserve(sized.bytes(id as u32), alignment);
         }
     }
     let mut pending = live
         .iter()
         .enumerate()
-        .filter(|(id, _)| !held(values, *id) && !values[*id].retained)
-        .filter(|(id, _)| !owns_its_quanta(values, *id))
+        .filter(|(id, _)| !sized.held(*id as u32) && !sized.retained(*id as u32))
+        .filter(|(id, _)| !sized.owns_its_quanta(*id as u32))
         .filter_map(|(id, live)| live.map(|live| (id, live)))
         .collect::<Vec<_>>();
     pending.sort_by_key(|(_, live)| (live.first, live.last));
@@ -1521,7 +1744,7 @@ fn allocate(
             .position(|held| held.live.reads == 1 && held.live.aliased_at == Some(live.first));
         if let Some(position) = taken {
             let held = active.swap_remove(position);
-            let bytes = storage_bytes(values, storage);
+            let bytes = sized.bytes(storage as u32);
             assert_eq!(
                 held.bytes, bytes,
                 "a value read in place by one task hands that task a storage of another size",
@@ -1542,7 +1765,7 @@ fn allocate(
                 true
             }
         });
-        let bytes = storage_bytes(values, storage);
+        let bytes = sized.bytes(storage as u32);
         let offset = arena.reserve(bytes, alignment);
         offsets[storage] = offset;
         active.push(Active {

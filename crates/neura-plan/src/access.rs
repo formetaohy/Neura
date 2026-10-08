@@ -52,16 +52,14 @@ pub(crate) struct Access {
 
 impl Access {
     pub(crate) fn of(values: &[ValueInfo], task: &impl Reads) -> Self {
-        let mut reads = task
-            .reads()
-            .map(|value| storage(values, value))
-            .collect::<Vec<u32>>();
+        Self::over(|value| storage(values, value), task)
+    }
+
+    pub(crate) fn over(storage: impl Fn(u32) -> u32, task: &impl Reads) -> Self {
+        let mut reads = task.reads().map(&storage).collect::<Vec<u32>>();
         reads.sort_unstable();
         reads.dedup();
-        let mut writes = task
-            .writes()
-            .map(|value| storage(values, value))
-            .collect::<Vec<u32>>();
+        let mut writes = task.writes().map(&storage).collect::<Vec<u32>>();
         writes.sort_unstable();
         writes.dedup();
         Self {

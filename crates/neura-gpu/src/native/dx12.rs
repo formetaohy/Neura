@@ -898,6 +898,15 @@ impl Device {
         seconds
     }
 
+    pub(crate) fn complete(&self, index: u64) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the D3D12 compute queue is never poisoned");
+        self.retire(&mut state);
+        index <= state.completed
+    }
+
     pub(crate) fn seconds(&self, index: u64) -> f64 {
         let mut state = self
             .state

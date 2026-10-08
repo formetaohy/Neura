@@ -323,7 +323,7 @@ fn the_engine_writes_a_resident_tensor_without_the_host() {
     submission.copy(
         &engine,
         0,
-        program.heap(),
+        &program.heap(),
         program.span(observation).offset,
         4 * 4,
     );

@@ -12,7 +12,7 @@ mod region;
 mod schedule;
 mod span;
 
-pub use encode::{Plan, Quantum, Span};
+pub use encode::{Encoding, Plan, Quantum, Span};
 pub use layout::{Layout, Region, Seed};
 pub use pages::WeightPages;
 pub use product::Product;

@@ -198,6 +198,10 @@ impl Allocation {
         &self.lease.heap
     }
 
+    pub(crate) fn share(&self) -> Arc<Heap> {
+        self.lease.heap.clone()
+    }
+
     pub(crate) fn buffer(&self) -> &GpuBuffer {
         self.lease.heap.buffer()
     }

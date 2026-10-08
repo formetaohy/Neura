@@ -379,7 +379,11 @@ impl Runtime {
             weights.state().tensors(),
         );
         resident.kernel.compile();
-        let tensors = self.heap.allocate(plan.tensor_bytes() / WORD_BYTES);
+        let tensors = self.heap.allocate(if plan.awaits_a_binding() {
+            0
+        } else {
+            plan.tensor_bytes() / WORD_BYTES
+        });
         Program::of(
             &self.context,
             resident,
@@ -485,7 +489,8 @@ impl Runtime {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
-        program.bind(extents);
+        let lengths = program.bind(extents);
+        program.materialize(self.context.queue(), &lengths);
     }
 
     pub fn declare_rows(&self, program: &Program, table: Value<'_>, rows: &[u32]) {
@@ -505,8 +510,7 @@ impl Runtime {
         );
         program.write_extents(self.context.queue());
         if program.dynamic() && program.records_pending() {
-            let extents = program.host_extents();
-            program.write_records(self.context.queue(), &extents);
+            program.write_records(self.context.queue());
             program.records_written();
         }
         if program.windows().is_empty() {
@@ -522,6 +526,7 @@ impl Runtime {
                 [program.workgroups, 1, 1],
             );
             let submission = submission.submit(self.context.queue());
+            program.used(submission);
             return Run {
                 queue: self.context.queue().clone(),
                 submissions: vec![submission],
@@ -555,7 +560,9 @@ impl Runtime {
                 &program.group,
                 [program.workgroups, 1, 1],
             );
-            submissions.push(submission.submit(queue));
+            let submission = submission.submit(queue);
+            program.used(submission);
+            submissions.push(submission);
             program.store().mark_dirty(group.writes());
         }
         Run {
@@ -680,7 +687,7 @@ impl Runtime {
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura pull");
         for (offset, length, at) in copies {
-            submission.copy(program.heap(), offset, staging, at, length);
+            submission.copy(&program.heap(), offset, staging, at, length);
         }
         submission.copy(
             program.refusal.buffer(),

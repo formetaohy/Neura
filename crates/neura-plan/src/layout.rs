@@ -213,39 +213,13 @@ impl Layout {
         &self.seeds
     }
 
-    pub(crate) fn store(&self, values: &[ValueInfo], value: u32) -> Store {
-        store_of(values[values[value as usize].storage as usize].residency)
-    }
-
-    pub(crate) fn element(&self, values: &[ValueInfo], value: u32) -> Element {
-        let info = &values[value as usize];
-        let owner = &values[info.storage as usize];
-        assert!(
-            info.element == owner.element,
-            "value {value} holds {} numbers of another storage",
-            info.element.name(),
-        );
-        info.element
-    }
-
-    pub(crate) fn scale(&self, values: &[ValueInfo], value: u32) -> f32 {
-        let info = &values[value as usize];
-        let owner = &values[info.storage as usize];
-        assert!(
-            info.scale == owner.scale,
-            "value {value} reconstructs numbers of another storage",
-        );
-        info.scale
-    }
-
-    pub(crate) fn address(&self, values: &[ValueInfo], arena: &[u64], value: u32) -> u64 {
-        let storage = values[value as usize].storage;
-        match self.store(values, value) {
-            Store::Weights => match values[storage as usize].residency {
+    pub(crate) fn address(&self, storage: u32, residency: Residency, arena: &[u64]) -> u64 {
+        match store_of(residency) {
+            Store::Weights => match residency {
                 Residency::State => self.state.address(storage),
                 _ => self.weights.address(storage),
             },
-            Store::Tensors => match values[storage as usize].residency {
+            Store::Tensors => match residency {
                 Residency::Resident => self.tensors.address(storage),
                 _ => arena[storage as usize] / WORD_BYTES,
             },

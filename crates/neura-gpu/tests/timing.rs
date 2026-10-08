@@ -43,3 +43,28 @@ fn every_platform_backend_times_the_copy_it_ran() {
         );
     }
 }
+
+#[test]
+fn every_platform_backend_reports_a_completed_copy() {
+    for backends in Backends::PLATFORM {
+        let backend = backends.backend();
+        let context = context(backends);
+        let device = context.device();
+        let queue = context.queue();
+        let usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+        let source = GpuBuffer::new(device, "completion source", 64 << 20, usage);
+        let target = GpuBuffer::new(device, "completion target", 64 << 20, usage);
+        let mut submission = Submission::new(device, "completion copy");
+        submission.copy(&source, 0, &target, 0, 64 << 20);
+        let index = submission.submit(queue);
+        queue.wait(index, neura_gpu::READBACK_TIMEOUT);
+        assert!(
+            queue.complete(index),
+            "{backend:?} reports a submission it waited on as unfinished",
+        );
+        assert!(
+            queue.complete(index),
+            "{backend:?} forgets a submission it has already reported",
+        );
+    }
+}

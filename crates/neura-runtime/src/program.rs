@@ -4,10 +4,13 @@ use crate::pool::Recycled;
 use crate::store::WeightStore;
 use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
 use neura_gpu::Queue;
-use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
+use neura_gpu::{
+    BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, READBACK_TIMEOUT, Submission,
+    SubmissionIndex,
+};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, TASKS, VALUES};
-use neura_plan::{Plan, Region, Span, TableRows, WeightPages};
+use neura_plan::{Encoding, Plan, Region, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -95,7 +98,6 @@ pub struct Program {
     cached: Mutex<Option<Vec<u32>>>,
     pub(crate) refusal: Recycled,
     pub(crate) group: BindGroup,
-    pub(crate) tensors: Allocation,
     pub(crate) weights: Weights,
     pub(crate) progress: Recycled,
     pub(crate) header: Vec<u8>,
@@ -104,9 +106,38 @@ pub struct Program {
     revision: Revision,
     tasks: Recycled,
     values: Recycled,
+    tensors: Mutex<Tensors>,
     bound: Mutex<Bound>,
     windows: Mutex<Option<Windows>>,
+    encoding: Mutex<Option<Arc<Encoding>>>,
+    last: Mutex<Option<SubmissionIndex>>,
     plan: Arc<Plan>,
+}
+
+struct Tensors {
+    active: Option<Allocation>,
+    retired: Vec<Allocation>,
+}
+
+impl Tensors {
+    fn held(&self) -> &Allocation {
+        self.active
+            .as_ref()
+            .expect("a program always walks the tensors it holds")
+    }
+
+    fn take(&mut self) -> Allocation {
+        self.active
+            .take()
+            .expect("a program always walks the tensors it holds")
+    }
+
+    fn sweep(&mut self, queue: &Queue, last: Option<SubmissionIndex>) {
+        match last {
+            Some(index) if !queue.complete(index) => {}
+            _ => self.retired.clear(),
+        }
+    }
 }
 
 struct Windows {
@@ -304,28 +335,37 @@ impl Program {
             queue,
             bytemuck::cast_slice(&progress::words(segments, plan.wave_tasks())),
         );
+        let tensors = Tensors {
+            active: Some(tensors),
+            retired: Vec::new(),
+        };
+        let arena = tensors.held().clone();
         let mut clearing = Submission::new(context.device(), "neura tensors and refusal");
-        clearing.clear(tensors.buffer(), tensors.offset(), tensors.bytes());
+        if arena.bytes() > 0 {
+            clearing.clear(arena.buffer(), arena.offset(), arena.bytes());
+        }
         clearing.clear(refusal.buffer(), 0, refusal.buffer().size());
         clearing.submit(queue);
-        for quantum in plan.quanta() {
-            tensors.buffer().write_at(
+        if !plan.awaits_a_binding() {
+            for quantum in plan.quanta() {
+                arena.buffer().write_at(
+                    queue,
+                    arena.offset() + quantum.offset,
+                    &quantum.scale.to_ne_bytes(),
+                );
+            }
+            placement.buffer().write(
                 queue,
-                tensors.offset() + quantum.offset,
-                &quantum.scale.to_ne_bytes(),
+                bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
+                    tensors: u32::try_from(arena.word()).unwrap_or_else(|_| {
+                        panic!("the tensors of a program start beyond the device address space")
+                    }),
+                    weights: u32::try_from(weights.offset() / WORD_BYTES).unwrap_or_else(|_| {
+                        panic!("the weights of a program start beyond the device address space")
+                    }),
+                })),
             );
         }
-        placement.buffer().write(
-            queue,
-            bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
-                tensors: u32::try_from(tensors.word()).unwrap_or_else(|_| {
-                    panic!("the tensors of a program start beyond the device address space")
-                }),
-                weights: u32::try_from(weights.offset() / WORD_BYTES).unwrap_or_else(|_| {
-                    panic!("the weights of a program start beyond the device address space")
-                }),
-            })),
-        );
         let tasks = Recycled::claim(
             pool,
             "neura tasks",
@@ -354,7 +394,7 @@ impl Program {
                 .write(queue, bytemuck::cast_slice(&plan.host_extents()));
         }
         let workgroups = segments.min(plan.profile().workgroups()).max(1);
-        let heap = tensors.heap();
+        let heap = arena.heap();
         let banks = heap.banks();
         let bank_bytes = heap.bank_bytes();
         let paged = weights.paged();
@@ -388,7 +428,7 @@ impl Program {
             let size = (heap.bytes() - offset).min(bank_bytes);
             bindings.push(Binding {
                 index: HEAP + bank,
-                buffer: tensors.buffer().binding(offset, size),
+                buffer: arena.buffer().binding(offset, size),
             });
         }
         if let Some(table) = weights.store().table() {
@@ -453,13 +493,15 @@ impl Program {
             ]);
         }
         let group = resident.kernel.bind_group(&bindings);
+        let bound = Bound::of(&plan);
+        let encoding = (!plan.awaits_a_binding()).then(|| plan.bound_encoding());
         Self {
             resident,
             extents,
             cached: Mutex::new(None),
             refusal,
             group,
-            tensors,
+            tensors: Mutex::new(tensors),
             weights,
             progress: progress_buffer,
             header,
@@ -468,13 +510,15 @@ impl Program {
             revision,
             tasks,
             values,
-            bound: Mutex::new(Bound::of(&plan)),
+            bound: Mutex::new(bound),
             windows: Mutex::new(preview),
+            encoding: Mutex::new(encoding),
+            last: Mutex::new(None),
             plan,
         }
     }
 
-    pub(crate) fn bind(&self, extents: &[u32]) {
+    pub(crate) fn bind(&self, extents: &[u32]) -> Vec<u32> {
         let host = self.plan.host_slots();
         assert_eq!(
             extents.len(),
@@ -483,7 +527,7 @@ impl Program {
             host.len(),
             extents.len(),
         );
-        let mut bound = self.binding();
+        let bound = self.binding();
         let mut values = bound
             .extents
             .clone()
@@ -495,11 +539,7 @@ impl Program {
             );
             values[*slot as usize] = *extent;
         }
-        bound.extents = Some(values);
-        bound.written = false;
-        bound.rows.clear();
-        drop(bound);
-        self.extents_cache().take();
+        values
     }
 
     pub(crate) fn declare_rows(&self, table: Value<'_>, rows: &[u32]) {
@@ -579,7 +619,103 @@ impl Program {
     }
 
     pub(crate) fn span_with(&self, value: Value, extents: &[u32]) -> Span {
-        self.plan.span_at(value, self.at(), extents)
+        let encoding = self.encoding();
+        self.plan.span_at(&encoding, value, self.at(), extents)
+    }
+
+    pub(crate) fn encoding(&self) -> Arc<Encoding> {
+        let lengths = self.host_extents();
+        if let Some(encoding) = self
+            .encoding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|held| held.lengths() == lengths)
+        {
+            return encoding.clone();
+        }
+        let encoding = Arc::new(self.plan.encode(&lengths));
+        *self.encoding.lock().unwrap_or_else(PoisonError::into_inner) = Some(encoding.clone());
+        encoding
+    }
+
+    pub(crate) fn materialize(&self, queue: &Queue, lengths: &[u32]) {
+        {
+            let encoding = self.encoding.lock().unwrap_or_else(PoisonError::into_inner);
+            if encoding
+                .as_ref()
+                .is_some_and(|held| held.lengths() == lengths)
+            {
+                return;
+            }
+        }
+        let encoding = Arc::new(self.plan.encode(lengths));
+        self.reserve(queue, encoding.tensor_bytes());
+        self.publish(queue, &encoding);
+        *self.encoding.lock().unwrap_or_else(PoisonError::into_inner) = Some(encoding);
+        let mut bound = self.binding();
+        bound.extents = Some(lengths.to_vec());
+        bound.written = false;
+        bound.rows.clear();
+        drop(bound);
+        self.extents_cache().take();
+    }
+
+    fn reserve(&self, queue: &Queue, tensor_bytes: u64) {
+        let mut tensors = self.tensors.lock().unwrap_or_else(PoisonError::into_inner);
+        let words = tensor_bytes / WORD_BYTES;
+        if tensors.held().words() >= words {
+            return;
+        }
+        let last = *self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        tensors.sweep(queue, last);
+        let heap = tensors.held().share();
+        let doubled = words.max(tensors.held().words() * 2);
+        let wanted = if heap.holds(doubled) { doubled } else { words };
+        let allocation = if heap.holds(wanted) {
+            heap.allocate(wanted)
+        } else {
+            let in_flight = last.filter(|index| !queue.complete(*index));
+            if let Some(index) = in_flight {
+                queue.wait(index, READBACK_TIMEOUT);
+            }
+            tensors.sweep(queue, None);
+            drop(tensors.take());
+            heap.allocate(wanted)
+        };
+        let mut clearing = Submission::new(queue.device(), "neura tensors");
+        clearing.clear(allocation.buffer(), allocation.offset(), allocation.bytes());
+        clearing.submit(queue);
+        let old = tensors.active.replace(allocation);
+        if let Some(old) = old {
+            tensors.retired.push(old);
+        }
+    }
+
+    fn publish(&self, queue: &Queue, encoding: &Encoding) {
+        let tensors = self.tensors.lock().unwrap_or_else(PoisonError::into_inner);
+        for quantum in encoding.quanta() {
+            tensors.held().buffer().write_at(
+                queue,
+                tensors.held().offset() + quantum.offset,
+                &quantum.scale.to_ne_bytes(),
+            );
+        }
+        self.placement.buffer().write(
+            queue,
+            bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
+                tensors: u32::try_from(tensors.held().word()).unwrap_or_else(|_| {
+                    panic!("the tensors of a program start beyond the device address space")
+                }),
+                weights: u32::try_from(self.weights.offset() / WORD_BYTES).unwrap_or_else(|_| {
+                    panic!("the weights of a program start beyond the device address space")
+                }),
+            })),
+        );
+    }
+
+    pub(crate) fn used(&self, submission: SubmissionIndex) {
+        *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(submission);
     }
 
     pub(crate) fn windows(&self) -> Arc<Vec<WeightGroup>> {
@@ -612,10 +748,10 @@ impl Program {
         self.weights.store()
     }
 
-    pub(crate) fn write_records(&self, queue: &Queue, extents: &[u32]) {
-        let encoding = self.plan.encode(extents);
-        self.values.buffer().write(queue, &encoding.values);
-        self.tasks.buffer().write(queue, &encoding.tasks);
+    pub(crate) fn write_records(&self, queue: &Queue) {
+        let encoding = self.encoding();
+        self.values.buffer().write(queue, encoding.values());
+        self.tasks.buffer().write(queue, encoding.tasks());
     }
 
     pub(crate) fn records_pending(&self) -> bool {
@@ -643,27 +779,58 @@ impl Program {
     }
 
     fn at(&self) -> Placement {
-        Placement::new(self.tensors.word(), self.weights.offset() / WORD_BYTES)
+        let tensors = self.tensors.lock().unwrap_or_else(PoisonError::into_inner);
+        Placement::new(tensors.held().word(), self.weights.offset() / WORD_BYTES)
     }
 
     pub(crate) fn lives_on(&self, heap: &Arc<crate::heap::Heap>) -> bool {
-        self.tensors.lives_on(heap)
+        self.tensors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held()
+            .lives_on(heap)
     }
 
-    pub fn heap(&self) -> &GpuBuffer {
-        self.tensors.buffer()
+    pub fn heap(&self) -> GpuBuffer {
+        self.tensors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held()
+            .buffer()
+            .clone()
     }
 
     pub fn heap_bytes(&self) -> u64 {
-        self.tensors.heap().bytes()
+        self.tensors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held()
+            .heap()
+            .bytes()
     }
 
     pub fn tensor_bytes(&self) -> u64 {
-        self.plan.tensor_bytes()
+        match self
+            .encoding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            Some(encoding) => encoding.tensor_bytes(),
+            None => self.plan.tensor_bytes(),
+        }
     }
 
     pub fn arena_bytes(&self) -> u64 {
-        self.plan.arena_bytes()
+        match self
+            .encoding
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            Some(encoding) => encoding.arena_bytes(),
+            None => self.plan.arena_bytes(),
+        }
     }
 
     pub fn resident_bytes(&self) -> u64 {
@@ -675,7 +842,12 @@ impl Program {
     }
 
     pub fn device_bytes(&self) -> u64 {
-        self.tensors.heap().bytes()
+        self.tensors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held()
+            .heap()
+            .bytes()
             + self.tasks.buffer().size()
             + self.values.buffer().size()
             + self.resident.steps.buffer().size()
@@ -734,7 +906,7 @@ impl Program {
     }
 
     pub fn readable(&self, value: Value) -> bool {
-        self.plan.readable(value)
+        self.encoding().readable(value.id())
     }
 
     pub fn updates_weights(&self) -> bool {

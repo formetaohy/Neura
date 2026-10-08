@@ -407,8 +407,8 @@ fn a_quantized_image_reads_back_the_quantum_its_storage_holds() {
         );
         assert_eq!(
             span.table_offset(),
-            Element::Int8.payload_words(6 * 4) * 4,
-            "the quantum a quantized tensor reconstructs by stands where the layout its bound declares puts it, whatever the binding",
+            span.payload_bytes(),
+            "the quantum a quantized tensor reconstructs by stands where the payload of the binding it walks ends",
         );
         assert_eq!(span.image_bytes(), span.payload_bytes() + 4);
         let packed = source
