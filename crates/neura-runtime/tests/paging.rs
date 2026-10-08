@@ -387,3 +387,89 @@ fn a_streamed_store_reads_and_writes_quantized_weights_across_pages() {
         quantized_weights_cross_pages(backends);
     }
 }
+
+const DEEP_WIDTH: u32 = 256;
+const DEEP_LAYERS: u32 = 6;
+const DEEP_BATCH: u32 = 32;
+const DEEP_STEPS: u32 = 4;
+const DEEP_BYTES: u64 = 96 * (1 << 14);
+
+fn deep_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let init = Init::Uniform {
+        low: -0.02,
+        high: 0.02,
+    };
+    let mut layers = Vec::new();
+    for _ in 0..DEEP_LAYERS {
+        layers.push((
+            graph.parameter(Shape::matrix(DEEP_WIDTH, DEEP_WIDTH), init, Element::Single),
+            graph.parameter(Shape::matrix(1, DEEP_WIDTH), Init::Zero, Element::Single),
+        ));
+    }
+    let data = graph.input(Shape::matrix(DEEP_BATCH, DEEP_WIDTH), Element::Single);
+    let mut value = data;
+    for (weight, bias) in &layers {
+        value = graph.relu(graph.add(graph.matmul(value, *weight), *bias));
+    }
+    let loss = graph.sum(value);
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    for (weight, bias) in &layers {
+        graph.add_into(*weight, graph.mul(gradients.of(*weight), descent));
+        graph.add_into(*bias, graph.mul(gradients.of(*bias), descent));
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let numbers = (0..(DEEP_BATCH * DEEP_WIDTH))
+        .map(|index| ((index % 13) as f32) * 0.01 - 0.06)
+        .collect::<Vec<_>>();
+    let mut observed = 0.0;
+    for _ in 0..DEEP_STEPS {
+        runtime.write(&program, data, &numbers);
+        runtime.run(&program).seconds();
+        observed = runtime.read(&program, loss)[0];
+    }
+    let parameters = layers
+        .iter()
+        .flat_map(|(weight, bias)| {
+            let mut values = runtime.read(&program, *weight);
+            values.extend(runtime.read(&program, *bias));
+            values
+        })
+        .collect();
+    (parameters, observed)
+}
+
+#[test]
+fn a_streamed_store_trains_a_model_that_no_budget_can_hold() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_loss) = deep_run(backends, MemoryRequest::default());
+        let (streamed, streamed_loss) = deep_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(DEEP_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a streamed store reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a streamed store held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
+    }
+}

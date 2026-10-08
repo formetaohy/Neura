@@ -528,7 +528,7 @@ impl Runtime {
         let device = self.context.device();
         let mut submissions = Vec::with_capacity(program.weight_groups().len());
         for group in program.weight_groups() {
-            program.store().ensure(queue, group.pages());
+            submissions.extend(program.store().ensure(queue, group.pages()));
             program.progress.buffer().write_at(
                 queue,
                 0,
