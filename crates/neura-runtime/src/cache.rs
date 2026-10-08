@@ -1,6 +1,6 @@
 use crate::pool::{Pool, Recycled};
 use neura_abi::{Element, Kind, StepRecord};
-use neura_gpu::{BufferUsages, GpuContext, PipelineHandle};
+use neura_gpu::{BufferUsages, GpuContext, PipelineHandle, WARM_PROGRAMS};
 use neura_graph::GraphStamp;
 use neura_kernel::Kernel;
 use neura_plan::{Plan, Product};
@@ -130,8 +130,62 @@ pub(crate) struct Assembly {
     pub(crate) kernel: Arc<Kernel>,
 }
 
+struct WarmKernel {
+    kernel: Arc<Kernel>,
+    declared: u64,
+}
+
+struct KernelCache {
+    entries: HashMap<KernelIdentity, WarmKernel>,
+    clock: u64,
+}
+
+impl KernelCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: 0,
+        }
+    }
+
+    fn get(&mut self, identity: &KernelIdentity) -> Option<Arc<Kernel>> {
+        self.clock += 1;
+        match self.entries.get_mut(identity) {
+            Some(warm) => {
+                warm.declared = self.clock;
+                Some(warm.kernel.clone())
+            }
+            None => None,
+        }
+    }
+
+    fn insert(&mut self, identity: KernelIdentity, kernel: Arc<Kernel>) {
+        self.entries.insert(
+            identity,
+            WarmKernel {
+                kernel,
+                declared: self.clock,
+            },
+        );
+    }
+
+    fn retain_warm(&mut self) {
+        if self.entries.len() <= WARM_PROGRAMS {
+            return;
+        }
+        let mut declared = self
+            .entries
+            .values()
+            .map(|warm| warm.declared)
+            .collect::<Vec<u64>>();
+        declared.sort_unstable();
+        let oldest = declared[self.entries.len() - WARM_PROGRAMS];
+        self.entries.retain(|_, warm| warm.declared >= oldest);
+    }
+}
+
 pub(crate) struct Artifacts {
-    kernels: Mutex<HashMap<KernelIdentity, Arc<Kernel>>>,
+    kernels: Mutex<KernelCache>,
     assemblies: Mutex<Vec<(PlanIdentity, Arc<Assembly>)>>,
     residents: Mutex<HashMap<u64, Vec<Weak<Resident>>>>,
     built: AtomicUsize,
@@ -140,7 +194,7 @@ pub(crate) struct Artifacts {
 impl Artifacts {
     pub(crate) fn new() -> Self {
         Self {
-            kernels: Mutex::new(HashMap::new()),
+            kernels: Mutex::new(KernelCache::new()),
             assemblies: Mutex::new(Vec::new()),
             residents: Mutex::new(HashMap::new()),
             built: AtomicUsize::new(0),
@@ -188,6 +242,7 @@ impl Artifacts {
         self.kernels
             .lock()
             .expect("a kernel cache is never poisoned")
+            .entries
             .len()
     }
 
@@ -209,10 +264,13 @@ impl Artifacts {
             .kernels
             .lock()
             .expect("a kernel cache is never poisoned");
-        kernels
-            .entry(identity)
-            .or_insert_with(|| Arc::new(assemble()))
-            .clone()
+        if let Some(kernel) = kernels.get(&identity) {
+            return kernel;
+        }
+        let kernel = Arc::new(assemble());
+        kernels.insert(identity, kernel.clone());
+        kernels.retain_warm();
+        kernel
     }
 
     pub(crate) fn resident_plans(&self) -> usize {
@@ -241,8 +299,11 @@ impl Artifacts {
             .residents
             .lock()
             .expect("a resident cache is never poisoned");
+        residents.retain(|_, bucket| {
+            bucket.retain(|resident| resident.strong_count() > 0);
+            !bucket.is_empty()
+        });
         let bucket = residents.entry(key).or_default();
-        bucket.retain(|resident| resident.strong_count() > 0);
         if let Some(resident) = bucket.iter().find_map(|resident| {
             let resident = resident.upgrade()?;
             resident.holds(&signature).then_some(resident)
