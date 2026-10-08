@@ -353,10 +353,15 @@ fn close(
         .iter()
         .map(|segment| work[*segment as usize])
         .sum::<u64>();
-    let saturated = created.get(earliest as usize).copied().unwrap_or(0) >= workgroups;
+    let segments_after_the_merge = created
+        .get(earliest as usize)
+        .copied()
+        .unwrap_or(0)
+        .saturating_sub(dependencies.len().saturating_sub(1) as u32);
+    let keeps_every_workgroup_busy = segments_after_the_merge >= workgroups;
     if dependencies.len() > 1
         && heaviest > 0
-        && !saturated
+        && keeps_every_workgroup_busy
         && !recomputed
         && dependencies
             .iter()

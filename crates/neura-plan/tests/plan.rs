@@ -216,7 +216,7 @@ fn a_retained_value_is_never_folded_away() {
 }
 
 #[test]
-fn a_consumer_closes_the_producers_it_reads_into_one_segment() {
+fn a_consumer_opens_a_wave_of_its_own_where_the_device_cannot_fill_the_wave_it_reads() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let right = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
@@ -230,16 +230,104 @@ fn a_consumer_closes_the_producers_it_reads_into_one_segment() {
     assert_eq!(plan.task_count(), 3);
     assert_eq!(
         plan.wave_count(),
-        1,
-        "a wave the device cannot fill hands its work to the wave it reads",
+        2,
+        "a consumer opens a wave of its own where the wave it reads holds fewer workgroups than the device runs",
     );
-    assert_eq!(plan.segments().len(), 1);
+    assert_eq!(
+        plan.segments().len(),
+        3,
+        "each task of the graph rides a workgroup of its own",
+    );
     let sum_task = writers(&plan, sum.id())[0];
     let product_task = writers(&plan, product.id())[0];
     let consumer = writers(&plan, out.id())[0];
+    assert_eq!(wave_of(&plan, sum_task), wave_of(&plan, product_task));
     assert!(follows(&plan, sum_task, consumer));
     assert!(follows(&plan, product_task, consumer));
     assert_eq!(out.shape(), Shape::vector(64));
+}
+
+#[test]
+fn a_wave_the_device_can_fill_closes_the_producers_it_reads() {
+    let graph = Graph::new();
+    let source = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
+    let producers = (0..34)
+        .map(|index| graph.mul(source, graph.fill(Shape::vector(64), index as f32 + 1.0)))
+        .collect::<Vec<_>>();
+    for producer in &producers {
+        graph.retain(*producer);
+    }
+    let out = graph.add(producers[0], producers[1]);
+    graph.retain(out);
+    let profile = *every_profile().last().expect("a profile");
+    assert_eq!(profile.workgroups(), 32);
+    let plan = plan_with(&graph, profile);
+    assert_eq!(
+        plan.wave_count(),
+        1,
+        "a wave that keeps every workgroup busy closes its producers",
+    );
+    assert_eq!(plan.segments().len(), 33);
+    let consumer = writers(&plan, out.id())[0] as u32;
+    let closes = plan
+        .segments()
+        .iter()
+        .find(|segment| segment.count == 3)
+        .expect("the consumer joins the producers it reads into one chain");
+    assert!(
+        closes.first <= consumer && consumer < closes.first + closes.count,
+        "the consumer walks the chain of its producers",
+    );
+}
+
+#[test]
+fn a_training_wave_chains_no_more_tasks_than_the_device_runs() {
+    let graph = Graph::new();
+    let observations = graph.input(Shape::matrix(128, 256), Element::Single);
+    let targets = graph.input(Shape::matrix(128, 256), Element::Single);
+    let mut carried = observations;
+    let mut parameters = Vec::new();
+    for layer in 0..6 {
+        let weight = graph.named_parameter(
+            &format!("layer{layer}.weight"),
+            Shape::matrix(256, 256),
+            Init::Zero,
+            Element::Single,
+        );
+        let bias = graph.named_parameter(
+            &format!("layer{layer}.bias"),
+            Shape::matrix(1, 256),
+            Init::Zero,
+            Element::Single,
+        );
+        parameters.push(weight);
+        parameters.push(bias);
+        carried = graph.relu(graph.add(graph.matmul(carried, weight), bias));
+    }
+    let difference = graph.sub(carried, targets);
+    let loss = graph.sum(graph.mul(difference, difference));
+    let gradients = graph.backward(loss);
+    let rate = graph.fill(Shape::scalar(), -0.005);
+    for parameter in parameters {
+        graph.add_into(parameter, graph.mul(gradients.of(parameter), rate));
+    }
+    graph.retain(loss);
+    let profile = *every_profile()
+        .iter()
+        .find(|profile| profile.workgroup() == Budget::BALANCED_THREADS)
+        .expect("a profile the device balances on");
+    let plan = plan_with(&graph, profile);
+    let mut widest = vec![0u32; plan.wave_count() as usize];
+    for segment in plan.segments() {
+        widest[segment.wave as usize] = widest[segment.wave as usize].max(segment.count);
+    }
+    for (wave, chain) in widest.iter().enumerate() {
+        assert!(
+            *chain <= profile.workgroups(),
+            "wave {wave} of a training step hands one workgroup {chain} tasks where the device runs {} of them",
+            profile.workgroups(),
+        );
+    }
 }
 
 #[test]
@@ -2301,10 +2389,6 @@ fn a_compaction_walks_the_rows_a_mask_names() {
         neura_abi::NO_VALUE,
         "a compaction walks the offsets its mask sums",
     );
-    assert!(
-        follows(&plan, author, compact),
-        "a compaction walks the count the closing task authors",
-    );
     for reader in records
         .iter()
         .enumerate()
@@ -2314,6 +2398,10 @@ fn a_compaction_walks_the_rows_a_mask_names() {
         assert!(
             follows(&plan, compact, reader),
             "task {reader} walks the index list the compaction fills",
+        );
+        assert!(
+            follows(&plan, author, reader),
+            "task {reader} walks the count the closing task authors",
         );
     }
 }
