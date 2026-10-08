@@ -48,8 +48,12 @@ mod device {
     fn main(lid: u32) {
         if lid == 0u32 {
             claim[0u32] = progress[progress::SEGMENTS];
+            claim[2u32] = progress[progress::FIRST_TASK];
+            claim[3u32] = progress[progress::LAST_TASK];
         }
         let total = workgroup_uniform_load(&claim[0u32]);
+        let from = workgroup_uniform_load(&claim[2u32]);
+        let to = workgroup_uniform_load(&claim[3u32]);
         loop {
             if lid == 0u32 {
                 claim[1u32] = atomic_add(&progress[progress::CURSOR], 1u32);
@@ -59,7 +63,9 @@ mod device {
                 break;
             }
             let segment = segments[ticket];
-            for index in stride(segment.first, segment.first + segment.count, 1u32) {
+            let first = max(segment.first, from);
+            let last = min(segment.first + segment.count, to);
+            for index in stride(first, last, 1u32) {
                 if lid == 0u32 {
                     gate(segment.wave);
                 }

@@ -4,6 +4,7 @@ use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
 use crate::lower::Task;
+use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::schedule;
 use crate::span::{Extents, Split};
@@ -30,6 +31,7 @@ pub struct Encoding {
 pub struct Span {
     pub store: Store,
     pub offset: u64,
+    pub word: u64,
     pub elements: u32,
     pub element: Element,
     pub scale: f32,
@@ -162,6 +164,7 @@ pub struct Plan {
     splits: Vec<Split>,
     order: Vec<u32>,
     slot_bounds: Vec<u32>,
+    weights: Vec<WeightPages>,
     authored: authored::Authored,
 }
 
@@ -232,6 +235,7 @@ impl Plan {
         );
         let order = schedule.order();
         let waves = schedule.waves();
+        let pages = pages::weight_pages(values, matmul_tiles, &tasks, order, &layout);
         let live = storage_liveness(values, &tasks, order);
         let reserved = layout.tensors().bytes();
         let (offsets, tensor_bytes) = allocate(values, &live, waves, alignment, reserved);
@@ -528,6 +532,7 @@ impl Plan {
             splits,
             order,
             slot_bounds,
+            weights: pages,
             authored,
         }
     }
@@ -710,6 +715,7 @@ impl Plan {
         Span {
             store: placed.store,
             offset,
+            word: placed.address,
             elements: placed.elements,
             element: placed.element,
             scale: placed.scale,
@@ -734,6 +740,14 @@ impl Plan {
 
     pub fn weights(&self) -> &Region {
         self.layout.weights()
+    }
+
+    pub fn weight_pages(&self) -> &[WeightPages] {
+        &self.weights
+    }
+
+    pub fn store_words(&self) -> u64 {
+        self.layout.words()
     }
 
     pub fn state(&self) -> &Region {

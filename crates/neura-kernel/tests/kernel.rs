@@ -43,6 +43,7 @@ fn all(profile: usize) -> &'static Kernel {
                     ),
                     false,
                     Banks::SINGLE,
+                    false,
                 )
             })
             .collect()
@@ -62,6 +63,7 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
         ),
         false,
         Banks::SINGLE,
+        false,
     )
 }
 
@@ -92,6 +94,70 @@ fn switch_cases(program: &ComputeProgram, name: &str) -> (Vec<u32>, bool) {
             _ => None,
         })
         .unwrap_or_else(|| panic!("the Rust device function {name} dispatches"))
+}
+
+#[test]
+fn a_paged_program_binds_the_page_table_it_translates_weights_through() {
+    let profile = profiles()[0];
+    let geometry = Geometry::of(
+        profile.workgroup(),
+        profile.shared_bytes(),
+        &walked(profile),
+        &[],
+    );
+    let plain = Kernel::assemble(
+        &[Kind::Matmul],
+        &[Element::Single],
+        geometry.clone(),
+        false,
+        Banks::SINGLE,
+        false,
+    );
+    let paged = Kernel::assemble(
+        &[Kind::Matmul],
+        &[Element::Single],
+        geometry,
+        false,
+        Banks::SINGLE,
+        true,
+    );
+    assert!(!plain.paged());
+    assert!(paged.paged());
+    assert_eq!(paged.bindings().len(), plain.bindings().len() + 1);
+    let table = neura_kernel::pages(Banks::SINGLE) as usize;
+    assert_eq!(paged.bindings()[table].name, "pages");
+    assert_eq!(paged.bindings()[table].kind, BindingKind::ReadOnlyStorage);
+    for (binding, reflected) in bindings(false, Banks::SINGLE, true)
+        .iter()
+        .zip(paged.bindings())
+    {
+        assert_eq!(binding.name, reflected.name);
+        assert_eq!(binding.binding, reflected.binding);
+        assert_eq!(binding.kind, reflected.kind);
+    }
+    let paged_source = paged.program();
+    let ShaderTranslation::Msl { source, .. } = paged_source.translate(Backend::Metal) else {
+        panic!("Metal requires MSL");
+    };
+    assert!(
+        source.contains("d_pages["),
+        "the MSL of a paged program reads its page table",
+    );
+    let ShaderTranslation::Hlsl { source, .. } = paged_source.translate(Backend::Dx12) else {
+        panic!("D3D12 requires HLSL");
+    };
+    assert!(
+        source.contains("d_pages["),
+        "the HLSL of a paged program reads its page table",
+    );
+    let plain_source = plain.program();
+    let ShaderTranslation::Msl { source, .. } = plain_source.translate(Backend::Metal) else {
+        panic!("Metal requires MSL");
+    };
+    assert!(
+        !source.contains("d_pages["),
+        "a program of a resident weight store pays no page table",
+    );
 }
 
 #[test]
@@ -196,8 +262,9 @@ fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
         ),
         false,
         banks,
+        false,
     );
-    let expected = bindings(false, banks);
+    let expected = bindings(false, banks, false);
     assert_eq!(expected.len(), 2 + banks.count() as usize + 5);
     assert_eq!(kernel.bindings().len(), expected.len());
     for (binding, reflected) in expected.iter().zip(kernel.bindings()) {
@@ -232,13 +299,15 @@ fn every_profile_compiles_the_rust_abi_and_bindings() {
             assert_eq!(kernel.geometry().walked(), &walked(*profile)[..]);
             assert_eq!(
                 kernel.bindings().len(),
-                bindings(false, Banks::SINGLE).len()
+                bindings(false, Banks::SINGLE, false).len()
             );
             assert_eq!(
                 program.bindings().len(),
-                bindings(false, Banks::SINGLE).len()
+                bindings(false, Banks::SINGLE, false).len()
             );
-            for (binding, reflected) in bindings(false, Banks::SINGLE).iter().zip(kernel.bindings())
+            for (binding, reflected) in bindings(false, Banks::SINGLE, false)
+                .iter()
+                .zip(kernel.bindings())
             {
                 assert_eq!(binding.name, reflected.name);
                 assert_eq!(binding.binding, reflected.binding);
@@ -483,6 +552,7 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             geometry.clone(),
             false,
             Banks::SINGLE,
+            false,
         );
         let program = kernel.program();
         assert_eq!(
@@ -523,6 +593,7 @@ fn a_device_program_carries_only_the_tiles_its_plan_walks() {
         geometry.clone(),
         false,
         Banks::SINGLE,
+        false,
     );
     let program = kernel.program();
     let names = functions(&program);
@@ -585,6 +656,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         geometry.clone(),
         false,
         Banks::SINGLE,
+        false,
     );
     let used = workgroup_bytes(&kernel.program());
     assert_eq!(
@@ -624,6 +696,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         Geometry::of(profile.workgroup(), profile.shared_bytes(), &[], &attention),
         false,
         Banks::SINGLE,
+        false,
     );
     let program = kernel.program();
     let names = functions(&program);

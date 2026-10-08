@@ -109,6 +109,11 @@ impl Element {
         self.payload_words(elements) + self.quanta(elements)
     }
 
+    pub const fn word_span(self, first: u64, count: u64) -> (u64, u64) {
+        let per = self.elements_per_word();
+        (first / per, (first + count).div_ceil(per))
+    }
+
     pub const fn narrow(self) -> bool {
         self.elements_per_word() > 1
     }

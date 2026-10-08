@@ -1,5 +1,6 @@
 pub mod element;
 pub mod kind;
+pub mod page;
 mod placement;
 pub mod progress;
 mod record;
@@ -10,6 +11,7 @@ pub mod strategy;
 
 pub use element::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK};
 pub use kind::{DeviceModule, Geometry, KINDS, Kind, KindInfo};
+pub use page::{NO_PAGE, PAGE_MASK, PAGE_SHIFT, PAGE_WORDS, pages_of};
 pub use placement::Placement;
 pub use record::{
     FieldLayout, FieldType, MEASURE, MeasureFields, MeasureRecord, PATCH, PatchFields, PatchRecord,

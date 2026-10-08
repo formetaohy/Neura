@@ -18,6 +18,7 @@ pub enum Refusal {
     Element,
     Mask,
     Empty,
+    Page,
 }
 
 impl Refusal {
@@ -32,6 +33,7 @@ impl Refusal {
         Self::Element,
         Self::Mask,
         Self::Empty,
+        Self::Page,
     ];
 
     pub const COUNT: u32 = Self::ALL.len() as u32;
@@ -58,6 +60,7 @@ impl Refusal {
             Self::Element => "element",
             Self::Mask => "mask",
             Self::Empty => "empty",
+            Self::Page => "page",
         }
     }
 
@@ -102,3 +105,4 @@ pub const TASK: u32 = Refusal::Task as u32;
 pub const ELEMENT: u32 = Refusal::Element as u32;
 pub const MASK: u32 = Refusal::Mask as u32;
 pub const EMPTY: u32 = Refusal::Empty as u32;
+pub const PAGE: u32 = Refusal::Page as u32;

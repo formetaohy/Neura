@@ -1,8 +1,16 @@
 use crate::Banks;
 use neura_compiler::{Compiler, ast};
 
-pub(crate) fn install(compiler: &mut Compiler, banks: Banks) {
+pub(crate) fn install(compiler: &mut Compiler, banks: Banks, paged: bool) {
     device::define(compiler);
+    compiler.select(
+        if paged {
+            "word_of_paged"
+        } else {
+            "word_of_direct"
+        },
+        "word_of",
+    );
     if banks.count() == 1 {
         compiler.select("peek_single", "peek");
         compiler.select("poke_single", "poke");
@@ -181,8 +189,23 @@ mod device {
         );
     }
 
-    fn word_of(value: Value, word: u32) -> u32 {
+    fn word_of_direct(value: Value, word: u32) -> u32 {
         return base_of(value) + value.base + word;
+    }
+
+    fn word_of_paged(value: Value, word: u32) -> u32 {
+        let mut address = value.base + word;
+        if value.store == store::WEIGHTS {
+            let page = address >> PAGE_SHIFT;
+            let slot = pages[page];
+            if slot == NO_PAGE {
+                refuse(refusal::TENSOR, refusal::PAGE, 0u32);
+                return placement.weights;
+            }
+            address = placement.weights + (slot << PAGE_SHIFT) + (address & PAGE_MASK);
+            return address;
+        }
+        return placement.tensors + address;
     }
 
     fn publish(value: Value, at: u32, data: f32) {

@@ -4,6 +4,7 @@ mod heap;
 mod pool;
 mod program;
 mod runtime;
+mod store;
 
 pub use checkpoint::Checkpoint;
 pub use neura_abi::Placement;

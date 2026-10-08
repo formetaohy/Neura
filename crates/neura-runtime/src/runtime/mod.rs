@@ -3,7 +3,8 @@ use crate::checkpoint::{Checkpoint, TensorData};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
-use neura_abi::{Kind, Placement, Refusal, TENSOR, WORD_BYTES};
+use crate::store::WeightStore;
+use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, progress};
 use neura_gpu::{
     BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback, Submission,
     SubmissionIndex,
@@ -31,9 +32,14 @@ pub struct Readout {
     queue: Queue,
     slot: usize,
     submission: SubmissionIndex,
-    spans: Vec<(Span, u64, u64)>,
+    sources: Vec<Source>,
     total: u64,
     refusal: u64,
+}
+
+enum Source {
+    Device { span: Span, offset: u64, bytes: u64 },
+    Host { span: Span, bytes: Vec<u8> },
 }
 
 impl Readout {
@@ -47,15 +53,24 @@ impl Readout {
                 .expect("a word was copied back"),
         );
         assert_eq!(refusal, 0, "{}", refusal_message(refusal));
-        self.spans
-            .iter()
-            .map(|(span, offset, length)| {
-                let start = *offset as usize;
-                unpack(
-                    span.element,
-                    span.elements as usize,
-                    &bytes[start..start + *length as usize],
-                )
+        self.sources
+            .into_iter()
+            .map(|source| match source {
+                Source::Device {
+                    span,
+                    offset,
+                    bytes: length,
+                } => {
+                    let start = offset as usize;
+                    unpack(
+                        span.element,
+                        span.elements as usize,
+                        &bytes[start..start + length as usize],
+                    )
+                }
+                Source::Host { span, bytes } => {
+                    unpack(span.element, span.elements as usize, &bytes)
+                }
             })
             .collect()
     }
@@ -63,12 +78,15 @@ impl Readout {
 
 pub struct Run {
     queue: Queue,
-    submission: SubmissionIndex,
+    submissions: Vec<SubmissionIndex>,
 }
 
 impl Run {
     pub fn seconds(self) -> f64 {
-        self.queue.seconds(self.submission)
+        self.submissions
+            .iter()
+            .map(|submission| self.queue.seconds(*submission))
+            .sum()
     }
 }
 
@@ -77,6 +95,7 @@ pub struct MemoryRequest {
     pub readback_slots: usize,
     pub heap_bytes: u64,
     pub heap_bank_bytes: Option<u64>,
+    pub resident_weight_bytes: Option<u64>,
 }
 
 impl Default for MemoryRequest {
@@ -86,6 +105,7 @@ impl Default for MemoryRequest {
             readback_slots: DEFAULT_READBACK_SLOTS,
             heap_bytes: DEFAULT_HEAP_BYTES,
             heap_bank_bytes: None,
+            resident_weight_bytes: None,
         }
     }
 }
@@ -103,6 +123,7 @@ pub struct Runtime {
     pool: Arc<Pool>,
     artifacts: Artifacts,
     alignment: u64,
+    resident_weight_bytes: Option<u64>,
 }
 
 impl Runtime {
@@ -158,7 +179,12 @@ impl Runtime {
             pool: Pool::of(context.device(), crate::pool::POOL_BYTES),
             artifacts: Artifacts::new(),
             context,
+            resident_weight_bytes: memory.resident_weight_bytes,
         }
+    }
+
+    fn paged_for(&self, words: u64) -> bool {
+        crate::store::paged_for(words, self.resident_weight_bytes)
     }
 
     pub fn resident_plans(&self) -> usize {
@@ -228,9 +254,7 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let store = checkpoint.pour(weights.region(), weights.state(), weights.words());
-        weights
-            .buffer()
-            .write_at(self.context.queue(), weights.offset(), &store);
+        weights.store().pour(self.context.queue(), &store);
     }
 
     pub fn checkpoint(&self, weights: &Weights) -> Checkpoint {
@@ -239,26 +263,7 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let bytes = weights.words() * WORD_BYTES;
-        let staging = Recycled::claim(
-            &self.pool,
-            "neura checkpoint",
-            bytes,
-            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-        );
-        let device = self.context.device();
-        let mut submission = Submission::new(device, "neura checkpoint");
-        submission.copy(
-            weights.buffer(),
-            weights.offset(),
-            staging.buffer(),
-            0,
-            bytes,
-        );
-        let submission = submission.submit(self.context.queue());
-        let store = staging
-            .buffer()
-            .read(self.context.queue(), submission, bytes);
+        let store = weights.store().checkpoint(self.context.queue());
         let mut tensors = stored(weights.region(), &store, "parameter");
         if weights.state().tensors() > 0 {
             tensors.extend(stored(weights.state(), &store, "training state"));
@@ -268,21 +273,25 @@ impl Runtime {
 
     fn parameter_store(&self, graph: &Graph) -> (Weights, Layout) {
         let layout = Layout::of(graph, self.alignment);
-        let store = self.heap.allocate(layout.words());
+        let store = WeightStore::new(
+            &self.context,
+            &self.pool,
+            &self.heap,
+            layout.words(),
+            self.resident_weight_bytes,
+        );
         let weights = Weights::new(store, layout.weights().clone(), layout.state().clone());
         (weights, layout)
     }
 
     fn seed(&self, layout: &Layout, weights: &Weights) {
-        let store = weights.allocation();
-        let placement = Placement::new(0, store.word());
         let queue = self.context.queue();
         let mut entropy = ENTROPY_SEED;
         for seed in layout.seeds() {
             let values = seed.init().samples(seed.elements(), &mut entropy);
-            self.heap.buffer().write_at(
+            weights.store().put(
                 queue,
-                layout.weight_bytes(placement, seed.address()),
+                seed.address(),
                 &pack(seed.element(), seed.scale(), &values),
             );
         }
@@ -290,9 +299,7 @@ impl Runtime {
 
     fn pour(&self, layout: &Layout, weights: &Weights, checkpoint: &Checkpoint) {
         let store = checkpoint.pour(layout.weights(), layout.state(), layout.words());
-        weights
-            .buffer()
-            .write_at(self.context.queue(), weights.offset(), &store);
+        weights.store().pour(self.context.queue(), &store);
     }
 
     pub fn rebind(&self, weights: &Weights, graph: &Graph<'_>) {
@@ -322,7 +329,7 @@ impl Runtime {
     pub fn precompile(&self, graph: &Graph, profile: Profile) {
         self.assert_profile(profile);
         let plan = Plan::of(graph, self.alignment, profile);
-        let kernel = self.kernel(&plan, profile);
+        let kernel = self.kernel(&plan, profile, self.paged_for(plan.store_words()));
         self.context.declare(kernel.program()).compile();
     }
 
@@ -354,7 +361,7 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let revision = graph.revision();
-        let (resident, plan) = self.assemble(graph, profile, chosen);
+        let (resident, plan) = self.assemble(graph, profile, chosen, weights.paged());
         assert!(
             resident.plan.task_count() > 0,
             "a program whose plan holds no task has nothing for the device to run",
@@ -388,12 +395,18 @@ impl Runtime {
         graph: &Graph,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
+        paged: bool,
     ) -> (Arc<Resident>, Arc<Plan>) {
-        let assembly =
-            self.artifacts
-                .assemble(graph.stamp(), profile, self.alignment, chosen, || {
-                    self.assembly(graph, profile, chosen)
-                });
+        let assembly = self.artifacts.assemble(
+            cache::PlanRequest {
+                stamp: graph.stamp(),
+                profile,
+                alignment: self.alignment,
+                chosen: chosen.to_vec(),
+                paged,
+            },
+            || self.assembly(graph, profile, chosen, paged),
+        );
         let resident = self
             .artifacts
             .resident(assembly.signature.clone(), |signature| {
@@ -413,10 +426,11 @@ impl Runtime {
         graph: &Graph,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
+        paged: bool,
     ) -> Assembly {
         let plan = Arc::new(Plan::chosen(graph, self.alignment, profile, chosen));
         let signature = cache::signature(&plan, profile, self.alignment);
-        let kernel = self.kernel(&plan, profile);
+        let kernel = self.kernel(&plan, profile, paged);
         Assembly {
             signature,
             plan,
@@ -424,7 +438,7 @@ impl Runtime {
         }
     }
 
-    fn kernel(&self, plan: &Plan, profile: Profile) -> Arc<Kernel> {
+    fn kernel(&self, plan: &Plan, profile: Profile, paged: bool) -> Arc<Kernel> {
         let kinds = plan.kinds().to_vec();
         let elements = plan.elements().to_vec();
         let walked = plan.walked_tiles().collect::<Vec<_>>();
@@ -436,10 +450,17 @@ impl Runtime {
         );
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
-        self.artifacts
-            .kernel(&kinds, &elements, geometry.clone(), authored, banks, || {
-                Kernel::assemble(&kinds, &elements, geometry, authored, banks)
-            })
+        self.artifacts.kernel(
+            cache::KernelIdentity {
+                kinds: kinds.clone(),
+                elements: elements.clone(),
+                geometry: geometry.clone(),
+                authored,
+                banks,
+                paged,
+            },
+            || Kernel::assemble(&kinds, &elements, geometry, authored, banks, paged),
+        )
     }
 
     fn scratch_weights(&self, graph: &Graph) -> Weights {
@@ -481,21 +502,57 @@ impl Runtime {
             program.write_records(self.context.queue(), &extents);
             program.records_written();
         }
+        if program.weight_groups().is_empty() {
+            let device = self.context.device();
+            let mut submission = Submission::new(device, "neura program");
+            program
+                .progress
+                .buffer()
+                .write_at(self.context.queue(), 0, &program.header);
+            submission.dispatch(
+                &program.resident.kernel,
+                &program.group,
+                [program.workgroups, 1, 1],
+            );
+            let submission = submission.submit(self.context.queue());
+            return Run {
+                queue: self.context.queue().clone(),
+                submissions: vec![submission],
+            };
+        }
+        self.stream(program)
+    }
+
+    fn stream(&self, program: &Program) -> Run {
+        let queue = self.context.queue();
         let device = self.context.device();
-        let mut submission = Submission::new(device, "neura program");
-        program
-            .progress
-            .buffer()
-            .write_at(self.context.queue(), 0, &program.header);
-        submission.dispatch(
-            &program.resident.kernel,
-            &program.group,
-            [program.workgroups, 1, 1],
-        );
-        let submission = submission.submit(self.context.queue());
+        let mut submissions = Vec::with_capacity(program.weight_groups().len());
+        for group in program.weight_groups() {
+            program.store().ensure(queue, group.pages());
+            program.progress.buffer().write_at(
+                queue,
+                0,
+                &progress::window(
+                    group.first_segment(),
+                    group.segments(),
+                    group.first_wave(),
+                    program.wave_count(),
+                    group.first_task(),
+                    group.last_task(),
+                ),
+            );
+            let mut submission = Submission::new(device, "neura program");
+            submission.dispatch(
+                &program.resident.kernel,
+                &program.group,
+                [program.workgroups, 1, 1],
+            );
+            submissions.push(submission.submit(queue));
+            program.store().mark_dirty(group.writes());
+        }
         Run {
-            queue: self.context.queue().clone(),
-            submission,
+            queue: queue.clone(),
+            submissions,
         }
     }
 
@@ -517,12 +574,23 @@ impl Runtime {
         );
         let bytes = pack(span.element, span.scale, data);
         let payload = span.payload_bytes() as usize;
+        let table = &bytes[payload..];
+        if span.store == Store::Weights {
+            let store = program.store();
+            let queue = self.context.queue();
+            if payload > 0 {
+                store.put(queue, span.word, &bytes[..payload]);
+            }
+            if !table.is_empty() {
+                store.put(queue, span.word + span.table_offset() / WORD_BYTES, table);
+            }
+            return;
+        }
         if payload > 0 {
             program
                 .heap()
                 .write_at(self.context.queue(), span.offset, &bytes[..payload]);
         }
-        let table = &bytes[payload..];
         if !table.is_empty() {
             program.heap().write_at(
                 self.context.queue(),
@@ -558,7 +626,42 @@ impl Runtime {
                 value.id(),
             );
         }
-        let total = spans.iter().map(|span| span.image_bytes()).sum::<u64>() + WORD_BYTES;
+        let mut sources = Vec::with_capacity(spans.len());
+        let mut copies = Vec::new();
+        let mut device_bytes = 0u64;
+        for span in spans {
+            if span.store == Store::Weights && program.store().paged() {
+                let payload = span.payload_bytes();
+                let table = span.table_bytes();
+                let queue = self.context.queue();
+                let mut bytes = program.store().get(queue, span.word, payload);
+                if table > 0 {
+                    bytes.extend(program.store().get(
+                        queue,
+                        span.word + payload / WORD_BYTES,
+                        table,
+                    ));
+                }
+                sources.push(Source::Host { span, bytes });
+                continue;
+            }
+            let payload = span.payload_bytes();
+            let table = span.table_bytes();
+            if payload > 0 {
+                copies.push((span.offset, payload, device_bytes));
+                device_bytes += payload;
+            }
+            if table > 0 {
+                copies.push((span.offset + span.table_offset(), table, device_bytes));
+                device_bytes += table;
+            }
+            sources.push(Source::Device {
+                span,
+                offset: device_bytes - (payload + table),
+                bytes: payload + table,
+            });
+        }
+        let total = device_bytes + WORD_BYTES;
         assert!(
             total <= self.readback.capacity(),
             "pulling {total} bytes outruns the {} byte readback of this runtime",
@@ -568,27 +671,16 @@ impl Runtime {
         let staging = self.readback.staging(slot);
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura pull");
-        let mut collected = Vec::with_capacity(spans.len());
-        let mut at = 0;
-        for span in &spans {
-            let payload = span.payload_bytes();
-            let table = span.table_bytes();
-            if payload > 0 {
-                submission.copy(program.heap(), span.offset, staging, at, payload);
-            }
-            if table > 0 {
-                submission.copy(
-                    program.heap(),
-                    span.offset + span.table_offset(),
-                    staging,
-                    at + payload,
-                    table,
-                );
-            }
-            collected.push((*span, at, payload + table));
-            at += payload + table;
+        for (offset, length, at) in copies {
+            submission.copy(program.heap(), offset, staging, at, length);
         }
-        submission.copy(program.refusal.buffer(), 0, staging, at, WORD_BYTES);
+        submission.copy(
+            program.refusal.buffer(),
+            0,
+            staging,
+            device_bytes,
+            WORD_BYTES,
+        );
         submission.clear(program.refusal.buffer(), 0, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
@@ -596,9 +688,9 @@ impl Runtime {
             queue: self.context.queue().clone(),
             slot,
             submission,
-            spans: collected,
+            sources,
             total,
-            refusal: at,
+            refusal: device_bytes,
         }
     }
 
@@ -713,6 +805,10 @@ fn refusal_message(word: u32) -> String {
                 "the device refused an address beyond the banks the heap of this program spans"
                     .to_owned()
             }
+            Refusal::Page => {
+                "the device read a weight page the resident weight budget of this store does not hold"
+                    .to_owned()
+            }
             _ => format!("the device refused {} {code} of a tensor", category.name(),),
         };
     }
@@ -757,5 +853,6 @@ fn refusal_message(word: u32) -> String {
         ),
         Refusal::Element => unreachable!("an element refusal carries no kind"),
         Refusal::Empty => unreachable!("an empty refusal carries no kind"),
+        Refusal::Page => unreachable!("a page refusal carries no kind"),
     }
 }

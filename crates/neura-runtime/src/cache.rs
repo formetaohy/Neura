@@ -107,20 +107,22 @@ impl Resident {
 }
 
 #[derive(PartialEq, Eq, Hash)]
-struct KernelIdentity {
-    kinds: Vec<Kind>,
-    elements: Vec<Element>,
-    geometry: Geometry,
-    authored: bool,
-    banks: Banks,
+pub(crate) struct KernelIdentity {
+    pub(crate) kinds: Vec<Kind>,
+    pub(crate) elements: Vec<Element>,
+    pub(crate) geometry: Geometry,
+    pub(crate) authored: bool,
+    pub(crate) banks: Banks,
+    pub(crate) paged: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-struct PlanIdentity {
-    stamp: GraphStamp,
-    profile: neura_profile::Profile,
-    alignment: u64,
-    chosen: Vec<(Product, neura_profile::MatmulTile)>,
+pub(crate) struct PlanRequest {
+    pub(crate) stamp: GraphStamp,
+    pub(crate) profile: neura_profile::Profile,
+    pub(crate) alignment: u64,
+    pub(crate) chosen: Vec<(Product, neura_profile::MatmulTile)>,
+    pub(crate) paged: bool,
 }
 
 const ASSEMBLY_CEILING: usize = 8;
@@ -187,7 +189,7 @@ impl KernelCache {
 
 pub(crate) struct Artifacts {
     kernels: Mutex<KernelCache>,
-    assemblies: Mutex<Vec<(PlanIdentity, Arc<Assembly>)>>,
+    assemblies: Mutex<Vec<(PlanRequest, Arc<Assembly>)>>,
     residents: Mutex<HashMap<u64, Vec<Weak<Resident>>>>,
     built: AtomicUsize,
 }
@@ -208,18 +210,10 @@ impl Artifacts {
 
     pub(crate) fn assemble(
         &self,
-        stamp: GraphStamp,
-        profile: neura_profile::Profile,
-        alignment: u64,
-        chosen: &[(Product, neura_profile::MatmulTile)],
+        request: PlanRequest,
         build: impl FnOnce() -> Assembly,
     ) -> Arc<Assembly> {
-        let identity = PlanIdentity {
-            stamp,
-            profile,
-            alignment,
-            chosen: chosen.to_vec(),
-        };
+        let identity = request;
         let mut assemblies = self
             .assemblies
             .lock()
@@ -249,20 +243,9 @@ impl Artifacts {
 
     pub(crate) fn kernel(
         &self,
-        kinds: &[Kind],
-        elements: &[Element],
-        geometry: Geometry,
-        authored: bool,
-        banks: Banks,
+        identity: KernelIdentity,
         assemble: impl FnOnce() -> Kernel,
     ) -> Arc<Kernel> {
-        let identity = KernelIdentity {
-            kinds: kinds.to_vec(),
-            elements: elements.to_vec(),
-            geometry,
-            authored,
-            banks,
-        };
         let mut kernels = self
             .kernels
             .lock()
@@ -320,16 +303,16 @@ impl Artifacts {
 }
 
 fn take_assembly(
-    assemblies: &mut Vec<(PlanIdentity, Arc<Assembly>)>,
-    identity: &PlanIdentity,
+    assemblies: &mut Vec<(PlanRequest, Arc<Assembly>)>,
+    identity: &PlanRequest,
 ) -> Option<Arc<Assembly>> {
     let found = assemblies.iter().position(|(kept, _)| kept == identity)?;
     Some(assemblies.remove(found).1)
 }
 
 fn keep_assembly(
-    assemblies: &mut Vec<(PlanIdentity, Arc<Assembly>)>,
-    identity: PlanIdentity,
+    assemblies: &mut Vec<(PlanRequest, Arc<Assembly>)>,
+    identity: PlanRequest,
     assembly: Arc<Assembly>,
 ) {
     let _ = take_assembly(assemblies, &identity);

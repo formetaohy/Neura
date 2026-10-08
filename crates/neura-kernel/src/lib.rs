@@ -50,47 +50,51 @@ impl Banks {
 
 pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
 
-pub const fn refusal(banks: Banks) -> u32 {
+pub const fn pages(banks: Banks) -> u32 {
     HEAP + banks.count()
 }
 
-pub const fn progress(banks: Banks) -> u32 {
-    refusal(banks) + 1
+pub const fn refusal(banks: Banks, paged: bool) -> u32 {
+    pages(banks) + paged as u32
 }
 
-pub const fn steps(banks: Banks) -> u32 {
-    progress(banks) + 1
+pub const fn progress(banks: Banks, paged: bool) -> u32 {
+    refusal(banks, paged) + 1
 }
 
-pub const fn placement(banks: Banks) -> u32 {
-    steps(banks) + 1
+pub const fn steps(banks: Banks, paged: bool) -> u32 {
+    progress(banks, paged) + 1
 }
 
-pub const fn segments(banks: Banks) -> u32 {
-    placement(banks) + 1
+pub const fn placement(banks: Banks, paged: bool) -> u32 {
+    steps(banks, paged) + 1
 }
 
-pub const fn extents(banks: Banks) -> u32 {
-    segments(banks) + 1
+pub const fn segments(banks: Banks, paged: bool) -> u32 {
+    placement(banks, paged) + 1
 }
 
-pub const fn measures(banks: Banks) -> u32 {
-    extents(banks) + 1
+pub const fn extents(banks: Banks, paged: bool) -> u32 {
+    segments(banks, paged) + 1
 }
 
-pub const fn patches(banks: Banks) -> u32 {
-    measures(banks) + 1
+pub const fn measures(banks: Banks, paged: bool) -> u32 {
+    extents(banks, paged) + 1
 }
 
-pub const fn patch_list(banks: Banks) -> u32 {
-    patches(banks) + 1
+pub const fn patches(banks: Banks, paged: bool) -> u32 {
+    measures(banks, paged) + 1
+}
+
+pub const fn patch_list(banks: Banks, paged: bool) -> u32 {
+    patches(banks, paged) + 1
 }
 
 pub const fn bank_ceiling(slots: u32) -> u32 {
     slots.saturating_sub(BINDINGS_WITHOUT_HEAP)
 }
 
-const _: () = assert!(segments(Banks::SINGLE) + 1 == BINDINGS_WITHOUT_HEAP + 1);
+const _: () = assert!(segments(Banks::SINGLE, false) + 1 == BINDINGS_WITHOUT_HEAP + 1);
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -116,7 +120,7 @@ fn binding(
     }
 }
 
-pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
+pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding> {
     let tables = if authored {
         BindingKind::TableStorage
     } else {
@@ -135,36 +139,45 @@ pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
             true,
         ));
     }
+    if paged {
+        list.push(binding(
+            pages(banks),
+            BindingKind::ReadOnlyStorage,
+            "pages",
+            "u32",
+            true,
+        ));
+    }
     list.push(binding(
-        refusal(banks),
+        refusal(banks, paged),
         BindingKind::ReadWriteStorage,
         "refusal",
         "AtomicU32",
         true,
     ));
     list.push(binding(
-        progress(banks),
+        progress(banks, paged),
         BindingKind::ReadWriteStorage,
         "progress",
         "AtomicU32",
         true,
     ));
     list.push(binding(
-        steps(banks),
+        steps(banks, paged),
         BindingKind::ReadOnlyStorage,
         "steps",
         "Step",
         true,
     ));
     list.push(binding(
-        placement(banks),
+        placement(banks, paged),
         BindingKind::ReadOnlyStorage,
         "placement",
         "Placement",
         false,
     ));
     list.push(binding(
-        segments(banks),
+        segments(banks, paged),
         BindingKind::ReadOnlyStorage,
         "segments",
         "Segment",
@@ -172,28 +185,28 @@ pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
     ));
     if authored {
         list.push(binding(
-            extents(banks),
+            extents(banks, paged),
             BindingKind::ReadWriteStorage,
             "extents",
             "u32",
             true,
         ));
         list.push(binding(
-            measures(banks),
+            measures(banks, paged),
             BindingKind::ReadOnlyStorage,
             "measures",
             "Measure",
             true,
         ));
         list.push(binding(
-            patches(banks),
+            patches(banks, paged),
             BindingKind::ReadOnlyStorage,
             "patches",
             "Patch",
             true,
         ));
         list.push(binding(
-            patch_list(banks),
+            patch_list(banks, paged),
             BindingKind::ReadOnlyStorage,
             "patch_list",
             "u32",
@@ -201,9 +214,9 @@ pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
         ));
     }
     let slots = if authored {
-        patch_list(banks) + 1
+        patch_list(banks, paged) + 1
     } else {
-        segments(banks) + 1
+        segments(banks, paged) + 1
     };
     assert_eq!(
         list.len() as u32,
@@ -216,6 +229,7 @@ pub fn bindings(authored: bool, banks: Banks) -> Vec<KernelBinding> {
 pub struct Kernel {
     kinds: Vec<Kind>,
     geometry: Geometry,
+    paged: bool,
     program: ComputeProgram,
 }
 
@@ -226,6 +240,7 @@ impl Kernel {
         geometry: Geometry,
         authored: bool,
         banks: Banks,
+        paged: bool,
     ) -> Self {
         assert!(
             !kinds.is_empty(),
@@ -245,6 +260,9 @@ impl Kernel {
         compiler.constant("EXACT_WALK_LIMIT", neura_abi::EXACT_WALK_LIMIT);
         compiler.constant("INT4_BLOCK", INT4_BLOCK);
         compiler.constant("FP4_BLOCK", FP4_BLOCK);
+        compiler.constant("PAGE_SHIFT", neura_abi::PAGE_SHIFT);
+        compiler.constant("PAGE_MASK", neura_abi::PAGE_MASK as u32);
+        compiler.constant("NO_PAGE", neura_abi::NO_PAGE);
         compiler.constant("refusal::TENSOR", TENSOR);
         compiler.constant("refusal::KIND_BITS", refusal::KIND_BITS);
         compiler.constant("refusal::CODE_BITS", refusal::CODE_BITS);
@@ -289,6 +307,8 @@ impl Kernel {
             ("progress::FRONTIER", progress::FRONTIER),
             ("progress::SEGMENTS", progress::SEGMENTS),
             ("progress::WAVES", progress::WAVES),
+            ("progress::FIRST_TASK", progress::FIRST_TASK),
+            ("progress::LAST_TASK", progress::LAST_TASK),
             ("progress::COUNTERS", progress::COUNTERS),
             ("progress::WAVE_STRIDE", progress::WAVE_STRIDE),
         ] {
@@ -297,7 +317,7 @@ impl Kernel {
         for kind in Kind::ALL {
             compiler.constant(kind.symbol(), kind.code());
         }
-        for binding in bindings(authored, banks) {
+        for binding in bindings(authored, banks, paged) {
             let spec = BindingSpec {
                 binding: binding.binding,
                 kind: binding.kind,
@@ -319,7 +339,7 @@ impl Kernel {
         }
         authored::install(&mut compiler, authored);
         scheduler::install(&mut compiler);
-        substrate::install(&mut compiler, banks);
+        substrate::install(&mut compiler, banks, paged);
         element::install(&mut compiler, elements);
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
@@ -368,7 +388,10 @@ impl Kernel {
             scheduler::ENTRY,
             geometry.workgroup(),
         );
-        for (expected, reflected) in bindings(authored, banks).iter().zip(program.reflected()) {
+        for (expected, reflected) in bindings(authored, banks, paged)
+            .iter()
+            .zip(program.reflected())
+        {
             assert_eq!(
                 expected.name, reflected.name,
                 "a device binding has an incorrect name"
@@ -377,12 +400,17 @@ impl Kernel {
         Self {
             kinds: kinds.to_vec(),
             geometry,
+            paged,
             program,
         }
     }
 
     pub fn kinds(&self) -> &[Kind] {
         &self.kinds
+    }
+
+    pub fn paged(&self) -> bool {
+        self.paged
     }
 
     pub fn geometry(&self) -> &Geometry {

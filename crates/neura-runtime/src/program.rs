@@ -1,6 +1,7 @@
 use crate::cache::Resident;
 use crate::heap::Allocation;
 use crate::pool::Recycled;
+use crate::store::WeightStore;
 use neura_abi::{Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, WORD_BYTES, progress};
 use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
@@ -13,13 +14,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 #[derive(Clone)]
 pub struct Weights {
-    store: Allocation,
+    store: Arc<WeightStore>,
     weights: Region,
     state: Region,
 }
 
 impl Weights {
-    pub(crate) fn new(store: Allocation, weights: Region, state: Region) -> Self {
+    pub(crate) fn new(store: Arc<WeightStore>, weights: Region, state: Region) -> Self {
         Self {
             store,
             weights,
@@ -43,6 +44,18 @@ impl Weights {
         self.weights.tensors()
     }
 
+    pub fn pages(&self) -> u32 {
+        self.store.pages()
+    }
+
+    pub fn resident_pages(&self) -> u32 {
+        self.store.resident_pages()
+    }
+
+    pub fn resident_bytes(&self) -> u64 {
+        self.store.resident_bytes()
+    }
+
     pub(crate) fn region(&self) -> &Region {
         &self.weights
     }
@@ -52,11 +65,15 @@ impl Weights {
     }
 
     pub(crate) fn words(&self) -> u64 {
-        self.state.words().max(self.weights.words())
+        self.store.words()
     }
 
-    pub(crate) fn allocation(&self) -> &Allocation {
+    pub(crate) fn store(&self) -> &Arc<WeightStore> {
         &self.store
+    }
+
+    pub(crate) fn paged(&self) -> bool {
+        self.store.paged()
     }
 
     pub(crate) fn lives_on(&self, heap: &Arc<crate::heap::Heap>) -> bool {
@@ -80,7 +97,118 @@ pub struct Program {
     tasks: Recycled,
     values: Recycled,
     bound: Mutex<Bound>,
+    groups: Vec<WeightGroup>,
     plan: Arc<Plan>,
+}
+
+pub(crate) struct WeightGroup {
+    first_segment: u32,
+    segments: u32,
+    first_wave: u32,
+    first_task: u32,
+    last_task: u32,
+    pages: Vec<u32>,
+    writes: Vec<u32>,
+}
+
+impl WeightGroup {
+    fn of(plan: &Plan, first_task: u32, last_task: u32, pages: Vec<u32>, writes: Vec<u32>) -> Self {
+        let segments = plan.segments();
+        let first = segments
+            .iter()
+            .position(|segment| segment.first + segment.count > first_task)
+            .unwrap_or_else(|| panic!("task {first_task} of a plan stands in no segment"));
+        let last = segments
+            .iter()
+            .rposition(|segment| segment.first < last_task)
+            .unwrap_or_else(|| panic!("task {} of a plan stands in no segment", last_task - 1));
+        Self {
+            first_segment: first as u32,
+            segments: (last - first + 1) as u32,
+            first_wave: segments[first].wave,
+            first_task,
+            last_task,
+            pages,
+            writes,
+        }
+    }
+
+    pub(crate) fn first_segment(&self) -> u32 {
+        self.first_segment
+    }
+
+    pub(crate) fn segments(&self) -> u32 {
+        self.segments
+    }
+
+    pub(crate) fn first_wave(&self) -> u32 {
+        self.first_wave
+    }
+
+    pub(crate) fn first_task(&self) -> u32 {
+        self.first_task
+    }
+
+    pub(crate) fn last_task(&self) -> u32 {
+        self.last_task
+    }
+
+    pub(crate) fn pages(&self) -> &[u32] {
+        &self.pages
+    }
+
+    pub(crate) fn writes(&self) -> &[u32] {
+        &self.writes
+    }
+}
+
+fn weight_groups(plan: &Plan, slots: u32) -> Vec<WeightGroup> {
+    let tasks = plan.weight_pages();
+    let mut groups = Vec::new();
+    let mut pages = Vec::<u32>::new();
+    let mut writes = Vec::<u32>::new();
+    let mut start = 0u32;
+    for (position, task) in tasks.iter().enumerate() {
+        let position = position as u32;
+        let mut merged = pages.clone();
+        merged.extend(task.pages());
+        merged.sort_unstable();
+        merged.dedup();
+        if merged.len() > slots as usize {
+            if pages.is_empty() {
+                panic!(
+                    "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
+                    merged.len(),
+                );
+            }
+            groups.push(WeightGroup::of(
+                plan,
+                start,
+                position,
+                std::mem::take(&mut pages),
+                std::mem::take(&mut writes),
+            ));
+            start = position;
+            merged = task.pages().to_vec();
+            assert!(
+                merged.len() <= slots as usize,
+                "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
+                merged.len(),
+            );
+        }
+        pages = merged;
+        writes.extend(task.writes());
+        writes.sort_unstable();
+        writes.dedup();
+    }
+    groups.push(WeightGroup::of(
+        plan,
+        start,
+        tasks.len() as u32,
+        pages,
+        writes,
+    ));
+    groups
 }
 
 struct Bound {
@@ -197,6 +325,12 @@ impl Program {
         let heap = tensors.heap();
         let banks = heap.banks();
         let bank_bytes = heap.bank_bytes();
+        let paged = weights.paged();
+        let groups = if paged {
+            weight_groups(&plan, weights.resident_pages())
+        } else {
+            Vec::new()
+        };
         let mut bindings = vec![
             Binding {
                 index: TASKS,
@@ -215,30 +349,36 @@ impl Program {
                 buffer: tensors.buffer().binding(offset, size),
             });
         }
+        if let Some(table) = weights.store().table() {
+            bindings.push(Binding {
+                index: neura_kernel::pages(banks),
+                buffer: table.binding(0, table.size()),
+            });
+        }
         bindings.extend([
             Binding {
-                index: neura_kernel::refusal(banks),
+                index: neura_kernel::refusal(banks, paged),
                 buffer: refusal.buffer().binding(0, refusal.buffer().size()),
             },
             Binding {
-                index: neura_kernel::progress(banks),
+                index: neura_kernel::progress(banks, paged),
                 buffer: progress_buffer
                     .buffer()
                     .binding(0, progress_buffer.buffer().size()),
             },
             Binding {
-                index: neura_kernel::steps(banks),
+                index: neura_kernel::steps(banks, paged),
                 buffer: resident
                     .steps
                     .buffer()
                     .binding(0, resident.steps.buffer().size()),
             },
             Binding {
-                index: neura_kernel::placement(banks),
+                index: neura_kernel::placement(banks, paged),
                 buffer: placement.buffer().binding(0, placement.buffer().size()),
             },
             Binding {
-                index: neura_kernel::segments(banks),
+                index: neura_kernel::segments(banks, paged),
                 buffer: resident
                     .segments
                     .buffer()
@@ -253,19 +393,19 @@ impl Program {
         ) {
             bindings.extend([
                 Binding {
-                    index: neura_kernel::extents(banks),
+                    index: neura_kernel::extents(banks, paged),
                     buffer: extents.buffer().binding(0, extents.buffer().size()),
                 },
                 Binding {
-                    index: neura_kernel::measures(banks),
+                    index: neura_kernel::measures(banks, paged),
                     buffer: measures.buffer().binding(0, measures.buffer().size()),
                 },
                 Binding {
-                    index: neura_kernel::patches(banks),
+                    index: neura_kernel::patches(banks, paged),
                     buffer: patches.buffer().binding(0, patches.buffer().size()),
                 },
                 Binding {
-                    index: neura_kernel::patch_list(banks),
+                    index: neura_kernel::patch_list(banks, paged),
                     buffer: patch_list.buffer().binding(0, patch_list.buffer().size()),
                 },
             ]);
@@ -287,6 +427,7 @@ impl Program {
             tasks,
             values,
             bound: Mutex::new(Bound::of(&plan)),
+            groups,
             plan,
         }
     }
@@ -362,6 +503,14 @@ impl Program {
 
     pub(crate) fn span_with(&self, value: Value, extents: &[u32]) -> Span {
         self.plan.span_at(value, self.at(), extents)
+    }
+
+    pub(crate) fn weight_groups(&self) -> &[WeightGroup] {
+        &self.groups
+    }
+
+    pub(crate) fn store(&self) -> &Arc<WeightStore> {
+        self.weights.store()
     }
 
     pub(crate) fn write_records(&self, queue: &Queue, extents: &[u32]) {
