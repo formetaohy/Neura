@@ -459,7 +459,6 @@ impl Runtime {
         }
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura program");
-        submission.clear(program.refusal.buffer(), 0, program.refusal.buffer().size());
         program
             .progress
             .buffer()
@@ -566,6 +565,7 @@ impl Runtime {
             at += payload + table;
         }
         submission.copy(program.refusal.buffer(), 0, staging, at, WORD_BYTES);
+        submission.clear(program.refusal.buffer(), 0, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
             readback: self.readback.clone(),

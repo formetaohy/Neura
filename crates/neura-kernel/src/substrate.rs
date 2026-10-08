@@ -7,10 +7,12 @@ pub(crate) fn install(compiler: &mut Compiler) {
 #[neura_compiler::module]
 mod device {
     fn refuse(subject: u32, category: u32, code: u32) {
-        atomic_store(
-            &refusal[0u32],
-            (subject << refusal::KIND_BITS) | (category << refusal::CODE_BITS) | (code + 1u32),
-        );
+        if atomic_add(&refusal[0u32], 0u32) == 0u32 {
+            atomic_store(
+                &refusal[0u32],
+                (subject << refusal::KIND_BITS) | (category << refusal::CODE_BITS) | (code + 1u32),
+            );
+        }
     }
 
     fn max_identity() -> f32 {
