@@ -473,3 +473,104 @@ fn a_streamed_store_trains_a_model_that_no_budget_can_hold() {
         );
     }
 }
+
+const CHURN_WIDTH: u32 = 256;
+const CHURN_LAYERS: u32 = 12;
+const CHURN_BATCH: u32 = 16;
+const CHURN_STEPS: u32 = 4;
+const CHURN_BYTES: u64 = 128 * (1 << 14);
+
+fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, u64) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let init = Init::Uniform {
+        low: -0.02,
+        high: 0.02,
+    };
+    let mut layers = Vec::new();
+    for _ in 0..CHURN_LAYERS {
+        layers.push(graph.parameter(
+            Shape::matrix(CHURN_WIDTH, CHURN_WIDTH),
+            init,
+            Element::Single,
+        ));
+    }
+    let data = graph.input(Shape::matrix(CHURN_BATCH, CHURN_WIDTH), Element::Single);
+    let target = graph.input(Shape::matrix(CHURN_BATCH, CHURN_WIDTH), Element::Single);
+    let mut value = data;
+    for weight in &layers {
+        value = graph.tanh(graph.matmul(value, *weight));
+    }
+    let difference = graph.sub(value, target);
+    let loss = graph.sum(graph.mul(difference, difference));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    for weight in &layers {
+        graph.add_into(*weight, graph.mul(gradients.of(*weight), descent));
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..(CHURN_BATCH * CHURN_WIDTH))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    let targets = (0..(CHURN_BATCH * CHURN_WIDTH))
+        .map(|index| ((index * 53) % 97) as f32 / 97.0 - 0.5)
+        .collect::<Vec<_>>();
+    let mut observed = 0.0;
+    for _ in 0..CHURN_STEPS {
+        runtime.write(&program, data, &observations);
+        runtime.write(&program, target, &targets);
+        runtime.run(&program);
+        observed = runtime.read(&program, loss)[0];
+    }
+    let parameters = layers
+        .iter()
+        .flat_map(|weight| runtime.read(&program, *weight))
+        .collect();
+    (
+        parameters,
+        observed,
+        weights.readback_pages(),
+        weights.readback_transfers(),
+    )
+}
+
+#[test]
+fn a_streamed_store_reads_the_pages_it_churns_back_in_windows() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_loss, _, _) = churn_run(backends, MemoryRequest::default());
+        let (streamed, streamed_loss, pages, transfers) = churn_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(CHURN_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a churning store reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a churning store held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
+        assert!(
+            pages > 16 * CHURN_LAYERS as u64,
+            "a store of {CHURN_BYTES} bytes read {pages} pages back over {CHURN_STEPS} steps and never left its deferral window",
+        );
+        assert!(
+            transfers * 16 <= pages,
+            "a store read {pages} pages back in {transfers} transfers, and one transfer carries a window of pages",
+        );
+    }
+}

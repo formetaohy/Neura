@@ -56,6 +56,14 @@ impl Weights {
         self.store.resident_bytes()
     }
 
+    pub fn readback_pages(&self) -> u64 {
+        self.store.readback_pages()
+    }
+
+    pub fn readback_transfers(&self) -> u64 {
+        self.store.readback_transfers()
+    }
+
     pub(crate) fn region(&self) -> &Region {
         &self.weights
     }

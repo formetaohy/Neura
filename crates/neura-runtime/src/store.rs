@@ -26,6 +26,8 @@ struct Mirror {
     chunks: Vec<Option<Recycled>>,
     spare: Vec<usize>,
     writebacks: Vec<Writeback>,
+    captured: u64,
+    transfers: u64,
 }
 
 struct Writeback {
@@ -34,13 +36,21 @@ struct Writeback {
     submission: Option<SubmissionIndex>,
 }
 
+#[derive(Clone, Copy)]
+enum Origin {
+    Chunk(usize),
+    Slot(u32),
+}
+
 const fn page_bytes() -> u64 {
     PAGE_WORDS * WORD_BYTES
 }
 
 const WRITEBACK_CHUNKS: usize = 64;
+const CAPTURE_PAGES: usize = 64;
 const UPLOAD_PAGES: usize = 64;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
+const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);
 
 impl Mirror {
     fn new(pages: u32, slots: u32) -> Self {
@@ -54,6 +64,8 @@ impl Mirror {
             chunks: Vec::new(),
             spare: Vec::new(),
             writebacks: Vec::new(),
+            captured: 0,
+            transfers: 0,
         }
     }
 
@@ -194,6 +206,24 @@ impl WeightStore {
         self.store.lives_on(heap)
     }
 
+    pub(crate) fn readback_pages(&self) -> u64 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .captured
+        })
+    }
+
+    pub(crate) fn readback_transfers(&self) -> u64 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .transfers
+        })
+    }
+
     fn bounds(&self, word: u64, bytes: u64) {
         assert!(
             bytes.is_multiple_of(WORD_BYTES)
@@ -215,6 +245,10 @@ impl WeightStore {
         };
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         let base = word * WORD_BYTES;
+        let from = (base / page_bytes()) as u32;
+        let to =
+            u32::try_from((base + bytes.len() as u64).div_ceil(page_bytes())).unwrap_or(u32::MAX);
+        self.materialize_writebacks(&mut mirror, queue, |page| page >= from && page < to);
         let mut at = 0u64;
         while at < bytes.len() as u64 {
             let byte = base + at;
@@ -232,7 +266,6 @@ impl WeightStore {
                     mirror.touch(slot);
                 }
                 None => {
-                    self.materialize_page(&mut mirror, queue, page);
                     let start = page as usize * page_bytes() as usize + within as usize;
                     mirror.bytes[start..start + chunk as usize]
                         .copy_from_slice(&bytes[at as usize..(at + chunk) as usize]);
@@ -269,6 +302,7 @@ impl WeightStore {
         );
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         let mut transfer: Option<Submission> = None;
+        let mut submitted: Vec<SubmissionIndex> = Vec::new();
         let mut uploads: Vec<(u32, u32)> = Vec::new();
         let mut changed = false;
         for page in pages {
@@ -282,7 +316,14 @@ impl WeightStore {
                 .iter()
                 .position(|writeback| writeback.page == *page)
                 .map(|position| mirror.writebacks.remove(position));
-            let slot = self.vacate(&mut mirror, queue, &mut transfer, pages, *page);
+            let slot = self.vacate(
+                &mut mirror,
+                queue,
+                &mut transfer,
+                &mut submitted,
+                pages,
+                *page,
+            );
             match held {
                 Some(writeback) => {
                     let chunk = mirror.chunks[writeback.chunk]
@@ -298,6 +339,7 @@ impl WeightStore {
                         self.store.offset() + u64::from(slot) * page_bytes(),
                         page_bytes(),
                     );
+                    mirror.chunks[writeback.chunk] = None;
                     mirror.spare.push(writeback.chunk);
                     mirror.dirty[slot as usize] = true;
                 }
@@ -311,12 +353,12 @@ impl WeightStore {
             mirror.touch(slot);
         }
         let mut batches = uploads.chunks(self.batch_pages());
-        let mut submitted = Vec::new();
         loop {
             let batch = batches.next();
             if batch.is_none() && transfer.is_none() {
                 break;
             }
+            let carried = transfer.is_some();
             let mut submission = transfer
                 .take()
                 .unwrap_or_else(|| Submission::new(queue.device(), "neura weight upload"));
@@ -338,7 +380,7 @@ impl WeightStore {
                 }
             }
             let index = submission.submit(queue);
-            if submitted.is_empty() {
+            if carried {
                 for writeback in &mut mirror.writebacks {
                     writeback.submission.get_or_insert(index);
                 }
@@ -371,6 +413,7 @@ impl WeightStore {
         mirror: &mut Mirror,
         queue: &Queue,
         transfer: &mut Option<Submission>,
+        submitted: &mut Vec<SubmissionIndex>,
         pages: &[u32],
         page: u32,
     ) -> u32 {
@@ -394,38 +437,7 @@ impl WeightStore {
         let kept = mirror.page_of[victim as usize];
         if kept != NO_PAGE {
             if mirror.dirty[victim as usize] {
-                match self.chunk(mirror, queue) {
-                    Some(chunk) => {
-                        let staging = mirror.chunks[chunk]
-                            .as_ref()
-                            .expect("a claimed chunk holds its staging buffer");
-                        let submission = transfer.get_or_insert_with(|| {
-                            Submission::new(queue.device(), "neura weight writeback")
-                        });
-                        submission.copy(
-                            self.store.buffer(),
-                            self.store.offset() + u64::from(victim) * page_bytes(),
-                            staging.buffer(),
-                            0,
-                            page_bytes(),
-                        );
-                        mirror.writebacks.push(Writeback {
-                            page: kept,
-                            chunk,
-                            submission: None,
-                        });
-                    }
-                    None => {
-                        let content = self.read_device(
-                            queue,
-                            self.store.offset() + u64::from(victim) * page_bytes(),
-                            page_bytes(),
-                        );
-                        let start = kept as usize * page_bytes() as usize;
-                        mirror.bytes[start..start + page_bytes() as usize]
-                            .copy_from_slice(&content);
-                    }
-                }
+                self.write_back(mirror, queue, transfer, submitted, victim, kept);
             }
             mirror.slot_of[kept as usize] = NO_PAGE;
         }
@@ -434,81 +446,156 @@ impl WeightStore {
         victim
     }
 
-    fn chunk(&self, mirror: &mut Mirror, queue: &Queue) -> Option<usize> {
-        let index = match mirror.spare.pop() {
+    fn write_back(
+        &self,
+        mirror: &mut Mirror,
+        queue: &Queue,
+        transfer: &mut Option<Submission>,
+        submitted: &mut Vec<SubmissionIndex>,
+        victim: u32,
+        page: u32,
+    ) {
+        let index = match self.spare_chunk(mirror) {
             Some(index) => index,
-            None => match mirror.chunks.iter().position(Option::is_none) {
-                Some(index) => index,
-                None if mirror.chunks.len() < WRITEBACK_CHUNKS => {
-                    mirror.chunks.push(None);
-                    mirror.chunks.len() - 1
-                }
-                None => {
-                    let position = mirror
-                        .writebacks
-                        .iter()
-                        .position(|writeback| writeback.submission.is_some())?;
-                    self.materialize_at(mirror, queue, position);
-                    mirror
-                        .spare
-                        .pop()
-                        .expect("a materialized writeback releases the chunk it held")
-                }
-            },
+            None => {
+                self.flush_transfer(mirror, queue, transfer, submitted);
+                submitted.extend(self.materialize_writebacks(mirror, queue, |_| true));
+                self.spare_chunk(mirror)
+                    .expect("a captured batch releases the chunks it held")
+            }
         };
-        mirror.chunks[index] = Some(Recycled::claim(
+        let chunk = Recycled::claim(
             &self.pool,
             "neura weight page",
             page_bytes(),
             WRITEBACK_USAGE,
-        ));
-        Some(index)
-    }
-
-    fn materialize_page(&self, mirror: &mut Mirror, queue: &Queue, page: u32) {
-        if let Some(position) = mirror
-            .writebacks
-            .iter()
-            .position(|writeback| writeback.page == page)
-        {
-            self.materialize_at(mirror, queue, position);
-        }
-    }
-
-    fn materialize_range(&self, mirror: &mut Mirror, queue: &Queue, first: u64, end: u64) {
-        let from = (first / page_bytes()) as u32;
-        let to =
-            u32::try_from(end.div_ceil(page_bytes())).expect("a weight range fits the page table");
-        for page in from..to {
-            self.materialize_page(mirror, queue, page);
-        }
-    }
-
-    fn materialize_all(&self, mirror: &mut Mirror, queue: &Queue) {
-        while !mirror.writebacks.is_empty() {
-            self.materialize_at(mirror, queue, 0);
-        }
-    }
-
-    fn materialize_at(&self, mirror: &mut Mirror, queue: &Queue, position: usize) {
-        let writeback = mirror.writebacks.remove(position);
-        let chunk = mirror.chunks[writeback.chunk]
-            .take()
-            .expect("a writeback holds the chunk it was handed");
-        let staging = Recycled::claim(
-            &self.pool,
-            "neura weight readback",
-            page_bytes(),
-            BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         );
-        let mut submission = Submission::new(queue.device(), "neura weight readback");
-        submission.copy(chunk.buffer(), 0, staging.buffer(), 0, page_bytes());
-        let submission = submission.submit(queue);
-        let bytes = staging.buffer().read(queue, submission, page_bytes());
-        let start = writeback.page as usize * page_bytes() as usize;
-        mirror.bytes[start..start + page_bytes() as usize].copy_from_slice(&bytes);
-        drop(chunk);
-        mirror.spare.push(writeback.chunk);
+        let submission = transfer
+            .get_or_insert_with(|| Submission::new(queue.device(), "neura weight writeback"));
+        submission.copy(
+            self.store.buffer(),
+            self.store.offset() + u64::from(victim) * page_bytes(),
+            chunk.buffer(),
+            0,
+            page_bytes(),
+        );
+        mirror.chunks[index] = Some(chunk);
+        mirror.writebacks.push(Writeback {
+            page,
+            chunk: index,
+            submission: None,
+        });
+    }
+
+    fn spare_chunk(&self, mirror: &mut Mirror) -> Option<usize> {
+        if let Some(index) = mirror.spare.pop() {
+            return Some(index);
+        }
+        if mirror.chunks.len() < WRITEBACK_CHUNKS {
+            mirror.chunks.push(None);
+            return Some(mirror.chunks.len() - 1);
+        }
+        None
+    }
+
+    fn flush_transfer(
+        &self,
+        mirror: &mut Mirror,
+        queue: &Queue,
+        transfer: &mut Option<Submission>,
+        submitted: &mut Vec<SubmissionIndex>,
+    ) {
+        if let Some(submission) = transfer.take() {
+            let index = submission.submit(queue);
+            for writeback in &mut mirror.writebacks {
+                writeback.submission.get_or_insert(index);
+            }
+            submitted.push(index);
+        }
+    }
+
+    fn materialize_writebacks(
+        &self,
+        mirror: &mut Mirror,
+        queue: &Queue,
+        select: impl Fn(u32) -> bool,
+    ) -> Vec<SubmissionIndex> {
+        let mut sources = Vec::new();
+        let mut kept = Vec::new();
+        for writeback in mirror.writebacks.drain(..) {
+            if select(writeback.page) {
+                assert!(
+                    writeback.submission.is_some(),
+                    "a page the host reads back is a page the queue already carries",
+                );
+                sources.push((writeback.page, Origin::Chunk(writeback.chunk)));
+            } else {
+                kept.push(writeback);
+            }
+        }
+        mirror.writebacks = kept;
+        let chunks = sources
+            .iter()
+            .map(|(_, origin)| match origin {
+                Origin::Chunk(chunk) => *chunk,
+                Origin::Slot(_) => unreachable!("a writeback holds a chunk"),
+            })
+            .collect::<Vec<usize>>();
+        let submitted = self.capture(mirror, queue, &sources);
+        for chunk in chunks {
+            mirror.chunks[chunk] = None;
+            mirror.spare.push(chunk);
+        }
+        submitted
+    }
+
+    fn capture(
+        &self,
+        mirror: &mut Mirror,
+        queue: &Queue,
+        sources: &[(u32, Origin)],
+    ) -> Vec<SubmissionIndex> {
+        let mut submitted = Vec::new();
+        for batch in sources.chunks(CAPTURE_PAGES) {
+            let bytes = batch.len() as u64 * page_bytes();
+            let staging =
+                Recycled::claim(&self.pool, "neura weight readback", bytes, READBACK_USAGE);
+            let mut submission = Submission::new(queue.device(), "neura weight readback");
+            for (at, (_, origin)) in batch.iter().enumerate() {
+                let (buffer, offset) = match origin {
+                    Origin::Chunk(chunk) => (
+                        mirror.chunks[*chunk]
+                            .as_ref()
+                            .expect("a writeback holds the chunk it was handed")
+                            .buffer(),
+                        0,
+                    ),
+                    Origin::Slot(slot) => (
+                        self.store.buffer(),
+                        self.store.offset() + u64::from(*slot) * page_bytes(),
+                    ),
+                };
+                submission.copy(
+                    buffer,
+                    offset,
+                    staging.buffer(),
+                    at as u64 * page_bytes(),
+                    page_bytes(),
+                );
+            }
+            let index = submission.submit(queue);
+            let read = staging.buffer().read(queue, index, bytes);
+            for (at, (page, _)) in batch.iter().enumerate() {
+                let start = *page as usize * page_bytes() as usize;
+                mirror.bytes[start..start + page_bytes() as usize].copy_from_slice(
+                    &read[at * page_bytes() as usize..(at + 1) * page_bytes() as usize],
+                );
+            }
+            mirror.captured += batch.len() as u64;
+            mirror.transfers += 1;
+            submitted.push(index);
+        }
+        submitted
     }
 
     pub(crate) fn mark_dirty(&self, pages: &[u32]) {
@@ -549,24 +636,32 @@ impl WeightStore {
         self.flush_range(&mut mirror, queue, 0, self.words * WORD_BYTES);
     }
 
+    fn materialize_range(&self, mirror: &mut Mirror, queue: &Queue, first: u64, end: u64) {
+        let from = (first / page_bytes()) as u32;
+        let to =
+            u32::try_from(end.div_ceil(page_bytes())).expect("a weight range fits the page table");
+        self.materialize_writebacks(mirror, queue, |page| page >= from && page < to);
+    }
+
+    fn materialize_all(&self, mirror: &mut Mirror, queue: &Queue) {
+        self.materialize_writebacks(mirror, queue, |_| true);
+    }
+
     fn flush_range(&self, mirror: &mut Mirror, queue: &Queue, first: u64, end: u64) {
+        let mut sources = Vec::new();
         for slot in 0..self.slots {
             let kept = mirror.page_of[slot as usize];
             if kept == NO_PAGE || !mirror.dirty[slot as usize] {
                 continue;
             }
-            let start = kept as usize * page_bytes() as usize;
-            if start as u64 >= end || start as u64 + page_bytes() <= first {
+            let start = u64::from(kept) * page_bytes();
+            if start >= end || start + page_bytes() <= first {
                 continue;
             }
-            let content = self.read_device(
-                queue,
-                self.store.offset() + u64::from(slot) * page_bytes(),
-                page_bytes(),
-            );
-            mirror.bytes[start..start + page_bytes() as usize].copy_from_slice(&content);
+            sources.push((kept, Origin::Slot(slot)));
             mirror.dirty[slot as usize] = false;
         }
+        self.capture(mirror, queue, &sources);
     }
 
     pub(crate) fn checkpoint(&self, queue: &Queue) -> Vec<u8> {
