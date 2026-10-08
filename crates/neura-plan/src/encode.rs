@@ -6,6 +6,8 @@ use crate::lower;
 use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
+use crate::record::{self, Recorded};
+use crate::region::{self, Resolved, Touches, Values};
 use crate::schedule;
 use crate::span::{Extents, Split};
 use neura_abi::{
@@ -164,7 +166,7 @@ pub struct Plan {
     splits: Vec<Split>,
     order: Vec<u32>,
     slot_bounds: Vec<u32>,
-    weights: Vec<WeightPages>,
+    authored_walks: Vec<bool>,
     authored: authored::Authored,
 }
 
@@ -235,7 +237,14 @@ impl Plan {
         );
         let order = schedule.order();
         let waves = schedule.waves();
-        let pages = pages::weight_pages(values, matmul_tiles, &tasks, order, &layout);
+        let authored_walks: Vec<bool> = tasks.iter().map(|task| !task.depends.is_empty()).collect();
+        assert_authored_walks_read_the_counts_that_rule_them(
+            values.len(),
+            &authored,
+            order,
+            &tasks,
+            &authored_walks,
+        );
         let live = storage_liveness(values, &tasks, order);
         let reserved = layout.tensors().bytes();
         let (offsets, tensor_bytes) = allocate(values, &live, waves, alignment, reserved);
@@ -422,6 +431,7 @@ impl Plan {
                 pad_columns: task.window.pad_columns(),
                 axis: task.axis,
                 offset: task.offset,
+                in_place: u32::from(task.in_place),
                 wave: waves[position],
                 split: split_kind,
                 measure: split_measure,
@@ -449,6 +459,7 @@ impl Plan {
         }
 
         let segments = schedule.segments().to_vec();
+        record::assert_records_hold_the_tasks_they_carry(&tasks, order, &task_bytes, &steps);
 
         let mut readable = vec![false; values.len()];
         let mut last_writer = std::collections::HashMap::<u64, u32>::new();
@@ -532,7 +543,7 @@ impl Plan {
             splits,
             order,
             slot_bounds,
-            weights: pages,
+            authored_walks,
             authored,
         }
     }
@@ -652,7 +663,11 @@ impl Plan {
         }
         let mut tasks = self.tasks.clone();
         for (position, index) in self.order.iter().enumerate() {
-            let (first, count) = self.extents.span(self.splits[*index as usize], extents);
+            let split = self.splits[*index as usize];
+            if matches!(split, Split::Range { .. }) {
+                continue;
+            }
+            let (first, count) = self.extents.span(split, extents);
             let at = position * size_of::<TaskRecord>();
             let mut record: TaskRecord =
                 bytemuck::pod_read_unaligned(&tasks[at..at + size_of::<TaskRecord>()]);
@@ -742,8 +757,29 @@ impl Plan {
         self.layout.weights()
     }
 
-    pub fn weight_pages(&self) -> &[WeightPages] {
-        &self.weights
+    pub fn weight_pages(&self, extents: &[u32]) -> Vec<WeightPages> {
+        let values = Resolved::of(&self.values, &self.extents, extents);
+        let tiles = self.profile.tiles();
+        let mut touched = Touches::default();
+        Recorded::of(&self.tasks, &self.steps)
+            .zip(&self.order)
+            .map(|(task, index)| {
+                let walked = !self.authored_walks[*index as usize]
+                    && values.owned(task.out())
+                    && values.dense(task.out());
+                match walked {
+                    true => region::walked(
+                        &mut touched,
+                        &task,
+                        &values,
+                        tiles,
+                        task.walked(&self.extents, extents),
+                    ),
+                    false => region::whole(&mut touched, &task, &values),
+                }
+                pages::weight_pages(&touched, &values, &self.layout)
+            })
+            .collect()
     }
 
     pub fn store_words(&self) -> u64 {
@@ -1235,6 +1271,45 @@ fn exact_length(values: &[ValueInfo], task: &Task, value: u32, axis: u32) {
         task.kind.name(),
         info.shape.dims(),
     );
+}
+
+fn assert_authored_walks_read_the_counts_that_rule_them(
+    values: usize,
+    authored: &authored::Authored,
+    order: &[u32],
+    tasks: &[Task],
+    authored_walks: &[bool],
+) {
+    if !authored.carries() {
+        return;
+    }
+    let list = authored.patch_list();
+    let mut ruled = vec![false; values];
+    for patch in authored.patches() {
+        let values_of = &list[patch.values as usize..(patch.values + patch.values_count) as usize];
+        for value in values_of {
+            ruled[*value as usize] = true;
+        }
+        let tasks_of = &list[patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize];
+        for seat in tasks_of {
+            let index = order[*seat as usize] as usize;
+            assert!(
+                authored_walks[index],
+                "task {index} walks a count the device authors, and the host predicts its walk only where no count rules it",
+            );
+        }
+    }
+    for (index, task) in tasks.iter().enumerate() {
+        if authored_walks[index] {
+            continue;
+        }
+        for value in task.reads().chain(task.writes()) {
+            assert!(
+                !ruled[value as usize],
+                "task {index} reads tensor {value} of a count the device authors, and the host predicts its walk only where no count rules it",
+            );
+        }
+    }
 }
 
 fn assert_units_keep_their_order(tasks: &[Task]) {

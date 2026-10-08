@@ -7,7 +7,7 @@ use neura_gpu::Queue;
 use neura_gpu::{BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, Submission};
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, TASKS, VALUES};
-use neura_plan::{Plan, Region, Span};
+use neura_plan::{Plan, Region, Span, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -105,8 +105,13 @@ pub struct Program {
     tasks: Recycled,
     values: Recycled,
     bound: Mutex<Bound>,
-    groups: Vec<WeightGroup>,
+    windows: Mutex<Option<Windows>>,
     plan: Arc<Plan>,
+}
+
+struct Windows {
+    extents: Vec<u32>,
+    groups: Arc<Vec<WeightGroup>>,
 }
 
 pub(crate) struct WeightGroup {
@@ -170,23 +175,22 @@ impl WeightGroup {
     }
 }
 
-fn weight_groups(plan: &Plan, slots: u32) -> Vec<WeightGroup> {
-    let tasks = plan.weight_pages();
+fn weight_groups(plan: &Plan, slots: u32, tasks: &[WeightPages]) -> Vec<WeightGroup> {
     let mut groups = Vec::new();
     let mut pages = Vec::<u32>::new();
     let mut writes = Vec::<u32>::new();
     let mut start = 0u32;
     for (position, task) in tasks.iter().enumerate() {
         let position = position as u32;
-        let mut merged = pages.clone();
-        merged.extend(task.pages());
-        merged.sort_unstable();
-        merged.dedup();
-        if merged.len() > slots as usize {
+        let added = task
+            .pages()
+            .iter()
+            .filter(|page| pages.binary_search(page).is_err())
+            .count();
+        if pages.len() + added > slots as usize {
             if pages.is_empty() {
                 panic!(
-                    "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
-                    merged.len(),
+                    "task {position} of this plan walks {added} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
                 );
             }
             groups.push(WeightGroup::of(
@@ -197,17 +201,24 @@ fn weight_groups(plan: &Plan, slots: u32) -> Vec<WeightGroup> {
                 std::mem::take(&mut writes),
             ));
             start = position;
-            merged = task.pages().to_vec();
-            assert!(
-                merged.len() <= slots as usize,
-                "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
-                merged.len(),
-            );
         }
-        pages = merged;
-        writes.extend(task.writes());
-        writes.sort_unstable();
-        writes.dedup();
+        for page in task.pages() {
+            match pages.binary_search(page) {
+                Ok(_) => {}
+                Err(at) => pages.insert(at, *page),
+            }
+        }
+        assert!(
+            pages.len() <= slots as usize,
+            "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; raise the resident weight budget, or bind a graph whose tasks walk no more pages than it holds",
+            pages.len(),
+        );
+        for write in task.writes() {
+            match writes.binary_search(write) {
+                Ok(_) => {}
+                Err(at) => writes.insert(at, *write),
+            }
+        }
     }
     groups.push(WeightGroup::of(
         plan,
@@ -334,8 +345,9 @@ impl Program {
         let banks = heap.banks();
         let bank_bytes = heap.bank_bytes();
         let paged = weights.paged();
+        let bound = plan.host_extents();
         let groups = if paged {
-            weight_groups(&plan, weights.resident_pages())
+            weight_groups(&plan, weights.resident_pages(), &plan.weight_pages(&bound))
         } else {
             Vec::new()
         };
@@ -435,7 +447,10 @@ impl Program {
             tasks,
             values,
             bound: Mutex::new(Bound::of(&plan)),
-            groups,
+            windows: Mutex::new(Some(Windows {
+                extents: bound,
+                groups: Arc::new(groups),
+            })),
             plan,
         }
     }
@@ -513,8 +528,25 @@ impl Program {
         self.plan.span_at(value, self.at(), extents)
     }
 
-    pub(crate) fn weight_groups(&self) -> &[WeightGroup] {
-        &self.groups
+    pub(crate) fn windows(&self) -> Arc<Vec<WeightGroup>> {
+        let extents = self.host_extents();
+        let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(kept) = windows.as_ref().filter(|kept| kept.extents == extents) {
+            return kept.groups.clone();
+        }
+        let groups = Arc::new(match self.weights.paged() {
+            true => weight_groups(
+                &self.plan,
+                self.weights.resident_pages(),
+                &self.plan.weight_pages(&extents),
+            ),
+            false => Vec::new(),
+        });
+        *windows = Some(Windows {
+            extents,
+            groups: groups.clone(),
+        });
+        groups
     }
 
     pub(crate) fn store(&self) -> &Arc<WeightStore> {
@@ -627,7 +659,7 @@ impl Program {
     }
 
     pub fn weight_windows(&self) -> u32 {
-        self.groups.len() as u32
+        self.windows().len() as u32
     }
 
     pub fn workgroups(&self) -> u32 {

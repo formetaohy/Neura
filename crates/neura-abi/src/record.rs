@@ -102,6 +102,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     pad_columns: u32 => U32,
     axis: u32 => U32,
     offset: u32 => U32,
+    in_place: u32 => U32,
     wave: u32 => U32,
     split: u32 => U32,
     measure: u32 => U32,

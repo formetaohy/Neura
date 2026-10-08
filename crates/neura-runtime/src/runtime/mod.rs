@@ -502,7 +502,7 @@ impl Runtime {
             program.write_records(self.context.queue(), &extents);
             program.records_written();
         }
-        if program.weight_groups().is_empty() {
+        if program.windows().is_empty() {
             let device = self.context.device();
             let mut submission = Submission::new(device, "neura program");
             program
@@ -526,8 +526,9 @@ impl Runtime {
     fn stream(&self, program: &Program) -> Run {
         let queue = self.context.queue();
         let device = self.context.device();
-        let mut submissions = Vec::with_capacity(program.weight_groups().len());
-        for group in program.weight_groups() {
+        let windows = program.windows();
+        let mut submissions = Vec::with_capacity(windows.len());
+        for group in windows.iter() {
             submissions.extend(program.store().ensure(queue, group.pages()));
             program.progress.buffer().write_at(
                 queue,

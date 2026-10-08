@@ -1059,3 +1059,50 @@ fn a_program_of_free_extents_runs_no_binding_but_the_one_it_names() {
     let produced = runtime.read(&program, output);
     assert_eq!(produced.len(), 4 * 8 * 8);
 }
+
+#[test]
+fn a_static_walk_beside_a_free_extent_walks_its_own_rows() {
+    let attention = |beside: bool| {
+        let runtime = open();
+        let graph = Graph::new();
+        let shape = Shape::of([2, 2, 9, 4]);
+        let query = graph.parameter(shape, Init::Zero, Element::Single);
+        let key = graph.parameter(shape, Init::Zero, Element::Single);
+        let value = graph.parameter(shape, Init::Zero, Element::Single);
+        let output = graph.attention(
+            query,
+            key,
+            value,
+            AttentionOptions {
+                scale: 0.5,
+                causal: true,
+                origin: None,
+                segments: None,
+                reach: None,
+                query_segments: None,
+            },
+        );
+        graph.retain(output);
+        let walked = beside.then(|| {
+            let tokens = graph.free(8);
+            let walked = graph.input(Shape::vector(8).freed(&[(3, tokens)]), Element::Single);
+            graph.retain(graph.sum(walked));
+            walked
+        });
+        let store = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &store);
+        if let Some(walked) = walked {
+            runtime.bind(&program, &[8]);
+            runtime.write(&program, walked, &data(8, 5));
+        }
+        let numbers = data(2 * 2 * 9 * 4, 7);
+        runtime.write(&program, query, &numbers);
+        runtime.write(&program, key, &numbers);
+        runtime.write(&program, value, &numbers);
+        runtime.run(&program);
+        runtime.read(&program, output)
+    };
+    let fixed = attention(false);
+    let beside = attention(true);
+    assert_close(&beside, &fixed, 1e-5);
+}

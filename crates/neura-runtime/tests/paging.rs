@@ -579,3 +579,247 @@ fn a_streamed_store_reads_the_pages_it_churns_back_in_windows() {
         );
     }
 }
+
+const FREE_LAYERS: u32 = 6;
+const FREE_WIDTH: u32 = 256;
+const FREE_BOUND: u32 = 32;
+const FREE_STEPS: u32 = 4;
+const FREE_BYTES: u64 = 96 * (1 << 14);
+
+fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let init = Init::Uniform {
+        low: -0.02,
+        high: 0.02,
+    };
+    let mut layers = Vec::new();
+    for _ in 0..FREE_LAYERS {
+        layers.push((
+            graph.parameter(Shape::matrix(FREE_WIDTH, FREE_WIDTH), init, Element::Single),
+            graph.parameter(Shape::matrix(1, FREE_WIDTH), Init::Zero, Element::Single),
+        ));
+    }
+    let batch = graph.free(FREE_BOUND);
+    let data = graph.input(
+        Shape::matrix(FREE_BOUND, FREE_WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    let target = graph.input(
+        Shape::matrix(FREE_BOUND, FREE_WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    let mut value = data;
+    for (weight, bias) in &layers {
+        value = graph.relu(graph.add(graph.matmul(value, *weight), *bias));
+    }
+    let difference = graph.sub(value, target);
+    let loss = graph.sum(graph.mul(difference, difference));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    for (weight, bias) in &layers {
+        graph.add_into(*weight, graph.mul(gradients.of(*weight), descent));
+        graph.add_into(*bias, graph.mul(gradients.of(*bias), descent));
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..(FREE_BOUND * FREE_WIDTH))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    let targets = (0..(FREE_BOUND * FREE_WIDTH))
+        .map(|index| ((index * 53) % 97) as f32 / 97.0 - 0.5)
+        .collect::<Vec<_>>();
+    let mut losses = Vec::new();
+    for step in 0..FREE_STEPS {
+        let live = [FREE_BOUND, FREE_BOUND / 3, 1, FREE_BOUND][step as usize];
+        runtime.bind(&program, &[live]);
+        runtime.write(
+            &program,
+            data,
+            &observations[..(live * FREE_WIDTH) as usize],
+        );
+        runtime.write(&program, target, &targets[..(live * FREE_WIDTH) as usize]);
+        runtime.run(&program);
+        losses.push(runtime.read(&program, loss)[0]);
+    }
+    let parameters = layers
+        .iter()
+        .flat_map(|(weight, bias)| {
+            let mut values = runtime.read(&program, *weight);
+            values.extend(runtime.read(&program, *bias));
+            values
+        })
+        .collect();
+    (parameters, losses, program.weight_windows())
+}
+
+#[test]
+fn a_streamed_store_pages_the_batch_a_binding_holds() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_losses, _) = free_run(backends, MemoryRequest::default());
+        let (streamed, streamed_losses, windows) = free_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(FREE_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of a free batch reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert_eq!(resident_losses.len(), streamed_losses.len());
+        for (at, (expected, observed)) in resident_losses.iter().zip(&streamed_losses).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "step {at} of a free batch held a loss of {observed} where the resident store held {expected}",
+            );
+        }
+        assert!(
+            windows <= FREE_LAYERS,
+            "a step of {FREE_LAYERS} layers over a free batch dispatched {windows} weight windows, and a window carries the tiles of many layers",
+        );
+    }
+}
+
+fn wide_run(backends: Backends, memory: MemoryRequest) -> (f32, u32, u32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let batch = graph.free(64);
+    let weight = graph.parameter(
+        Shape::matrix(512, 512),
+        Init::Uniform {
+            low: -0.01,
+            high: 0.01,
+        },
+        Element::Single,
+    );
+    let data = graph.input(Shape::matrix(64, 512).freed(&[(2, batch)]), Element::Single);
+    let loss = graph.sum(graph.relu(graph.matmul(data, weight)));
+    graph.retain(loss);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.bind(&program, &[64]);
+    runtime.write(&program, data, &vec![0.25; 64 * 512]);
+    runtime.run(&program);
+    let observed = runtime.read(&program, loss)[0];
+    (observed, weights.pages(), weights.resident_pages())
+}
+
+#[test]
+fn a_streamed_store_holds_a_weight_no_budget_holds_whole() {
+    for backends in Backends::PLATFORM {
+        let (expected, pages, resident) = wide_run(backends, MemoryRequest::default());
+        assert_eq!(
+            resident, pages,
+            "a store without a weight budget holds every page its model carries",
+        );
+        let (observed, pages, held) = wide_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(16 * (1 << 14)),
+                ..Default::default()
+            },
+        );
+        assert_eq!(pages, resident);
+        assert!(
+            held < pages,
+            "a budget of 16 pages holds {held} of the {pages} pages the weight of this model carries",
+        );
+        assert!(
+            (expected - observed).abs() <= 1e-4,
+            "a store that pages a weight no budget holds whole walked to a loss of {observed} where the resident store walked to {expected}",
+        );
+    }
+}
+
+#[test]
+fn a_streamed_store_pages_a_model_a_device_count_rules() {
+    for backends in Backends::PLATFORM {
+        let counted = |memory: MemoryRequest| {
+            let runtime = open(backends, memory);
+            let graph = Graph::new();
+            let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
+            let tokens = graph.input(Shape::of([1, 1, 8, 128]), Element::Single);
+            let first = graph.parameter(
+                Shape::matrix(128, 128),
+                Init::Uniform {
+                    low: -0.05,
+                    high: 0.05,
+                },
+                Element::Single,
+            );
+            let second = graph.parameter(
+                Shape::matrix(128, 128),
+                Init::Uniform {
+                    low: -0.05,
+                    high: 0.05,
+                },
+                Element::Single,
+            );
+            let count = graph.sum_axis(probe, 2);
+            let live = graph.trim(tokens, 2, count);
+            let out = graph.matmul(graph.matmul(live, first), second);
+            graph.retain(out);
+            let weights = runtime.weights(&graph);
+            let program = runtime.compile(&graph, &weights);
+            runtime.write(&program, probe, &[1.0; 8]);
+            let tokens_data = (0..(8 * 128))
+                .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+                .collect::<Vec<_>>();
+            let first_data = (0..(128 * 128))
+                .map(|index| ((index * 53) % 97) as f32 / 97.0 - 0.5)
+                .collect::<Vec<_>>();
+            let second_data = (0..(128 * 128))
+                .map(|index| ((index * 71) % 89) as f32 / 89.0 - 0.5)
+                .collect::<Vec<_>>();
+            runtime.write(&program, tokens, &tokens_data);
+            runtime.write(&program, first, &first_data);
+            runtime.write(&program, second, &second_data);
+            runtime.run(&program);
+            (runtime.read(&program, out), program.weight_windows())
+        };
+        let (resident, windows) = counted(MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..Default::default()
+        });
+        assert_eq!(
+            windows, 0,
+            "a store that holds every weight resident walks no window",
+        );
+        let (streamed, windows) = counted(MemoryRequest {
+            readback_bytes: 4 << 20,
+            resident_weight_bytes: Some(4 * (1 << 14)),
+            ..Default::default()
+        });
+        assert!(
+            windows >= 1,
+            "a store of {} pages holds {} of them, and the weights of a model a device count rules walk in a window of their own",
+            8,
+            4,
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of a model a device count rules reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+    }
+}

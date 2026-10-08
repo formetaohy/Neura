@@ -28,7 +28,7 @@ fn a_plan_names_the_weight_pages_of_every_task_it_schedules() {
     graph.add_into(weight, upward);
     let plan = plan(&graph);
     assert_eq!(plan.store_words(), u64::from(WIDTH) * u64::from(WIDTH));
-    let tasks = plan.weight_pages();
+    let tasks = plan.weight_pages(plan.slot_bounds());
     assert_eq!(tasks.len(), plan.task_count() as usize);
     let mut widest = 0;
     let mut walked = BTreeSet::new();
@@ -69,6 +69,61 @@ fn a_plan_names_the_weight_pages_of_every_task_it_schedules() {
 }
 
 #[test]
+fn a_free_walk_pages_the_tile_a_binding_walks() {
+    let graph = Graph::new();
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::matrix(WIDTH, WIDTH),
+        Init::Zero,
+        Element::Single,
+    );
+    let batch = graph.free(ROWS);
+    let data = graph.input(
+        Shape::matrix(ROWS, WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    graph.retain(graph.matmul(data, weight));
+    let plan = plan(&graph);
+    let (tile, carried) = plan.matmul_geometries()[0];
+    let row_blocks = ROWS.div_ceil(tile.rows());
+    let column_blocks = WIDTH.div_ceil(tile.columns());
+    let splits = carried / (row_blocks * column_blocks);
+    let depth_blocks = WIDTH.div_ceil(tile.depth());
+    let slice_rows = depth_blocks.div_ceil(splits) * tile.depth();
+    let rows_per_page = PAGE_WORDS as u32 / WIDTH;
+    let reach = slice_rows.div_ceil(rows_per_page) + 1;
+    for live in [ROWS, ROWS / 2, 1] {
+        let tasks = plan.weight_pages(&[live]);
+        let widest = tasks
+            .iter()
+            .map(|task| task.pages().len())
+            .max()
+            .unwrap_or(0) as u32;
+        assert!(
+            widest <= reach,
+            "a free batch of {live} rows walks {widest} pages of a weight whose tile walks {slice_rows} rows of it, and {reach} pages a depth slice of {slice_rows} rows can reach; {PAGES} means every tile claimed the whole weight",
+        );
+        for task in &tasks {
+            for write in task.writes() {
+                assert!(
+                    task.pages().contains(write),
+                    "a task that writes weight page {write} holds it resident",
+                );
+            }
+        }
+    }
+    let empty = plan
+        .weight_pages(&[0])
+        .iter()
+        .map(|task| task.pages().len())
+        .sum::<usize>();
+    assert_eq!(
+        empty, 0,
+        "a binding of no rows weighs no weight, and a walk of no numbers demands no page",
+    );
+}
+
+#[test]
 fn a_plan_without_weights_names_no_weight_page() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(ROWS, WIDTH), Element::Single);
@@ -76,7 +131,7 @@ fn a_plan_without_weights_names_no_weight_page() {
     let plan = plan(&graph);
     assert_eq!(plan.store_words(), 0);
     assert!(
-        plan.weight_pages()
+        plan.weight_pages(plan.slot_bounds())
             .iter()
             .all(|task| task.pages().is_empty() && task.writes().is_empty()),
         "a graph without a parameter holds no weight page",

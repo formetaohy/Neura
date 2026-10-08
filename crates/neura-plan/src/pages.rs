@@ -1,10 +1,6 @@
 use crate::layout::Layout;
-use crate::lower::Task;
-use crate::region::{Region, touches};
+use crate::region::{Region, Touches, Values};
 use neura_abi::{PAGE_SHIFT, pages_of};
-use neura_graph::{Residency, ValueInfo};
-use neura_profile::MatmulTile;
-use std::collections::BTreeSet;
 
 #[derive(Default)]
 pub struct WeightPages {
@@ -22,78 +18,78 @@ impl WeightPages {
     }
 }
 
-pub(crate) fn weight_pages(
-    values: &[ValueInfo],
-    tiles: &[MatmulTile],
-    tasks: &[Task],
-    order: &[u32],
+pub(crate) fn weight_pages<V: Values>(
+    touched: &Touches,
+    values: &V,
     layout: &Layout,
-) -> Vec<WeightPages> {
-    order
-        .iter()
-        .map(|index| {
-            let touched = touches(values, tiles, &tasks[*index as usize]);
-            let mut pages = BTreeSet::new();
-            let mut writes = BTreeSet::new();
-            for (storage, region) in &touched.reads {
-                pages.extend(pages_of_storage(values, *storage, *region, layout));
-            }
-            for (storage, region) in &touched.writes {
-                let written = pages_of_storage(values, *storage, *region, layout);
-                pages.extend(written.iter().copied());
-                writes.extend(written);
-            }
-            WeightPages {
-                pages: pages.into_iter().collect(),
-                writes: writes.into_iter().collect(),
-            }
-        })
-        .collect()
+) -> WeightPages {
+    let mut pages = Vec::new();
+    let mut writes = Vec::new();
+    for (storage, region) in &touched.reads {
+        collect(values, *storage, *region, layout, &mut pages);
+    }
+    for (storage, region) in &touched.writes {
+        let mark = writes.len();
+        collect(values, *storage, *region, layout, &mut writes);
+        pages.extend_from_slice(&writes[mark..]);
+    }
+    pages.sort_unstable();
+    pages.dedup();
+    writes.sort_unstable();
+    writes.dedup();
+    WeightPages { pages, writes }
 }
 
-fn pages_of_storage(
-    values: &[ValueInfo],
+fn collect<V: Values>(
+    values: &V,
     storage: u32,
     region: Region,
     layout: &Layout,
-) -> Vec<u32> {
-    let info = &values[storage as usize];
-    let address = match info.residency {
-        Residency::Parameter => layout.weights().address(storage),
-        Residency::State => layout.state().address(storage),
-        _ => return Vec::new(),
+    pages: &mut Vec<u32>,
+) {
+    let placed = match layout.weights().holds(storage) {
+        true => layout.weights(),
+        false if layout.state().holds(storage) => layout.state(),
+        false => return,
     };
-    let elements = u64::from(info.shape.elements());
-    let words = info.element.storage_words(elements);
-    let mut runs = Vec::new();
+    let element = values.element(storage);
+    let base = placed.address(storage);
+    let elements = values
+        .bounds(storage)
+        .iter()
+        .map(|dim| u64::from(*dim))
+        .product::<u64>();
+    let words = element.storage_words(elements);
     match region {
-        Region::Whole => runs.push((0, words)),
-        Region::Run { first, count } => runs.push(info.element.word_span(first, count)),
+        Region::Whole => span(base, 0, words, pages),
+        Region::Run { first, count } => {
+            let (first, end) = element.word_span(first, count);
+            span(base, first, end, pages);
+        }
         Region::Band {
             first,
-            span,
+            span: width,
             stride,
             count,
         } => {
             for index in 0..count {
-                let at = first + index * stride;
-                runs.push(info.element.word_span(at, span));
+                let (first, end) = element.word_span(first + index * stride, width);
+                span(base, first, end, pages);
             }
         }
     }
-    if info.element.quantized() {
-        runs.push((info.element.payload_words(elements), words));
+    if element.quantized() {
+        span(base, element.payload_words(elements), words, pages);
     }
-    let mut pages = Vec::new();
-    for (first, end) in runs {
-        if end <= first {
-            continue;
-        }
-        let from = (address + first) >> PAGE_SHIFT;
-        let to = pages_of(address + end);
-        for page in from..to {
-            pages.push(u32::try_from(page).expect("a weight page fits the page table"));
-        }
+}
+
+fn span(base: u64, first: u64, end: u64, pages: &mut Vec<u32>) {
+    if end <= first {
+        return;
     }
-    pages
+    let from = (base + first) >> PAGE_SHIFT;
+    let to = pages_of(base + end);
+    for page in from..to {
+        pages.push(u32::try_from(page).expect("a weight page fits the page table"));
+    }
 }

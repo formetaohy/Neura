@@ -7,6 +7,7 @@ mod layout;
 mod lower;
 mod pages;
 mod product;
+mod record;
 mod region;
 mod schedule;
 mod span;

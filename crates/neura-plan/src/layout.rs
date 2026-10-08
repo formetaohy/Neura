@@ -74,6 +74,12 @@ impl Region {
         self.placement(storage).0
     }
 
+    pub(crate) fn holds(&self, storage: u32) -> bool {
+        self.placed
+            .get(storage as usize)
+            .is_some_and(|placed| placed.is_some())
+    }
+
     fn placement(&self, storage: u32) -> (u64, Element, f32) {
         self.placed
             .get(storage as usize)
