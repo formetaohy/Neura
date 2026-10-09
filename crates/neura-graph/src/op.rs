@@ -2,7 +2,7 @@ use crate::graph::{AttentionOptions, Graph, Ragged, Residency, TaskInfo, Value};
 use crate::pool::Pool;
 use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
-use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
+use neura_abi::{Distribution, EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
 
 const SEGMENT_CHUNK_ROWS: u32 = 512;
@@ -929,6 +929,45 @@ impl<'g> Graph<'g> {
     pub fn argmax(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
         self.choice(Kind::Argmax, value, NO_VALUE)
+    }
+
+    pub fn uniform(&self, shape: Shape, seed: Value<'g>) -> Value<'g> {
+        self.draw(Distribution::Uniform, shape, seed)
+    }
+
+    pub fn normal(&self, shape: Shape, seed: Value<'g>) -> Value<'g> {
+        self.draw(Distribution::Normal, shape, seed)
+    }
+
+    fn draw(&self, distribution: Distribution, shape: Shape, seed: Value<'g>) -> Value<'g> {
+        let seed = self.own(seed);
+        assert!(
+            self.shape(seed).is_scalar(),
+            "a {} draw takes one seed, and value {} holds {} elements",
+            distribution.name(),
+            seed.id(),
+            self.shape(seed).elements(),
+        );
+        let out = self.fresh(shape, Element::Single, Residency::Derived, false);
+        self.push(TaskInfo::of(
+            Kind::Noise,
+            distribution.code(),
+            out.id(),
+            [seed.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        ));
+        out
+    }
+
+    pub fn dropout(&self, value: Value<'g>, keep: f32, seed: Value<'g>) -> Value<'g> {
+        assert!(
+            keep > 0.0 && keep <= 1.0,
+            "a dropout that keeps {keep} of the numbers it draws keeps none of them or more than it holds",
+        );
+        let value = self.own(value);
+        let shape = self.shape(value);
+        let kept = self.less(self.uniform(shape, seed), self.fill(Shape::scalar(), keep));
+        let masked = self.select(kept, value, self.fill(shape, 0.0));
+        self.mul(masked, self.fill(Shape::scalar(), 1.0 / keep))
     }
 
     pub fn categorical(&self, logits: Value<'g>, seed: Value<'g>) -> Value<'g> {

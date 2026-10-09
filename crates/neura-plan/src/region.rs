@@ -519,6 +519,7 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Unary
         | Kind::Select
         | Kind::Fill
+        | Kind::Noise
         | Kind::Broadcast
         | Kind::Partial => elementwise(values, task, first, count, &mut narrowed),
         Kind::Attention

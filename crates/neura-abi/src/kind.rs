@@ -15,6 +15,7 @@ pub enum DeviceModule {
     Scan,
     Rows,
     MatmulWeight,
+    Noise,
 }
 
 impl DeviceModule {
@@ -34,6 +35,7 @@ impl DeviceModule {
         Self::Scan,
         Self::Rows,
         Self::MatmulWeight,
+        Self::Noise,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -53,6 +55,7 @@ impl DeviceModule {
             Self::Scan => "scan",
             Self::Rows => "rows",
             Self::MatmulWeight => "matmul_weight",
+            Self::Noise => "noise",
         }
     }
 }
@@ -536,6 +539,14 @@ kinds! {
         geometry: None,
         prelude: false,
         chain: false,
+        origin: false,
+    };
+    Noise NOISE = "noise" {
+        entry: "run_noise",
+        modules: [Noise],
+        geometry: Access,
+        prelude: false,
+        chain: true,
         origin: false,
     };
 }

@@ -531,6 +531,7 @@ fn schedule_unit(
         | Kind::Select
         | Kind::Partial
         | Kind::Fill
+        | Kind::Noise
         | Kind::Broadcast
         | Kind::Layout
         | Kind::Extend

@@ -1894,6 +1894,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::PrefixScan
             | Kind::PrefixClose
             | Kind::Fill
+            | Kind::Noise
             | Kind::Broadcast
             | Kind::Layout
             | Kind::Extend

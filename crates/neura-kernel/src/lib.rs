@@ -6,8 +6,8 @@ mod substrate;
 mod task;
 
 use neura_abi::{
-    DeviceModule, Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR,
-    control, measure, refusal, split, store, strategy,
+    DeviceModule, Distribution, Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal,
+    TENSOR, control, measure, refusal, split, store, strategy,
 };
 use neura_compiler::{Compiler, ast};
 use neura_profile::{CLAIM_BYTES, Geometry};
@@ -321,6 +321,9 @@ impl Kernel {
         for kind in Kind::ALL {
             compiler.constant(kind.symbol(), kind.code());
         }
+        for distribution in Distribution::ALL {
+            compiler.constant(distribution.symbol(), distribution.code());
+        }
         for binding in bindings(authored, banks, paged) {
             let spec = BindingSpec {
                 binding: binding.binding,
@@ -456,5 +459,6 @@ fn install(
         DeviceModule::Convert => task::convert::install(compiler, elements),
         DeviceModule::Scan => task::scan::install(compiler),
         DeviceModule::Rows => task::rows::install(compiler),
+        DeviceModule::Noise => task::noise::install(compiler),
     }
 }

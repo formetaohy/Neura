@@ -759,6 +759,7 @@ impl<'g> Graph<'g> {
                 }
             }
             Kind::Fill
+            | Kind::Noise
             | Kind::Layout
             | Kind::Extend
             | Kind::Partial
