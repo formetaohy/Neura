@@ -43,8 +43,12 @@ mod device {
         return chosen;
     }
 
-    fn gumbel_noise(seed: u32, index: u32) -> f32 {
-        let mut hash = seed ^ (index * 0x9e3779b9u32);
+    fn element_coordinates(source: Value, row: u32, column: u32) -> uvec4 {
+        return coordinates(row * source.dims.w + column, source.dims);
+    }
+
+    fn gumbel_noise(seed: u32, at: uvec4) -> f32 {
+        let mut hash = seed ^ (element_key(at) * 0x9e3779b9u32);
         hash = hash ^ (hash >> 16u32);
         hash = hash * 0x7feb352du32;
         hash = hash ^ (hash >> 15u32);
@@ -53,11 +57,18 @@ mod device {
         return -log(-log(f32(hash >> 8u32) * (1.0 / 16777216.0)));
     }
 
-    fn choice_weight(value: f32, seed: u32, index: u32, noised: bool) -> f32 {
+    fn choice_weight(
+        value: f32,
+        seed: u32,
+        noised: bool,
+        source: Value,
+        row: u32,
+        column: u32,
+    ) -> f32 {
         if !noised {
             return value;
         }
-        return value + gumbel_noise(seed, index);
+        return value + gumbel_noise(seed, element_coordinates(source, row, column));
     }
 
     fn fold_row_by_workgroup(
@@ -75,8 +86,10 @@ mod device {
             let weight = choice_weight(
                 read_flat(task, source, row * columns + column),
                 seed,
-                row * columns + column,
                 noised,
+                source,
+                row,
+                column,
             );
             if weight > local {
                 local = weight;
@@ -100,8 +113,10 @@ mod device {
             let weight = choice_weight(
                 read_flat(task, source, row * columns + column),
                 seed,
-                row * columns + column,
                 noised,
+                source,
+                row,
+                column,
             );
             if weight > local {
                 local = weight;

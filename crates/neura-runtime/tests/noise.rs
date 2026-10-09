@@ -283,6 +283,34 @@ fn a_draw_walks_the_length_a_binding_holds() {
 }
 
 #[test]
+fn a_drawn_element_keeps_the_number_its_coordinate_names() {
+    let runtime = open();
+    let graph = Graph::new();
+    let tokens = graph.free(8);
+    let seed = seed_of(&graph);
+    let draw = graph.uniform(Shape::of([2, 8, 4]).freed(&[(2, tokens)]), seed);
+    graph.retain(draw);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let mut drawn = Vec::new();
+    for tokens in [8u32, 4] {
+        runtime.bind(&program, &[tokens]);
+        runtime.write(&program, seed, &[f32::from_bits(0x5eed)]);
+        runtime.run(&program);
+        drawn.push(runtime.read(&program, draw));
+    }
+    assert_eq!(drawn[0].len(), 2 * 8 * 4);
+    assert_eq!(drawn[1].len(), 2 * 4 * 4);
+    for plane in 0..2usize {
+        assert_eq!(
+            &drawn[0][plane * 32..plane * 32 + 16],
+            &drawn[1][plane * 16..plane * 16 + 16],
+            "the first four tokens of plane {plane} drew other numbers when the binding named four instead of eight",
+        );
+    }
+}
+
+#[test]
 fn a_reparameterized_draw_descends_through_its_mean_and_its_spread() {
     let runtime = open();
     let graph = Graph::new();

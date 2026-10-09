@@ -55,8 +55,16 @@ pub fn write_reference(table: &[f32], indices: &[f32], updates: &[f32], width: u
     out
 }
 
-pub fn gumbel_reference(seed: u32, index: u32) -> f32 {
-    let mut hash = seed ^ index.wrapping_mul(0x9e37_79b9);
+fn element_key(at: [u32; 4]) -> u32 {
+    let mut key = at[0].wrapping_mul(0x9e37_79b9);
+    key = (key ^ at[1]).wrapping_mul(0x85eb_ca6b);
+    key = (key ^ at[2]).wrapping_mul(0xc2b2_ae35);
+    key = (key ^ at[3]).wrapping_mul(0x27d4_eb2f);
+    key
+}
+
+pub fn gumbel_reference(seed: u32, at: [u32; 4]) -> f32 {
+    let mut hash = seed ^ element_key(at).wrapping_mul(0x9e37_79b9);
     hash ^= hash >> 16;
     hash = hash.wrapping_mul(0x7feb_352d);
     hash ^= hash >> 15;

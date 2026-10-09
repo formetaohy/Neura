@@ -289,6 +289,38 @@ fn a_categorical_draw_follows_the_logits_it_was_handed() {
 }
 
 #[test]
+fn a_drawn_action_keeps_the_row_of_its_coordinate() {
+    let runtime = open();
+    let graph = Graph::new();
+    let tokens = graph.free(32);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let logits = graph.input(Shape::of([2, 32, 4]).freed(&[(2, tokens)]), Element::Single);
+    let draw = graph.categorical(logits, seed);
+    graph.retain(draw);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let row = [0.25f32, -0.5, 0.75, 0.0];
+    let logit_data = (0..64).flat_map(|_| row).collect::<Vec<_>>();
+    let mut drawn = Vec::new();
+    for bound in [32u32, 8] {
+        runtime.bind(&program, &[bound]);
+        runtime.write(&program, seed, &[f32::from_bits(0x5eed)]);
+        runtime.write(&program, logits, &logit_data[..bound as usize * 8]);
+        runtime.run(&program);
+        drawn.push(runtime.read(&program, draw));
+    }
+    assert_eq!(drawn[0].len(), 64);
+    assert_eq!(drawn[1].len(), 16);
+    for plane in 0..2usize {
+        assert_eq!(
+            &drawn[1][plane * 8..plane * 8 + 8],
+            &drawn[0][plane * 32..plane * 32 + 8],
+            "plane {plane} drew other actions when the binding named eight tokens instead of thirty two",
+        );
+    }
+}
+
+#[test]
 fn a_draw_picks_the_largest_logit_its_seeded_noise_hands_it() {
     let runtime = open();
     let rows = 512;
@@ -307,9 +339,10 @@ fn a_draw_picks_the_largest_logit_its_seeded_noise_hands_it() {
         runtime.run(&program);
         let expected = (0..rows)
             .map(|row| {
-                let base = row * classes;
-                let left = logit_data[base as usize] + gumbel_reference(raw, base);
-                let right = logit_data[base as usize + 1] + gumbel_reference(raw, base + 1);
+                let left =
+                    logit_data[(row * classes) as usize] + gumbel_reference(raw, [0, 0, row, 0]);
+                let right = logit_data[(row * classes + 1) as usize]
+                    + gumbel_reference(raw, [0, 0, row, 1]);
                 if right > left { 1.0 } else { 0.0 }
             })
             .collect::<Vec<_>>();

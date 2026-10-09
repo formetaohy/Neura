@@ -139,6 +139,14 @@ mod device {
         return at.x * strides.x + at.y * strides.y + at.z * strides.z + at.w * strides.w;
     }
 
+    fn element_key(at: uvec4) -> u32 {
+        let mut key = at.x * 0x9e3779b9u32;
+        key = (key ^ at.y) * 0x85ebca6bu32;
+        key = (key ^ at.z) * 0xc2b2ae35u32;
+        key = (key ^ at.w) * 0x27d4eb2fu32;
+        return key;
+    }
+
     fn walked_at(mode: u32, index: u32, dims: uvec4) -> uvec4 {
         if mode == strategy::INDEX {
             return uvec4(0u32, 0u32, 0u32, index);
