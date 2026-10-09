@@ -1,11 +1,10 @@
 use crate::heap::{Allocation, Heap};
 use crate::pool::{Pool, Recycled};
+use crate::spill::{Spill, SpillFile};
 use neura_abi::{NO_PAGE, PAGE_WORDS, WORD_BYTES, pages_of};
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext, Queue, Submission, SubmissionIndex};
 use neura_plan::Region;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -56,18 +55,12 @@ const WRITEBACK_CHUNKS: usize = 64;
 const CAPTURE_PAGES: usize = 64;
 const UPLOAD_PAGES: usize = 64;
 const STREAM_BYTES: u64 = 1 << 16;
-const SPILL_ATTEMPTS: u32 = 32;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
 const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);
 
 enum Backing {
     Memory(Vec<u8>),
-    File {
-        file: File,
-        path: PathBuf,
-        read: u64,
-        written: u64,
-    },
+    Spilled(SpillFile),
 }
 
 impl Backing {
@@ -75,73 +68,35 @@ impl Backing {
         Self::Memory(vec![0; pages as usize * page_bytes() as usize])
     }
 
-    fn spilled(directory: &Path, pages: u32) -> Self {
-        let bytes = u64::from(pages) * page_bytes();
-        for _ in 0..SPILL_ATTEMPTS {
-            let serial = NEXT_SPILL.fetch_add(1, Ordering::Relaxed);
-            let path = directory.join(format!(
-                "neura-weights-{}-{serial}.spill",
-                std::process::id(),
-            ));
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => {
-                    file.set_len(bytes).unwrap_or_else(|error| {
-                        panic!(
-                            "a weight spill of {bytes} bytes could not claim its bytes at {}: {error}",
-                            path.display(),
-                        )
-                    });
-                    return Self::File {
-                        file,
-                        path,
-                        read: 0,
-                        written: 0,
-                    };
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(error) => panic!(
-                    "a weight spill of {bytes} bytes could not be created at {}: {error}",
-                    path.display(),
-                ),
-            }
-        }
-        panic!(
-            "a weight spill of {bytes} bytes found no free name beside {} stale spills of {}",
-            SPILL_ATTEMPTS,
-            directory.display(),
-        );
+    fn spilled(spill: &Spill, pages: u32) -> Self {
+        Self::Spilled(spill.create(u64::from(pages) * page_bytes()))
     }
 
     fn host_bytes(&self) -> u64 {
         match self {
             Self::Memory(image) => image.len() as u64,
-            Self::File { .. } => 0,
+            Self::Spilled(_) => 0,
         }
     }
 
     fn path(&self) -> Option<PathBuf> {
         match self {
             Self::Memory(_) => None,
-            Self::File { path, .. } => Some(path.clone()),
+            Self::Spilled(file) => Some(file.path()),
         }
     }
 
     fn read_bytes(&self) -> u64 {
         match self {
             Self::Memory(_) => 0,
-            Self::File { read, .. } => *read,
+            Self::Spilled(file) => file.read_bytes(),
         }
     }
 
     fn written_bytes(&self) -> u64 {
         match self {
             Self::Memory(_) => 0,
-            Self::File { written, .. } => *written,
+            Self::Spilled(file) => file.written_bytes(),
         }
     }
 
@@ -150,19 +105,7 @@ impl Backing {
             Self::Memory(image) => {
                 bytes.copy_from_slice(&image[at as usize..at as usize + bytes.len()])
             }
-            Self::File {
-                file, path, read, ..
-            } => {
-                file.seek(SeekFrom::Start(at))
-                    .and_then(|_| file.read_exact(bytes))
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "a weight spill at {} could not be read at {at}: {error}",
-                            path.display(),
-                        )
-                    });
-                *read += bytes.len() as u64;
-            }
+            Self::Spilled(file) => file.read(at, bytes),
         }
     }
 
@@ -171,40 +114,15 @@ impl Backing {
             Self::Memory(image) => {
                 image[at as usize..at as usize + bytes.len()].copy_from_slice(bytes)
             }
-            Self::File {
-                file,
-                path,
-                written,
-                ..
-            } => {
-                file.seek(SeekFrom::Start(at))
-                    .and_then(|_| file.write_all(bytes))
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "a weight spill at {} could not be written at {at}: {error}",
-                            path.display(),
-                        )
-                    });
-                *written += bytes.len() as u64;
-            }
+            Self::Spilled(file) => file.write(at, bytes),
         }
     }
 }
-
-impl Drop for Backing {
-    fn drop(&mut self) {
-        if let Self::File { path, .. } = self {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-static NEXT_SPILL: AtomicU64 = AtomicU64::new(0);
 
 impl Mirror {
-    fn new(pages: u32, slots: u32, spill: Option<&Path>) -> Self {
+    fn new(pages: u32, slots: u32, spill: Option<&Spill>) -> Self {
         let backing = match spill {
-            Some(directory) => Backing::spilled(directory, pages),
+            Some(spill) => Backing::spilled(spill, pages),
             None => Backing::memory(pages),
         };
         Self {
@@ -271,7 +189,7 @@ impl WeightStore {
         heap: &Arc<Heap>,
         words: u64,
         resident: Option<u64>,
-        spill: Option<&Path>,
+        spill: Option<&Spill>,
     ) -> Arc<Self> {
         let pages = u32::try_from(pages_of(words)).unwrap_or_else(|_| {
             panic!("a weight store of {words} words spans more pages than a device addresses")

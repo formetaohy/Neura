@@ -557,3 +557,120 @@ fn a_spilled_store_carries_every_quantum_of_a_quantized_model() {
         carries_every_quantum_of_a_quantized_model(backends, &directory("quantized"));
     }
 }
+
+#[test]
+fn a_spill_directory_sweeps_the_leftovers_of_a_crashed_run() {
+    let directory = directory("sweep");
+    let pid = std::process::id();
+    let stale = (0..40u64)
+        .map(|serial| directory.join(format!("neura-weights-{pid}-{}.spill", 1_000_000 + serial)))
+        .chain((0..8u64).map(|serial| {
+            directory.join(format!(
+                "neura-weights-{}-{}.spill",
+                pid + 1,
+                1_000_000 + serial,
+            ))
+        }))
+        .collect::<Vec<_>>();
+    for path in &stale {
+        std::fs::write(path, b"the pages of a run that is gone").expect("a leftover spill");
+    }
+    let held = directory.join(format!("neura-weights-{pid}-9001.spill"));
+    let lock = std::fs::File::create(&held).expect("the spill of a live run");
+    lock.try_lock().expect("a live run holds its spill");
+    let foreign = directory.join("engine-cache.bin");
+    std::fs::write(&foreign, b"a file that belongs to the engine").expect("a foreign file");
+
+    let runtime = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let graph = Graph::new();
+    let session = training(&graph);
+    let weights = runtime.weights(&graph);
+
+    for path in &stale {
+        assert!(
+            !path.exists(),
+            "a sweep left the spill at {} behind",
+            path.display(),
+        );
+    }
+    assert!(
+        held.exists(),
+        "a sweep removed the spill a live run holds at {}",
+        held.display(),
+    );
+    assert!(
+        foreign.exists(),
+        "a sweep removed the file at {}",
+        foreign.display(),
+    );
+    let file = weights
+        .spill_file()
+        .expect("a spilled store names the file its pages live in");
+    assert!(
+        file.exists(),
+        "a swept directory created no spill at {}",
+        file.display(),
+    );
+    let trained = train(&runtime, &graph, &session, &weights);
+    assert!(
+        trained.loss.is_finite(),
+        "a spilled store that swept its directory ran a step of a spilled model",
+    );
+    drop(trained);
+    drop(session);
+    drop(weights);
+    assert!(
+        !file.exists(),
+        "a spilled store left its file at {} behind",
+        file.display(),
+    );
+    drop(lock);
+    let _ = std::fs::remove_file(&held);
+}
+
+#[test]
+fn a_sweep_keeps_the_spill_a_live_run_holds() {
+    let directory = directory("live");
+    let first = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let first_graph = Graph::new();
+    let first_session = training(&first_graph);
+    let first_weights = first.weights(&first_graph);
+    let file = first_weights
+        .spill_file()
+        .expect("a spilled store names the file its pages live in");
+    assert!(
+        file.exists(),
+        "a spilled store holds no file at {}",
+        file.display(),
+    );
+
+    let second = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let second_graph = Graph::new();
+    let second_session = training(&second_graph);
+    let second_weights = second.weights(&second_graph);
+    assert!(
+        file.exists(),
+        "a sweep removed the spill at {} a live run holds",
+        file.display(),
+    );
+    let trained = train(&first, &first_graph, &first_session, &first_weights);
+    assert!(
+        trained.loss.is_finite(),
+        "the sweep of another run broke the model of a live spill",
+    );
+    assert!(
+        first_weights.spill_read_bytes() > 0,
+        "a live spill read no byte of the file it holds",
+    );
+    let other = train(&second, &second_graph, &second_session, &second_weights);
+    assert!(
+        other.loss.is_finite(),
+        "the run that swept a directory of live spills ran no model",
+    );
+    assert!(
+        second_weights
+            .spill_file()
+            .is_some_and(|path| path.exists()),
+        "the run that swept a directory of live spills holds no file",
+    );
+}

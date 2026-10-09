@@ -3,6 +3,7 @@ use crate::checkpoint::{self, Checkpoint, CheckpointFile, Container};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
+use crate::spill::Spill;
 use crate::store::WeightStore;
 use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, progress};
 use neura_gpu::{
@@ -17,7 +18,7 @@ use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 mod tune;
 
@@ -136,6 +137,7 @@ pub struct Runtime {
     alignment: u64,
     resident_weight_bytes: Option<u64>,
     weight_spill: Option<PathBuf>,
+    spill: OnceLock<Spill>,
     encoding_bytes: u64,
 }
 
@@ -194,6 +196,7 @@ impl Runtime {
             context,
             resident_weight_bytes: memory.resident_weight_bytes,
             weight_spill: memory.weight_spill,
+            spill: OnceLock::new(),
             encoding_bytes: memory.encoding_bytes,
         }
     }
@@ -342,16 +345,26 @@ impl Runtime {
 
     fn parameter_store(&self, graph: &Graph) -> (Weights, Layout) {
         let layout = Layout::of(graph, self.alignment);
+        let spill = match self.paged_for(layout.words()) {
+            true => self.spill(),
+            false => None,
+        };
         let store = WeightStore::new(
             &self.context,
             &self.pool,
             &self.heap,
             layout.words(),
             self.resident_weight_bytes,
-            self.weight_spill.as_deref(),
+            spill,
         );
         let weights = Weights::new(store, layout.weights().clone(), layout.state().clone());
         (weights, layout)
+    }
+
+    fn spill(&self) -> Option<&Spill> {
+        self.weight_spill
+            .as_ref()
+            .map(|directory| self.spill.get_or_init(|| Spill::of(directory)))
     }
 
     fn seed(&self, layout: &Layout, weights: &Weights) {

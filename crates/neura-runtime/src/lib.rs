@@ -4,6 +4,7 @@ mod heap;
 mod pool;
 mod program;
 mod runtime;
+mod spill;
 mod store;
 
 pub use checkpoint::{Checkpoint, CheckpointFile, CheckpointTensor};
