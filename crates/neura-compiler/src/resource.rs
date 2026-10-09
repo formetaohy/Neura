@@ -4,11 +4,27 @@ use std::ops::{Index, IndexMut};
 pub struct Read<T>(PhantomData<T>);
 pub struct ReadWrite<T>(PhantomData<T>);
 
+pub struct AtomicU32;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Uvec3 {
     pub x: u32,
     pub y: u32,
     pub z: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Uvec4 {
+    pub x: u32,
+    pub y: u32,
+    pub z: u32,
+    pub w: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fvec2 {
+    pub x: f32,
+    pub y: f32,
 }
 
 impl<T> Index<u32> for Read<T> {

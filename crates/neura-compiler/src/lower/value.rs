@@ -1,5 +1,6 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::ast;
+use crate::device::Intrinsic;
 use crate::{Compiler, DeviceInstruction};
 use neura_shader::{
     AtomicOp, BinaryOp, Constant, MatrixLayout, MatrixUse, Scalar, Type, TypeId, UnaryOp,
@@ -478,9 +479,37 @@ impl FunctionLower<'_> {
     }
 
     fn call(&mut self, name: &str, args: &[ast::Expression]) -> Typed {
-        match name {
-            "uvec4" => {
-                assert_eq!(args.len(), 4);
+        match Intrinsic::of(name) {
+            Some(intrinsic) => {
+                assert!(
+                    intrinsic.yields(),
+                    "the device intrinsic {name} writes without yielding a value",
+                );
+                let args = self.intrinsic_arguments(intrinsic, args);
+                self.intrinsic(intrinsic, args)
+            }
+            None => self.device_function(name, args),
+        }
+    }
+
+    pub(super) fn intrinsic_arguments<'a>(
+        &self,
+        intrinsic: Intrinsic,
+        arguments: &'a [ast::Expression],
+    ) -> &'a [ast::Expression] {
+        assert_eq!(
+            arguments.len(),
+            intrinsic.arity() as usize,
+            "the device intrinsic {} takes {} arguments",
+            intrinsic.name(),
+            intrinsic.arity(),
+        );
+        arguments
+    }
+
+    fn intrinsic(&mut self, intrinsic: Intrinsic, args: &[ast::Expression]) -> Typed {
+        match intrinsic {
+            Intrinsic::Uvec4 => {
                 let ty = self.compiler.scalar("u32");
                 let constituents = args
                     .iter()
@@ -492,8 +521,7 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "select" => {
-                assert_eq!(args.len(), 3);
+            Intrinsic::Select => {
                 let reject = self.value(&args[0]);
                 let accept = self.value_with_hint(&args[1], Some(reject.ty));
                 let condition = self.value_with_hint(&args[2], Some(self.compiler.scalar("bool")));
@@ -504,8 +532,7 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "bitcast_u32" => {
-                assert_eq!(args.len(), 1);
+            Intrinsic::BitcastU32 => {
                 let source = self.value_with_hint(&args[0], Some(self.compiler.scalar("f32")));
                 let ty = self.compiler.scalar("u32");
                 self.emit(ty, |result| DeviceInstruction::Bitcast {
@@ -513,8 +540,7 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "bitcast_f32" => {
-                assert_eq!(args.len(), 1);
+            Intrinsic::BitcastF32 => {
                 let source = self.value_with_hint(&args[0], Some(self.compiler.scalar("u32")));
                 let ty = self.compiler.scalar("f32");
                 self.emit(ty, |result| DeviceInstruction::Bitcast {
@@ -522,20 +548,18 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "f32" | "i32" | "u32" | "f16" => {
-                assert_eq!(args.len(), 1);
+            Intrinsic::F32 | Intrinsic::U32 | Intrinsic::I32 | Intrinsic::F16 => {
                 let source = self.value(&args[0]);
-                let ty = match name {
-                    "f16" => self.compiler.module_mut().scalar(Scalar::F16),
-                    other => self.compiler.ty(other),
+                let ty = match intrinsic {
+                    Intrinsic::F16 => self.compiler.module_mut().scalar(Scalar::F16),
+                    _ => self.compiler.ty(intrinsic.name()),
                 };
                 self.emit(ty, |result| DeviceInstruction::Convert {
                     value: source.value,
                     result,
                 })
             }
-            "unpack2x16float" => {
-                assert_eq!(args.len(), 1);
+            Intrinsic::UnpackHalf2x16 => {
                 let source = self.value_with_hint(&args[0], Some(self.compiler.scalar("u32")));
                 let ty = self.compiler.ty("fvec2");
                 self.emit(ty, |result| DeviceInstruction::Math {
@@ -544,24 +568,33 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "max" | "min" | "abs" | "sqrt" | "exp" | "log" | "tanh" | "trunc" | "sin" | "cos"
-            | "pow" | "floor" => {
-                let fun = match name {
-                    "max" => neura_shader::MathFun::Max,
-                    "min" => neura_shader::MathFun::Min,
-                    "abs" => neura_shader::MathFun::Abs,
-                    "sqrt" => neura_shader::MathFun::Sqrt,
-                    "exp" => neura_shader::MathFun::Exp,
-                    "log" => neura_shader::MathFun::Log,
-                    "tanh" => neura_shader::MathFun::Tanh,
-                    "trunc" => neura_shader::MathFun::Trunc,
-                    "sin" => neura_shader::MathFun::Sin,
-                    "cos" => neura_shader::MathFun::Cos,
-                    "pow" => neura_shader::MathFun::Pow,
-                    "floor" => neura_shader::MathFun::Floor,
+            Intrinsic::Max
+            | Intrinsic::Min
+            | Intrinsic::Abs
+            | Intrinsic::Sqrt
+            | Intrinsic::Exp
+            | Intrinsic::Log
+            | Intrinsic::Tanh
+            | Intrinsic::Trunc
+            | Intrinsic::Sin
+            | Intrinsic::Cos
+            | Intrinsic::Pow
+            | Intrinsic::Floor => {
+                let fun = match intrinsic {
+                    Intrinsic::Max => neura_shader::MathFun::Max,
+                    Intrinsic::Min => neura_shader::MathFun::Min,
+                    Intrinsic::Abs => neura_shader::MathFun::Abs,
+                    Intrinsic::Sqrt => neura_shader::MathFun::Sqrt,
+                    Intrinsic::Exp => neura_shader::MathFun::Exp,
+                    Intrinsic::Log => neura_shader::MathFun::Log,
+                    Intrinsic::Tanh => neura_shader::MathFun::Tanh,
+                    Intrinsic::Trunc => neura_shader::MathFun::Trunc,
+                    Intrinsic::Sin => neura_shader::MathFun::Sin,
+                    Intrinsic::Cos => neura_shader::MathFun::Cos,
+                    Intrinsic::Pow => neura_shader::MathFun::Pow,
+                    Intrinsic::Floor => neura_shader::MathFun::Floor,
                     _ => unreachable!(),
                 };
-                assert_eq!(args.len(), fun.arity());
                 let first = self.value(&args[0]);
                 let mut arguments = vec![first.value];
                 if let Some(second) = args.get(1) {
@@ -573,10 +606,9 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "atomic_add" | "atomic_sub" => self.atomic(name, args),
-            "workgroup_uniform_load" => self.workgroup_uniform_load(args),
-            "coopmat_accumulator" => {
-                assert_eq!(args.len(), 1);
+            Intrinsic::AtomicAdd | Intrinsic::AtomicSub => self.atomic(intrinsic, args),
+            Intrinsic::WorkgroupUniformLoad => self.workgroup_uniform_load(args),
+            Intrinsic::CoopmatAccumulator => {
                 let value = self.value_with_hint(&args[0], Some(self.compiler.scalar("f32")));
                 let ty = self.coopmat(ast::Type::Named("coopmat_accumulator".to_owned()));
                 self.emit(ty, |result| DeviceInstruction::MatrixFill {
@@ -584,13 +616,16 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "coopmat_load_row" => self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::A),
-            "coopmat_load_b_row" => self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::B),
-            "coopmat_load_column" => {
+            Intrinsic::CoopmatLoadRow => {
+                self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::A)
+            }
+            Intrinsic::CoopmatLoadBRow => {
+                self.matrix_load(args, MatrixLayout::RowMajor, MatrixUse::B)
+            }
+            Intrinsic::CoopmatLoadColumn => {
                 self.matrix_load(args, MatrixLayout::ColumnMajor, MatrixUse::B)
             }
-            "coopmat_muladd" => {
-                assert_eq!(args.len(), 3);
+            Intrinsic::CoopmatMuladd => {
                 let accumulate = self.value(&args[2]);
                 let left = self.value_with_hint(&args[0], None);
                 let right = self.value_with_hint(&args[1], None);
@@ -601,40 +636,47 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            "workgroup_barrier" | "storage_barrier" | "atomic_store" | "coopmat_store" => {
-                panic!("a device synchronization or store cannot yield a value")
+            Intrinsic::ScalarArray => {
+                panic!("a Rust device register array is declared by a let binding")
             }
-            _ => {
-                let function = self.compiler.lower_callee(name);
-                let (parameters, result) = {
-                    let callee = &self.compiler.module().functions()[function as usize];
-                    (
-                        callee
-                            .arguments
-                            .iter()
-                            .map(|argument| argument.ty)
-                            .collect::<Vec<_>>(),
-                        callee.result,
-                    )
-                };
-                assert_eq!(
-                    args.len(),
-                    parameters.len(),
-                    "{name} takes a fixed number of arguments"
-                );
-                let arguments = args
-                    .iter()
-                    .zip(parameters)
-                    .map(|(arg, ty)| self.value_with_hint(arg, Some(ty)).value)
-                    .collect();
-                let ty = result.expect("a void function cannot be used as a value");
-                self.emit(ty, |value| DeviceInstruction::Call {
-                    function,
-                    arguments,
-                    result: Some(value),
-                })
+            Intrinsic::AtomicStore
+            | Intrinsic::WorkgroupBarrier
+            | Intrinsic::StorageBarrier
+            | Intrinsic::CoopmatStore => {
+                unreachable!("a device synchronization or store yields no value")
             }
         }
+    }
+
+    fn device_function(&mut self, name: &str, args: &[ast::Expression]) -> Typed {
+        let function = self.compiler.lower_callee(name);
+        let (parameters, result) = {
+            let callee = &self.compiler.module().functions()[function as usize];
+            (
+                callee
+                    .arguments
+                    .iter()
+                    .map(|argument| argument.ty)
+                    .collect::<Vec<_>>(),
+                callee.result,
+            )
+        };
+        assert_eq!(
+            args.len(),
+            parameters.len(),
+            "{name} takes a fixed number of arguments"
+        );
+        let arguments = args
+            .iter()
+            .zip(parameters)
+            .map(|(arg, ty)| self.value_with_hint(arg, Some(ty)).value)
+            .collect();
+        let ty = result.expect("a void function cannot be used as a value");
+        self.emit(ty, |value| DeviceInstruction::Call {
+            function,
+            arguments,
+            result: Some(value),
+        })
     }
 
     fn coopmat(&mut self, ty: ast::Type) -> TypeId {
@@ -647,11 +689,6 @@ impl FunctionLower<'_> {
         layout: MatrixLayout,
         usage: MatrixUse,
     ) -> Typed {
-        assert_eq!(
-            args.len(),
-            2,
-            "a device matrix load takes a place and a stride"
-        );
         let pointer = self.reference(
             &args[0],
             if matches!(layout, MatrixLayout::RowMajor) {
@@ -677,13 +714,12 @@ impl FunctionLower<'_> {
         })
     }
 
-    pub(super) fn atomic(&mut self, name: &str, args: &[ast::Expression]) -> Typed {
-        assert_eq!(args.len(), 2);
+    pub(super) fn atomic(&mut self, intrinsic: Intrinsic, args: &[ast::Expression]) -> Typed {
         let pointer = self.reference(&args[0], "a device atomic");
-        let fun = match name {
-            "atomic_add" => AtomicOp::Add,
-            "atomic_sub" => AtomicOp::Subtract,
-            other => panic!("{other} is not a device atomic"),
+        let fun = match intrinsic {
+            Intrinsic::AtomicAdd => AtomicOp::Add,
+            Intrinsic::AtomicSub => AtomicOp::Subtract,
+            other => panic!("{} is not a device atomic", other.name()),
         };
         let ty = self.compiler.module().loaded_ty(pointer.ty);
         assert_eq!(

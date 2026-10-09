@@ -1,5 +1,6 @@
 extern crate self as neura_compiler;
 
+pub mod device;
 mod lower;
 mod resource;
 pub use neura_abi as abi;
@@ -13,7 +14,7 @@ pub use neura_shader::{BindingSpec, ComputeProgram};
 use std::collections::{BTreeMap, HashMap};
 
 pub use neura_macro::{kernel, module};
-pub use resource::{Read, ReadWrite, Uvec3};
+pub use resource::{AtomicU32, Fvec2, Read, ReadWrite, Uvec3, Uvec4};
 
 pub struct Compiler {
     module: Module,

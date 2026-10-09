@@ -1,6 +1,7 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::DeviceInstruction;
 use crate::ast;
+use crate::device::Intrinsic;
 use neura_shader::{Barrier, BinaryOp, MatrixLayout};
 
 impl FunctionLower<'_> {
@@ -17,14 +18,10 @@ impl FunctionLower<'_> {
                         name: intrinsic,
                         arguments,
                     } = value
-                        && intrinsic == "scalar_array"
+                        && Intrinsic::of(intrinsic) == Some(Intrinsic::ScalarArray)
                     {
                         assert!(*mutable, "scalar registers are mutable");
-                        assert_eq!(
-                            arguments.len(),
-                            2,
-                            "scalar registers require a value and a length"
-                        );
+                        let arguments = self.intrinsic_arguments(Intrinsic::ScalarArray, arguments);
                         let initial = self.value(&arguments[0]);
                         let count = self.compiler.evaluate(&arguments[1]);
                         assert!(count > 0, "a scalar register array is not empty");
@@ -236,11 +233,6 @@ impl FunctionLower<'_> {
 
     pub(super) fn workgroup_uniform_load(&mut self, arguments: &[ast::Expression]) -> Typed {
         use crate::ast::Expression as E;
-        assert_eq!(
-            arguments.len(),
-            1,
-            "a workgroup uniform load takes one reference",
-        );
         let E::Reference(reference) = &arguments[0] else {
             panic!("a workgroup uniform load takes a reference");
         };
@@ -257,71 +249,73 @@ impl FunctionLower<'_> {
     fn expression_statement(&mut self, expr: &ast::Expression) {
         use crate::ast::Expression as E;
         if let E::Call { name, arguments } = expr {
-            match name.as_str() {
-                "workgroup_barrier" => {
-                    assert!(arguments.is_empty());
-                    self.push(DeviceInstruction::Barrier(Barrier::WorkGroup));
-                    return;
+            match Intrinsic::of(name) {
+                Some(intrinsic) => {
+                    let arguments = self.intrinsic_arguments(intrinsic, arguments);
+                    match intrinsic {
+                        Intrinsic::WorkgroupBarrier => {
+                            self.push(DeviceInstruction::Barrier(Barrier::WorkGroup));
+                            return;
+                        }
+                        Intrinsic::StorageBarrier => {
+                            self.push(DeviceInstruction::Barrier(Barrier::Storage));
+                            return;
+                        }
+                        Intrinsic::AtomicStore => {
+                            let pointer = self.reference(&arguments[0], "an atomic store");
+                            let ty = self.compiler.module().loaded_ty(pointer.ty);
+                            let value = self.value_with_hint(&arguments[1], Some(ty));
+                            self.push(DeviceInstruction::Store {
+                                pointer: pointer.value,
+                                value: value.value,
+                            });
+                            return;
+                        }
+                        Intrinsic::CoopmatStore => {
+                            let pointer = self.reference(&arguments[0], "a device matrix store");
+                            let stride = self
+                                .value_with_hint(&arguments[1], Some(self.compiler.scalar("u32")));
+                            let value = self.value(&arguments[2]);
+                            self.push(DeviceInstruction::MatrixStore {
+                                pointer: pointer.value,
+                                value: value.value,
+                                stride: stride.value,
+                                layout: MatrixLayout::RowMajor,
+                            });
+                            return;
+                        }
+                        Intrinsic::AtomicAdd | Intrinsic::AtomicSub => {
+                            self.atomic(intrinsic, arguments);
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
-                "storage_barrier" => {
-                    assert!(arguments.is_empty());
-                    self.push(DeviceInstruction::Barrier(Barrier::Storage));
-                    return;
-                }
-                "atomic_store" => {
-                    assert_eq!(arguments.len(), 2);
-                    let pointer = self.reference(&arguments[0], "an atomic store");
-                    let ty = self.compiler.module().loaded_ty(pointer.ty);
-                    let value = self.value_with_hint(&arguments[1], Some(ty));
-                    self.push(DeviceInstruction::Store {
-                        pointer: pointer.value,
-                        value: value.value,
+                None if !self.compiler.returns_value(name) => {
+                    let function = self.compiler.lower_callee(name);
+                    let parameters = self.compiler.module().functions()[function as usize]
+                        .arguments
+                        .iter()
+                        .map(|argument| argument.ty)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        parameters.len(),
+                        arguments.len(),
+                        "{name} takes a fixed number of arguments"
+                    );
+                    let arguments = arguments
+                        .iter()
+                        .zip(parameters)
+                        .map(|(argument, ty)| self.value_with_hint(argument, Some(ty)).value)
+                        .collect();
+                    self.push(DeviceInstruction::Call {
+                        function,
+                        arguments,
+                        result: None,
                     });
                     return;
                 }
-                "coopmat_store" => {
-                    assert_eq!(arguments.len(), 3);
-                    let pointer = self.reference(&arguments[0], "a device matrix store");
-                    let stride =
-                        self.value_with_hint(&arguments[1], Some(self.compiler.scalar("u32")));
-                    let value = self.value(&arguments[2]);
-                    self.push(DeviceInstruction::MatrixStore {
-                        pointer: pointer.value,
-                        value: value.value,
-                        stride: stride.value,
-                        layout: MatrixLayout::RowMajor,
-                    });
-                    return;
-                }
-                "atomic_add" | "atomic_sub" => {
-                    self.atomic(name, arguments);
-                    return;
-                }
-                _ => {}
-            }
-            if !self.compiler.returns_value(name) {
-                let function = self.compiler.lower_callee(name);
-                let parameters = self.compiler.module().functions()[function as usize]
-                    .arguments
-                    .iter()
-                    .map(|argument| argument.ty)
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    parameters.len(),
-                    arguments.len(),
-                    "{name} takes a fixed number of arguments"
-                );
-                let arguments = arguments
-                    .iter()
-                    .zip(parameters)
-                    .map(|(argument, ty)| self.value_with_hint(argument, Some(ty)).value)
-                    .collect();
-                self.push(DeviceInstruction::Call {
-                    function,
-                    arguments,
-                    result: None,
-                });
-                return;
+                None => {}
             }
         }
         self.value(expr);

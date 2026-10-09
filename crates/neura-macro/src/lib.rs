@@ -217,17 +217,17 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
         let Some(GenericArgument::Type(syn::Type::Path(ty))) = generics.args.first() else {
             return Err(syn::Error::new_spanned(
                 generics,
-                "storage buffers contain u32 or f32",
+                "storage buffers contain u32, f32 or AtomicU32",
             ));
         };
         let Some(ty) = ty.path.get_ident() else {
             return Err(syn::Error::new_spanned(
                 ty,
-                "storage buffers contain u32 or f32",
+                "storage buffers contain u32, f32 or AtomicU32",
             ));
         };
         let element = ty.to_string();
-        let element = if matches!(element.as_str(), "u32" | "f32") {
+        let element = if matches!(element.as_str(), "u32" | "f32" | "AtomicU32") {
             element
         } else if let Some(record) = element.strip_suffix("Record") {
             let record = record.to_owned();
@@ -236,7 +236,7 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
         } else {
             return Err(syn::Error::new_spanned(
                 ty,
-                "storage buffers contain u32, f32 or an ABI record",
+                "storage buffers contain u32, f32, AtomicU32 or an ABI record",
             ));
         };
         if segment.ident == "ReadWrite" {
@@ -280,6 +280,7 @@ fn expand_kernel(options: Workgroup, mut original: syn::ItemFn) -> syn::Result<T
             }).clone()
         }
         const _: () = {
+            use ::neura_compiler::device::*;
             #typecheck
             let _ = #hidden;
         };

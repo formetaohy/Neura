@@ -1,4 +1,4 @@
-use neura_compiler::{Read, ReadWrite, kernel};
+use neura_compiler::{AtomicU32, Read, ReadWrite, kernel};
 use neura_gpu::{
     Backends, Binding, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission,
 };
@@ -379,5 +379,97 @@ fn past_a_gigabyte(backends: Backends) {
 fn every_platform_backend_reaches_past_a_gigabyte() {
     for backends in Backends::PLATFORM {
         past_a_gigabyte(backends);
+    }
+}
+
+#[kernel(workgroup_size = 8)]
+fn activates(lid: u32, input: Read<f32>, out: ReadWrite<f32>, counts: ReadWrite<AtomicU32>) {
+    let value = input[lid];
+    let positive = select(0.0f32, value, value > 0.0f32);
+    out[lid] = min(exp(positive), abs(value) + 1.0f32);
+    if value > 0.0f32 {
+        atomic_add(&counts[0], 1u32);
+    }
+}
+
+fn activation(value: f32) -> f32 {
+    let positive = if value > 0.0 { value } else { 0.0 };
+    positive.exp().min(value.abs() + 1.0)
+}
+
+fn activated(backends: Backends) {
+    let context = GpuContext::open(&GpuRequest {
+        backends,
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    let device = context.device().clone();
+    let queue = context.queue().clone();
+    let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    let input = GpuBuffer::new(&device, "activation input", 32, storage);
+    let counts = GpuBuffer::new(
+        &device,
+        "activation counts",
+        16,
+        storage | BufferUsages::COPY_SRC,
+    );
+    let output = GpuBuffer::new(
+        &device,
+        "activation output",
+        32,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
+    let readback = GpuBuffer::new(
+        &device,
+        "activation readback",
+        64,
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    );
+    let values = [-3.0f32, -0.5, 0.0, 0.25, 1.0, 2.0, -1.5, 4.0];
+    input.write_at(&queue, 0, bytemuck::cast_slice(&values));
+    counts.write_at(&queue, 0, bytemuck::cast_slice(&[0u32, 0, 0, 0]));
+    let pipeline = context.declare(activates());
+    let group = pipeline.bind_group(&[
+        Binding {
+            index: 0,
+            buffer: input.binding(0, 32),
+        },
+        Binding {
+            index: 1,
+            buffer: output.binding(0, 32),
+        },
+        Binding {
+            index: 2,
+            buffer: counts.binding(0, 16),
+        },
+    ]);
+    let mut submission = Submission::new(&device, "native activation dispatch");
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
+    submission.submit(&queue);
+    let mut transfer = Submission::new(&device, "native activation transfer");
+    transfer.copy(&output, 0, &readback, 0, 32);
+    transfer.copy(&counts, 0, &readback, 32, 16);
+    let index = transfer.submit(&queue);
+    let measured = readback.read(&queue, index, 48);
+    let produced = bytemuck::cast_slice::<u8, f32>(&measured[..32]);
+    for (at, (value, observed)) in values.iter().zip(produced).enumerate() {
+        let expected = activation(*value);
+        assert!(
+            (expected - observed).abs() <= 1e-5,
+            "a kernel reached {observed} where {expected} is the answer at {at}",
+        );
+    }
+    let counted = u32::from_ne_bytes(measured[32..36].try_into().expect("four bytes"));
+    assert_eq!(
+        counted,
+        values.iter().filter(|value| **value > 0.0).count() as u32,
+        "the atomic counter weighs every input the kernel rectifies",
+    );
+}
+
+#[test]
+fn every_platform_backend_runs_a_kernel_over_the_device_vocabulary() {
+    for backends in Backends::PLATFORM {
+        activated(backends);
     }
 }
