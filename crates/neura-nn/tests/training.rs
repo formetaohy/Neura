@@ -90,7 +90,7 @@ fn descent_lowers_the_loss_of_a_single_layer() {
     let targets = graph.input(Shape::matrix(16, 1), Element::Single);
     let loss = mse_loss(&graph, layer.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.05, 0.0);
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -133,7 +133,7 @@ fn a_batch_of_sequences_trains_one_dense_layer() {
     assert_eq!(prediction.shape(), Shape::of([8, 5, 2]));
     let loss = mse_loss(&graph, prediction, targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.05, 0.0);
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -178,7 +178,7 @@ fn a_convolution_lowers_the_loss_of_the_pattern_it_reads() {
     let targets = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
     let loss = mse_loss(&graph, conv.forward(&graph, inputs), targets);
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.1, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.1, 0.0);
     optimizer.track_all(&graph, &conv.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -208,7 +208,7 @@ fn a_step_over_a_parameter_without_a_gradient_stops_the_graph() {
     let other = graph.named_parameter("other", Shape::matrix(4, 4), Init::Zero, Element::Single);
     let loss = graph.sum(graph.relu(weight));
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.1, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.1, 0.0);
     optimizer.track(&graph, other);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         optimizer.step(&graph, &gradients);
@@ -343,7 +343,7 @@ fn a_policy_takes_the_action_the_device_picks_and_learns_from_it() {
     graph.retain(logits);
     graph.retain(action);
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.05, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.05, 0.0);
     optimizer.track_all(&graph, &layer.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);

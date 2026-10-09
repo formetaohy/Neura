@@ -126,7 +126,7 @@ fn a_momentum_descent_matches_a_reference() {
     let weight = graph.named_parameter("weight", Shape::vector(2), Init::Zero, Element::Single);
     let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(2), 1.0)));
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::momentum(&graph, rate, momentum_decay, 0.0);
+    let mut optimizer = Sgd::momentum(&graph, "descent", rate, momentum_decay, 0.0);
     optimizer.track_all(&graph, &[weight]);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -170,7 +170,7 @@ fn a_decay_enters_a_momentum_before_its_velocity() {
     );
     let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(2), 0.0)));
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::momentum(&graph, rate, momentum_decay, decay);
+    let mut optimizer = Sgd::momentum(&graph, "descent", rate, momentum_decay, decay);
     optimizer.track_all(&graph, &[weight]);
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
@@ -211,7 +211,7 @@ fn clipping_scales_a_gradient_set_by_its_global_norm() {
     ));
     let gradients = graph.backward(loss);
     let clipped = gradients.clip(&graph, 1.0);
-    let mut optimizer = Sgd::new(&graph, 1.0, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 1.0, 0.0);
     optimizer.track_all(&graph, &[first, second]);
     optimizer.step(&graph, &clipped);
     let weights = runtime.weights(&graph);
@@ -296,11 +296,11 @@ fn a_frozen_parameter_enters_no_descent() {
     );
     graph.freeze(&[weight]);
     assert!(refuses(|| {
-        let mut descent = Sgd::new(&graph, 0.1, 0.0);
+        let mut descent = Sgd::new(&graph, "plain", 0.1, 0.0);
         descent.track(&graph, weight);
     }));
     assert!(refuses(|| {
-        let mut momentum = Sgd::momentum(&graph, 0.1, 0.9, 0.0);
+        let mut momentum = Sgd::momentum(&graph, "momentum", 0.1, 0.9, 0.0);
         momentum.track(&graph, weight);
     }));
     assert!(refuses(|| {

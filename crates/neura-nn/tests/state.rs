@@ -137,8 +137,8 @@ fn a_training_graph_keeps_its_state_beside_the_model_it_learns() {
     let checkpoint = runtime.checkpoint(&weights);
     assert_eq!(
         checkpoint.tensors(),
-        13,
-        "four parameters ride beside four pairs of moments and the clock a descent counts its steps with",
+        17,
+        "four parameters ride beside four pairs of moments, the clock a descent counts its steps with and the four knobs it reads every step",
     );
     assert!(checkpoint.tensor("first.weight").is_some());
     assert!(checkpoint.tensor("second.bias").is_some());

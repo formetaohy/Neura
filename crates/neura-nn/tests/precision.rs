@@ -141,7 +141,7 @@ fn a_narrow_step_runs_beside_a_wide_one() {
     let prediction = model.forward(&graph, input);
     let loss = mse_loss(&graph, prediction, prediction);
     let gradients = graph.backward(loss);
-    let mut optimizer = Sgd::new(&graph, 0.01, 0.0);
+    let mut optimizer = Sgd::new(&graph, "descent", 0.01, 0.0);
     optimizer.track_all(&graph, &model.parameters());
     optimizer.step(&graph, &gradients);
     let weights = runtime.weights(&graph);
