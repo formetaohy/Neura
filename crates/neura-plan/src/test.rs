@@ -427,6 +427,7 @@ fn lowered(dynamic: bool) -> lower::Plan {
             .last()
             .expect("a profile"),
         &[],
+        0,
     )
 }
 
@@ -1051,5 +1052,109 @@ fn a_weight_gradient_writes_the_rows_it_folds_and_reads_the_row_it_updates() {
         touched.reads,
         vec![(3, Region::Whole), (2, Region::run(18, 18))],
         "a weight gradient fold reads the partials it folds and the rows of the filter it updates",
+    );
+}
+
+#[test]
+fn a_convolution_gradient_chunk_declares_the_partials_it_writes_and_the_band_it_weighs() {
+    let filter = ValueInfo::derived(Shape::of([4, 2, 3, 3]), 0);
+    let gradient = ValueInfo::derived(Shape::of([1, 4, 4, 4]), 1);
+    let out = ValueInfo::derived(Shape::of([1, 2, 6, 6]), 2);
+    let partials = ValueInfo::derived(Shape::of([1, 1, 4, 72]), 3);
+    let values = vec![filter, gradient, out, partials];
+    let mut chunk = windowed(
+        Kind::Conv2dInputGrad,
+        2,
+        [0, 1, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        6,
+        6,
+    );
+    chunk.geometry = neura_abi::strategy::INPUT_CHUNK;
+    chunk.extra = 3;
+    chunk.slot = 1;
+    chunk.splits = 4;
+    let touched = touches_of(&values, &chunk);
+    assert_eq!(
+        touched.writes,
+        vec![(2, Region::empty()), (3, Region::run(72 + 6, 6))],
+        "a gradient chunk leaves the input gradient alone and writes the seat of its own chunk",
+    );
+    assert_eq!(
+        declared(&touched.reads, 0),
+        vec![Region::run(18, 9)],
+        "a gradient chunk weighs the block of the filter its own channels name",
+    );
+    assert_eq!(
+        declared(&touched.reads, 1),
+        vec![Region::Whole],
+        "a gradient chunk reads the incoming gradient whole",
+    );
+}
+
+#[test]
+fn a_convolution_gradient_fold_reads_every_chunk_of_the_span_it_folds() {
+    let gradient = ValueInfo::derived(Shape::of([1, 4, 4, 4]), 0);
+    let out = ValueInfo::derived(Shape::of([1, 2, 6, 6]), 1);
+    let partials = ValueInfo::derived(Shape::of([1, 1, 4, 72]), 2);
+    let values = vec![gradient, out, partials];
+    let mut fold = windowed(
+        Kind::Conv2dInputGrad,
+        1,
+        [2, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        6,
+        12,
+    );
+    fold.geometry = neura_abi::strategy::INPUT_FOLD;
+    fold.splits = 4;
+    let touched = touches_of(&values, &fold);
+    assert_eq!(
+        touched.writes,
+        vec![(1, Region::run(6, 12))],
+        "a gradient fold lands the sum of its chunks in the input gradient",
+    );
+    let expected = Region::band(6, 12, 72, 4);
+    assert_eq!(
+        declared(&touched.reads, 2),
+        vec![expected],
+        "a gradient fold reads every chunk of the span it folds",
+    );
+}
+
+#[test]
+fn a_convolution_gradient_fold_rides_the_chain_that_updates_its_rows() {
+    let out = ValueInfo::derived(Shape::of([1, 2, 6, 6]), 0);
+    let partials = ValueInfo::derived(Shape::of([1, 1, 4, 72]), 1);
+    let carried = ValueInfo::derived(Shape::of([1, 2, 6, 6]), 2);
+    let values = vec![out, partials, carried];
+    let mut fold = windowed(
+        Kind::Conv2dInputGrad,
+        0,
+        [1, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        6,
+        12,
+    );
+    fold.geometry = neura_abi::strategy::INPUT_FOLD;
+    fold.splits = 4;
+    fold.in_place = true;
+    fold.chain = vec![StepRecord::of(StepFields {
+        op: neura_pointwise::ADD,
+        operand: 2,
+        swapped: 0,
+    })];
+    let touched = touches_of(&values, &fold);
+    assert_eq!(
+        touched.writes,
+        vec![(0, Region::run(6, 12))],
+        "a gradient fold lands the sum of its chunks in the input gradient",
+    );
+    assert_eq!(
+        declared(&touched.reads, 1),
+        vec![Region::band(6, 12, 72, 4)],
+        "a gradient fold reads every chunk of the span it folds",
+    );
+    assert_eq!(
+        declared(&touched.reads, 2),
+        vec![Region::run(6, 12)],
+        "a gradient fold updates the rows of the input gradient it rides into",
     );
 }

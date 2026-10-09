@@ -1938,6 +1938,7 @@ fn a_plan_walks_the_tile_a_measured_choice_names() {
         profile,
         &[(product, chosen)],
         DEFAULT_ENCODING_BYTES,
+        0,
     );
     assert_eq!(chosen_plan.products(), &[product]);
     let chosen_tasks = tasks(&chosen_plan);
@@ -1975,6 +1976,7 @@ fn a_plan_refuses_a_measured_tile_its_profile_does_not_offer() {
                 profile,
                 &[(Product::of(1, 64, 64, 32), foreign)],
                 DEFAULT_ENCODING_BYTES,
+                0,
             );
         }),
         "a plan walked a measured tile its profile does not offer",

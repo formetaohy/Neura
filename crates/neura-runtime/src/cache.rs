@@ -103,6 +103,7 @@ pub(crate) struct PlanRequest {
     pub(crate) alignment: u64,
     pub(crate) chosen: Vec<(Product, neura_profile::MatmulTile)>,
     pub(crate) paged: bool,
+    pub(crate) weight_slots: u32,
 }
 
 const ASSEMBLY_CEILING: usize = 8;

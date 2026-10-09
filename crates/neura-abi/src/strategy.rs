@@ -5,3 +5,5 @@ pub const WEIGHT_CHUNK: u32 = 3;
 pub const WEIGHT_FOLD: u32 = 4;
 pub const FRAME: u32 = 5;
 pub const INDEX: u32 = 6;
+pub const INPUT_CHUNK: u32 = 7;
+pub const INPUT_FOLD: u32 = 8;

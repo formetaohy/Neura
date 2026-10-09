@@ -1,8 +1,8 @@
 use neura_profile::{MatmulStrategy, MatmulTile, Profile};
 
-const MATMUL_SPLITS_CEILING: u32 = 64;
+pub(crate) const SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
-const MATMUL_PARTIALS_CEILING: u32 = 1 << 20;
+pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
 const NARROW_ROWS: u32 = 2;
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
@@ -94,8 +94,8 @@ impl Product {
         let splits = splits.min(u64::from(
             self.depth.div_ceil(tile.depth()) / MATMUL_SPLIT_BLOCKS,
         ));
-        let splits = splits.min(u64::from(MATMUL_SPLITS_CEILING));
-        let splits = splits.min(u64::from(MATMUL_PARTIALS_CEILING) / elements);
+        let splits = splits.min(u64::from(SPLITS_CEILING));
+        let splits = splits.min(PARTIALS_CEILING / elements);
         let splits =
             splits.min(u64::from(self.depth) * u64::from(self.rows + self.columns) / elements);
         splits.max(1) as u32

@@ -464,6 +464,9 @@ fn narrow<W: Walk, V: Values>(
         Kind::Matmul => product(values, tiles, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
         Kind::Conv2d => convolution(values, task, first, count, &mut narrowed),
+        Kind::Conv2dInputGrad if task.geometry() == neura_abi::strategy::INPUT_FOLD => {
+            fold(values, task, first, count, &mut narrowed)
+        }
         Kind::Conv2dInputGrad => convolution_input_grad(values, task, first, count, &mut narrowed),
         Kind::Conv2dWeightGrad => {
             convolution_weight_grad(values, task, first, count, &mut narrowed)
@@ -759,7 +762,7 @@ fn spans(base: u64, outer_stride: u64, inner_stride: u64, outer: u64, inner: u64
 
 fn fold<W: Walk, V: Values>(values: &V, task: &W, first: u32, count: u32, narrowed: &mut Narrowed) {
     let out = task.out();
-    let elements = values.elements(out);
+    let elements = bounded_elements(values, out);
     let partials = task.input(0);
     narrowed.write(out, Region::run(u64::from(first), u64::from(count)));
     let read = if values.dense(partials) {
@@ -859,16 +862,21 @@ fn convolution<W: Walk, V: Values>(
     let filter = task.input(1);
     let range = Region::run(u64::from(first), u64::from(count));
     narrowed.write(out, range);
-    let region = channel_span(values, out, first, count)
-        .zip(filter_planes(values, filter))
-        .map(|((first_channel, last_channel), (per_channel, _))| {
-            Region::run(
-                u64::from(first_channel) * per_channel,
-                u64::from(last_channel - first_channel + 1) * per_channel,
-            )
-        })
-        .unwrap_or(Region::Whole);
-    narrowed.read(filter, region);
+    let runs = channel_runs(values, out, first, count);
+    match (runs.is_empty(), filter_planes(values, filter)) {
+        (false, Some((per_channel, _))) => {
+            for (first_channel, last_channel) in runs.iter() {
+                narrowed.read(
+                    filter,
+                    Region::run(
+                        u64::from(first_channel) * per_channel,
+                        u64::from(last_channel - first_channel + 1) * per_channel,
+                    ),
+                );
+            }
+        }
+        _ => narrowed.read(filter, Region::Whole),
+    }
     chained_reads(values, task, out, range, narrowed);
 }
 
@@ -880,24 +888,56 @@ fn convolution_input_grad<W: Walk, V: Values>(
     narrowed: &mut Narrowed<'_>,
 ) {
     let out = task.out();
+    let extra = task.extra();
     let filter = task.input(0);
     let range = Region::run(u64::from(first), u64::from(count));
-    narrowed.write(out, range);
-    name_filter_bands(values, out, filter, first, count, narrowed);
+    if extra != NO_VALUE {
+        narrowed.write(out, Region::empty());
+        narrowed.write(
+            extra,
+            Region::run(
+                u64::from(task.slot()) * bounded_elements(values, out) + u64::from(first),
+                u64::from(count),
+            ),
+        );
+    } else {
+        narrowed.write(out, range);
+    }
+    let runs = channel_runs(values, out, first, count);
+    if runs.is_empty() {
+        narrowed.read(filter, Region::Whole);
+    }
+    for (first_channel, last_channel) in runs.iter() {
+        name_filter_bands(
+            values,
+            task,
+            out,
+            filter,
+            first_channel,
+            last_channel,
+            narrowed,
+        );
+    }
     chained_reads(values, task, out, range, narrowed);
 }
 
-fn name_filter_bands<V: Values>(
+fn bounded_elements<V: Values>(values: &V, value: u32) -> u64 {
+    values
+        .bounds(value)
+        .iter()
+        .map(|dim| u64::from(*dim))
+        .product()
+}
+
+fn name_filter_bands<W: Walk, V: Values>(
     values: &V,
+    task: &W,
     out: u32,
     filter: u32,
-    first: u32,
-    count: u32,
+    first_channel: u32,
+    last_channel: u32,
     narrowed: &mut Narrowed<'_>,
 ) {
-    let Some((first_channel, last_channel)) = channel_span(values, out, first, count) else {
-        return;
-    };
     let Some((per_channel, per_local)) = filter_planes(values, filter) else {
         return;
     };
@@ -910,12 +950,19 @@ fn name_filter_bands<V: Values>(
     if out_channels == 0 {
         return;
     }
+    let chunks = u64::from(task.splits().max(1));
+    let per_chunk = out_channels.div_ceil(chunks);
+    let first_block = u64::from(task.slot()).min(chunks - 1) * per_chunk;
+    let last_block = (first_block + per_chunk).min(out_channels);
+    if last_block <= first_block {
+        return;
+    }
     let block = |group: u64, local: (u64, u64)| {
         Region::band(
-            group * out_channels * per_channel + local.0 * per_local,
+            (group * out_channels + first_block) * per_channel + local.0 * per_local,
             (local.1 - local.0 + 1) * per_local,
             per_channel,
-            out_channels,
+            last_block - first_block,
         )
     };
     let first_group = u64::from(first_channel) / channels;
@@ -931,10 +978,10 @@ fn name_filter_bands<V: Values>(
         narrowed.read(
             filter,
             Region::band(
-                (first_group + 1) * out_channels * per_channel,
-                per_channel,
-                per_channel,
-                out_channels * (last_group - first_group - 1),
+                ((first_group + 1) * out_channels + first_block) * per_channel,
+                (last_block - first_block) * per_channel,
+                out_channels * per_channel,
+                last_group - first_group - 1,
             ),
         );
     }
@@ -987,23 +1034,50 @@ fn chained_reads<W: Walk, V: Values>(
     }
 }
 
-fn channel_span<V: Values>(values: &V, out: u32, first: u32, count: u32) -> Option<(u32, u32)> {
+#[derive(Clone, Copy, Default)]
+struct ChannelRuns {
+    runs: [(u32, u32); 2],
+    held: usize,
+}
+
+impl ChannelRuns {
+    fn push(&mut self, first: u64, last: u64) {
+        self.runs[self.held] = (first as u32, last as u32);
+        self.held += 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.held == 0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.runs[..self.held].iter().copied()
+    }
+}
+
+fn channel_runs<V: Values>(values: &V, out: u32, first: u32, count: u32) -> ChannelRuns {
+    let mut runs = ChannelRuns::default();
     let dims = values.dims(out);
-    let plane = u64::from(dims[2]).checked_mul(u64::from(dims[3]))?;
+    let Some(plane) = u64::from(dims[2]).checked_mul(u64::from(dims[3])) else {
+        return runs;
+    };
     let channels = u64::from(dims[1]);
-    if plane == 0 || channels == 0 {
-        return None;
+    if plane == 0 || channels == 0 || count == 0 {
+        return runs;
     }
-    let batch = plane.checked_mul(channels)?;
     let first = u64::from(first);
-    let last = first.checked_add(u64::from(count))?.checked_sub(1)?;
-    if first / batch != last / batch {
-        return None;
+    let Some(last) = first.checked_add(u64::from(count)).map(|end| end - 1) else {
+        return runs;
+    };
+    let a = (first / plane) % channels;
+    let b = (last / plane) % channels;
+    if a <= b {
+        runs.push(a, b);
+    } else {
+        runs.push(a, channels - 1);
+        runs.push(0, b);
     }
-    Some((
-        ((first / plane) % channels) as u32,
-        ((last / plane) % channels) as u32,
-    ))
+    runs
 }
 
 fn filter_planes<V: Values>(values: &V, filter: u32) -> Option<(u64, u64)> {

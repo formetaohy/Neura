@@ -305,7 +305,7 @@ pub struct Plan {
 
 impl Plan {
     pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile, encoding_bytes: u64) -> Self {
-        Self::chosen(graph, alignment, profile, &[], encoding_bytes)
+        Self::chosen(graph, alignment, profile, &[], encoding_bytes, 0)
     }
 
     pub fn chosen(
@@ -314,6 +314,7 @@ impl Plan {
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
         encoding_bytes: u64,
+        weight_slots: u32,
     ) -> Self {
         Self::compile(
             &graph.snapshot(),
@@ -321,6 +322,7 @@ impl Plan {
             alignment,
             chosen,
             encoding_bytes,
+            weight_slots,
         )
     }
 
@@ -330,6 +332,7 @@ impl Plan {
         alignment: u64,
         chosen: &[(Product, MatmulTile)],
         encoding_bytes: u64,
+        weight_slots: u32,
     ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
@@ -337,7 +340,7 @@ impl Plan {
         );
         let fused = fuse::fuse(state);
         let authored_slots = state.authored().to_vec();
-        let lowered = lower::lower(state.values(), &fused, profile, chosen);
+        let lowered = lower::lower(state.values(), &fused, profile, chosen, weight_slots);
         let lower::Plan {
             values,
             mut tasks,

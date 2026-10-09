@@ -1,7 +1,7 @@
 use crate::access::Reads;
-use crate::product::Product;
+use crate::product::{PARTIALS_CEILING, Product, SPLITS_CEILING};
 use crate::span::{self, Measure, Split};
-use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord, strategy};
+use neura_abi::{Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -126,6 +126,7 @@ pub(crate) fn lower(
     units: &[TaskInfo],
     profile: Profile,
     chosen: &[(Product, MatmulTile)],
+    weight_slots: u32,
 ) -> Plan {
     let mut plan = Plan {
         values: values.to_vec(),
@@ -138,9 +139,9 @@ pub(crate) fn lower(
     for (unit, task) in units.iter().enumerate() {
         let mark = plan.tasks.len();
         if writes_narrow(&plan.values, task) {
-            schedule_narrow(&mut plan, task, profile, chosen);
+            schedule_narrow(&mut plan, task, profile, chosen, weight_slots);
         } else {
-            schedule_unit(&mut plan, task, profile, chosen);
+            schedule_unit(&mut plan, task, profile, chosen, weight_slots);
         }
         for task in &mut plan.tasks[mark..] {
             task.unit = unit as u32;
@@ -187,6 +188,7 @@ fn schedule_narrow(
     unit: &TaskInfo,
     profile: Profile,
     chosen: &[(Product, MatmulTile)],
+    weight_slots: u32,
 ) {
     if let Some((source, steps)) = pointwise_steps(plan, unit) {
         let tasks = convert(plan, unit, source, steps, profile);
@@ -224,7 +226,13 @@ fn schedule_narrow(
         copy.chain.clear();
         plan.tasks.push(copy);
     }
-    schedule_unit(plan, &redirected(unit, image), profile, chosen);
+    schedule_unit(
+        plan,
+        &redirected(unit, image),
+        profile,
+        chosen,
+        weight_slots,
+    );
     let tasks = convert(plan, unit, image, Vec::new(), profile);
     plan.tasks.extend(tasks);
 }
@@ -359,6 +367,7 @@ fn schedule_unit(
     unit: &TaskInfo,
     profile: Profile,
     chosen: &[(Product, MatmulTile)],
+    weight_slots: u32,
 ) {
     let target = device_workgroups(profile);
     match unit.kind {
@@ -449,32 +458,14 @@ fn schedule_unit(
             let filter = plan.shape(unit.inputs[1]);
             let dims = filter.dims();
             let taps = u64::from(dims[1] * dims[2] * dims[3]);
+            let input_channels = plan.shape(unit.inputs[0]).dims()[1];
+            let per_task = conv_task_elements(out, input_channels, filter, weight_slots, target);
             let measure = measured(plan, unit.out, Measure::Elements);
-            spread(
-                plan,
-                unit,
-                out.elements(),
-                task_elements(out.elements(), target),
-                measure,
-                |_, count| u64::from(count) * taps,
-            );
+            spread(plan, unit, out.elements(), per_task, measure, |_, count| {
+                u64::from(count) * taps
+            });
         }
-        Kind::Conv2dInputGrad => {
-            let out = plan.shape(unit.out);
-            let filter = plan.shape(unit.inputs[0]);
-            let dims = filter.dims();
-            let groups = out.dims()[1] / dims[1];
-            let taps = u64::from(dims[0] / groups * dims[2] * dims[3]);
-            let measure = measured(plan, unit.out, Measure::Elements);
-            spread(
-                plan,
-                unit,
-                out.elements(),
-                task_elements(out.elements(), target),
-                measure,
-                |_, count| u64::from(count) * taps,
-            );
-        }
+        Kind::Conv2dInputGrad => conv_input_grad(plan, unit, profile, weight_slots),
         Kind::PoolMax2d | Kind::PoolMean2d => {
             let out = plan.shape(unit.out);
             let taps = window_taps(unit.window);
@@ -1059,6 +1050,145 @@ fn task_elements(elements: u32, target: u32) -> u32 {
     (elements / target)
         .next_power_of_two()
         .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
+}
+
+struct Convolution {
+    groups: u32,
+    out_channels: u32,
+    local_channels: u32,
+    taps: u64,
+}
+
+impl Convolution {
+    fn of(input_channels: u32, filter: Shape) -> Self {
+        let dims = filter.dims();
+        let local_channels = dims[1].max(1);
+        let groups = (input_channels / local_channels).max(1);
+        Self {
+            groups,
+            out_channels: (dims[0] / groups).max(1),
+            local_channels,
+            taps: u64::from(dims[2]) * u64::from(dims[3]),
+        }
+    }
+
+    fn per_channel(&self) -> u64 {
+        u64::from(self.local_channels) * self.taps
+    }
+}
+
+fn weight_budget_words(weight_slots: u32) -> u64 {
+    u64::from(weight_slots.saturating_sub(1)) * PAGE_WORDS
+}
+
+fn element_cap(plane: u64, channels: u64) -> u32 {
+    u32::try_from(channels.saturating_mul(plane).min(u64::from(u32::MAX))).unwrap_or(u32::MAX)
+}
+
+fn conv_task_elements(
+    out: Shape,
+    input_channels: u32,
+    filter: Shape,
+    weight_slots: u32,
+    target: u32,
+) -> u32 {
+    let per_task = task_elements(out.elements(), target);
+    if weight_slots == 0 {
+        return per_task;
+    }
+    let conv = Convolution::of(input_channels, filter);
+    let plane = u64::from(out.dims()[2]) * u64::from(out.dims()[3]);
+    let channels = (weight_budget_words(weight_slots) / conv.per_channel())
+        .saturating_sub(1)
+        .max(1);
+    per_task.min(element_cap(plane, channels))
+}
+
+fn conv_input_chunks(out_elements: u32, conv: &Convolution, weight_slots: u32) -> u32 {
+    if weight_slots == 0 {
+        return 1;
+    }
+    let budget = weight_budget_words(weight_slots).max(1);
+    let per_chunk = (budget / conv.per_channel()).max(1);
+    let room = PARTIALS_CEILING / u64::from(out_elements).max(1);
+    conv.out_channels
+        .div_ceil(u32::try_from(per_chunk).unwrap_or(u32::MAX))
+        .clamp(
+            1,
+            u64::from(conv.out_channels)
+                .min(u64::from(SPLITS_CEILING))
+                .min(room.max(1)) as u32,
+        )
+        .max(1)
+}
+
+fn conv_group_chunk_elements(
+    plane: u64,
+    conv: &Convolution,
+    chunk_channels: u64,
+    weight_slots: u32,
+) -> u32 {
+    let group_plane = plane.saturating_mul(u64::from(conv.local_channels)).max(1);
+    let hull = chunk_channels.saturating_mul(conv.per_channel());
+    let groups =
+        (weight_budget_words(weight_slots) / (hull + PAGE_WORDS)).clamp(1, u64::from(conv.groups));
+    element_cap(group_plane, groups)
+}
+
+fn conv_input_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile, weight_slots: u32) {
+    let out = plan.shape(unit.out);
+    let filter = plan.shape(unit.inputs[0]);
+    let conv = Convolution::of(out.dims()[1], filter);
+    let plane = u64::from(out.dims()[2]) * u64::from(out.dims()[3]);
+    let chunks = conv_input_chunks(out.elements(), &conv, weight_slots);
+    let chunk_channels = u64::from(conv.out_channels.div_ceil(chunks));
+    let per_task = match chunks > 1 {
+        true => conv_group_chunk_elements(plane, &conv, chunk_channels, weight_slots),
+        false => task_elements(out.elements(), device_workgroups(profile)),
+    };
+    let measure = measured(plan, unit.out, Measure::Elements);
+    let spans = span::chunks(out.elements(), per_task, measure);
+    let work = |count: u32, channels: u64| u64::from(count) * channels * conv.taps;
+    if chunks == 1 {
+        for (first, count, split) in spans {
+            let mut task = Task::span(
+                unit,
+                first,
+                count,
+                work(count, u64::from(conv.out_channels)),
+            );
+            task.geometry = strategy::INPUT_CHUNK;
+            task.slot = 0;
+            task.splits = 1;
+            task.split = split;
+            plan.tasks.push(task);
+        }
+        return;
+    }
+    let partials = plan.publish(Shape::of([1, 1, chunks, out.elements()]));
+    for chunk in 0..chunks {
+        for (first, count, split) in &spans {
+            let mut task = Task::span(unit, *first, *count, work(*count, chunk_channels));
+            task.geometry = strategy::INPUT_CHUNK;
+            task.extra = partials;
+            task.slot = chunk;
+            task.splits = chunks;
+            task.split = *split;
+            task.prelude.clear();
+            task.chain.clear();
+            task.in_place = false;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in spans {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(chunks));
+        task.geometry = strategy::INPUT_FOLD;
+        task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.splits = chunks;
+        task.split = split;
+        task.prelude.clear();
+        plan.tasks.push(task);
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

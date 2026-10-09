@@ -1,4 +1,4 @@
-use super::{Program, Runtime, Weights};
+use super::{Program, Runtime, Weights, resident_weight_slots};
 use neura_abi::{Element, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_plan::{Layout, Plan, Product};
@@ -68,8 +68,15 @@ impl Runtime {
         let mut at = 1;
         while at < candidates.len() {
             let (profile, chosen) = &candidates[at];
-            let words = Plan::chosen(graph, self.alignment, *profile, chosen, self.encoding_bytes)
-                .tensor_bytes()
+            let words = Plan::chosen(
+                graph,
+                self.alignment,
+                *profile,
+                chosen,
+                self.encoding_bytes,
+                resident_weight_slots(weights),
+            )
+            .tensor_bytes()
                 / WORD_BYTES;
             if !self.heap.holds(words) {
                 self.score(&reference, &batch, &mut best, &mut seconds);
@@ -141,6 +148,7 @@ impl Runtime {
             incumbent.0,
             &incumbent.1,
             self.encoding_bytes,
+            resident_weight_slots(weights),
         )
         .tensor_bytes()
             / WORD_BYTES;
@@ -150,6 +158,7 @@ impl Runtime {
             challenger.0,
             &challenger.1,
             self.encoding_bytes,
+            resident_weight_slots(weights),
         )
         .tensor_bytes()
             / WORD_BYTES;

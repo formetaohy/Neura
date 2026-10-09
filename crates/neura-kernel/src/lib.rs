@@ -285,6 +285,8 @@ impl Kernel {
             ("strategy::WEIGHT_FOLD", strategy::WEIGHT_FOLD),
             ("strategy::FRAME", strategy::FRAME),
             ("strategy::INDEX", strategy::INDEX),
+            ("strategy::INPUT_CHUNK", strategy::INPUT_CHUNK),
+            ("strategy::INPUT_FOLD", strategy::INPUT_FOLD),
         ] {
             compiler.constant(name, value);
         }

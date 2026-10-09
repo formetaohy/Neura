@@ -42,7 +42,7 @@ enum Origin {
     Slot(u32),
 }
 
-const fn page_bytes() -> u64 {
+pub(crate) const fn page_bytes() -> u64 {
     PAGE_WORDS * WORD_BYTES
 }
 

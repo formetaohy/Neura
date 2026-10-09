@@ -48,19 +48,34 @@ mod device {
     }
 
     fn run_conv2d_input_grad(task: Task, lid: u32) {
-        let taps = values[task.a];
+        match task.geometry {
+            strategy::INPUT_FOLD => run_conv2d_input_fold(task, lid),
+            strategy::INPUT_CHUNK => run_conv2d_input_chunk(task, lid),
+            _ => refuse(kind::CONV2D_INPUT_GRAD, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn run_conv2d_input_chunk(task: Task, lid: u32) {
+        let filter = values[task.a];
         let gradient = values[task.b];
-        let output = values[task.out];
-        let channels = taps.dims.y;
-        let out_channels = taps.dims.x / (output.dims.y / channels);
+        let source = values[task.out];
+        let channels = filter.dims.y;
+        let out_channels = filter.dims.x / (source.dims.y / channels);
         let gradient_rows = i32(gradient.dims.z);
         let gradient_columns = i32(gradient.dims.w);
+        let per_chunk = ceil_div(out_channels, task.splits);
+        let first_block = task.slot * per_chunk;
+        let last_block = min(first_block + per_chunk, out_channels);
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            let at = coordinates(index, output.dims);
+            let at = coordinates(index, source.dims);
             let first_channel = (at.y / channels) * out_channels;
             let local_channel = at.y % channels;
             let mut total = 0.0;
-            for channel in stride(first_channel, first_channel + out_channels, 1u32) {
+            for channel in stride(
+                first_channel + first_block,
+                first_channel + last_block,
+                1u32,
+            ) {
                 for reach_row in stride(0u32, task.reach_rows, 1u32) {
                     let shifted_row = i32(at.z) + i32(task.pad_rows) - i32(reach_row);
                     if shifted_row < 0i32 || shifted_row % i32(task.stride_rows) != 0i32 {
@@ -81,19 +96,49 @@ mod device {
                         if column >= gradient_columns {
                             continue;
                         }
-                        let source = read_address(
+                        let address = read_address(
                             uvec4(at.x, channel, u32(row), u32(column)),
                             gradient.strides,
                         );
                         let weight = read_address(
                             uvec4(channel, local_channel, reach_row, reach_column),
-                            taps.strides,
+                            filter.strides,
                         );
-                        total = total + fetch(gradient, source) * fetch(taps, weight);
+                        total = total + fetch(gradient, address) * fetch(filter, weight);
                     }
                 }
             }
-            publish(output, index, chained(task, at, total));
+            if task.extra == NO_VALUE {
+                publish(source, index, chained(task, at, total));
+            } else {
+                let partials = values[task.extra];
+                publish(
+                    partials,
+                    read_address(uvec4(0u32, 0u32, task.slot, index), partials.strides),
+                    total,
+                );
+            }
+        }
+    }
+
+    fn run_conv2d_input_fold(task: Task, lid: u32) {
+        let partials = values[task.a];
+        let output = values[task.out];
+        let chunks = partials.dims.z;
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut total = 0.0;
+            for chunk in stride(0u32, chunks, 1u32) {
+                total = total
+                    + fetch(
+                        partials,
+                        read_address(uvec4(0u32, 0u32, chunk, index), partials.strides),
+                    );
+            }
+            publish(
+                output,
+                index,
+                chained(task, coordinates(index, output.dims), total),
+            );
         }
     }
 

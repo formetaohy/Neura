@@ -1194,3 +1194,177 @@ fn a_streamed_store_pages_the_filter_of_a_convolution() {
         );
     }
 }
+
+const INPUT_GRADIENT_CHANNELS: u32 = 8192;
+const INPUT_GRADIENT_BYTES: u64 = 6 * (1 << 14);
+const INPUT_GRADIENT_PAGES: u32 = (INPUT_GRADIENT_CHANNELS * 9) / 4096;
+
+fn input_gradient_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, f32, u32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let images = graph.gradient_input(Shape::of([1, 1, 4, 4]), Element::Single);
+    let filter = graph.parameter(
+        Shape::of([INPUT_GRADIENT_CHANNELS, 1, 3, 3]),
+        Init::Uniform {
+            low: -0.02,
+            high: 0.02,
+        },
+        Element::Single,
+    );
+    let convolved = graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3]));
+    let loss = graph.sum(graph.mul(convolved, convolved));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..16)
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    for _ in 0..STEPS {
+        runtime.write(&program, images, &observations);
+        runtime.run(&program);
+    }
+    (
+        runtime.read(&program, filter),
+        runtime.read(&program, gradients.of(images)),
+        runtime.read(&program, loss)[0],
+        program.weight_windows(),
+    )
+}
+
+#[test]
+fn a_streamed_store_trains_the_input_gradient_of_a_convolution() {
+    assert!(
+        INPUT_GRADIENT_PAGES > INPUT_GRADIENT_BYTES as u32 / (1 << 14),
+        "a filter of {INPUT_GRADIENT_PAGES} pages holds no more than the budget books it",
+    );
+    for backends in Backends::PLATFORM {
+        let (resident, resident_gradient, resident_loss, _) =
+            input_gradient_run(backends, MemoryRequest::default());
+        let (streamed, streamed_gradient, streamed_loss, windows) = input_gradient_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(INPUT_GRADIENT_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of {INPUT_GRADIENT_BYTES} bytes reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert_eq!(resident_gradient.len(), streamed_gradient.len());
+        for (at, (expected, observed)) in
+            resident_gradient.iter().zip(&streamed_gradient).enumerate()
+        {
+            assert!(
+                (expected - observed).abs() <= 1e-4,
+                "a gradient the input of a streamed convolution walks reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a streamed convolution held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
+        assert!(
+            windows > 1,
+            "a store of {INPUT_GRADIENT_BYTES} bytes walked {windows} weight windows over a filter of {INPUT_GRADIENT_PAGES} pages",
+        );
+    }
+}
+
+const GROUPED_CHANNELS: u32 = 1024;
+const GROUPED_INPUTS: u32 = 256;
+const GROUPED_GROUPS: u32 = 8;
+const GROUPED_BOUND: u32 = 4;
+const GROUPED_BYTES: u64 = 4 * (1 << 14);
+
+fn grouped_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<Vec<f32>>) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let batch = graph.free(GROUPED_BOUND);
+    let images = graph.gradient_input(
+        Shape::of([GROUPED_BOUND, GROUPED_INPUTS, 4, 4]).freed(&[(0, batch)]),
+        Element::Single,
+    );
+    let filter = graph.parameter(
+        Shape::of([GROUPED_CHANNELS, GROUPED_INPUTS / GROUPED_GROUPS, 3, 3]),
+        Init::Uniform {
+            low: -0.02,
+            high: 0.02,
+        },
+        Element::Single,
+    );
+    let convolved = graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3]));
+    let loss = graph.sum(graph.mul(convolved, convolved));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(images));
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let mut observed = Vec::new();
+    for live in [GROUPED_BOUND, 3, 1, 0] {
+        runtime.bind(&program, &[live]);
+        runtime.write(
+            &program,
+            images,
+            &vec![0.25; (live * GROUPED_INPUTS * 16) as usize],
+        );
+        runtime.run(&program);
+        observed.push(runtime.read(&program, gradients.of(images)));
+    }
+    (runtime.read(&program, filter), observed)
+}
+
+#[test]
+fn a_streamed_store_trains_a_grouped_convolution_of_every_batch_a_binding_holds() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_gradients) = grouped_run(backends, MemoryRequest::default());
+        let (streamed, streamed_gradients) = grouped_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(GROUPED_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of {GROUPED_BYTES} bytes reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert_eq!(resident_gradients.len(), streamed_gradients.len());
+        for (live, (expected, observed)) in resident_gradients
+            .iter()
+            .zip(&streamed_gradients)
+            .enumerate()
+        {
+            assert_eq!(expected.len(), observed.len());
+            for (at, (expected, observed)) in expected.iter().zip(observed).enumerate() {
+                assert!(
+                    (expected - observed).abs() <= 1e-4,
+                    "a binding of {live} reached {observed} where the resident store reached {expected} at {at}",
+                );
+            }
+        }
+    }
+}

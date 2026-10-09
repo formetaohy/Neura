@@ -421,7 +421,7 @@ kinds! {
     Conv2dInputGrad CONV2D_INPUT_GRAD = "conv2d_input_grad" {
         entry: "run_conv2d_input_grad",
         modules: [Conv],
-        geometry: None,
+        geometry: Strategy,
         prelude: false,
         chain: true,
         origin: false,

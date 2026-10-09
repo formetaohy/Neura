@@ -187,6 +187,12 @@ impl Runtime {
         }
     }
 
+    fn declared_weight_slots(&self) -> u32 {
+        self.resident_weight_bytes.map_or(0, |bytes| {
+            u32::try_from(bytes / crate::store::page_bytes()).unwrap_or(u32::MAX)
+        })
+    }
+
     fn paged_for(&self, words: u64) -> bool {
         crate::store::paged_for(words, self.resident_weight_bytes)
     }
@@ -332,8 +338,21 @@ impl Runtime {
 
     pub fn precompile(&self, graph: &Graph, profile: Profile) {
         self.assert_profile(profile);
-        let plan = Plan::of(graph, self.alignment, profile, self.encoding_bytes);
-        let kernel = self.kernel(&plan, profile, self.paged_for(plan.store_words()));
+        let paged = self.paged_for(Layout::of(graph, self.alignment).words());
+        let weight_slots = if paged {
+            self.declared_weight_slots()
+        } else {
+            0
+        };
+        let plan = Plan::chosen(
+            graph,
+            self.alignment,
+            profile,
+            &[],
+            self.encoding_bytes,
+            weight_slots,
+        );
+        let kernel = self.kernel(&plan, profile, paged);
         self.context.declare(kernel.program()).compile();
     }
 
@@ -365,7 +384,7 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let revision = graph.revision();
-        let (resident, plan) = self.assemble(graph, profile, chosen, weights.paged());
+        let (resident, plan) = self.assemble(graph, profile, chosen, weights);
         assert!(
             resident.plan.task_count() > 0,
             "a program whose plan holds no task has nothing for the device to run",
@@ -403,8 +422,10 @@ impl Runtime {
         graph: &Graph,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
-        paged: bool,
+        weights: &Weights,
     ) -> (Arc<Resident>, Arc<Plan>) {
+        let paged = weights.paged();
+        let weight_slots = resident_weight_slots(weights);
         let assembly = self.artifacts.assemble(
             cache::PlanRequest {
                 stamp: graph.stamp(),
@@ -412,8 +433,9 @@ impl Runtime {
                 alignment: self.alignment,
                 chosen: chosen.to_vec(),
                 paged,
+                weight_slots,
             },
-            || self.assembly(graph, profile, chosen, paged),
+            || self.assembly(graph, profile, chosen, paged, weight_slots),
         );
         let resident = self
             .artifacts
@@ -435,6 +457,7 @@ impl Runtime {
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
         paged: bool,
+        weight_slots: u32,
     ) -> Assembly {
         let plan = Arc::new(Plan::chosen(
             graph,
@@ -442,6 +465,7 @@ impl Runtime {
             profile,
             chosen,
             self.encoding_bytes,
+            weight_slots,
         ));
         let signature = cache::signature(&plan, profile, self.alignment);
         let kernel = self.kernel(&plan, profile, paged);
@@ -786,6 +810,13 @@ impl Runtime {
 
     pub fn built_plans(&self) -> usize {
         self.artifacts.built()
+    }
+}
+
+pub(crate) fn resident_weight_slots(weights: &Weights) -> u32 {
+    match weights.paged() {
+        true => weights.resident_pages(),
+        false => 0,
     }
 }
 
