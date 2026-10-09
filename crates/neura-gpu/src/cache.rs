@@ -38,6 +38,7 @@ struct State {
     stores: AtomicU64,
     evictions: AtomicU64,
     refused: AtomicU64,
+    faults: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ impl ArtifactCache {
             stores: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             refused: AtomicU64::new(0),
+            faults: AtomicU64::new(0),
         });
         adopt(&state);
         Self { state: Some(state) }
@@ -131,6 +133,12 @@ impl ArtifactCache {
             .map_or(0, |state| state.refused.load(Ordering::Relaxed))
     }
 
+    pub fn faults(&self) -> u64 {
+        self.state
+            .as_deref()
+            .map_or(0, |state| state.faults.load(Ordering::Relaxed))
+    }
+
     pub fn holds(&self, key: &str) -> bool {
         let Some(path) = self.path(key) else {
             return false;
@@ -138,7 +146,10 @@ impl ArtifactCache {
         match fs::metadata(&path) {
             Ok(meta) => meta.is_file() && meta.len() > 0,
             Err(error) if error.kind() == ErrorKind::NotFound => false,
-            Err(error) => panic!("inspecting the device artifact {}: {error}", path.display()),
+            Err(_) => {
+                self.fault();
+                false
+            }
         }
     }
 
@@ -148,40 +159,25 @@ impl ArtifactCache {
         let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return None,
-            Err(error) => panic!("reading the device artifact {}: {error}", path.display()),
+            Err(_) => {
+                self.fault();
+                return None;
+            }
         };
         let mut payload = Vec::new();
-        file.read_to_end(&mut payload).unwrap_or_else(|error| {
-            panic!("reading the device artifact {}: {error}", path.display())
-        });
-        assert!(
-            !payload.is_empty(),
-            "the device artifact {} holds no byte",
-            path.display(),
-        );
+        if file.read_to_end(&mut payload).is_err() {
+            self.fault();
+            return None;
+        }
+        if payload.is_empty() {
+            self.fault();
+            drop(file);
+            evict(state, &path);
+            return None;
+        }
         state.loads.fetch_add(1, Ordering::Relaxed);
-        let mut held = state
-            .held
-            .lock()
-            .expect("a device artifact cache is never poisoned");
-        held.clock += 1;
-        let used = held.clock;
         let bytes = payload.len() as u64;
-        let previous = match held.entries.get_mut(&path) {
-            Some(entry) => {
-                entry.used = used;
-                let previous = entry.bytes;
-                entry.bytes = bytes;
-                previous
-            }
-            None => 0,
-        };
-        held.entries
-            .entry(path.clone())
-            .or_insert(Entry { bytes, used });
-        held.bytes = held.bytes + bytes - previous;
-        let reclaim = held.bytes.saturating_sub(state.budget);
-        drop(held);
+        let reclaim = index(state, &path, bytes);
         if reclaim > 0 {
             enforce(state, Some(&path), reclaim);
         }
@@ -196,68 +192,97 @@ impl ArtifactCache {
         let Some(state) = self.state.as_deref() else {
             return;
         };
-        let bytes = payload.len() as u64;
-        if bytes > state.budget {
+        if payload.len() as u64 > state.budget {
             state.refused.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let path = self
-            .file(key)
-            .expect("an enabled device artifact cache names a file for every key");
-        let partial = path.with_extension(format!(
+        let Some(staged) = self.scratch(key) else {
+            return;
+        };
+        if fs::write(&staged, payload).is_err() {
+            self.fault();
+            unstage(&staged);
+            return;
+        }
+        self.publish(key, &staged);
+    }
+
+    pub fn scratch(&self, key: &str) -> Option<PathBuf> {
+        let path = self.file(key)?;
+        Some(path.with_extension(format!(
             "partial-{}-{}",
             std::process::id(),
             PARTIAL.fetch_add(1, Ordering::Relaxed),
-        ));
-        fs::write(&partial, payload).unwrap_or_else(|error| {
-            panic!("writing the device artifact {}: {error}", partial.display())
-        });
-        fs::rename(&partial, &path).unwrap_or_else(|error| {
-            panic!("publishing the device artifact {}: {error}", path.display())
-        });
-        state.stores.fetch_add(1, Ordering::Relaxed);
-        let reclaim = index(state, &path, bytes);
-        if reclaim > 0 {
-            enforce(state, Some(&path), reclaim);
-        }
+        )))
     }
 
-    pub fn record(&self, key: &str) {
+    pub fn publish(&self, key: &str, staged: &Path) {
         let Some(state) = self.state.as_deref() else {
             return;
         };
-        let path = self
-            .path(key)
-            .expect("an enabled device artifact cache names a file for every key");
-        let bytes = match fs::metadata(&path) {
-            Ok(meta) if meta.is_file() => meta.len(),
-            Ok(_) => panic!(
-                "the device artifact {} holds something beside bytes",
-                path.display(),
-            ),
-            Err(error) if error.kind() == ErrorKind::NotFound => return,
-            Err(error) => panic!("inspecting the device artifact {}: {error}", path.display()),
+        let Some(path) = self.file(key) else {
+            unstage(staged);
+            return;
         };
-        assert!(
-            bytes > 0,
-            "the device artifact {} holds no byte",
-            path.display(),
-        );
-        if bytes > state.budget {
-            state.refused.fetch_add(1, Ordering::Relaxed);
-            discard(state, &path);
+        let bytes = match fs::metadata(staged) {
+            Ok(meta) if meta.is_file() => meta.len(),
+            Ok(_) => {
+                self.fault();
+                unstage(staged);
+                return;
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                self.fault();
+                return;
+            }
+            Err(_) => {
+                self.fault();
+                unstage(staged);
+                return;
+            }
+        };
+        if bytes == 0 {
+            self.fault();
+            unstage(staged);
             return;
         }
-        let reclaim = index(state, &path, bytes);
-        if reclaim > 0 {
-            enforce(state, Some(&path), reclaim);
+        if bytes > state.budget {
+            state.refused.fetch_add(1, Ordering::Relaxed);
+            unstage(staged);
+            return;
         }
+        match fs::rename(staged, &path) {
+            Ok(()) => {
+                state.stores.fetch_add(1, Ordering::Relaxed);
+                let reclaim = index(state, &path, bytes);
+                if reclaim > 0 {
+                    enforce(state, Some(&path), reclaim);
+                }
+            }
+            Err(_) => {
+                self.fault();
+                unstage(staged);
+            }
+        }
+    }
+
+    pub fn discard(&self, key: &str) {
+        let Some(state) = self.state.as_deref() else {
+            return;
+        };
+        let Some(path) = self.path(key) else {
+            return;
+        };
+        evict(state, &path);
     }
 
     pub fn file(&self, key: &str) -> Option<PathBuf> {
         let path = self.path(key)?;
-        fs::create_dir_all(path.parent().expect("an artifact key names a file"))
-            .unwrap_or_else(|error| panic!("creating the device artifact directory: {error}"));
+        let parent = path.parent().expect("an artifact key names a file");
+        if fs::create_dir_all(parent).is_err() {
+            self.fault();
+            return None;
+        }
         Some(path)
     }
 
@@ -274,9 +299,15 @@ impl ArtifactCache {
         );
         Some(state.root.join(key))
     }
+
+    fn fault(&self) {
+        if let Some(state) = self.state.as_deref() {
+            state.faults.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
-fn adopt(state: &Arc<State>) {
+fn adopt(state: &State) {
     let mut found = Vec::new();
     collect(state, &state.root, &mut found);
     found.sort_by_key(|(_, _, modified)| *modified);
@@ -297,24 +328,28 @@ fn adopt(state: &Arc<State>) {
     }
 }
 
-fn collect(state: &Arc<State>, directory: &Path, found: &mut Vec<(PathBuf, u64, SystemTime)>) {
-    let entries = fs::read_dir(directory).unwrap_or_else(|error| {
-        panic!(
-            "reading the device artifact cache {}: {error}",
-            directory.display(),
-        )
-    });
+fn collect(state: &State, directory: &Path, found: &mut Vec<(PathBuf, u64, SystemTime)>) {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(_) => {
+            fault(state);
+            return;
+        }
+    };
     for entry in entries {
-        let entry = entry.unwrap_or_else(|error| {
-            panic!(
-                "reading the device artifact cache {}: {error}",
-                directory.display(),
-            )
-        });
+        let Ok(entry) = entry else {
+            fault(state);
+            continue;
+        };
         let path = entry.path();
-        let meta = fs::symlink_metadata(&path).unwrap_or_else(|error| {
-            panic!("inspecting the device artifact {}: {error}", path.display())
-        });
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(_) => {
+                fault(state);
+                continue;
+            }
+        };
         if meta.is_dir() {
             collect(state, &path, found);
             continue;
@@ -328,7 +363,7 @@ fn collect(state: &Arc<State>, directory: &Path, found: &mut Vec<(PathBuf, u64, 
             .file_name()
             .is_some_and(|name| name.to_string_lossy().contains("partial-"));
         if bytes == 0 || (partial && abandoned(modified)) {
-            discard(state, &path);
+            evict(state, &path);
             continue;
         }
         if partial {
@@ -376,16 +411,16 @@ fn enforce(state: &State, keep: Option<&Path>, mut reclaim: u64) {
         held.entries.remove(&path);
         held.bytes -= bytes;
         drop(held);
-        discard(state, &path);
+        evict(state, &path);
         reclaim = reclaim.saturating_sub(bytes);
     }
 }
 
-fn discard(state: &State, path: &Path) {
+fn evict(state: &State, path: &Path) {
     match fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => panic!("evicting the device artifact {}: {error}", path.display()),
+        Err(_) => fault(state),
     }
     if let Some(parent) = path.parent()
         && parent != state.root
@@ -393,6 +428,14 @@ fn discard(state: &State, path: &Path) {
         let _ = fs::remove_dir(parent);
     }
     state.evictions.fetch_add(1, Ordering::Relaxed);
+}
+
+fn unstage(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+fn fault(state: &State) {
+    state.faults.fetch_add(1, Ordering::Relaxed);
 }
 
 fn candidate_roots() -> Vec<PathBuf> {

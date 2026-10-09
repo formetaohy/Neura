@@ -129,18 +129,18 @@ fn an_artifact_cache_publishes_its_artifacts() {
 }
 
 #[test]
-#[should_panic(expected = "holds no byte")]
-fn an_empty_artifact_is_refused() {
+fn an_artifact_of_no_byte_a_crashed_writer_left_is_a_miss() {
     let directory = directory("empty");
     let cache = ArtifactCache::at(&directory);
-    std::fs::write(
-        cache
-            .file("dx12/empty.dxil")
-            .expect("a named cache names a file"),
-        [],
-    )
-    .expect("a test writes an empty artifact");
-    cache.load("dx12/empty.dxil");
+    let empty = cache
+        .file("dx12/empty.dxil")
+        .expect("a named cache names a file");
+    std::fs::write(&empty, []).expect("a test writes an empty artifact");
+    assert!(cache.load("dx12/empty.dxil").is_none());
+    assert!(!cache.holds("dx12/empty.dxil"));
+    assert!(!empty.exists(), "an artifact of no byte leaves");
+    assert_eq!(cache.faults(), 1);
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
 }
 
 #[test]
@@ -251,47 +251,168 @@ fn a_bounded_cache_refuses_an_artifact_larger_than_its_budget() {
 }
 
 #[test]
-fn a_bounded_cache_counts_the_artifacts_its_writers_record() {
+fn a_bounded_cache_counts_the_artifacts_its_writers_publish() {
     let directory = directory("recorded");
     let cache = ArtifactCache::bounded(&directory, 40);
     let written = cache
-        .file("dx12/written.dxil")
-        .expect("a named cache names a file");
-    std::fs::write(&written, [3u8; 32]).expect("a test writes an artifact");
-    cache.record("dx12/written.dxil");
+        .scratch("dx12/written.dxil")
+        .expect("a named cache stages a file");
+    std::fs::write(&written, [3u8; 32]).expect("a driver writes an artifact");
+    cache.publish("dx12/written.dxil", &written);
     assert_eq!(
         cache.bytes(),
         32,
-        "a recorded artifact counts toward the budget"
+        "a published artifact counts toward the budget"
     );
+    assert_eq!(cache.stores(), 1);
     assert!(cache.holds("dx12/written.dxil"));
+    assert!(
+        !written.exists(),
+        "a published artifact leaves nothing staged"
+    );
     cache.store("dx12/other.dxil", &[4u8; 24]);
     assert!(cache.bytes() <= 40);
-    assert_eq!(cache.evictions(), 1, "a recorded artifact can be reclaimed");
+    assert_eq!(
+        cache.evictions(),
+        1,
+        "a published artifact can be reclaimed"
+    );
     let large = cache
-        .file("metal/large.bin")
-        .expect("a named cache names a file");
-    std::fs::write(&large, [5u8; 64]).expect("a test writes an artifact");
-    cache.record("metal/large.bin");
+        .scratch("metal/large.bin")
+        .expect("a named cache stages a file");
+    std::fs::write(&large, [5u8; 64]).expect("a driver writes an artifact");
+    cache.publish("metal/large.bin", &large);
     assert_eq!(cache.refused(), 1);
     assert!(
         !cache.holds("metal/large.bin"),
         "an artifact larger than the budget leaves",
     );
     assert_eq!(cache.bytes(), 24);
+    assert!(!large.exists(), "a refused artifact leaves nothing staged");
     std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
 }
 
 #[test]
-#[should_panic(expected = "holds no byte")]
-fn a_recorded_artifact_of_no_byte_is_refused() {
+fn a_published_artifact_of_no_byte_stays_out_of_the_cache() {
     let directory = directory("recorded-empty");
     let cache = ArtifactCache::bounded(&directory, 1 << 20);
     let empty = cache
-        .file("dx12/empty.dxil")
+        .scratch("dx12/empty.dxil")
+        .expect("a named cache stages a file");
+    std::fs::write(&empty, []).expect("a driver writes an empty artifact");
+    cache.publish("dx12/empty.dxil", &empty);
+    assert!(!cache.holds("dx12/empty.dxil"));
+    assert_eq!(cache.stores(), 0);
+    assert_eq!(cache.faults(), 1);
+    assert!(
+        !empty.exists(),
+        "an artifact of no byte leaves nothing staged"
+    );
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
+}
+
+#[test]
+fn a_publish_without_a_staged_artifact_is_no_publish() {
+    let directory = directory("unpublished");
+    let cache = ArtifactCache::bounded(&directory, 1 << 20);
+    cache.publish("dx12/gone.dxil", &directory.join("dx12/gone.partial-1-1"));
+    assert!(!cache.holds("dx12/gone.dxil"));
+    assert_eq!(cache.stores(), 0);
+    assert_eq!(cache.faults(), 1);
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
+}
+
+#[test]
+fn a_cache_serves_no_artifact_it_cannot_read() {
+    let directory = directory("unreadable");
+    let cache = ArtifactCache::bounded(&directory, 1 << 20);
+    let occupied = cache
+        .file("dx12/taken.dxil")
         .expect("a named cache names a file");
-    std::fs::write(&empty, []).expect("a test writes an empty artifact");
-    cache.record("dx12/empty.dxil");
+    std::fs::create_dir_all(&occupied).expect("a test occupies an artifact path");
+    std::fs::write(occupied.join("inner"), [1u8; 4]).expect("a test writes inside it");
+    assert!(cache.load("dx12/taken.dxil").is_none());
+    assert!(!cache.holds("dx12/taken.dxil"));
+    assert_eq!(cache.faults(), 1);
+    cache.store("dx12/taken.dxil", &[2u8; 8]);
+    assert_eq!(cache.stores(), 0);
+    assert_eq!(cache.faults(), 2);
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
+}
+
+#[test]
+fn a_cache_reclaims_what_it_cannot_remove() {
+    let directory = directory("busy");
+    let cache = ArtifactCache::bounded(&directory, 32);
+    cache.store("dx12/a.dxil", &[1u8; 24]);
+    let busy = directory.join("dx12").join("a.dxil");
+    std::fs::remove_file(&busy).expect("a test takes the artifact back");
+    std::fs::create_dir_all(&busy).expect("a test occupies the artifact path");
+    std::fs::write(busy.join("inner"), [0u8; 4]).expect("a test writes inside it");
+    cache.store("dx12/b.dxil", &[2u8; 24]);
+    assert!(
+        cache.bytes() <= 32,
+        "a cache over its bound reclaims what it holds"
+    );
+    assert!(
+        cache.faults() >= 1,
+        "a path this cache cannot remove is a fault"
+    );
+    assert_eq!(cache.load("dx12/b.dxil").as_deref(), Some(&[2u8; 24][..]));
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
+}
+
+#[test]
+fn a_cache_publishes_what_a_driver_writes_beside_it() {
+    let directory = directory("driver");
+    let cache = ArtifactCache::bounded(&directory, 1 << 20);
+    let staged = cache
+        .scratch("metal/a-device/archive.bin")
+        .expect("a named cache stages a file");
+    std::fs::write(&staged, [7u8; 16]).expect("a driver writes an archive");
+    cache.publish("metal/a-device/archive.bin", &staged);
+    assert_eq!(
+        cache.load("metal/a-device/archive.bin").as_deref(),
+        Some(&[7u8; 16][..]),
+    );
+    assert_eq!(cache.stores(), 1);
+    assert!(
+        !staged.exists(),
+        "a published artifact leaves nothing staged"
+    );
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
+}
+
+#[test]
+fn caches_of_two_writers_share_one_directory() {
+    let directory = directory("shared");
+    let threads = (0..4u32)
+        .map(|worker| {
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                let cache = ArtifactCache::bounded(&directory, 512);
+                for round in 0..48u32 {
+                    let key = format!("dx12/{}.dxil", (round * 4 + worker) % 48);
+                    let value = (round * 4 + worker) as u8 + 1;
+                    cache.store(&key, &[value; 16]);
+                    if let Some(loaded) = cache.load(&key) {
+                        assert_eq!(loaded.len(), 16, "an artifact came back in pieces");
+                        assert!(
+                            loaded.iter().all(|byte| *byte == loaded[0]),
+                            "an artifact came back with the bytes of two writers",
+                        );
+                    }
+                    let _ = cache.holds(&key);
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread
+            .join()
+            .expect("a cache of a shared directory never panics");
+    }
+    std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");
 }
 
 #[test]

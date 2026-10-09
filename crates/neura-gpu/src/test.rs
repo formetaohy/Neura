@@ -78,3 +78,42 @@ fn a_power_class_ranks_hardware_by_its_preference() {
     assert!(DeviceType::Integrated.rank(power) > DeviceType::Discrete.rank(power));
     assert!(DeviceType::Discrete.rank(power) > DeviceType::Virtual.rank(power));
 }
+
+#[cfg(dx12_backend)]
+#[test]
+fn a_cached_dxil_the_driver_refuses_is_a_miss() {
+    use crate::GpuContext;
+    use crate::native::dx12;
+    use neura_compiler::{Read, ReadWrite, kernel};
+
+    #[kernel(workgroup_size = 64)]
+    fn scale(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
+        output[lid] = input[lid] * 3u32;
+    }
+
+    let directory =
+        std::env::temp_dir().join(format!("neura-cache-refused-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let context = GpuContext::open(&GpuRequest {
+        backends: Backends::DX12,
+        artifacts: Some(directory.clone()),
+        ..Default::default()
+    })
+    .expect("a D3D12 compute device");
+    let cache = context.artifact_cache().clone();
+    let program = scale();
+    let (_, _, key) = dx12::hlsl(&program);
+    let poison = b"a dxil module this driver refuses";
+    cache.store(&key, poison);
+    let pipeline = context.declare(program);
+    pipeline.compile();
+    assert!(pipeline.is_compiled());
+    assert_ne!(
+        cache.load(&key).as_deref(),
+        Some(&poison[..]),
+        "a refused artifact is replaced by a fresh compile",
+    );
+    assert_eq!(cache.evictions(), 1, "a refused artifact leaves the cache");
+    drop(pipeline);
+    let _ = std::fs::remove_dir_all(&directory);
+}

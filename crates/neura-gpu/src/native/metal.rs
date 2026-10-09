@@ -22,7 +22,9 @@ use objc2_metal::{
 };
 use std::any::Any;
 use std::cmp::Reverse;
+use std::fs;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -134,6 +136,7 @@ pub(crate) struct Pipeline {
 struct Archive {
     raw: Retained<ProtocolObject<dyn MTLBinaryArchive>>,
     key: String,
+    staged: PathBuf,
 }
 
 unsafe impl Send for Archive {}
@@ -146,10 +149,14 @@ impl Archive {
         program: &str,
     ) -> Option<Self> {
         let key = format!("metal/{}/archive-{program}.bin", device.registryID());
-        let file = artifacts.file(&key)?;
+        let staged = artifacts.scratch(&key)?;
         let descriptor = MTLBinaryArchiveDescriptor::new();
-        if artifacts.holds(&key) {
-            let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
+        if let Some(bytes) = artifacts.load(&key) {
+            if fs::write(&staged, bytes).is_err() {
+                let _ = fs::remove_file(&staged);
+                return None;
+            }
+            let url = NSURL::fileURLWithPath(&NSString::from_str(&staged.to_string_lossy()));
             descriptor.setUrl(Some(&url));
         }
         let raw = device
@@ -158,9 +165,9 @@ impl Archive {
                 device.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new())
             })
             .unwrap_or_else(|error| {
-                panic!("creating the Metal archive {}: {error}", file.display(),)
+                panic!("creating the Metal archive {}: {error}", staged.display(),)
             });
-        Some(Self { raw, key })
+        Some(Self { raw, key, staged })
     }
 }
 
@@ -341,41 +348,50 @@ impl Device {
             if let Some(archives) = &archives {
                 descriptor.setBinaryArchives(Some(archives));
             }
-            let compiled = self
+            let compiled = match self
                 .raw
                 .newComputePipelineStateWithDescriptor_options_reflection_error(
                     &descriptor,
                     MTLPipelineOption::None,
                     None,
-                )
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "creating the Metal pipeline of {}: {error}",
-                        program.label()
-                    )
-                });
+                ) {
+                Ok(compiled) => compiled,
+                Err(error) => {
+                    let Some(archive) = &archive else {
+                        panic!(
+                            "creating the Metal pipeline of {}: {error}",
+                            program.label()
+                        );
+                    };
+                    self.artifacts.discard(&archive.key);
+                    descriptor.setBinaryArchives(None);
+                    self.raw
+                        .newComputePipelineStateWithDescriptor_options_reflection_error(
+                            &descriptor,
+                            MTLPipelineOption::None,
+                            None,
+                        )
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "creating the Metal pipeline of {}: {error}",
+                                program.label()
+                            )
+                        })
+                }
+            };
             if let Some(archive) = &archive {
-                archive
+                let url =
+                    NSURL::fileURLWithPath(&NSString::from_str(&archive.staged.to_string_lossy()));
+                if archive
                     .raw
                     .addComputePipelineFunctionsWithDescriptor_error(&descriptor)
-                    .unwrap_or_else(|error| {
-                        panic!(
-                            "archiving the Metal pipeline of {}: {error}",
-                            program.label()
-                        )
-                    });
-                let file = self
-                    .artifacts
-                    .file(&archive.key)
-                    .expect("an archive lives only beside an artifact cache");
-                let url = NSURL::fileURLWithPath(&NSString::from_str(&file.to_string_lossy()));
-                archive
-                    .raw
-                    .serializeToURL_error(&url)
-                    .unwrap_or_else(|error| {
-                        panic!("writing the Metal archive {}: {error}", file.display())
-                    });
-                self.artifacts.record(&archive.key);
+                    .is_ok()
+                    && archive.raw.serializeToURL_error(&url).is_ok()
+                {
+                    self.artifacts.publish(&archive.key, &archive.staged);
+                } else {
+                    let _ = fs::remove_file(&archive.staged);
+                }
             }
             let workgroup = program.workgroup_size();
             assert!(

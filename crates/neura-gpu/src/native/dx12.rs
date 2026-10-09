@@ -495,39 +495,41 @@ impl Device {
 
     pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
         pipeline.resource.compiled.get_or_init(|| {
-            let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
-                panic!("D3D12 accepts HLSL compute programs");
-            };
-            let mut parts = vec![source.as_bytes(), entry.as_bytes()];
-            parts.extend(DXC_FLAGS.iter().map(|flag| flag.as_bytes()));
-            let key = format!("dx12/{}.dxil", fingerprint(&parts));
-            let bytes = match self.artifacts.load(&key) {
-                Some(bytes) => bytes,
-                None => {
-                    let bytes = dxil(&source, &entry, program.label());
-                    self.artifacts.store(&key, &bytes);
-                    bytes
+            let (source, entry, key) = hlsl(program);
+            if let Some(bytes) = self.artifacts.load(&key) {
+                if let Ok(compiled) = self.pipeline(pipeline, &bytes) {
+                    return compiled;
                 }
-            };
-            let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
-                pRootSignature: ManuallyDrop::new(Some(pipeline.resource.root.clone())),
-                CS: D3D12_SHADER_BYTECODE {
-                    pShaderBytecode: bytes.as_ptr().cast(),
-                    BytecodeLength: bytes.len(),
-                },
-                ..Default::default()
-            };
-            let compiled =
-                unsafe { self.raw.CreateComputePipelineState(&state) }.unwrap_or_else(|error| {
-                    panic!(
-                        "creating the D3D12 compute pipeline of {}: {error}",
-                        program.label()
-                    )
-                });
-            let mut state = state;
-            unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
-            compiled
+                self.artifacts.discard(&key);
+            }
+            let bytes = dxil(&source, &entry, program.label());
+            self.artifacts.store(&key, &bytes);
+            self.pipeline(pipeline, &bytes).unwrap_or_else(|error| {
+                panic!(
+                    "creating the D3D12 compute pipeline of {}: {error}",
+                    program.label()
+                )
+            })
         });
+    }
+
+    fn pipeline(
+        &self,
+        pipeline: &Pipeline,
+        bytes: &[u8],
+    ) -> windows::core::Result<ID3D12PipelineState> {
+        let state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+            pRootSignature: ManuallyDrop::new(Some(pipeline.resource.root.clone())),
+            CS: D3D12_SHADER_BYTECODE {
+                pShaderBytecode: bytes.as_ptr().cast(),
+                BytecodeLength: bytes.len(),
+            },
+            ..Default::default()
+        };
+        let compiled = unsafe { self.raw.CreateComputePipelineState(&state) };
+        let mut state = state;
+        unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
+        compiled
     }
 
     pub(crate) fn create_buffer(
@@ -1077,6 +1079,16 @@ fn allocate(
         raw: resource.expect("a committed buffer was created"),
         state: Mutex::new(state),
     })
+}
+
+pub(crate) fn hlsl(program: &ComputeProgram) -> (String, String, String) {
+    let ShaderTranslation::Hlsl { source, entry } = program.translate(Backend::Dx12) else {
+        panic!("D3D12 accepts HLSL compute programs");
+    };
+    let mut parts = vec![source.as_bytes(), entry.as_bytes()];
+    parts.extend(DXC_FLAGS.iter().map(|flag| flag.as_bytes()));
+    let key = format!("dx12/{}.dxil", fingerprint(&parts));
+    (source, entry, key)
 }
 
 impl Pipeline {
