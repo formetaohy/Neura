@@ -10,7 +10,7 @@ use neura_gpu::{
     ReadbackLease, Submission, SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
-use neura_kernel::Kernel;
+use neura_kernel::{Banks, Kernel, binding_count};
 use neura_plan::{Layout, Plan, Product, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
@@ -176,7 +176,7 @@ impl Runtime {
         let ceiling = neura_kernel::bank_ceiling(limits.max_storage_buffers_per_shader_stage);
         assert!(
             heap.banks().count() <= ceiling,
-            "a heap of {} bytes spans {} banks of {bank_bytes} bytes, and this device binds {ceiling} of them beside the {} storage buffers a program already carries",
+            "a heap of {} bytes spans {} banks of {bank_bytes} bytes, and this device binds {ceiling} of them beside the {} storage buffers a program of resident weights and frozen extents already carries",
             memory.heap_bytes,
             heap.banks().count(),
             neura_kernel::BINDINGS_WITHOUT_HEAP,
@@ -543,6 +543,7 @@ impl Runtime {
         );
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
+        self.assert_storage_bindings(banks, authored, paged);
         self.artifacts.kernel(
             cache::KernelIdentity {
                 kinds: kinds.clone(),
@@ -554,6 +555,37 @@ impl Runtime {
             },
             || Kernel::assemble(&kinds, &elements, geometry, authored, banks, paged),
         )
+    }
+
+    fn assert_storage_bindings(&self, banks: Banks, authored: bool, paged: bool) {
+        let count = binding_count(banks, authored, paged);
+        let slots = self.context.limits().max_storage_buffers_per_shader_stage;
+        if count <= slots {
+            return;
+        }
+        let mut parts = vec![
+            format!(
+                "{} buffers of its records",
+                neura_kernel::BINDINGS_WITHOUT_HEAP,
+            ),
+            match banks.count() {
+                1 => "1 heap bank".to_owned(),
+                banks => format!("{banks} heap banks"),
+            },
+        ];
+        if paged {
+            parts.push("the weight page table".to_owned());
+        }
+        if authored {
+            parts.push(format!(
+                "{} tables of the device-authored walks",
+                neura_kernel::BINDINGS_OF_AUTHORED,
+            ));
+        }
+        panic!(
+            "this graph binds {count} storage buffers where this device binds {slots}: {}; raise heap_bank_bytes so the heap spans fewer banks, keep the weights resident, bind fixed lengths instead of device counts, or run on a device that binds {count} storage buffers",
+            parts.join(", "),
+        );
     }
 
     fn scratch_weights(&self, graph: &Graph) -> Weights {

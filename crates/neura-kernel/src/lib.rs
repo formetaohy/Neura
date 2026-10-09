@@ -49,6 +49,15 @@ impl Banks {
 }
 
 pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
+pub const BINDINGS_OF_PAGES: u32 = 1;
+pub const BINDINGS_OF_AUTHORED: u32 = 4;
+
+pub const fn binding_count(banks: Banks, authored: bool, paged: bool) -> u32 {
+    BINDINGS_WITHOUT_HEAP
+        + banks.count()
+        + paged as u32 * BINDINGS_OF_PAGES
+        + authored as u32 * BINDINGS_OF_AUTHORED
+}
 
 pub const fn pages(banks: Banks) -> u32 {
     HEAP + banks.count()
@@ -94,7 +103,14 @@ pub const fn bank_ceiling(slots: u32) -> u32 {
     slots.saturating_sub(BINDINGS_WITHOUT_HEAP)
 }
 
-const _: () = assert!(segments(Banks::SINGLE, false) + 1 == BINDINGS_WITHOUT_HEAP + 1);
+const _: () =
+    assert!(binding_count(Banks::SINGLE, false, false) == segments(Banks::SINGLE, false) + 1);
+const _: () =
+    assert!(binding_count(Banks::SINGLE, false, true) == segments(Banks::SINGLE, true) + 1);
+const _: () =
+    assert!(binding_count(Banks::SINGLE, true, false) == patch_list(Banks::SINGLE, false) + 1);
+const _: () =
+    assert!(binding_count(Banks::SINGLE, true, true) == patch_list(Banks::SINGLE, true) + 1);
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -213,11 +229,7 @@ pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding>
             true,
         ));
     }
-    let slots = if authored {
-        patch_list(banks, paged) + 1
-    } else {
-        segments(banks, paged) + 1
-    };
+    let slots = binding_count(banks, authored, paged);
     assert_eq!(
         list.len() as u32,
         slots,

@@ -23,6 +23,14 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
+fn refusal(action: impl FnOnce()) -> String {
+    let error = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action))
+        .expect_err("a refused program reaches the device");
+    *error
+        .downcast::<String>()
+        .unwrap_or_else(|error| panic!("a refusal carries its words: {error:?}"))
+}
+
 fn linear<'g>(graph: &Graph<'g>, inputs: u32, outputs: u32) -> (Value<'g>, Value<'g>) {
     (
         graph.parameter(
@@ -660,6 +668,130 @@ fn one_device_program_serves_every_store_of_its_model() {
         runtime.declared_kernels(),
         1,
         "a device program that carries the stores it addresses is rebuilt for every store",
+    );
+}
+
+#[test]
+fn a_device_that_binds_the_baseline_refuses_the_programs_it_cannot_bind() {
+    let runtime = Runtime::open(RuntimeRequest {
+        gpu: GpuRequest::default().minimum_limits(),
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            ..Default::default()
+        },
+    })
+    .expect("a device that binds the baseline bindings");
+    let plain = Graph::new();
+    let (weight, _) = linear(&plain, 4, 4);
+    let data = plain.input(Shape::matrix(2, 4), Element::Single);
+    let out = plain.matmul(data, weight);
+    plain.retain(out);
+    let weights = runtime.weights(&plain);
+    let program = runtime.compile(&plain, &weights);
+    runtime.write(&program, data, &[1.0; 8]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, out).len(),
+        8,
+        "a program of resident weights and fixed lengths runs on the baseline bindings",
+    );
+
+    let authored = Graph::new();
+    let rows = authored.input(Shape::matrix(8, 1), Element::Single);
+    let count = authored.sum_axis(rows, 2);
+    let live = authored.trim(rows, 2, count);
+    authored.retain(live);
+    let weights = runtime.weights(&authored);
+    let message = refusal(|| {
+        let _ = runtime.compile(&authored, &weights);
+    });
+    assert!(
+        message.contains("12 storage buffers where this device binds 8")
+            && message.contains("4 tables of the device-authored walks"),
+        "a device-authored walk on the baseline bindings is refused with its budget: {message}",
+    );
+
+    let paged = Runtime::open(RuntimeRequest {
+        gpu: GpuRequest::default().minimum_limits(),
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            resident_weight_bytes: Some(4 << 10),
+            ..Default::default()
+        },
+    })
+    .expect("a paging device that binds the baseline bindings");
+    let model = Graph::new();
+    let (weight, _) = linear(&model, 64, 64);
+    let data = model.input(Shape::matrix(4, 64), Element::Single);
+    model.retain(model.matmul(data, weight));
+    let weights = paged.weights(&model);
+    assert!(
+        weights.resident_pages() < weights.pages(),
+        "a store of 16KiB keeps no 4KiB paging",
+    );
+    let message = refusal(|| {
+        let _ = paged.compile(&model, &weights);
+    });
+    assert!(
+        message.contains("9 storage buffers where this device binds 8")
+            && message.contains("the weight page table"),
+        "a paged store on the baseline bindings is refused with its budget: {message}",
+    );
+}
+
+#[test]
+fn a_heap_of_many_banks_refuses_the_program_that_outgrows_the_device() {
+    let device =
+        GpuContext::open(&GpuRequest::default()).expect("a device of the adapter's bindings");
+    let ceiling = device.limits().max_storage_buffers_per_shader_stage - 7;
+    let bank_bytes = 1 << 20;
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 1 << 16,
+            heap_bytes: u64::from(ceiling) * bank_bytes,
+            heap_bank_bytes: Some(bank_bytes),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .expect("a heap that leaves a plain program every storage buffer it binds");
+    assert_eq!(runtime.heap_banks(), ceiling);
+
+    let plain = Graph::new();
+    let (weight, _) = linear(&plain, 4, 4);
+    let data = plain.input(Shape::matrix(2, 4), Element::Single);
+    let out = plain.matmul(data, weight);
+    plain.retain(out);
+    let weights = runtime.weights(&plain);
+    let program = runtime.compile(&plain, &weights);
+    runtime.write(&program, data, &[1.0; 8]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, out).len(),
+        8,
+        "a program that fills every storage buffer of the device runs",
+    );
+
+    let authored = Graph::new();
+    let rows = authored.input(Shape::matrix(8, 1), Element::Single);
+    let count = authored.sum_axis(rows, 2);
+    let live = authored.trim(rows, 2, count);
+    authored.retain(live);
+    let weights = runtime.weights(&authored);
+    let message = refusal(|| {
+        let _ = runtime.compile(&authored, &weights);
+    });
+    let banks = match ceiling {
+        1 => "1 heap bank".to_owned(),
+        banks => format!("{banks} heap banks"),
+    };
+    assert!(
+        message.contains(&format!(
+            "{} storage buffers where this device binds {}",
+            ceiling + 11,
+            ceiling + 7,
+        )) && message.contains(&banks),
+        "a heap of every bank the device binds is refused the tables of a device-authored walk: {message}",
     );
 }
 

@@ -22,7 +22,10 @@ fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
         .map(|(index, tile)| (index as u32, *tile))
         .collect()
 }
-use neura_kernel::{Banks, Kernel, bindings};
+use neura_kernel::{
+    BINDINGS_OF_AUTHORED, BINDINGS_OF_PAGES, BINDINGS_WITHOUT_HEAP, Banks, Kernel, binding_count,
+    bindings,
+};
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
@@ -286,6 +289,54 @@ fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
             source.contains(&format!("[[buffer({})]]", 2 + bank)),
             "the MSL of a device program binds no bank {bank}",
         );
+    }
+}
+
+#[test]
+fn every_program_binds_the_storage_buffers_its_features_need() {
+    for banks in [Banks::SINGLE, Banks::of(2, 10), Banks::of(5, 12)] {
+        for authored in [false, true] {
+            for paged in [false, true] {
+                let declared = bindings(authored, banks, paged);
+                let count = binding_count(banks, authored, paged);
+                assert_eq!(
+                    count,
+                    BINDINGS_WITHOUT_HEAP
+                        + banks.count()
+                        + u32::from(paged) * BINDINGS_OF_PAGES
+                        + u32::from(authored) * BINDINGS_OF_AUTHORED,
+                    "the program of {banks:?} banks, {authored} authored walks and {paged} page tables declares another storage budget",
+                );
+                assert_eq!(
+                    declared.len() as u32,
+                    count,
+                    "the program of {banks:?} banks, {authored} authored walks and {paged} page tables binds {} storage buffers",
+                    declared.len(),
+                );
+                assert_eq!(
+                    declared.last().expect("a program binds buffers").binding,
+                    count - 1,
+                    "the storage bindings of a program are dense",
+                );
+                assert_eq!(
+                    declared
+                        .iter()
+                        .filter(|binding| binding.name == "pages")
+                        .count(),
+                    usize::from(paged),
+                );
+                assert_eq!(
+                    declared
+                        .iter()
+                        .filter(|binding| matches!(
+                            binding.name.as_str(),
+                            "extents" | "measures" | "patches" | "patch_list"
+                        ))
+                        .count(),
+                    usize::from(authored) * BINDINGS_OF_AUTHORED as usize,
+                );
+            }
+        }
     }
 }
 
