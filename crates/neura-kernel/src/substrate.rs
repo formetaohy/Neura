@@ -91,9 +91,9 @@ mod device {
     }
 
     fn refuse(subject: u32, category: u32, code: u32) {
-        if atomic_add(&refusal[0u32], 0u32) == 0u32 {
+        if atomic_add(&state[control::REFUSAL], 0u32) == 0u32 {
             atomic_store(
-                &refusal[0u32],
+                &state[control::REFUSAL],
                 (subject << refusal::KIND_BITS) | (category << refusal::CODE_BITS) | (code + 1u32),
             );
         }

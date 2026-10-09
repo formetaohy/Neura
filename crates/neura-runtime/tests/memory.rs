@@ -672,7 +672,7 @@ fn one_device_program_serves_every_store_of_its_model() {
 }
 
 #[test]
-fn a_device_that_binds_the_baseline_refuses_the_programs_it_cannot_bind() {
+fn a_device_that_binds_the_baseline_pages_its_weights_and_refuses_the_walks_it_cannot_bind() {
     let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
@@ -706,7 +706,8 @@ fn a_device_that_binds_the_baseline_refuses_the_programs_it_cannot_bind() {
         let _ = runtime.compile(&authored, &weights);
     });
     assert!(
-        message.contains("12 storage buffers where this device binds 8")
+        message.contains("11 storage buffers where this device binds 8")
+            && message.contains("6 buffers of its records")
             && message.contains("4 tables of the device-authored walks"),
         "a device-authored walk on the baseline bindings is refused with its budget: {message}",
     );
@@ -715,27 +716,32 @@ fn a_device_that_binds_the_baseline_refuses_the_programs_it_cannot_bind() {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
             readback_bytes: 1 << 16,
-            resident_weight_bytes: Some(4 << 10),
+            resident_weight_bytes: Some(2 << 14),
             ..Default::default()
         },
     })
     .expect("a paging device that binds the baseline bindings");
     let model = Graph::new();
-    let (weight, _) = linear(&model, 64, 64);
-    let data = model.input(Shape::matrix(4, 64), Element::Single);
-    model.retain(model.matmul(data, weight));
+    let (weight, _) = linear(&model, 128, 128);
+    let data = model.input(Shape::matrix(128, 8), Element::Single);
+    let out = model.matmul(weight, data);
+    model.retain(out);
     let weights = paged.weights(&model);
     assert!(
         weights.resident_pages() < weights.pages(),
-        "a store of 16KiB keeps no 4KiB paging",
+        "a store of {} pages keeps {} of them beside a budget of two",
+        weights.pages(),
+        weights.resident_pages(),
     );
-    let message = refusal(|| {
-        let _ = paged.compile(&model, &weights);
-    });
-    assert!(
-        message.contains("9 storage buffers where this device binds 8")
-            && message.contains("the weight page table"),
-        "a paged store on the baseline bindings is refused with its budget: {message}",
+    let program = paged.compile(&model, &weights);
+    let observations = random(128 * 8, 5);
+    paged.write(&program, data, &observations);
+    paged.run(&program);
+    let filter = paged.read(&program, weight);
+    assert_close(
+        &paged.read(&program, out),
+        &matmul_reference(&filter, &observations, 128, 128, 8),
+        1e-4,
     );
 }
 
@@ -743,7 +749,7 @@ fn a_device_that_binds_the_baseline_refuses_the_programs_it_cannot_bind() {
 fn a_heap_of_many_banks_refuses_the_program_that_outgrows_the_device() {
     let device =
         GpuContext::open(&GpuRequest::default()).expect("a device of the adapter's bindings");
-    let ceiling = device.limits().max_storage_buffers_per_shader_stage - 7;
+    let ceiling = device.limits().max_storage_buffers_per_shader_stage - 6;
     let bank_bytes = 1 << 20;
     let runtime = Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
@@ -788,8 +794,8 @@ fn a_heap_of_many_banks_refuses_the_program_that_outgrows_the_device() {
     assert!(
         message.contains(&format!(
             "{} storage buffers where this device binds {}",
-            ceiling + 11,
-            ceiling + 7,
+            ceiling + 10,
+            ceiling + 6,
         )) && message.contains(&banks),
         "a heap of every bank the device binds is refused the tables of a device-authored walk: {message}",
     );

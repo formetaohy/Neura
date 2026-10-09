@@ -149,7 +149,7 @@ impl Encoding {
     }
 
     pub fn header(&self) -> Vec<u8> {
-        neura_abi::progress::header(self.segments.len() as u32, self.wave_count())
+        neura_abi::control::header(self.segments.len() as u32, self.wave_count())
     }
 
     pub fn holds(&self, storage: u32) -> bool {

@@ -2,9 +2,7 @@ use crate::cache::Resident;
 use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::store::WeightStore;
-use neura_abi::{
-    Placement, PlacementFields, PlacementRecord, REFUSAL_BYTES, SegmentRecord, WORD_BYTES, progress,
-};
+use neura_abi::{Placement, PlacementFields, PlacementRecord, SegmentRecord, WORD_BYTES, control};
 use neura_gpu::Queue;
 use neura_gpu::{
     BindGroup, Binding, BufferUsages, GpuBuffer, GpuContext, READBACK_TIMEOUT, Submission,
@@ -117,10 +115,9 @@ pub struct Program {
     pub(crate) resident: Arc<Resident>,
     extents: Option<Recycled>,
     cached: Mutex<Option<Vec<u32>>>,
-    pub(crate) refusal: Recycled,
+    pub(crate) state: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) weights: Weights,
-    pub(crate) progress: Recycled,
     placement: Recycled,
     segments: Recycled,
     patches: Option<Recycled>,
@@ -344,12 +341,6 @@ impl Program {
         revision: Revision,
     ) -> Self {
         let pool = resident.pool();
-        let refusal = Recycled::claim(
-            pool,
-            "neura refusal",
-            REFUSAL_BYTES,
-            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        );
         let placement = Recycled::claim(
             pool,
             "neura placement",
@@ -357,11 +348,11 @@ impl Program {
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
-        let progress_buffer = Recycled::claim(
+        let state_buffer = Recycled::claim(
             pool,
-            "neura progress",
-            progress::bytes(plan.task_count()),
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            "neura state",
+            control::bytes(plan.task_count()),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         let segments = Recycled::claim(
             pool,
@@ -390,11 +381,10 @@ impl Program {
             retired: Vec::new(),
         };
         let arena = tensors.held().clone();
-        let mut clearing = Submission::new(context.device(), "neura tensors and refusal");
+        let mut clearing = Submission::new(context.device(), "neura tensors");
         if arena.bytes() > 0 {
             clearing.clear(arena.buffer(), arena.offset(), arena.bytes());
         }
-        clearing.clear(refusal.buffer(), 0, refusal.buffer().size());
         clearing.submit(queue);
         if !plan.awaits_a_binding() {
             for quantum in plan.quanta() {
@@ -434,9 +424,9 @@ impl Program {
         segments
             .buffer()
             .write(queue, bytemuck::cast_slice(bound_encoding.segments()));
-        progress_buffer.buffer().write(
+        state_buffer.buffer().write(
             queue,
-            bytemuck::cast_slice(&progress::words(
+            bytemuck::cast_slice(&control::words(
                 bound_encoding.segments().len() as u32,
                 bound_encoding.wave_tasks(),
             )),
@@ -510,14 +500,10 @@ impl Program {
         }
         bindings.extend([
             Binding {
-                index: neura_kernel::refusal(banks, paged),
-                buffer: refusal.buffer().binding(0, refusal.buffer().size()),
-            },
-            Binding {
-                index: neura_kernel::progress(banks, paged),
-                buffer: progress_buffer
+                index: neura_kernel::state(banks, paged),
+                buffer: state_buffer
                     .buffer()
-                    .binding(0, progress_buffer.buffer().size()),
+                    .binding(0, state_buffer.buffer().size()),
             },
             Binding {
                 index: neura_kernel::steps(banks, paged),
@@ -567,11 +553,10 @@ impl Program {
             resident,
             extents,
             cached: Mutex::new(None),
-            refusal,
             group,
             tensors: Mutex::new(tensors),
             weights,
-            progress: progress_buffer,
+            state: state_buffer,
             placement,
             segments,
             patches,
@@ -843,9 +828,10 @@ impl Program {
         self.segments
             .buffer()
             .write(queue, bytemuck::cast_slice(encoding.segments()));
-        self.progress.buffer().write(
+        self.state.buffer().write_at(
             queue,
-            bytemuck::cast_slice(&progress::words(
+            control::offset_bytes(),
+            bytemuck::cast_slice(&control::progress(
                 encoding.segments().len() as u32,
                 encoding.wave_tasks(),
             )),
@@ -959,8 +945,7 @@ impl Program {
             + self.values.buffer().size()
             + self.segments.buffer().size()
             + self.resident.steps.buffer().size()
-            + self.refusal.buffer().size()
-            + self.progress.buffer().size()
+            + self.state.buffer().size()
             + self.placement.buffer().size()
     }
 

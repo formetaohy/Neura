@@ -7,7 +7,7 @@ mod task;
 
 use neura_abi::{
     DeviceModule, Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal, TENSOR,
-    measure, progress, refusal, split, store, strategy,
+    control, measure, refusal, split, store, strategy,
 };
 use neura_compiler::{Compiler, ast};
 use neura_profile::{CLAIM_BYTES, Geometry};
@@ -48,7 +48,7 @@ impl Banks {
     }
 }
 
-pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
+pub const BINDINGS_WITHOUT_HEAP: u32 = 6;
 pub const BINDINGS_OF_PAGES: u32 = 1;
 pub const BINDINGS_OF_AUTHORED: u32 = 4;
 
@@ -63,16 +63,12 @@ pub const fn pages(banks: Banks) -> u32 {
     HEAP + banks.count()
 }
 
-pub const fn refusal(banks: Banks, paged: bool) -> u32 {
+pub const fn state(banks: Banks, paged: bool) -> u32 {
     pages(banks) + paged as u32
 }
 
-pub const fn progress(banks: Banks, paged: bool) -> u32 {
-    refusal(banks, paged) + 1
-}
-
 pub const fn steps(banks: Banks, paged: bool) -> u32 {
-    progress(banks, paged) + 1
+    state(banks, paged) + 1
 }
 
 pub const fn placement(banks: Banks, paged: bool) -> u32 {
@@ -165,16 +161,9 @@ pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding>
         ));
     }
     list.push(binding(
-        refusal(banks, paged),
+        state(banks, paged),
         BindingKind::ReadWriteStorage,
-        "refusal",
-        "AtomicU32",
-        true,
-    ));
-    list.push(binding(
-        progress(banks, paged),
-        BindingKind::ReadWriteStorage,
-        "progress",
+        "state",
         "AtomicU32",
         true,
     ));
@@ -317,14 +306,15 @@ impl Kernel {
             compiler.constant(name, value);
         }
         for (name, value) in [
-            ("progress::CURSOR", progress::CURSOR),
-            ("progress::FRONTIER", progress::FRONTIER),
-            ("progress::SEGMENTS", progress::SEGMENTS),
-            ("progress::WAVES", progress::WAVES),
-            ("progress::FIRST_TASK", progress::FIRST_TASK),
-            ("progress::LAST_TASK", progress::LAST_TASK),
-            ("progress::COUNTERS", progress::COUNTERS),
-            ("progress::WAVE_STRIDE", progress::WAVE_STRIDE),
+            ("control::REFUSAL", control::REFUSAL),
+            ("control::CURSOR", control::CURSOR),
+            ("control::FRONTIER", control::FRONTIER),
+            ("control::SEGMENTS", control::SEGMENTS),
+            ("control::WAVES", control::WAVES),
+            ("control::FIRST_TASK", control::FIRST_TASK),
+            ("control::LAST_TASK", control::LAST_TASK),
+            ("control::COUNTERS", control::COUNTERS),
+            ("control::WAVE_STRIDE", control::WAVE_STRIDE),
         ] {
             compiler.constant(name, value);
         }

@@ -1,8 +1,8 @@
+pub mod control;
 pub mod element;
 pub mod kind;
 pub mod page;
 mod placement;
-pub mod progress;
 mod record;
 pub mod refusal;
 pub mod span;
@@ -28,4 +28,3 @@ pub const REFUSAL_WORDS: u32 = 1;
 pub const NO_VALUE: u32 = u32::MAX;
 pub const NO_SLOT: u32 = u8::MAX as u32;
 pub const WORD_BYTES: u64 = 4;
-pub const REFUSAL_BYTES: u64 = REFUSAL_WORDS as u64 * WORD_BYTES;

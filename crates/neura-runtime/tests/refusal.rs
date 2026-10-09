@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_graph::{Graph, Shape, Value};
+use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
 #[path = "support/mod.rs"]
@@ -79,6 +79,36 @@ fn a_refusal_survives_the_runs_the_host_never_reads() {
         let _ = model.runtime.read(&program, model.total);
     });
     assert!(message.contains("refused extent"), "{message}");
+}
+
+#[test]
+fn a_refusal_survives_the_binding_the_host_never_reads() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let bound = graph.free(BOUND);
+    let tokens = graph.input(
+        Shape::of([BOUND, 1, WIDTH, WIDTH]).freed(&[(0, bound)]),
+        Element::Single,
+    );
+    let table = graph.parameter(Shape::matrix(WIDTH, WIDTH), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::of([1, WIDTH, 1, 1]), Element::Single);
+    let gathered = graph.gather(table, indices);
+    let total = graph.sum(tokens);
+    graph.retain(gathered);
+    graph.retain(total);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.bind(&program, &[BOUND]);
+    runtime.write(&program, tokens, &data(BOUND * WIDTH * WIDTH, 7));
+    runtime.write(&program, indices, &[100.0, 1.0, 2.0, 3.0]);
+    runtime.run(&program);
+    runtime.bind(&program, &[WIDTH]);
+    runtime.write(&program, indices, &[0.0, 1.0, 2.0, 3.0]);
+    runtime.run(&program);
+    let message = refusal_message(|| {
+        let _ = runtime.read(&program, gathered);
+    });
+    assert!(message.contains("an index"), "{message}");
 }
 
 #[test]

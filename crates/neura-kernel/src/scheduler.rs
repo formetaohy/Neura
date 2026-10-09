@@ -9,7 +9,7 @@ pub(crate) fn install(compiler: &mut Compiler) {
 #[neura_compiler::module]
 mod device {
     fn remaining(wave: u32) -> u32 {
-        return progress::COUNTERS + progress::WAVE_STRIDE * wave;
+        return control::COUNTERS + control::WAVE_STRIDE * wave;
     }
 
     fn total(wave: u32) -> u32 {
@@ -18,7 +18,7 @@ mod device {
 
     fn gate(wave: u32) {
         loop {
-            if atomic_add(&progress[progress::FRONTIER], 0u32) >= wave {
+            if atomic_add(&state[control::FRONTIER], 0u32) >= wave {
                 break;
             }
         }
@@ -27,13 +27,13 @@ mod device {
     fn finish(wave: u32, lid: u32) {
         let mut rest = 0u32;
         if lid == 0u32 {
-            rest = atomic_sub(&progress[remaining(wave)], 1u32);
+            rest = atomic_sub(&state[remaining(wave)], 1u32);
         }
         storage_barrier();
         if rest == 1u32 {
             if lid == 0u32 {
-                atomic_store(&progress[progress::FRONTIER], wave + 1u32);
-                atomic_add(&progress[remaining(wave)], progress[total(wave)]);
+                atomic_store(&state[control::FRONTIER], wave + 1u32);
+                atomic_add(&state[remaining(wave)], state[total(wave)]);
             }
         }
     }
@@ -47,16 +47,16 @@ mod device {
     #[neura_compiler::kernel]
     fn main(lid: u32) {
         if lid == 0u32 {
-            claim[0u32] = progress[progress::SEGMENTS];
-            claim[2u32] = progress[progress::FIRST_TASK];
-            claim[3u32] = progress[progress::LAST_TASK];
+            claim[0u32] = state[control::SEGMENTS];
+            claim[2u32] = state[control::FIRST_TASK];
+            claim[3u32] = state[control::LAST_TASK];
         }
         let total = workgroup_uniform_load(&claim[0u32]);
         let from = workgroup_uniform_load(&claim[2u32]);
         let to = workgroup_uniform_load(&claim[3u32]);
         loop {
             if lid == 0u32 {
-                claim[1u32] = atomic_add(&progress[progress::CURSOR], 1u32);
+                claim[1u32] = atomic_add(&state[control::CURSOR], 1u32);
             }
             let ticket = workgroup_uniform_load(&claim[1u32]);
             if ticket >= total {

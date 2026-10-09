@@ -5,7 +5,7 @@ use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
 use crate::spill::Spill;
 use crate::store::WeightStore;
-use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, progress};
+use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, control};
 use neura_gpu::{
     BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback,
     ReadbackLease, Submission, SubmissionIndex,
@@ -652,9 +652,9 @@ impl Runtime {
             let mut submission = Submission::new(device, "neura program");
             let header = program.header();
             program
-                .progress
+                .state
                 .buffer()
-                .write_at(self.context.queue(), 0, &header);
+                .write_at(self.context.queue(), control::offset_bytes(), &header);
             submission.dispatch(
                 &program.resident.kernel,
                 &program.group,
@@ -677,10 +677,10 @@ impl Runtime {
         let mut submissions = Vec::with_capacity(windows.len());
         for group in windows.iter() {
             submissions.extend(program.store().ensure(queue, group.pages()));
-            program.progress.buffer().write_at(
+            program.state.buffer().write_at(
                 queue,
-                0,
-                &progress::window(
+                control::offset_bytes(),
+                &control::window(
                     group.first_segment(),
                     group.segments(),
                     group.first_wave(),
@@ -824,13 +824,7 @@ impl Runtime {
         for (offset, length, at) in copies {
             submission.copy(&program.heap(), offset, staging, at, length);
         }
-        submission.copy(
-            program.refusal.buffer(),
-            0,
-            staging,
-            device_bytes,
-            WORD_BYTES,
-        );
+        submission.copy(program.state.buffer(), 0, staging, device_bytes, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
             lease,
@@ -839,7 +833,7 @@ impl Runtime {
             sources,
             total,
             refusal_at: device_bytes,
-            refusal_buffer: program.refusal.buffer().clone(),
+            refusal_buffer: program.state.buffer().clone(),
         }
     }
 

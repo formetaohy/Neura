@@ -177,8 +177,8 @@ fn rust_source_compiles_into_three_native_shader_formats() {
         };
         assert!(!entry.is_empty());
         assert!(source.contains("register(u2)"));
-        assert!(source.contains("register(u4)"));
-        assert!(source.contains("register(t5)"));
+        assert!(source.contains("register(u3)"));
+        assert!(source.contains("register(t4)"));
         let bare = bare_float_literals(&source);
         assert!(
             bare.is_empty(),
@@ -195,7 +195,7 @@ fn rust_source_compiles_into_three_native_shader_formats() {
         assert!(!entry.is_empty());
         assert!(size_bindings.is_empty());
         assert!(source.contains("[[buffer(2)]]"));
-        assert!(source.contains("[[buffer(7)]]"));
+        assert!(source.contains("[[buffer(6)]]"));
         let bare = bare_float_literals(&source);
         assert!(
             bare.is_empty(),
@@ -268,7 +268,7 @@ fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
         false,
     );
     let expected = bindings(false, banks, false);
-    assert_eq!(expected.len(), 2 + banks.count() as usize + 5);
+    assert_eq!(expected.len(), 2 + banks.count() as usize + 4);
     assert_eq!(kernel.bindings().len(), expected.len());
     for (binding, reflected) in expected.iter().zip(kernel.bindings()) {
         assert_eq!(binding.name, reflected.name);
@@ -277,7 +277,7 @@ fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
     }
     assert_eq!(kernel.bindings()[2].name, "heap0");
     assert_eq!(kernel.bindings()[4].name, "heap2");
-    assert_eq!(kernel.bindings()[5].name, "refusal");
+    assert_eq!(kernel.bindings()[5].name, "state");
     let program = kernel.program();
     assert_eq!(peek_switch(&program, "peek"), (vec![0, 1, 2], true));
     assert_eq!(peek_switch(&program, "poke"), (vec![0, 1, 2], true));
