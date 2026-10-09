@@ -1477,6 +1477,16 @@ impl region::Values for Sized<'_> {
                 .extents
                 .sealed(Sized::storage(self, value), self.authored)
     }
+
+    fn bounded(&self, value: u32) -> bool {
+        self.strides(value) == Shape::dense_strides(self.dims(value))
+            && self.extents.cut_is_outer(value, self.authored)
+            && self.extents.strides_hold(value, self.authored)
+    }
+
+    fn strides_hold(&self, value: u32) -> bool {
+        self.extents.strides_hold(value, self.authored)
+    }
 }
 
 fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {

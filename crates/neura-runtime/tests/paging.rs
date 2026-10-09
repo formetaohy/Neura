@@ -56,7 +56,7 @@ fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
 
 const STREAMED_BYTES: u64 = 5 * (1 << 14);
 
-fn train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>) {
+fn train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>, u32) {
     let runtime = open(backends, memory);
     let graph = Graph::new();
     let model = Model::new(&graph);
@@ -91,12 +91,12 @@ fn train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>)
         .iter()
         .map(|parameter| runtime.read(&program, *parameter))
         .collect();
-    (parameters, vec![observed])
+    (parameters, vec![observed], program.weight_windows())
 }
 
 fn train_streamed_like_the_resident_store(backends: Backends) {
-    let resident = train(backends, MemoryRequest::default());
-    let streamed = train(
+    let (resident, resident_loss, _) = train(backends, MemoryRequest::default());
+    let (streamed, streamed_loss, _) = train(
         backends,
         MemoryRequest {
             resident_weight_bytes: Some(STREAMED_BYTES),
@@ -104,11 +104,11 @@ fn train_streamed_like_the_resident_store(backends: Backends) {
         },
     );
     assert_eq!(
-        resident.0.len(),
-        streamed.0.len(),
+        resident.len(),
+        streamed.len(),
         "a streamed store carries the parameters of its model",
     );
-    for (expected, observed) in resident.0.iter().zip(&streamed.0) {
+    for (expected, observed) in resident.iter().zip(&streamed) {
         assert_eq!(expected.len(), observed.len());
         for (at, (expected, observed)) in expected.iter().zip(observed).enumerate() {
             assert!(
@@ -118,10 +118,10 @@ fn train_streamed_like_the_resident_store(backends: Backends) {
         }
     }
     assert!(
-        (resident.1[0] - streamed.1[0]).abs() <= 1e-5,
+        (resident_loss[0] - streamed_loss[0]).abs() <= 1e-5,
         "a streamed store held a loss of {} where the resident store held {}",
-        streamed.1[0],
-        resident.1[0],
+        streamed_loss[0],
+        resident_loss[0],
     );
 }
 
@@ -830,6 +830,106 @@ fn a_streamed_store_pages_a_model_a_device_count_rules() {
                 "a store of a model a device count rules reached {observed} where the resident store reached {expected} at {at}",
             );
         }
+    }
+}
+
+fn counted_train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, f32, u32) {
+    let runtime = open(backends, memory);
+    let graph = Graph::new();
+    let model = Model::new(&graph);
+    let probe = graph.input(Shape::matrix(ROWS, 1), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let batch = graph.free(ROWS);
+    let data = graph.input(
+        Shape::matrix(ROWS, WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    graph.author(batch, count);
+    let target = graph.input(
+        Shape::matrix(ROWS, WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    let difference = graph.sub(model.forward(&graph, data), target);
+    let loss = graph.sum(graph.mul(difference, difference));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -RATE);
+    for parameter in model.parameters() {
+        graph.add_into(parameter, graph.mul(gradients.of(parameter), descent));
+    }
+
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let live = ROWS - 5;
+    let mut flags = vec![0.0f32; ROWS as usize];
+    flags[..live as usize].fill(1.0);
+    let observations = (0..(ROWS * WIDTH))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    let targets = (0..(ROWS * WIDTH))
+        .map(|index| ((index * 53) % 97) as f32 / 97.0 - 0.5)
+        .collect::<Vec<_>>();
+    let mut observed = 0.0;
+    for _ in 0..STEPS {
+        runtime.write(&program, probe, &flags);
+        runtime.write(&program, data, &observations);
+        runtime.write(&program, target, &targets);
+        runtime.run(&program);
+        observed = runtime.read(&program, loss)[0];
+    }
+    let parameters = model
+        .parameters()
+        .iter()
+        .map(|parameter| runtime.read(&program, *parameter))
+        .collect();
+    (parameters, observed, program.weight_windows())
+}
+
+#[test]
+fn a_streamed_store_trains_the_model_a_device_count_rules() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_loss, resident_windows) =
+            counted_train(backends, MemoryRequest::default());
+        assert_eq!(
+            resident_windows, 0,
+            "a store that holds every weight resident walks no window",
+        );
+        let (streamed, streamed_loss, windows) = counted_train(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(STREAMED_BYTES),
+                ..Default::default()
+            },
+        );
+        let (_, _, sealed_windows) = train(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(STREAMED_BYTES),
+                ..Default::default()
+            },
+        );
+        assert!(
+            windows >= 1,
+            "a store of a model a device count rules and a budget of {STREAMED_BYTES} bytes walks every weight in a window",
+        );
+        assert!(
+            windows <= sealed_windows,
+            "a model a device count rules walks {windows} weight windows where its sealed twin walks {sealed_windows}",
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (expected, observed) in resident.iter().zip(&streamed) {
+            assert_eq!(expected.len(), observed.len());
+            for (at, (expected, observed)) in expected.iter().zip(observed).enumerate() {
+                assert!(
+                    (expected - observed).abs() <= 1e-5,
+                    "a streamed store reached {observed} where the resident store reached {expected} at {at}",
+                );
+            }
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a streamed store held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
     }
 }
 

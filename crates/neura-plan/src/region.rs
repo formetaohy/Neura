@@ -126,6 +126,10 @@ pub(crate) trait Values {
         self.exact(value)
     }
 
+    fn strides_hold(&self, value: u32) -> bool {
+        self.exact(value)
+    }
+
     fn elements(&self, value: u32) -> u64 {
         self.dims(value).iter().map(|dim| u64::from(*dim)).product()
     }
@@ -183,6 +187,7 @@ pub(crate) struct Resolved {
     recomputes: Vec<Option<u32>>,
     exact: Vec<bool>,
     bounded: Vec<bool>,
+    holds: Vec<bool>,
 }
 
 impl Resolved {
@@ -197,6 +202,7 @@ impl Resolved {
             recomputes: Vec::with_capacity(count),
             exact: Vec::with_capacity(count),
             bounded: Vec::with_capacity(count),
+            holds: Vec::with_capacity(count),
         };
         for value in 0..count as u32 {
             let at = value as usize * size_of::<neura_abi::ValueRecord>();
@@ -214,11 +220,11 @@ impl Resolved {
                 .push(extents.sealed(value, authored) && extents.sealed(record.storage, authored));
             let dense = resolved.strides[value as usize]
                 == Shape::dense_strides(resolved.dims[value as usize]);
-            resolved.bounded.push(
-                dense
-                    && extents.cut_is_outer(value, authored)
-                    && extents.cut_is_outer(record.storage, authored),
-            );
+            let holds = extents.strides_hold(value, authored);
+            resolved
+                .bounded
+                .push(dense && extents.cut_is_outer(value, authored) && holds);
+            resolved.holds.push(holds);
         }
         resolved
     }
@@ -259,6 +265,10 @@ impl Values for Resolved {
 
     fn bounded(&self, value: u32) -> bool {
         self.bounded[value as usize]
+    }
+
+    fn strides_hold(&self, value: u32) -> bool {
+        self.holds[value as usize]
     }
 }
 
@@ -301,7 +311,7 @@ pub(crate) fn touches<W: Walk, V: Values>(
     span: (u32, u32),
     touched: &mut Touches,
 ) {
-    if exact(values, task) {
+    if exact(values, task) || bounded(values, task) {
         walked(touched, task, values, tiles, span, &[]);
     } else {
         whole(touched, task, values);
@@ -327,7 +337,7 @@ pub(crate) fn bounded<W: Walk, V: Values>(values: &V, task: &W) -> bool {
         && task
             .reads()
             .chain(task.writes())
-            .all(|value| values.exact(value) || values.bounded(value))
+            .all(|value| values.exact(value) || values.strides_hold(value))
 }
 
 pub(crate) fn walked<W: Walk, V: Values>(

@@ -108,6 +108,10 @@ impl Extents {
         })
     }
 
+    pub(crate) fn strides_hold(&self, value: u32, authored: &[u32]) -> bool {
+        self.cut_is_outer(self.values[value as usize].storage, authored)
+    }
+
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {
         match self.values[value as usize].strides_source {
             None => Shape::dense_strides(self.dims(value, extents)),

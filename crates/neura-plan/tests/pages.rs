@@ -443,3 +443,71 @@ fn a_convolution_pages_the_filter_a_device_count_rules() {
         "the tasks of a convolution a device count rules walk every page of the filter between them",
     );
 }
+
+const TRAIN_WIDTH: u32 = 512;
+const TRAIN_ROWS: u32 = 64;
+const TRAIN_DEPTH: u32 = 4;
+const TRAIN_SLOTS: u32 = 64;
+
+fn trains<'g>(graph: &Graph<'g>, rows: neura_graph::Value<'g>) {
+    let weights = (0..TRAIN_DEPTH)
+        .map(|_| {
+            graph.parameter(
+                Shape::matrix(TRAIN_WIDTH, TRAIN_WIDTH),
+                Init::Zero,
+                Element::Single,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut current = rows;
+    for weight in &weights {
+        current = graph.relu(graph.matmul(current, *weight));
+    }
+    let loss = graph.sum(current);
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.01);
+    for weight in &weights {
+        graph.add_into(*weight, graph.mul(gradients.of(*weight), descent));
+    }
+}
+
+#[test]
+fn a_device_count_walks_the_pages_and_waves_of_a_sealed_twin() {
+    let sealed_graph = Graph::new();
+    let sealed_rows = sealed_graph.input(Shape::matrix(TRAIN_ROWS, TRAIN_WIDTH), Element::Single);
+    trains(&sealed_graph, sealed_rows);
+    let sealed = budgeted(&sealed_graph, TRAIN_SLOTS);
+
+    let counted_graph = Graph::new();
+    let probe = counted_graph.input(Shape::matrix(TRAIN_ROWS, 1), Element::Single);
+    let count = counted_graph.sum_axis(probe, 2);
+    let batch = counted_graph.free(TRAIN_ROWS);
+    let counted_rows = counted_graph.input(
+        Shape::matrix(TRAIN_ROWS, TRAIN_WIDTH).freed(&[(2, batch)]),
+        Element::Single,
+    );
+    counted_graph.author(batch, count);
+    trains(&counted_graph, counted_rows);
+    let counted = budgeted(&counted_graph, TRAIN_SLOTS);
+
+    let (sealed_widest, sealed_walked, _) = widest_and_walked(&sealed);
+    let (counted_widest, counted_walked, _) = widest_and_walked(&counted);
+    let sealed_waves = sealed.bound_encoding().wave_count();
+    let counted_waves = counted.bound_encoding().wave_count();
+    assert_eq!(
+        counted_walked.len(),
+        sealed_walked.len(),
+        "the tasks of a model a device count rules walk {} pages where the tasks of its sealed twin walk {}",
+        counted_walked.len(),
+        sealed_walked.len(),
+    );
+    assert!(
+        counted_widest <= sealed_widest,
+        "a task of a model a device count rules walks {counted_widest} pages where a task of its sealed twin walks {sealed_widest}",
+    );
+    assert!(
+        counted_waves <= sealed_waves + 1,
+        "a model a device count rules gates {counted_waves} waves where its sealed twin gates {sealed_waves}",
+    );
+}
