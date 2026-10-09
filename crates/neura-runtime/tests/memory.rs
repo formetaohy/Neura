@@ -8,7 +8,7 @@ use neura_profile::{Budget, Profile};
 fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
 }
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 #[path = "support/reference.rs"]
@@ -93,7 +93,7 @@ fn a_plan_keeps_its_weights_out_of_the_arena() {
     let data = graph.input(Shape::matrix(1, 256), Element::Single);
     let out = graph.add(graph.matmul(data, weight), bias);
     graph.retain(out);
-    let encoding = Plan::of(&graph, 256, narrow());
+    let encoding = Plan::of(&graph, 256, narrow(), DEFAULT_ENCODING_BYTES);
     assert_eq!(encoding.weights().bytes(), (256 * 256 + 256) * 4);
     assert!(
         encoding.arena_bytes() >= 2 * 256 * 4,

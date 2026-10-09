@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_profile::{Budget, Profile};
 use std::time::Instant;
 
@@ -25,7 +25,7 @@ fn planning_millis(graph: &Graph, profile: Profile) -> f64 {
     let mut fastest = f64::MAX;
     for _ in 0..3 {
         let started = Instant::now();
-        let plan = Plan::of(graph, ALIGNMENT, profile);
+        let plan = Plan::of(graph, ALIGNMENT, profile, DEFAULT_ENCODING_BYTES);
         fastest = fastest.min(started.elapsed().as_secs_f64() * 1000.0);
         drop(plan);
     }

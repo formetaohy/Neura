@@ -1,6 +1,6 @@
 use neura_abi::{Element, PAGE_WORDS};
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::{Plan, TableRows};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan, TableRows};
 use neura_profile::{Budget, Profile};
 use std::collections::BTreeSet;
 
@@ -10,7 +10,12 @@ const ROWS: u32 = 16;
 const PAGES: u32 = WIDTH * WIDTH / PAGE_WORDS as u32;
 
 fn plan(graph: &Graph) -> Plan {
-    Plan::of(graph, ALIGNMENT, Profile::derive(Budget::BASELINE, None)[0])
+    Plan::of(
+        graph,
+        ALIGNMENT,
+        Profile::derive(Budget::BASELINE, None)[0],
+        DEFAULT_ENCODING_BYTES,
+    )
 }
 
 #[test]
@@ -194,5 +199,128 @@ fn a_table_walk_pages_the_rows_a_host_names() {
     assert_eq!(
         walked, named,
         "the tasks of a table walk page every row a host names",
+    );
+}
+
+#[test]
+fn a_convolution_pages_the_filter_channels_a_task_walks() {
+    let channels = 8192u32;
+    let graph = Graph::new();
+    let images = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
+    let filter = graph.named_parameter(
+        "filter",
+        Shape::of([channels, 1, 3, 3]),
+        Init::Zero,
+        Element::Single,
+    );
+    graph.retain(graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3])));
+    let plan = plan(&graph);
+    let tasks = plan.weight_pages_at(plan.slot_bounds(), &[]);
+    let whole = (u64::from(channels) * 9).div_ceil(PAGE_WORDS) as usize;
+    let widest = tasks
+        .iter()
+        .map(|task| task.pages().len())
+        .max()
+        .expect("a convolution schedules a task");
+    assert!(
+        widest * 4 <= whole,
+        "a task walks {widest} pages of a filter of {whole}, and the convolution weighs the channels its walk names",
+    );
+    let mut walked = BTreeSet::new();
+    for task in &tasks {
+        walked.extend(task.pages().iter().copied());
+    }
+    assert_eq!(
+        walked,
+        (0..whole as u32).collect::<BTreeSet<_>>(),
+        "the tasks of a convolution walk every page of the filter between them",
+    );
+    for task in &tasks {
+        for write in task.writes() {
+            assert!(
+                task.pages().contains(write),
+                "a task that writes weight page {write} holds it resident",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_training_convolution_pages_the_filter_channels_a_task_walks() {
+    let channels = 4096u32;
+    let graph = Graph::new();
+    let images = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
+    let filter = graph.named_parameter(
+        "filter",
+        Shape::of([channels, 1, 3, 3]),
+        Init::Zero,
+        Element::Single,
+    );
+    let convolved = graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3]));
+    let loss = graph.sum(graph.mul(convolved, convolved));
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.01);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let plan = plan(&graph);
+    let tasks = plan.weight_pages_at(plan.slot_bounds(), &[]);
+    let whole = (u64::from(channels) * 9).div_ceil(PAGE_WORDS) as usize;
+    let widest = tasks
+        .iter()
+        .map(|task| task.pages().len())
+        .max()
+        .expect("a training convolution schedules a task");
+    assert!(
+        widest * 4 <= whole,
+        "a task of a training convolution walks {widest} pages of a filter of {whole}, and no task weighs the whole filter",
+    );
+    let mut walked = BTreeSet::new();
+    for task in &tasks {
+        walked.extend(task.pages().iter().copied());
+    }
+    assert_eq!(
+        walked,
+        (0..whole as u32).collect::<BTreeSet<_>>(),
+        "the tasks of a training convolution walk every page of the filter between them",
+    );
+}
+
+#[test]
+fn a_convolution_pages_the_filter_channels_of_the_shape_a_binding_names() {
+    let channels = 8192u32;
+    let graph = Graph::new();
+    let batch = graph.free(4);
+    let images = graph.input(
+        Shape::of([4, 1, 4, 4]).freed(&[(0, batch)]),
+        Element::Single,
+    );
+    let filter = graph.named_parameter(
+        "filter",
+        Shape::of([channels, 1, 3, 3]),
+        Init::Zero,
+        Element::Single,
+    );
+    graph.retain(graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3])));
+    let plan = plan(&graph);
+    let whole = (u64::from(channels) * 9).div_ceil(PAGE_WORDS) as usize;
+    for live in [4u32, 2, 1] {
+        let widest = plan
+            .weight_pages_at(&[live], &[])
+            .iter()
+            .map(|task| task.pages().len())
+            .max()
+            .expect("a convolution schedules a task");
+        assert!(
+            widest * 4 <= whole,
+            "a free batch of {live} images walks {widest} pages of a filter of {whole}, and a shorter binding weighs no more of it",
+        );
+    }
+    let empty = plan
+        .weight_pages_at(&[0], &[])
+        .iter()
+        .map(|task| task.pages().len())
+        .sum::<usize>();
+    assert_eq!(
+        empty, 0,
+        "a binding of no image weighs no filter, and a walk of no numbers demands no page",
     );
 }

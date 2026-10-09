@@ -15,7 +15,10 @@ use neura_kernel::{HEAP, TASKS, VALUES};
 use neura_plan::{Encoding, Plan, Region, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+const REMEMBERED_WINDOWS: usize = 8;
 
 #[derive(Clone)]
 pub struct Weights {
@@ -111,7 +114,8 @@ pub struct Program {
     values: Recycled,
     tensors: Mutex<Tensors>,
     bound: Mutex<Bound>,
-    windows: Mutex<Option<Windows>>,
+    windows: Mutex<Vec<Windows>>,
+    planned_windows: AtomicUsize,
     encoding: Mutex<Option<Arc<Encoding>>>,
     last: Mutex<Option<SubmissionIndex>>,
     plan: Arc<Plan>,
@@ -145,6 +149,7 @@ impl Tensors {
 
 struct Windows {
     extents: Vec<u32>,
+    rows: Vec<(u32, Vec<u32>)>,
     groups: Arc<Vec<WeightGroup>>,
 }
 
@@ -456,11 +461,13 @@ impl Program {
                 );
                 Some(Windows {
                     extents: bound,
+                    rows: Vec::new(),
                     groups: Arc::new(groups),
                 })
             }
             false => None,
         };
+        let previewed = usize::from(preview.is_some());
         let mut bindings = vec![
             Binding {
                 index: TASKS,
@@ -557,7 +564,8 @@ impl Program {
             tasks,
             values,
             bound: Mutex::new(bound),
-            windows: Mutex::new(preview),
+            windows: Mutex::new(preview.into_iter().collect()),
+            planned_windows: AtomicUsize::new(previewed),
             encoding: Mutex::new(encoding),
             last: Mutex::new(None),
             plan,
@@ -615,7 +623,6 @@ impl Program {
             None => bound.rows.push((table.id(), declared)),
         }
         drop(bound);
-        *self.windows.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     fn declared_rows(&self) -> Vec<(u32, Vec<u32>)> {
@@ -768,8 +775,14 @@ impl Program {
         let extents = self.host_extents();
         let declared = self.declared_rows();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(kept) = windows.as_ref().filter(|kept| kept.extents == extents) {
-            return kept.groups.clone();
+        if let Some(position) = windows
+            .iter()
+            .position(|kept| kept.extents == extents && kept.rows == declared)
+        {
+            let kept = windows.remove(position);
+            let groups = kept.groups.clone();
+            windows.push(kept);
+            return groups;
         }
         let rows = declared
             .iter()
@@ -777,19 +790,30 @@ impl Program {
             .collect::<Vec<TableRows<'_>>>();
         let encoding = self.encoding();
         let groups = Arc::new(match self.weights.paged() {
-            true => weight_groups(
-                &self.plan,
-                &encoding,
-                self.weights.resident_pages(),
-                &self.plan.weight_pages(&encoding, &rows),
-            ),
+            true => {
+                self.planned_windows.fetch_add(1, Ordering::Relaxed);
+                weight_groups(
+                    &self.plan,
+                    &encoding,
+                    self.weights.resident_pages(),
+                    &self.plan.weight_pages(&encoding, &rows),
+                )
+            }
             false => Vec::new(),
         });
-        *windows = Some(Windows {
+        while windows.len() >= REMEMBERED_WINDOWS {
+            windows.remove(0);
+        }
+        windows.push(Windows {
             extents,
+            rows: declared,
             groups: groups.clone(),
         });
         groups
+    }
+
+    pub fn planned_windows(&self) -> usize {
+        self.planned_windows.load(Ordering::Relaxed)
     }
 
     pub(crate) fn store(&self) -> &Arc<WeightStore> {
@@ -942,6 +966,18 @@ impl Program {
 
     pub fn matmul_geometries(&self) -> Vec<(MatmulTile, u32)> {
         self.plan.matmul_geometries()
+    }
+
+    pub fn remembered_encodings(&self) -> usize {
+        self.plan.remembered_encodings()
+    }
+
+    pub fn remembered_bytes(&self) -> u64 {
+        self.plan.remembered_bytes()
+    }
+
+    pub fn derived_encodings(&self) -> u64 {
+        self.plan.derived_encodings()
     }
 
     pub fn task_count(&self) -> u32 {

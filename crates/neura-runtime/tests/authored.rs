@@ -1,6 +1,6 @@
 use neura_abi::{Element, Kind};
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::Runtime;
 
 #[path = "support/mod.rs"]
@@ -331,7 +331,12 @@ fn a_device_count_cuts_the_planes_a_host_extent_holds() {
     let model = cut(&graph, CUT_PLANES, BOUND);
     let store = runtime.weights(&graph);
     let program = runtime.compile(&graph, &store);
-    let plan = Plan::of(&graph, runtime.alignment(), program.profile());
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
     assert!(
         plan.carries_authored(),
         "the planes of the batch walk an extent the device authors",
@@ -420,7 +425,12 @@ fn a_device_count_rules_the_rows_a_depth_split_product_walks() {
     let model = split_product(&graph, SPLIT_TOKENS);
     let store = runtime.weights(&graph);
     let program = runtime.compile(&graph, &store);
-    let plan = Plan::of(&graph, runtime.alignment(), program.profile());
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
     assert!(
         plan.kinds().contains(&Kind::MatmulFold),
         "the product splits its depth across tasks, and the layout of the partials the fold reads is the one the live rows give",

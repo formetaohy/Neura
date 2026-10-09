@@ -44,9 +44,14 @@ impl Runtime {
     }
 
     fn products(&self, graph: &Graph) -> Vec<Product> {
-        Plan::of(graph, self.alignment, self.default_profile())
-            .products()
-            .to_vec()
+        Plan::of(
+            graph,
+            self.alignment,
+            self.default_profile(),
+            self.encoding_bytes,
+        )
+        .products()
+        .to_vec()
     }
 
     fn fastest_plan(
@@ -63,8 +68,9 @@ impl Runtime {
         let mut at = 1;
         while at < candidates.len() {
             let (profile, chosen) = &candidates[at];
-            let words =
-                Plan::chosen(graph, self.alignment, *profile, chosen).tensor_bytes() / WORD_BYTES;
+            let words = Plan::chosen(graph, self.alignment, *profile, chosen, self.encoding_bytes)
+                .tensor_bytes()
+                / WORD_BYTES;
             if !self.heap.holds(words) {
                 self.score(&reference, &batch, &mut best, &mut seconds);
                 batch.clear();
@@ -129,11 +135,23 @@ impl Runtime {
         incumbent: (Profile, Vec<(Product, MatmulTile)>),
         challenger: (Profile, Vec<(Product, MatmulTile)>),
     ) -> (Profile, Vec<(Product, MatmulTile)>) {
-        let incumbent_words = Plan::chosen(graph, self.alignment, incumbent.0, &incumbent.1)
-            .tensor_bytes()
+        let incumbent_words = Plan::chosen(
+            graph,
+            self.alignment,
+            incumbent.0,
+            &incumbent.1,
+            self.encoding_bytes,
+        )
+        .tensor_bytes()
             / WORD_BYTES;
-        let challenger_words = Plan::chosen(graph, self.alignment, challenger.0, &challenger.1)
-            .tensor_bytes()
+        let challenger_words = Plan::chosen(
+            graph,
+            self.alignment,
+            challenger.0,
+            &challenger.1,
+            self.encoding_bytes,
+        )
+        .tensor_bytes()
             / WORD_BYTES;
         if !self.heap.holds(incumbent_words + challenger_words) {
             return challenger;
@@ -179,7 +197,8 @@ impl Runtime {
     fn measured_tile(&self, product: Product, profile: Profile) -> Option<MatmulTile> {
         let graph = product_graph(product);
         let layout = Layout::of(&graph, self.alignment);
-        let tensors = Plan::of(&graph, self.alignment, profile).tensor_bytes() / WORD_BYTES;
+        let tensors = Plan::of(&graph, self.alignment, profile, self.encoding_bytes).tensor_bytes()
+            / WORD_BYTES;
         let tiles = product.shortlist(profile);
         if !self.heap.holds(layout.words() + tensors) {
             return None;

@@ -1,5 +1,6 @@
 use crate::access::{Access, Reads};
 use crate::authored;
+use crate::encodings::Encodings;
 use crate::fuse;
 use crate::layout::{Layout, Region, store_of};
 use crate::lower;
@@ -17,7 +18,8 @@ use neura_abi::{
 use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo};
 use neura_profile::{AttentionTile, MatmulTile, Profile};
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Quantum {
@@ -45,6 +47,22 @@ pub struct Encoding {
 }
 
 impl Encoding {
+    pub fn bytes(&self) -> u64 {
+        self.values.len() as u64
+            + self.tasks.len() as u64
+            + self.spans.len() as u64 * size_of::<Option<Placed>>() as u64
+            + self.readable.len() as u64
+            + self.quanta.len() as u64 * size_of::<Quantum>() as u64
+            + self.lengths.len() as u64 * size_of::<u32>() as u64
+            + self.order.len() as u64 * size_of::<u32>() as u64
+            + self.waves.len() as u64 * size_of::<u32>() as u64
+            + self.segments.len() as u64 * size_of::<SegmentRecord>() as u64
+            + self.wave_tasks.len() as u64 * size_of::<u32>() as u64
+            + self.patches.len() as u64 * size_of::<neura_abi::PatchRecord>() as u64
+            + self.patch_list.len() as u64 * size_of::<u32>() as u64
+            + self.held.len() as u64
+    }
+
     fn empty() -> Self {
         Self {
             values: Vec::new(),
@@ -281,11 +299,13 @@ pub struct Plan {
     shapes: Arc<Vec<ValueInfo>>,
     alignment: u64,
     bound: Arc<Encoding>,
+    encodings: Mutex<Encodings>,
+    derived: AtomicU64,
 }
 
 impl Plan {
-    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile) -> Self {
-        Self::chosen(graph, alignment, profile, &[])
+    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile, encoding_bytes: u64) -> Self {
+        Self::chosen(graph, alignment, profile, &[], encoding_bytes)
     }
 
     pub fn chosen(
@@ -293,8 +313,15 @@ impl Plan {
         alignment: u64,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
+        encoding_bytes: u64,
     ) -> Self {
-        Self::compile(&graph.snapshot(), profile, alignment, chosen)
+        Self::compile(
+            &graph.snapshot(),
+            profile,
+            alignment,
+            chosen,
+            encoding_bytes,
+        )
     }
 
     fn compile(
@@ -302,6 +329,7 @@ impl Plan {
         profile: Profile,
         alignment: u64,
         chosen: &[(Product, MatmulTile)],
+        encoding_bytes: u64,
     ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
@@ -586,6 +614,8 @@ impl Plan {
             shapes,
             alignment,
             bound: Arc::new(Encoding::empty()),
+            encodings: Mutex::new(Encodings::of(encoding_bytes)),
+            derived: AtomicU64::new(0),
         };
         let bound = plan.deliver(&plan.slot_bounds);
         plan.declared_waves = declared_waves(&bound);
@@ -723,10 +753,33 @@ impl Plan {
             self.slot_bounds.len(),
             lengths.len(),
         );
-        match lengths == self.slot_bounds.as_slice() {
-            true => self.bound.clone(),
-            false => Arc::new(self.deliver(lengths)),
+        if lengths == self.slot_bounds.as_slice() {
+            return self.bound.clone();
         }
+        if let Some(held) = self.store().find(lengths) {
+            return held;
+        }
+        let derived = Arc::new(self.deliver(lengths));
+        self.derived.fetch_add(1, Ordering::Relaxed);
+        self.store().insert(lengths, derived)
+    }
+
+    fn store(&self) -> MutexGuard<'_, Encodings> {
+        self.encodings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn remembered_encodings(&self) -> usize {
+        self.store().len()
+    }
+
+    pub fn remembered_bytes(&self) -> u64 {
+        self.store().bytes()
+    }
+
+    pub fn derived_encodings(&self) -> u64 {
+        self.derived.load(Ordering::Relaxed)
     }
 
     fn same_steps(&self, left: &Recorded<'_>, right: &Recorded<'_>) -> bool {

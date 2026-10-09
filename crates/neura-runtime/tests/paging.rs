@@ -586,7 +586,7 @@ const FREE_BOUND: u32 = 32;
 const FREE_STEPS: u32 = 4;
 const FREE_BYTES: u64 = 96 * (1 << 14);
 
-fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32) {
+fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32, usize) {
     let runtime = open(
         backends,
         MemoryRequest {
@@ -657,14 +657,19 @@ fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u
             values
         })
         .collect();
-    (parameters, losses, program.weight_windows())
+    (
+        parameters,
+        losses,
+        program.weight_windows(),
+        program.planned_windows(),
+    )
 }
 
 #[test]
 fn a_streamed_store_pages_the_batch_a_binding_holds() {
     for backends in Backends::PLATFORM {
-        let (resident, resident_losses, _) = free_run(backends, MemoryRequest::default());
-        let (streamed, streamed_losses, windows) = free_run(
+        let (resident, resident_losses, _, _) = free_run(backends, MemoryRequest::default());
+        let (streamed, streamed_losses, windows, planned) = free_run(
             backends,
             MemoryRequest {
                 resident_weight_bytes: Some(FREE_BYTES),
@@ -688,6 +693,10 @@ fn a_streamed_store_pages_the_batch_a_binding_holds() {
         assert!(
             windows <= FREE_LAYERS,
             "a step of {FREE_LAYERS} layers over a free batch dispatched {windows} weight windows, and a window carries the tiles of many layers",
+        );
+        assert_eq!(
+            planned, 3,
+            "a program that walked {FREE_STEPS} bindings of 3 shapes planned the pages of {planned} of them, and a shape it has walked keeps the window its pages belong to",
         );
     }
 }
@@ -1105,6 +1114,83 @@ fn a_streamed_table_reads_the_rows_a_host_names_at_a_fixed_shape() {
         assert_eq!(
             windows, 1,
             "a table walk of rows a host names dispatches one weight window",
+        );
+    }
+}
+
+const CONV_CHANNELS: u32 = 8192;
+const CONV_BYTES: u64 = 6 * (1 << 14);
+const CONV_PAGES: u32 = (CONV_CHANNELS * 9) / 4096;
+
+fn convolution_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let images = graph.input(Shape::of([1, 1, 4, 4]), Element::Single);
+    let filter = graph.parameter(
+        Shape::of([CONV_CHANNELS, 1, 3, 3]),
+        Init::Uniform {
+            low: -0.02,
+            high: 0.02,
+        },
+        Element::Single,
+    );
+    let convolved = graph.conv2d(images, filter, neura_graph::Window::sliding([3, 3]));
+    let loss = graph.sum(graph.mul(convolved, convolved));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..16)
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    for _ in 0..2 {
+        runtime.write(&program, images, &observations);
+        runtime.run(&program);
+    }
+    (
+        runtime.read(&program, filter),
+        runtime.read(&program, loss)[0],
+        program.weight_windows(),
+    )
+}
+
+#[test]
+fn a_streamed_store_pages_the_filter_of_a_convolution() {
+    assert!(
+        (CONV_CHANNELS * 9).div_ceil(4096) >= 2,
+        "a filter of {CONV_PAGES} pages holds no more than the budget books it",
+    );
+    for backends in Backends::PLATFORM {
+        let (resident, resident_loss, _) = convolution_run(backends, MemoryRequest::default());
+        let (streamed, streamed_loss, windows) = convolution_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(CONV_BYTES),
+                ..Default::default()
+            },
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of {CONV_BYTES} bytes reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a streamed convolution held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
+        assert!(
+            windows > 1,
+            "a store of {CONV_BYTES} bytes walked {windows} weight windows over a filter of {CONV_PAGES} pages",
         );
     }
 }

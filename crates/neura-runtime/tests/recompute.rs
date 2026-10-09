@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::{Budget, Profile};
 
 #[path = "support/mod.rs"]
@@ -96,8 +96,8 @@ fn a_recomputed_stack_holds_less_of_the_forward_it_runs() {
     let (_, out, _) = stack(&recomputed, true);
     recomputed.backward(recomputed.sum(out));
 
-    let plain = Plan::of(&plain, 256, narrow());
-    let recomputed = Plan::of(&recomputed, 256, narrow());
+    let plain = Plan::of(&plain, 256, narrow(), DEFAULT_ENCODING_BYTES);
+    let recomputed = Plan::of(&recomputed, 256, narrow(), DEFAULT_ENCODING_BYTES);
     assert!(
         recomputed.arena_bytes() * 5 < plain.arena_bytes() * 4,
         "a stack of {LAYERS} layers keeps {} bytes of arena where {BLOCK} layer regions recompute it into {}",

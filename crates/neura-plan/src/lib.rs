@@ -1,6 +1,7 @@
 mod access;
 mod authored;
 mod encode;
+mod encodings;
 mod fuse;
 mod hazard;
 mod layout;
@@ -13,6 +14,7 @@ mod schedule;
 mod span;
 
 pub use encode::{Encoding, Plan, Quantum, Span};
+pub use encodings::DEFAULT_ENCODING_BYTES;
 pub use layout::{Layout, Region, Seed};
 pub use pages::WeightPages;
 pub use product::Product;

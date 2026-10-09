@@ -23,7 +23,7 @@ fn wide() -> Profile {
 fn every_profile() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
 }
-use neura_plan::{Layout, Plan, Product};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Layout, Plan, Product};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
@@ -34,7 +34,7 @@ fn plan(graph: &Graph) -> Plan {
 }
 
 fn plan_with(graph: &Graph, profile: Profile) -> Plan {
-    Plan::of(graph, ALIGNMENT, profile)
+    Plan::of(graph, ALIGNMENT, profile, DEFAULT_ENCODING_BYTES)
 }
 
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
@@ -1932,7 +1932,13 @@ fn a_plan_walks_the_tile_a_measured_choice_names() {
         .iter()
         .find(|tile| **tile != planned)
         .expect("a profile offers a tile beside the one it plans");
-    let chosen_plan = Plan::chosen(&graph, ALIGNMENT, profile, &[(product, chosen)]);
+    let chosen_plan = Plan::chosen(
+        &graph,
+        ALIGNMENT,
+        profile,
+        &[(product, chosen)],
+        DEFAULT_ENCODING_BYTES,
+    );
     assert_eq!(chosen_plan.products(), &[product]);
     let chosen_tasks = tasks(&chosen_plan);
     assert!(!chosen_tasks.is_empty(), "a measured plan holds no task");
@@ -1968,6 +1974,7 @@ fn a_plan_refuses_a_measured_tile_its_profile_does_not_offer() {
                 ALIGNMENT,
                 profile,
                 &[(Product::of(1, 64, 64, 32), foreign)],
+                DEFAULT_ENCODING_BYTES,
             );
         }),
         "a plan walked a measured tile its profile does not offer",

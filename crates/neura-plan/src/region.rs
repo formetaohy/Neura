@@ -7,6 +7,7 @@ use neura_profile::MatmulTile;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Region {
+    Empty,
     Whole,
     Run {
         first: u64,
@@ -21,6 +22,10 @@ pub(crate) enum Region {
 }
 
 impl Region {
+    pub(crate) fn empty() -> Self {
+        Self::Empty
+    }
+
     pub(crate) fn run(first: u64, count: u64) -> Self {
         if count == 0 {
             return Self::Whole;
@@ -407,7 +412,7 @@ fn assert_names_held_numbers<W: Walk, V: Values>(
 ) {
     for (storage, region) in reads.iter().chain(writes) {
         let first = match *region {
-            Region::Whole => continue,
+            Region::Empty | Region::Whole => continue,
             Region::Run { first, .. } | Region::Band { first, .. } => first,
         };
         assert!(
@@ -425,6 +430,10 @@ struct Narrowed<'a> {
 }
 
 impl Narrowed<'_> {
+    fn names(&self, value: u32) -> bool {
+        self.reads.iter().any(|(kept, _)| *kept == value)
+    }
+
     fn write(&mut self, value: u32, region: Region) {
         self.writes.push((value, region));
     }
@@ -454,6 +463,11 @@ fn narrow<W: Walk, V: Values>(
     match task.kind() {
         Kind::Matmul => product(values, tiles, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
+        Kind::Conv2d => convolution(values, task, first, count, &mut narrowed),
+        Kind::Conv2dInputGrad => convolution_input_grad(values, task, first, count, &mut narrowed),
+        Kind::Conv2dWeightGrad => {
+            convolution_weight_grad(values, task, first, count, &mut narrowed)
+        }
         Kind::Convert => convert(values, task, first, count, &mut narrowed),
         Kind::Gather => gather(values, task, rows, &mut narrowed),
         Kind::Rope | Kind::RopeGrad => rope(values, task, first, count, &mut narrowed),
@@ -466,7 +480,33 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Fill
         | Kind::Broadcast
         | Kind::Partial => elementwise(values, task, first, count, &mut narrowed),
-        _ => {}
+        Kind::Attention
+        | Kind::AttentionQueryGrad
+        | Kind::AttentionKeyGrad
+        | Kind::AttentionValueGrad
+        | Kind::PrefixChunk
+        | Kind::PrefixScan
+        | Kind::PrefixClose
+        | Kind::Layout
+        | Kind::Extend
+        | Kind::SumChunk
+        | Kind::SumAxis
+        | Kind::Argmax
+        | Kind::Categorical
+        | Kind::OneHot
+        | Kind::Scatter
+        | Kind::ScatterWrite
+        | Kind::Compact
+        | Kind::PoolMax2d
+        | Kind::PoolMax2dInputGrad
+        | Kind::PoolMean2d
+        | Kind::PoolMean2dInputGrad
+        | Kind::Concat
+        | Kind::Slice
+        | Kind::Rows
+        | Kind::MatmulWeightGrad
+        | Kind::SegmentSum
+        | Kind::Length => {}
     }
     for count in task.depends() {
         narrowed.read_whole(count);
@@ -806,4 +846,175 @@ fn softmax<W: Walk, V: Values>(
         };
         narrowed.read(value, region);
     }
+}
+
+fn convolution<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    let filter = task.input(1);
+    let range = Region::run(u64::from(first), u64::from(count));
+    narrowed.write(out, range);
+    let region = channel_span(values, out, first, count)
+        .zip(filter_planes(values, filter))
+        .map(|((first_channel, last_channel), (per_channel, _))| {
+            Region::run(
+                u64::from(first_channel) * per_channel,
+                u64::from(last_channel - first_channel + 1) * per_channel,
+            )
+        })
+        .unwrap_or(Region::Whole);
+    narrowed.read(filter, region);
+    chained_reads(values, task, out, range, narrowed);
+}
+
+fn convolution_input_grad<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    let filter = task.input(0);
+    let range = Region::run(u64::from(first), u64::from(count));
+    narrowed.write(out, range);
+    name_filter_bands(values, out, filter, first, count, narrowed);
+    chained_reads(values, task, out, range, narrowed);
+}
+
+fn name_filter_bands<V: Values>(
+    values: &V,
+    out: u32,
+    filter: u32,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let Some((first_channel, last_channel)) = channel_span(values, out, first, count) else {
+        return;
+    };
+    let Some((per_channel, per_local)) = filter_planes(values, filter) else {
+        return;
+    };
+    let channels = u64::from(values.dims(filter)[1]);
+    let groups = u64::from(values.dims(out)[1]) / channels;
+    if channels == 0 || groups == 0 {
+        return;
+    }
+    let out_channels = u64::from(values.dims(filter)[0]) / groups;
+    if out_channels == 0 {
+        return;
+    }
+    let block = |group: u64, local: (u64, u64)| {
+        Region::band(
+            group * out_channels * per_channel + local.0 * per_local,
+            (local.1 - local.0 + 1) * per_local,
+            per_channel,
+            out_channels,
+        )
+    };
+    let first_group = u64::from(first_channel) / channels;
+    let last_group = u64::from(last_channel) / channels;
+    let first_local = u64::from(first_channel) % channels;
+    let last_local = u64::from(last_channel) % channels;
+    if first_group == last_group {
+        narrowed.read(filter, block(first_group, (first_local, last_local)));
+        return;
+    }
+    narrowed.read(filter, block(first_group, (first_local, channels - 1)));
+    if first_group + 1 < last_group {
+        narrowed.read(
+            filter,
+            Region::band(
+                (first_group + 1) * out_channels * per_channel,
+                per_channel,
+                per_channel,
+                out_channels * (last_group - first_group - 1),
+            ),
+        );
+    }
+    narrowed.read(filter, block(last_group, (0, last_local)));
+}
+
+fn convolution_weight_grad<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    let filter = task.input(2);
+    let range = Region::run(u64::from(first), u64::from(count));
+    let written = if filter == NO_VALUE {
+        range
+    } else {
+        if !values.dense(filter) {
+            return;
+        }
+        narrowed.read(filter, Region::empty());
+        Region::run(
+            u64::from(task.slot()) * values.elements(filter) + u64::from(first),
+            u64::from(count),
+        )
+    };
+    narrowed.write(out, written);
+    chained_reads(values, task, out, written, narrowed);
+}
+
+fn chained_reads<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    out: u32,
+    range: Region,
+    narrowed: &mut Narrowed<'_>,
+) {
+    for value in task.chain().chain(task.prelude()) {
+        if value == NO_VALUE || narrowed.names(value) {
+            continue;
+        }
+        let region = if walks_its_range(values, value, out) {
+            range
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
+}
+
+fn channel_span<V: Values>(values: &V, out: u32, first: u32, count: u32) -> Option<(u32, u32)> {
+    let dims = values.dims(out);
+    let plane = u64::from(dims[2]).checked_mul(u64::from(dims[3]))?;
+    let channels = u64::from(dims[1]);
+    if plane == 0 || channels == 0 {
+        return None;
+    }
+    let batch = plane.checked_mul(channels)?;
+    let first = u64::from(first);
+    let last = first.checked_add(u64::from(count))?.checked_sub(1)?;
+    if first / batch != last / batch {
+        return None;
+    }
+    Some((
+        ((first / plane) % channels) as u32,
+        ((last / plane) % channels) as u32,
+    ))
+}
+
+fn filter_planes<V: Values>(values: &V, filter: u32) -> Option<(u64, u64)> {
+    if !values.dense(filter) {
+        return None;
+    }
+    let dims = values.dims(filter);
+    let per_local = u64::from(dims[2]).checked_mul(u64::from(dims[3]))?;
+    let per_channel = u64::from(dims[1]).checked_mul(per_local)?;
+    if per_channel == 0 {
+        return None;
+    }
+    Some((per_channel, per_local))
 }

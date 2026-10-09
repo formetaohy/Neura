@@ -11,14 +11,14 @@ fn wide() -> Profile {
         .last()
         .expect("a profile")
 }
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
 
 fn plan_with(graph: &Graph, profile: Profile) -> Plan {
-    Plan::of(graph, ALIGNMENT, profile)
+    Plan::of(graph, ALIGNMENT, profile, DEFAULT_ENCODING_BYTES)
 }
 
 fn refuses(action: impl FnOnce()) -> bool {

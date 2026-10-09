@@ -1,8 +1,10 @@
 use neura_abi::{Element, Store, ValueRecord, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::Plan;
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_profile::{Budget, Profile};
 use std::mem::size_of;
+use std::sync::Arc;
+use std::time::Instant;
 
 const ALIGNMENT: u64 = 256;
 
@@ -39,7 +41,7 @@ fn chain(rows: u32, free: Option<u32>) -> Graph<'static> {
 #[test]
 fn a_binding_holds_the_arena_of_the_lengths_it_names() {
     let graph = chain(64, Some(64));
-    let plan = Plan::of(&graph, ALIGNMENT, narrow());
+    let plan = Plan::of(&graph, ALIGNMENT, narrow(), DEFAULT_ENCODING_BYTES);
     let bound = plan.encode(&[64]);
     let half = plan.encode(&[32]);
     let one = plan.encode(&[1]);
@@ -71,7 +73,7 @@ fn a_binding_holds_the_arena_of_the_lengths_it_names() {
 #[test]
 fn every_record_of_a_binding_addresses_that_binding() {
     let graph = chain(64, Some(64));
-    let plan = Plan::of(&graph, ALIGNMENT, narrow());
+    let plan = Plan::of(&graph, ALIGNMENT, narrow(), DEFAULT_ENCODING_BYTES);
     for lengths in [[64u32], [7], [1], [0]] {
         let encoding = plan.encode(&lengths);
         let words = encoding.tensor_bytes() / WORD_BYTES;
@@ -101,7 +103,7 @@ fn every_record_of_a_binding_addresses_that_binding() {
 #[test]
 fn a_static_plan_holds_the_arena_it_derives() {
     let graph = chain(64, None);
-    let plan = Plan::of(&graph, ALIGNMENT, narrow());
+    let plan = Plan::of(&graph, ALIGNMENT, narrow(), DEFAULT_ENCODING_BYTES);
     let derived = plan.encode(&[]);
     assert_eq!(derived.values(), plan.values(), "the records differ");
     assert_eq!(derived.tasks(), plan.tasks(), "the task records differ");
@@ -163,8 +165,18 @@ fn training(rows: u32, free: Option<u32>) -> Graph<'static> {
 
 #[test]
 fn a_free_plan_schedules_its_bound_length_the_way_a_static_plan_does() {
-    let free = Plan::of(&training(128, Some(128)), ALIGNMENT, narrow());
-    let fixed = Plan::of(&training(128, None), ALIGNMENT, narrow());
+    let free = Plan::of(
+        &training(128, Some(128)),
+        ALIGNMENT,
+        narrow(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let fixed = Plan::of(
+        &training(128, None),
+        ALIGNMENT,
+        narrow(),
+        DEFAULT_ENCODING_BYTES,
+    );
     assert_eq!(
         free.task_count(),
         fixed.task_count(),
@@ -195,7 +207,12 @@ fn a_free_plan_schedules_its_bound_length_the_way_a_static_plan_does() {
 
 #[test]
 fn a_shorter_binding_walks_the_tasks_its_lengths_open() {
-    let plan = Plan::of(&training(128, Some(128)), ALIGNMENT, narrow());
+    let plan = Plan::of(
+        &training(128, Some(128)),
+        ALIGNMENT,
+        narrow(),
+        DEFAULT_ENCODING_BYTES,
+    );
     let bound = plan.encode(&[128]);
     let reserved = plan.tensor_bytes();
     let mut tasks = bound.task_count();
@@ -235,5 +252,76 @@ fn a_shorter_binding_walks_the_tasks_its_lengths_open() {
         "a binding of one row walks {} tasks where the bound of 128 rows walks {}; a binding walks the tasks its own lengths open",
         one.task_count(),
         bound.task_count(),
+    );
+}
+
+#[test]
+fn a_plan_remembers_the_encodings_of_the_shapes_it_has_walked() {
+    let graph = training(128, Some(128));
+    let plan = Plan::of(&graph, ALIGNMENT, narrow(), DEFAULT_ENCODING_BYTES);
+    assert_eq!(
+        plan.derived_encodings(),
+        0,
+        "a plan derives the encoding of the bound lengths at compile, not at a walk",
+    );
+    let walked = plan.encode(&[64]);
+    assert_eq!(plan.derived_encodings(), 1);
+    assert_eq!(plan.remembered_encodings(), 1);
+    let again = plan.encode(&[64]);
+    assert!(
+        Arc::ptr_eq(&walked, &again),
+        "a plan answers a shape it has walked with the encoding it derived then",
+    );
+    assert_eq!(
+        plan.derived_encodings(),
+        1,
+        "a shape a plan has walked is not derived again",
+    );
+    assert!(
+        plan.remembered_bytes() <= DEFAULT_ENCODING_BYTES,
+        "a plan remembers {} bytes where its budget is {DEFAULT_ENCODING_BYTES}",
+        plan.remembered_bytes(),
+    );
+    let other = plan.encode(&[16]);
+    assert!(!Arc::ptr_eq(&walked, &other));
+    assert_eq!(plan.remembered_encodings(), 2);
+    let bound = plan.encode(&[128]);
+    assert!(
+        Arc::ptr_eq(&bound, &plan.bound_encoding()),
+        "the bound lengths are the encoding the plan itself carries",
+    );
+    assert_eq!(
+        plan.remembered_encodings(),
+        2,
+        "the bound lengths stand in the plan and take no room of the shapes it remembers",
+    );
+}
+
+fn encode_millis(plan: &Plan, lengths: &[u32], rounds: u32) -> f64 {
+    let mut fastest = f64::MAX;
+    for _ in 0..rounds {
+        let started = Instant::now();
+        let _ = plan.encode(lengths);
+        fastest = fastest.min(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    fastest
+}
+
+#[test]
+fn a_shape_a_plan_has_walked_costs_no_second_derive() {
+    let graph = training(128, Some(128));
+    let plan = Plan::of(&graph, ALIGNMENT, narrow(), DEFAULT_ENCODING_BYTES);
+    let walked = encode_millis(&plan, &[64], 1);
+    let fresh = (0..4u32)
+        .map(|at| encode_millis(&plan, &[96 + at], 1))
+        .fold(f64::MAX, f64::min);
+    let again = encode_millis(&plan, &[64], 64);
+    assert!(
+        again * 20.0 < fresh,
+        "a shape of 64 rows the plan has walked costs {again:.4} ms beside the {fresh:.4} ms of a shape it has not, and a plan answers a shape it has walked without planning it again",
+    );
+    assert!(
+        again * 20.0 < walked,
+        "walking a shape the plan has walked costs {again:.4} ms beside the {walked:.4} ms its first walk costs",
     );
 }

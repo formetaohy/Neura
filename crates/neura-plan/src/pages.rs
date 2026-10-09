@@ -61,6 +61,7 @@ fn collect<V: Values>(
         .product::<u64>();
     let words = element.storage_words(elements);
     match region {
+        Region::Empty => return,
         Region::Whole => span(base, 0, words, pages),
         Region::Run { first, count } => {
             let (first, end) = element.word_span(first, count);

@@ -96,6 +96,7 @@ pub struct MemoryRequest {
     pub heap_bytes: u64,
     pub heap_bank_bytes: Option<u64>,
     pub resident_weight_bytes: Option<u64>,
+    pub encoding_bytes: u64,
 }
 
 impl Default for MemoryRequest {
@@ -106,6 +107,7 @@ impl Default for MemoryRequest {
             heap_bytes: DEFAULT_HEAP_BYTES,
             heap_bank_bytes: None,
             resident_weight_bytes: None,
+            encoding_bytes: neura_plan::DEFAULT_ENCODING_BYTES,
         }
     }
 }
@@ -124,6 +126,7 @@ pub struct Runtime {
     artifacts: Artifacts,
     alignment: u64,
     resident_weight_bytes: Option<u64>,
+    encoding_bytes: u64,
 }
 
 impl Runtime {
@@ -180,6 +183,7 @@ impl Runtime {
             artifacts: Artifacts::new(),
             context,
             resident_weight_bytes: memory.resident_weight_bytes,
+            encoding_bytes: memory.encoding_bytes,
         }
     }
 
@@ -328,7 +332,7 @@ impl Runtime {
 
     pub fn precompile(&self, graph: &Graph, profile: Profile) {
         self.assert_profile(profile);
-        let plan = Plan::of(graph, self.alignment, profile);
+        let plan = Plan::of(graph, self.alignment, profile, self.encoding_bytes);
         let kernel = self.kernel(&plan, profile, self.paged_for(plan.store_words()));
         self.context.declare(kernel.program()).compile();
     }
@@ -432,7 +436,13 @@ impl Runtime {
         chosen: &[(Product, MatmulTile)],
         paged: bool,
     ) -> Assembly {
-        let plan = Arc::new(Plan::chosen(graph, self.alignment, profile, chosen));
+        let plan = Arc::new(Plan::chosen(
+            graph,
+            self.alignment,
+            profile,
+            chosen,
+            self.encoding_bytes,
+        ));
         let signature = cache::signature(&plan, profile, self.alignment);
         let kernel = self.kernel(&plan, profile, paged);
         Assembly {

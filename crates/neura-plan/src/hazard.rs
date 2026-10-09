@@ -191,6 +191,9 @@ impl Accesses {
     }
 
     pub(crate) fn record(&mut self, region: Region, hazard: &Hazard, quantized: bool) {
+        if matches!(region, Region::Empty) {
+            return;
+        }
         self.every.join(hazard);
         if matches!(region, Region::Whole) {
             self.whole.join(hazard);
@@ -216,6 +219,9 @@ impl Accesses {
     }
 
     pub(crate) fn query(&self, region: Region, quantized: bool) -> Hazard {
+        if matches!(region, Region::Empty) {
+            return Hazard::default();
+        }
         if matches!(region, Region::Whole) {
             return self.every;
         }
@@ -318,7 +324,7 @@ impl Iterator for Quanta {
 
 pub(crate) fn quanta(region: Region, quantized: bool) -> Quanta {
     let state = match region {
-        Region::Whole => QuantaState::Empty,
+        Region::Empty | Region::Whole => QuantaState::Empty,
         Region::Run { first, count } => QuantaState::Once(Some((first, first.checked_add(count)))),
         Region::Band {
             first,
@@ -408,6 +414,7 @@ fn quantized<V: Values>(values: &V, storage: u32) -> bool {
 
 fn covers<V: Values>(values: &V, storage: u32, region: Region) -> bool {
     match region {
+        Region::Empty => false,
         Region::Whole => true,
         Region::Run { first, count } => first == 0 && count >= values.elements(storage),
         Region::Band { .. } => false,

@@ -263,3 +263,41 @@ fn a_bound_program_gates_the_waves_of_the_shape_it_binds() {
         "a binding of one row walks every one of the {tasks} tasks the bound of {bound} rows walks",
     );
 }
+
+#[test]
+fn a_program_walks_every_shape_of_a_family_once() {
+    let runtime = open();
+    let graph = Graph::new();
+    let family = model(&graph, BOUND, Some(BOUND));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let derived = program.derived_encodings();
+    for _ in 0..3 {
+        step(&runtime, &program, &family, 64);
+        assert_eq!(
+            program.derived_encodings(),
+            derived + 1,
+            "a program plans a shape once, and every later binding of it walks the encoding the plan remembers",
+        );
+    }
+    step(&runtime, &program, &family, 16);
+    assert_eq!(program.derived_encodings(), derived + 2);
+    for _ in 0..3 {
+        step(&runtime, &program, &family, 64);
+        step(&runtime, &program, &family, 16);
+        assert_eq!(
+            program.derived_encodings(),
+            derived + 2,
+            "a program that alternates two shapes derives neither of them twice",
+        );
+    }
+    assert_eq!(
+        program.remembered_encodings(),
+        2,
+        "a program remembers the two shapes it has walked",
+    );
+    assert!(
+        program.remembered_bytes() > 0,
+        "a program that walked two shapes holds no encoding of them",
+    );
+}
