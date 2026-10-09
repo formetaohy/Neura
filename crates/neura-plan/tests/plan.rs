@@ -1794,50 +1794,61 @@ fn a_plan_never_writes_a_block_quantized_tensor() {
 }
 
 #[test]
-fn a_wide_attention_head_trades_its_key_span_for_the_row_it_carries() {
-    let graph = Graph::new();
-    let queries = graph.parameter(Shape::of([2, 1, 8, 64]), Init::Zero, Element::Single);
-    let keys = graph.parameter(Shape::of([2, 1, 8, 64]), Init::Zero, Element::Single);
-    let out = graph.attention(
-        queries,
-        keys,
-        keys,
-        neura_graph::AttentionOptions {
-            scale: 0.125,
-            causal: true,
-            origin: None,
-            segments: None,
-            reach: None,
-            query_segments: None,
-        },
+fn a_wide_attention_head_spreads_its_row_over_the_threads_it_outruns() {
+    let attend = |width: u32| {
+        let graph = Graph::new();
+        let tensor =
+            |width: u32| graph.parameter(Shape::of([2, 1, 8, width]), Init::Zero, Element::Single);
+        let queries = tensor(width);
+        let keys = tensor(width);
+        let out = graph.attention(
+            queries,
+            keys,
+            keys,
+            neura_graph::AttentionOptions {
+                scale: 0.125,
+                causal: true,
+                origin: None,
+                segments: None,
+                reach: None,
+                query_segments: None,
+            },
+        );
+        graph.retain(out);
+        plan(&graph).attention()[0]
+    };
+    let narrow = attend(64);
+    assert_eq!(
+        narrow.slices(),
+        1,
+        "a row of 64 numbers fits one device thread",
     );
-    graph.retain(out);
-    let plan = plan(&graph);
-    let tile = plan.attention()[0];
+    assert_eq!(narrow.slice_width(), 64);
+    let wide = attend(80);
+    assert_eq!(
+        wide.slices(),
+        2,
+        "a row of 80 numbers spreads over two threads instead of spending the registers one thread carries",
+    );
+    assert_eq!(wide.slice_width(), 40);
     assert!(
-        tile.registers() <= AttentionTile::REGISTER_CEILING,
-        "a row of {} numbers and its gradient outrun the {} registers a device thread carries",
-        tile.width(),
-        AttentionTile::REGISTER_CEILING,
+        wide.slice_width() <= AttentionTile::WIDTH_PER_THREAD,
+        "no thread carries more than {} numbers of a row",
+        AttentionTile::WIDTH_PER_THREAD,
     );
-    assert_eq!(
-        tile.keys(),
-        8,
-        "a row of {} numbers leaves room for the widest key span both budgets carry",
-        tile.width(),
+    assert!(
+        wide.registers() <= narrow.registers(),
+        "a wider head spends threads instead of the registers one thread carries",
     );
-    assert_eq!(
-        tile.registers(),
-        AttentionTile::REGISTER_CEILING,
-        "a wide row spends the whole register budget its device thread carries",
-    );
+    assert!(wide.registers() <= AttentionTile::REGISTER_CEILING);
 }
 
 #[test]
-fn a_head_too_wide_for_one_thread_is_refused() {
+fn a_head_wider_than_the_workgroup_can_hold_is_refused() {
     let graph = Graph::new();
-    let queries = graph.parameter(Shape::of([2, 1, 8, 80]), Init::Zero, Element::Single);
-    let keys = graph.parameter(Shape::of([2, 1, 8, 80]), Init::Zero, Element::Single);
+    let width = 64 * 64 + 1;
+    let queries = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
     let _ = graph.attention(
         queries,
         keys,
@@ -1855,7 +1866,7 @@ fn a_head_too_wide_for_one_thread_is_refused() {
         refuses(|| {
             let _ = plan(&graph);
         }),
-        "a query row of 80 numbers and its gradient outrun the registers of one device thread",
+        "a query row of {width} numbers needs 65 threads of its own, and a workgroup of 64 holds no whole row",
     );
 }
 

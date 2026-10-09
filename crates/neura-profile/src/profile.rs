@@ -5,39 +5,71 @@ use std::collections::HashMap;
 pub struct AttentionTile {
     keys: u32,
     width: u32,
+    slices: u32,
 }
 
 impl AttentionTile {
     pub const REGISTER_CEILING: u32 = 200;
     pub const KEYS_CEILING: u32 = 16;
+    pub const WIDTH_PER_THREAD: u32 = 64;
+    pub const REDUCTIONS: u32 = 1;
 
     pub fn new(keys: u32, width: u32) -> Self {
         assert!(
             keys > 0 && keys <= Self::KEYS_CEILING && width > 0,
             "an attention tile walks no key of no width",
         );
-        Self { keys, width }
-    }
-
-    pub fn fit(pool: u64, width: u32) -> Self {
-        let row = 3 * width + 1;
+        let slices = Self::slices_of(width);
+        let slice_width = width.div_ceil(slices);
         assert!(
-            row <= Self::REGISTER_CEILING,
-            "an attention of width {width} carries a query row of {} numbers and its gradient in one thread, beyond the {} a device thread holds",
-            row - 1,
+            3 * slice_width < Self::REGISTER_CEILING,
+            "an attention of width {width} spreads one query row over {slices} threads of {slice_width} numbers, and the {} numbers of that row and its gradients still outrun the {} a device thread holds",
+            3 * slice_width,
             Self::REGISTER_CEILING,
         );
+        Self {
+            keys,
+            width,
+            slices,
+        }
+    }
+
+    pub fn fit(pool: u64, workgroup: u32, width: u32) -> Self {
+        let slices = Self::slices_of(width);
+        assert!(
+            slices <= workgroup,
+            "an attention of width {width} spreads one query row over {slices} threads, and a workgroup of {workgroup} threads holds no whole row",
+        );
+        let slice_width = width.div_ceil(slices);
         let staged = 2 * WORD_BYTES * u64::from(width);
-        let room = pool / staged;
-        let registers = u64::from(Self::REGISTER_CEILING - 3 * width);
+        let reduced = u64::from(Self::reduction_words_per_key(workgroup, slices)) * WORD_BYTES;
+        let room = pool / (staged + reduced);
+        let registers = u64::from(Self::REGISTER_CEILING - 3 * slice_width) / 2;
         let keys = u32::try_from(room.min(registers))
             .unwrap_or(u32::MAX)
             .clamp(1, Self::KEYS_CEILING);
         assert!(
+            3 * slice_width < Self::REGISTER_CEILING,
+            "an attention of width {width} spreads one query row over {slices} threads of {slice_width} numbers, and the {} numbers of that row and its gradients still outrun the {} a device thread holds",
+            3 * slice_width,
+            Self::REGISTER_CEILING,
+        );
+        assert!(
             u64::from(keys) <= room,
-            "an attention of width {width} stages {staged} bytes of keys and values for one key, beyond the {pool} bytes of workgroup scratch its profile offers",
+            "an attention of width {width} stages {staged} bytes of keys and values and {reduced} bytes of reductions for one key, beyond the {pool} bytes of workgroup scratch its profile offers",
         );
         Self::new(keys, width)
+    }
+
+    fn slices_of(width: u32) -> u32 {
+        width.div_ceil(Self::WIDTH_PER_THREAD).next_power_of_two()
+    }
+
+    const fn reduction_words_per_key(workgroup: u32, slices: u32) -> u32 {
+        if slices == 1 {
+            return 0;
+        }
+        Self::REDUCTIONS * workgroup
     }
 
     pub const fn keys(self) -> u32 {
@@ -48,16 +80,35 @@ impl AttentionTile {
         self.width
     }
 
+    pub const fn slices(self) -> u32 {
+        self.slices
+    }
+
+    pub const fn slice_width(self) -> u32 {
+        self.width.div_ceil(self.slices)
+    }
+
     pub const fn stage_words(self) -> u32 {
         self.keys * self.width
     }
 
-    pub const fn shared_bytes(self) -> u64 {
-        2 * self.stage_words() as u64 * WORD_BYTES
+    pub const fn reduction_words(self, workgroup: u32) -> u32 {
+        if self.slices == 1 {
+            return 0;
+        }
+        (workgroup / self.slices) * self.keys * Self::REDUCTIONS * self.slices
+    }
+
+    pub const fn scratch_words(self, workgroup: u32) -> u32 {
+        2 * self.stage_words() + self.reduction_words(workgroup)
+    }
+
+    pub const fn shared_bytes(self, workgroup: u32) -> u64 {
+        self.scratch_words(workgroup) as u64 * WORD_BYTES
     }
 
     pub const fn registers(self) -> u32 {
-        3 * self.width + self.keys
+        3 * self.slice_width() + 2 * self.keys
     }
 }
 
@@ -1071,7 +1122,7 @@ impl Geometry {
                 (2 * (self.left_stage + self.right_stage)).max(self.copy) as u32
             }
             DeviceModule::MatmulWeight => (self.left_stage + self.right_stage) as u32,
-            DeviceModule::Attention => 2 * self.attention_stage_words(),
+            DeviceModule::Attention => self.attention_scratch_words(),
             DeviceModule::Reduce => self.workgroup,
             DeviceModule::Choice => 2 * self.workgroup,
             DeviceModule::Scan => self.workgroup,
@@ -1123,10 +1174,10 @@ impl Geometry {
             })
     }
 
-    pub fn attention_stage_words(&self) -> u32 {
+    pub fn attention_scratch_words(&self) -> u32 {
         self.attention
             .iter()
-            .map(|tile| tile.stage_words())
+            .map(|tile| tile.scratch_words(self.workgroup))
             .max()
             .unwrap_or(0)
     }

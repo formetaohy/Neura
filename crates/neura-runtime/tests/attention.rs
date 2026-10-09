@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
-use neura_runtime::{Backends, Runtime};
+use neura_runtime::Backends;
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -86,6 +86,14 @@ fn graph_of_beside(
 
 fn run_forward(shapes: Shapes, tolerance: f32) -> (Vec<f32>, Vec<f32>) {
     let runtime = open();
+    run_forward_on(&runtime, shapes, tolerance)
+}
+
+fn run_forward_on(
+    runtime: &neura_runtime::Runtime,
+    shapes: Shapes,
+    tolerance: f32,
+) -> (Vec<f32>, Vec<f32>) {
     let (graph, queries, keys, values, out) = graph_of(shapes);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -117,6 +125,15 @@ fn run_backward(shapes: Shapes, tolerance: f32) {
 
 fn run_backward_beside(shapes: Shapes, tolerance: f32, beside_the_output: Option<f32>) {
     let runtime = open();
+    run_backward_on(&runtime, shapes, tolerance, beside_the_output)
+}
+
+fn run_backward_on(
+    runtime: &neura_runtime::Runtime,
+    shapes: Shapes,
+    tolerance: f32,
+    beside_the_output: Option<f32>,
+) {
     let (graph, queries, keys, values, out) = graph_of_beside(shapes, beside_the_output);
     let loss = graph.sum(out);
     let gradients = graph.backward(loss);
@@ -573,34 +590,73 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
 }
 
 #[test]
-fn a_fused_attention_leaves_no_room_for_a_score_it_cannot_carry() {
-    let runtime: Runtime = open();
-    let graph = Graph::new();
-    let width = 96;
-    let query = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
-    let key = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
-    let value = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
-    let out = graph.attention(
-        query,
-        key,
-        value,
-        AttentionOptions {
-            scale: 0.5,
-            causal: false,
-            origin: None,
-            segments: None,
-            reach: None,
-            query_segments: None,
-        },
-    );
-    graph.retain(out);
-    let weights = runtime.weights(&graph);
-    assert!(
-        refuses(|| {
-            let _ = runtime.compile(&graph, &weights);
-        }),
-        "a fused attention holds a query row of a width no thread carries",
-    );
+fn a_head_wider_than_a_thread_carries_walks_every_number_of_its_row() {
+    let reference_scale = |width: u32| 1.0 / (width as f32).sqrt();
+    for width in [67u32, 80, 96, 128, 256] {
+        for causal in [false, true] {
+            let shapes = Shapes {
+                heads: 1,
+                key_heads: 1,
+                batch: 1,
+                queries: 5,
+                keys: 5,
+                width,
+                causal,
+                origin: 0,
+                reach: 0,
+                scale: reference_scale(width),
+            };
+            run_forward(shapes, 1e-4);
+            run_backward(shapes, 1e-4);
+        }
+    }
+    let grouped = Shapes {
+        heads: 4,
+        key_heads: 2,
+        batch: 2,
+        queries: 6,
+        keys: 6,
+        width: 128,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: reference_scale(128),
+    };
+    run_forward(grouped, 1e-4);
+    run_backward(grouped, 1e-4);
+    for backends in Backends::PLATFORM {
+        let runtime = open_with(backends);
+        for (width, causal) in [(67u32, true), (128, false)] {
+            let shapes = Shapes {
+                heads: 2,
+                key_heads: 1,
+                batch: 1,
+                queries: 5,
+                keys: 5,
+                width,
+                causal,
+                origin: 0,
+                reach: 0,
+                scale: reference_scale(width),
+            };
+            run_forward_on(&runtime, shapes, 1e-4);
+            run_backward_on(&runtime, shapes, 1e-4, None);
+        }
+    }
+    let windowed = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 7,
+        keys: 7,
+        width: 128,
+        causal: true,
+        origin: 0,
+        reach: 3,
+        scale: reference_scale(128),
+    };
+    run_forward(windowed, 1e-4);
+    run_backward(windowed, 1e-4);
 }
 
 #[test]

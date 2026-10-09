@@ -787,7 +787,11 @@ fn workgroup_allocation_fits_the_advertised_profile() {
 #[test]
 fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
     let profile = *profiles().last().expect("a profile");
-    let attention = [AttentionTile::new(4, 8)];
+    let attention = [AttentionTile::fit(
+        profile.scratch_bytes(),
+        profile.workgroup(),
+        8,
+    )];
     let geometry = Geometry::of(
         profile.workgroup(),
         profile.shared_bytes(),
@@ -809,7 +813,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         "a device program declares the pool its widest body stages beside the word its workgroups claim with",
     );
     let partitioned = geometry.staging_bytes()
-        + 2 * u64::from(attention[0].stage_words()) * WORD_BYTES
+        + attention[0].shared_bytes(profile.workgroup())
         + 2 * u64::from(profile.workgroup()) * WORD_BYTES;
     assert!(
         used < partitioned,
@@ -828,7 +832,10 @@ fn the_same_rust_specialization_produces_the_same_device_program() {
 #[test]
 fn attention_specialization_contains_every_tile_of_its_geometry() {
     let profile = *profiles().last().expect("a profile");
-    let attention = [AttentionTile::new(4, 8), AttentionTile::new(2, 16)];
+    let attention = [
+        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 8),
+        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 16),
+    ];
     let kernel = Kernel::assemble(
         &[
             Kind::Attention,
@@ -862,13 +869,11 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
     }
     assert_eq!(
         kernel.geometry().scratch_bytes(&[Kind::Attention]),
-        2 * u64::from(
-            attention
-                .iter()
-                .map(|tile| tile.stage_words())
-                .max()
-                .expect("an attention stage"),
-        ) * WORD_BYTES,
+        attention
+            .iter()
+            .map(|tile| tile.shared_bytes(profile.workgroup()))
+            .max()
+            .expect("an attention tile"),
         "a device program stages the widest attention tile it carries",
     );
 }

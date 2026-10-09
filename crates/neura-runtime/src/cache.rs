@@ -317,6 +317,7 @@ pub(crate) fn signature(plan: &Plan, profile: neura_profile::Profile, alignment:
     for tile in plan.attention() {
         bytes.extend(tile.keys().to_le_bytes());
         bytes.extend(tile.width().to_le_bytes());
+        bytes.extend(tile.slices().to_le_bytes());
     }
     bytes.extend(alignment.to_le_bytes());
     bytes.extend(plan.tasks());

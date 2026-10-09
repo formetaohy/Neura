@@ -526,7 +526,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
         );
         assert_eq!(tiles[0].width(), width);
         assert!(
-            tiles[0].shared_bytes() <= profile.shared_bytes(),
+            tiles[0].shared_bytes(profile.workgroup()) <= profile.shared_bytes(),
             "an attention stages more than the pool its profile offers",
         );
         let tasks = tasks_of(&plan, out);
@@ -585,16 +585,25 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
     let plan = plan_with(&graph, profile);
     assert_eq!(
         plan.attention(),
-        [AttentionTile::fit(profile.scratch_bytes(), width)],
+        [AttentionTile::fit(
+            profile.scratch_bytes(),
+            profile.workgroup(),
+            width
+        )],
         "an attention keys as deep as the pool its profile offers, while the products beside it stage from that same pool",
     );
 }
 
 #[test]
-fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carries() {
+fn a_head_wider_than_a_thread_carries_splits_every_row_block_across_its_threads() {
     let graph = Graph::new();
+    let tokens = 100u32;
     let width = 96u32;
-    let tensor = graph.parameter(Shape::of([1, 1, 4, width]), Init::Zero, Element::Single);
+    let tensor = graph.parameter(
+        Shape::of([1, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
     let out = graph.attention(
         tensor,
         tensor,
@@ -609,9 +618,24 @@ fn an_attention_stops_the_plan_that_asks_for_more_registers_than_a_thread_carrie
         },
     );
     graph.retain(out);
-    assert!(refuses(|| {
-        let _ = plan_with(&graph, narrow());
-    }));
+    let profile = narrow();
+    let plan = plan_with(&graph, profile);
+    let tile = plan.attention()[0];
+    assert_eq!(
+        tile.slices(),
+        2,
+        "a row of {width} numbers spreads over two threads",
+    );
+    let per_task = profile.workgroup() / tile.slices();
+    let tasks = tasks_of(&plan, out);
+    assert_eq!(
+        tasks.len() as u32,
+        tokens.div_ceil(per_task),
+        "an attention hands the device one task per {per_task} row block",
+    );
+    for task in tasks {
+        assert!(task.count > 0 && task.count <= per_task);
+    }
 }
 
 #[test]

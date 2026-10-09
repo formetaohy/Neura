@@ -377,6 +377,7 @@ fn schedule_unit(
             let tokens = rows[2];
             let geometry = attention_geometry(plan, profile, rows[3]);
             let tile = plan.attention[geometry as usize];
+            let per_task = profile.workgroup() / tile.slices();
             let grid = if unit.queries != NO_VALUE {
                 unit.queries
             } else {
@@ -393,10 +394,10 @@ fn schedule_unit(
                     rows,
                     rows[0] * rows[1],
                 );
-                ragged_spans(plan.shape(grid).elements() - 1, tokens, profile.workgroup())
+                ragged_spans(plan.shape(grid).elements() - 1, tokens, per_task)
             } else {
                 let measure = measured(plan, unit.out, Measure::Tokens);
-                attention_spans(tokens, rows[0] * rows[1], profile, measure)
+                attention_spans(tokens, rows[0] * rows[1], per_task, measure)
             };
             for (plane, first, count, split) in spans {
                 let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
@@ -411,16 +412,13 @@ fn schedule_unit(
             let keys = plan.shape(unit.inputs[1]).dims();
             let geometry = attention_geometry(plan, profile, keys[3]);
             let tile = plan.attention[geometry as usize];
+            let per_task = profile.workgroup() / tile.slices();
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
             let segmented = unit.segments != NO_VALUE;
             let spans = if segmented {
-                ragged_spans(
-                    plan.shape(unit.segments).elements() - 1,
-                    keys[2],
-                    profile.workgroup(),
-                )
+                ragged_spans(plan.shape(unit.segments).elements() - 1, keys[2], per_task)
             } else {
-                attention_spans(keys[2], keys[0] * keys[1], profile, measure)
+                attention_spans(keys[2], keys[0] * keys[1], per_task, measure)
             };
             for (plane, first, count, split) in spans {
                 let walked = if segmented { keys[2] } else { count };
@@ -670,10 +668,9 @@ fn ragged_spans(planes: u32, rows: u32, per_task: u32) -> Vec<(u32, u32, u32, Sp
 fn attention_spans(
     tokens: u32,
     planes: u32,
-    profile: Profile,
+    per_task: u32,
     measure: Option<u32>,
 ) -> Vec<(u32, u32, u32, Split)> {
-    let per_task = profile.workgroup();
     match measure {
         None => {
             let mut spans = Vec::new();
@@ -715,8 +712,11 @@ fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32) -> u32 {
     if let Some(index) = plan.attention.iter().position(|tile| tile.width() == width) {
         return index as u32;
     }
-    plan.attention
-        .push(AttentionTile::fit(profile.scratch_bytes(), width));
+    plan.attention.push(AttentionTile::fit(
+        profile.scratch_bytes(),
+        profile.workgroup(),
+        width,
+    ));
     (plan.attention.len() - 1) as u32
 }
 
