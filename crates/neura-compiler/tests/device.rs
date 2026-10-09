@@ -1,4 +1,4 @@
-use neura_compiler::device::{Intrinsic, Reach};
+use neura_compiler::device::{Intrinsic, LoopForm, Reach};
 use neura_compiler::{AtomicU32, BindingSpec, Compiler, ComputeProgram, Read, ReadWrite, kernel};
 use neura_shader::{AtomicOp, Backend, Barrier, Instruction, MathFun};
 
@@ -265,6 +265,24 @@ fn every_intrinsic_the_device_speaks_is_declared_once() {
         Intrinsic::of("a_name_no_intrinsic_carries"),
         None,
         "a name no intrinsic declares is a Rust device function",
+    );
+}
+
+#[test]
+fn every_loop_form_the_device_speaks_is_declared_once() {
+    for form in LoopForm::ALL.iter().copied() {
+        assert_eq!(
+            LoopForm::of(form.name()),
+            Some(form),
+            "the device loop form {} is found by the name it declares",
+            form.name(),
+        );
+        assert!(!form.name().is_empty());
+    }
+    assert_eq!(
+        LoopForm::of("a_name_no_loop_form_carries"),
+        None,
+        "a name no loop form declares is a Rust device function",
     );
 }
 

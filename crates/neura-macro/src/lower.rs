@@ -42,7 +42,8 @@ pub(crate) fn function(source: &syn::ItemFn) -> syn::Result<TokenStream> {
             quote!(Some(#ty))
         }
     };
-    let body = statements(&source.block.stmts)?;
+    let returns = matches!(source.sig.output, syn::ReturnType::Type(_, _));
+    let body = tail_statements(&source.block.stmts, returns)?;
     Ok(quote!(neura_ast::Function {
         name: #name.into(),
         arguments: vec![#(#arguments),*],
@@ -81,6 +82,131 @@ pub(crate) fn statements(source: &[Stmt]) -> syn::Result<Vec<TokenStream>> {
     source.iter().map(statement).collect()
 }
 
+fn tail_statements(source: &[Stmt], returns: bool) -> syn::Result<Vec<TokenStream>> {
+    let last = source.len().checked_sub(1);
+    source
+        .iter()
+        .enumerate()
+        .map(|(index, statement)| {
+            if returns
+                && last == Some(index)
+                && let Stmt::Expr(expr, None) = statement
+            {
+                return tail_statement(expr);
+            }
+            self::statement(statement)
+        })
+        .collect()
+}
+
+fn tail_statement(source: &Expr) -> syn::Result<TokenStream> {
+    if matches!(
+        source,
+        Expr::Return(_) | Expr::Loop(_) | Expr::While(_) | Expr::Break(_) | Expr::Continue(_)
+    ) {
+        return executable(source);
+    }
+    tail_expression(source)
+}
+
+fn tail_expression(source: &Expr) -> syn::Result<TokenStream> {
+    let path = quote!(neura_ast::Statement);
+    match source {
+        Expr::If(expr) => if_statement(expr, true),
+        Expr::Match(selection) => match_statement(selection, true),
+        Expr::Block(block) => {
+            let body = tail_statements(&block.block.stmts, true)?;
+            Ok(quote!(#path::Block(vec![#(#body),*])))
+        }
+        other => {
+            let value = expression(other)?;
+            Ok(quote!(#path::Return(Some(#value))))
+        }
+    }
+}
+
+fn block_statements(block: &syn::Block, tail: bool) -> syn::Result<Vec<TokenStream>> {
+    if tail {
+        tail_statements(&block.stmts, true)
+    } else {
+        statements(&block.stmts)
+    }
+}
+
+fn branch(source: &Expr, tail: bool) -> syn::Result<Vec<TokenStream>> {
+    if let Expr::Block(block) = source {
+        return block_statements(&block.block, tail);
+    }
+    Ok(vec![if tail {
+        tail_statement(source)?
+    } else {
+        executable(source)?
+    }])
+}
+
+fn if_statement(expr: &syn::ExprIf, tail: bool) -> syn::Result<TokenStream> {
+    let path = quote!(neura_ast::Statement);
+    let condition = expression(&expr.cond)?;
+    let accept = block_statements(&expr.then_branch, tail)?;
+    let reject = expr
+        .else_branch
+        .as_ref()
+        .map_or_else(|| Ok(Vec::new()), |(_, source)| branch(source, tail))?;
+    Ok(quote!(#path::If {
+        condition: #condition,
+        accept: vec![#(#accept),*],
+        reject: vec![#(#reject),*],
+    }))
+}
+
+fn match_statement(selection: &syn::ExprMatch, tail: bool) -> syn::Result<TokenStream> {
+    let path = quote!(neura_ast::Statement);
+    let selector = expression(&selection.expr)?;
+    let mut arms = Vec::new();
+    for arm in &selection.arms {
+        if arm.guard.is_some() {
+            return Err(syn::Error::new_spanned(
+                arm,
+                "device matches do not have guards",
+            ));
+        }
+        let pattern = match &arm.pat {
+            Pat::Wild(_) => quote!(neura_ast::Pattern::Default),
+            Pat::Lit(lit) => {
+                let Lit::Int(number) = &lit.lit else {
+                    return Err(syn::Error::new_spanned(
+                        lit,
+                        "device cases are integer constants",
+                    ));
+                };
+                let (value, _) = integer(number)?;
+                quote!(neura_ast::Pattern::Integer(#value))
+            }
+            Pat::Path(path) if path.path.segments.len() > 1 => {
+                let name = path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|part| part.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                quote!(neura_ast::Pattern::Constant(#name.into()))
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &arm.pat,
+                    "device cases require a qualified Rust constant",
+                ));
+            }
+        };
+        let body = branch(&arm.body, tail)?;
+        arms.push(quote!(neura_ast::Arm {
+            pattern: #pattern, body: vec![#(#body),*],
+        }));
+    }
+    Ok(quote!(#path::Match { selector: #selector, arms: vec![#(#arms),*] }))
+}
+
 fn statement(source: &Stmt) -> syn::Result<TokenStream> {
     match source {
         Stmt::Local(local) => {
@@ -117,76 +243,11 @@ fn statement(source: &Stmt) -> syn::Result<TokenStream> {
     }
 }
 
-fn branch(source: &Expr) -> syn::Result<Vec<TokenStream>> {
-    if let Expr::Block(block) = source {
-        statements(&block.block.stmts)
-    } else {
-        Ok(vec![executable(source)?])
-    }
-}
-
 fn executable(source: &Expr) -> syn::Result<TokenStream> {
     let path = quote!(neura_ast::Statement);
     match source {
-        Expr::If(expr) => {
-            let condition = expression(&expr.cond)?;
-            let accept = statements(&expr.then_branch.stmts)?;
-            let reject = expr
-                .else_branch
-                .as_ref()
-                .map_or_else(|| Ok(Vec::new()), |(_, branch)| self::branch(branch))?;
-            Ok(quote!(#path::If {
-                condition: #condition,
-                accept: vec![#(#accept),*],
-                reject: vec![#(#reject),*],
-            }))
-        }
-        Expr::Match(selection) => {
-            let selector = expression(&selection.expr)?;
-            let mut arms = Vec::new();
-            for arm in &selection.arms {
-                if arm.guard.is_some() {
-                    return Err(syn::Error::new_spanned(
-                        arm,
-                        "device matches do not have guards",
-                    ));
-                }
-                let pattern = match &arm.pat {
-                    Pat::Wild(_) => quote!(neura_ast::Pattern::Default),
-                    Pat::Lit(lit) => {
-                        let Lit::Int(number) = &lit.lit else {
-                            return Err(syn::Error::new_spanned(
-                                lit,
-                                "device cases are integer constants",
-                            ));
-                        };
-                        let (value, _) = integer(number)?;
-                        quote!(neura_ast::Pattern::Integer(#value))
-                    }
-                    Pat::Path(path) if path.path.segments.len() > 1 => {
-                        let name = path
-                            .path
-                            .segments
-                            .iter()
-                            .map(|part| part.ident.to_string())
-                            .collect::<Vec<_>>()
-                            .join("::");
-                        quote!(neura_ast::Pattern::Constant(#name.into()))
-                    }
-                    _ => {
-                        return Err(syn::Error::new_spanned(
-                            &arm.pat,
-                            "device cases require a qualified Rust constant",
-                        ));
-                    }
-                };
-                let body = branch(&arm.body)?;
-                arms.push(quote!(neura_ast::Arm {
-                    pattern: #pattern, body: vec![#(#body),*],
-                }));
-            }
-            Ok(quote!(#path::Match { selector: #selector, arms: vec![#(#arms),*] }))
-        }
+        Expr::If(expr) => if_statement(expr, false),
+        Expr::Match(selection) => match_statement(selection, false),
         Expr::ForLoop(loop_) => {
             let Pat::Ident(variable) = loop_.pat.as_ref() else {
                 return Err(syn::Error::new_spanned(
@@ -194,28 +255,11 @@ fn executable(source: &Expr) -> syn::Result<TokenStream> {
                     "device loop counters have simple names",
                 ));
             };
-            let Expr::Call(call) = loop_.expr.as_ref() else {
-                return Err(syn::Error::new_spanned(
-                    &loop_.expr,
-                    "device loops use stride or unroll",
-                ));
-            };
-            let name = call_name(&call.func)?;
-            if call.args.len() != 3 || !matches!(name.as_str(), "stride" | "unroll") {
-                return Err(syn::Error::new_spanned(
-                    &loop_.expr,
-                    "device loops use stride(start, end, step) or unroll(start, end, step)",
-                ));
-            }
-            let start = expression(&call.args[0])?;
-            let end = expression(&call.args[1])?;
-            let step = expression(&call.args[2])?;
+            let iterator = expression(&loop_.expr)?;
             let name = variable.ident.to_string();
-            let unroll = call_name(&call.func)? == "unroll";
             let body = statements(&loop_.body.stmts)?;
             Ok(quote!(#path::For {
-                name: #name.into(), start: #start, end: #end, step: #step,
-                unroll: #unroll, body: vec![#(#body),*],
+                name: #name.into(), iterator: #iterator, body: vec![#(#body),*],
             }))
         }
         Expr::While(loop_) => {

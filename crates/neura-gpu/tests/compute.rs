@@ -473,3 +473,89 @@ fn every_platform_backend_runs_a_kernel_over_the_device_vocabulary() {
         activated(backends);
     }
 }
+
+#[kernel(workgroup_size = 64)]
+mod summation {
+    workgroup!(partial: [f32; 64]);
+
+    fn twice(value: f32) -> f32 {
+        value * 2.0f32
+    }
+
+    #[kernel]
+    fn main(lid: u32, input: Read<f32>, output: ReadWrite<f32>) {
+        let mut total = 0.0f32;
+        for index in stride(lid, 256u32, WORKGROUP_SIZE) {
+            total += input[index];
+        }
+        partial[lid] = twice(total);
+        workgroup_barrier();
+        output[lid] = partial[(lid + 63u32) % 64u32];
+    }
+}
+
+fn summed(backends: Backends) {
+    let context = GpuContext::open(&GpuRequest {
+        backends,
+        ..Default::default()
+    })
+    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    let device = context.device().clone();
+    let queue = context.queue().clone();
+    let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    let input = GpuBuffer::new(&device, "summation input", 1024, storage);
+    let output = GpuBuffer::new(
+        &device,
+        "summation output",
+        256,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
+    let readback = GpuBuffer::new(
+        &device,
+        "summation readback",
+        256,
+        BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+    );
+    let values = (0..256)
+        .map(|index| index as f32 * 0.125 - 12.0)
+        .collect::<Vec<_>>();
+    input.write_at(&queue, 0, bytemuck::cast_slice(&values));
+    let pipeline = context.declare(summation());
+    let group = pipeline.bind_group(&[
+        Binding {
+            index: 0,
+            buffer: input.binding(0, 1024),
+        },
+        Binding {
+            index: 1,
+            buffer: output.binding(0, 256),
+        },
+    ]);
+    let mut submission = Submission::new(&device, "native summation dispatch");
+    submission.dispatch(&pipeline, &group, [1, 1, 1]);
+    submission.submit(&queue);
+    let mut transfer = Submission::new(&device, "native summation transfer");
+    transfer.copy(&output, 0, &readback, 0, 256);
+    let index = transfer.submit(&queue);
+    let measured = readback.read(&queue, index, 256);
+    let produced = bytemuck::cast_slice::<u8, f32>(&measured);
+    for (lane, observed) in produced.iter().enumerate() {
+        let source = (lane + 63) % 64;
+        let expected = [0usize, 64, 128, 192]
+            .iter()
+            .map(|offset| values[source + offset])
+            .sum::<f32>()
+            * 2.0;
+        assert!(
+            (expected - observed).abs() <= 1e-4,
+            "lane {lane} came back as {observed} where {expected} is the answer",
+        );
+    }
+}
+
+#[test]
+fn every_platform_backend_runs_a_kernel_module_over_shared_memory() {
+    for backends in Backends::PLATFORM {
+        summed(backends);
+    }
+}

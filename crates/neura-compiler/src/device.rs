@@ -87,6 +87,43 @@ vocabulary! {
     CoopmatStore "coopmat_store" Tile 3 false;
 }
 
+macro_rules! loop_forms {
+    ($($variant:ident $name:literal $unroll:literal;)+) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum LoopForm {
+            $($variant),+
+        }
+
+        impl LoopForm {
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name),+
+                }
+            }
+
+            pub const fn unroll(self) -> bool {
+                match self {
+                    $(Self::$variant => $unroll),+
+                }
+            }
+
+            pub fn of(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+loop_forms! {
+    Stride "stride" false;
+    Unroll "unroll" true;
+}
+
 mod private {
     pub trait Scalar {}
     impl Scalar for u32 {}
@@ -181,6 +218,14 @@ pub fn atomic_store(_pointer: &AtomicU32, _value: u32) {
 
 pub fn workgroup_barrier() {
     unreachable!("a device intrinsic exists only on the device")
+}
+
+pub fn stride(_start: u32, _end: u32, _step: u32) -> core::ops::Range<u32> {
+    unreachable!("a device loop exists only on the device")
+}
+
+pub fn unroll(_start: u32, _end: u32, _step: u32) -> core::ops::Range<u32> {
+    unreachable!("a device loop exists only on the device")
 }
 
 pub fn storage_barrier() {

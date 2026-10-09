@@ -1,7 +1,7 @@
 use super::{FunctionLower, Symbol, Typed};
 use crate::DeviceInstruction;
 use crate::ast;
-use crate::device::Intrinsic;
+use crate::device::{Intrinsic, LoopForm};
 use neura_shader::{Barrier, BinaryOp, MatrixLayout};
 
 impl FunctionLower<'_> {
@@ -147,13 +147,10 @@ impl FunctionLower<'_> {
                 }
                 S::For {
                     name,
-                    start,
-                    end,
-                    step,
-                    unroll,
+                    iterator,
                     body,
                 } => {
-                    self.for_loop(name, start, end, step, *unroll, body);
+                    self.for_loop(name, iterator, body);
                 }
                 S::While { condition, body } => {
                     let body = self.block(|lower| {
@@ -321,16 +318,26 @@ impl FunctionLower<'_> {
         self.value(expr);
     }
 
-    fn for_loop(
-        &mut self,
-        name: &str,
-        start: &ast::Expression,
-        end: &ast::Expression,
-        step: &ast::Expression,
-        unroll: bool,
-        statements: &[ast::Statement],
-    ) {
-        if unroll {
+    fn for_loop(&mut self, name: &str, iterator: &ast::Expression, statements: &[ast::Statement]) {
+        let ast::Expression::Call {
+            name: loop_form,
+            arguments,
+        } = iterator
+        else {
+            panic!("a device loop walks a declared loop form");
+        };
+        let form = LoopForm::of(loop_form)
+            .unwrap_or_else(|| panic!("the device loop form {loop_form} is not declared"));
+        assert_eq!(
+            arguments.len(),
+            3,
+            "the device loop form {} takes a start, an end and a step",
+            form.name(),
+        );
+        let start = &arguments[0];
+        let end = &arguments[1];
+        let step = &arguments[2];
+        if form.unroll() {
             let first = self.compiler.evaluate(start);
             let limit = self.compiler.evaluate(end);
             let increment = self.compiler.evaluate(step);

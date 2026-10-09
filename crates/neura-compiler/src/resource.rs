@@ -4,6 +4,34 @@ use std::ops::{Index, IndexMut};
 pub struct Read<T>(PhantomData<T>);
 pub struct ReadWrite<T>(PhantomData<T>);
 
+pub struct Workgroup<T, const N: usize>(PhantomData<T>);
+
+impl<T, const N: usize> Workgroup<T, N> {
+    pub const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T, const N: usize> Default for Workgroup<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, const N: usize> Index<u32> for Workgroup<T, N> {
+    type Output = T;
+
+    fn index(&self, _: u32) -> &Self::Output {
+        unreachable!("device workgroup memory exists only on the device")
+    }
+}
+
+impl<T, const N: usize> IndexMut<u32> for Workgroup<T, N> {
+    fn index_mut(&mut self, _: u32) -> &mut Self::Output {
+        unreachable!("device workgroup memory exists only on the device")
+    }
+}
+
 pub struct AtomicU32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

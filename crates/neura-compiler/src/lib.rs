@@ -14,7 +14,7 @@ pub use neura_shader::{BindingSpec, ComputeProgram};
 use std::collections::{BTreeMap, HashMap};
 
 pub use neura_macro::{kernel, module};
-pub use resource::{AtomicU32, Fvec2, Read, ReadWrite, Uvec3, Uvec4};
+pub use resource::{AtomicU32, Fvec2, Read, ReadWrite, Uvec3, Uvec4, Workgroup};
 
 pub struct Compiler {
     module: Module,
@@ -429,16 +429,8 @@ fn calls(body: &[ast::Statement]) -> Vec<String> {
                     names.extend(calls(&arm.body));
                 }
             }
-            ast::Statement::For {
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
-                for expression in [start, end, step] {
-                    calls_of_expression(expression, &mut names);
-                }
+            ast::Statement::For { iterator, body, .. } => {
+                calls_of_expression(iterator, &mut names);
                 names.extend(calls(body));
             }
             ast::Statement::While { condition, body } => {

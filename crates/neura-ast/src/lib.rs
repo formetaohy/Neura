@@ -162,10 +162,7 @@ pub enum Statement {
     },
     For {
         name: String,
-        start: Expression,
-        end: Expression,
-        step: Expression,
-        unroll: bool,
+        iterator: Expression,
         body: Vec<Self>,
     },
     While {
@@ -288,16 +285,8 @@ impl Statement {
                     }
                 }
             }
-            Self::For {
-                start,
-                end,
-                step,
-                body,
-                ..
-            } => {
-                for expression in [start, end, step] {
-                    expression.specialize(constants, suffix);
-                }
+            Self::For { iterator, body, .. } => {
+                iterator.specialize(constants, suffix);
                 for statement in body {
                     statement.specialize(constants, suffix);
                 }
