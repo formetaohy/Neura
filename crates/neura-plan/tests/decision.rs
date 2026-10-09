@@ -757,3 +757,43 @@ fn a_convert_walks_the_plan_index_over_the_tensor_it_narrows() {
         assert_eq!(task.geometry, strategy::INDEX);
     }
 }
+
+#[test]
+fn a_sample_folds_every_row_through_its_workgroup() {
+    let rows = 1000u32;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, 16), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let keep = graph.parameter(Shape::scalar(), Init::Constant(4.0), Element::Single);
+    let cumulative = graph.parameter(Shape::scalar(), Init::Constant(0.9), Element::Single);
+    let draw = graph.sample(logits, seed, keep, cumulative);
+    graph.retain(draw);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let tasks = tasks_of(&plan, draw);
+        assert!(
+            !tasks.is_empty(),
+            "a sample of a thousand rows holds a task"
+        );
+        let mut cursor = 0;
+        for task in &tasks {
+            assert_eq!(Kind::of(task.kind), Kind::Sample);
+            assert_eq!(
+                task.geometry,
+                strategy::WORKGROUP_ROW,
+                "a sample folds its rows through the workgroup of {profile:?}",
+            );
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.b, seed.id());
+            assert_eq!(task.c, keep.id());
+            assert_eq!(task.d, cumulative.id());
+            assert_eq!(
+                task.first, cursor,
+                "a block of rows begins where no block before it ended",
+            );
+            cursor += task.count;
+        }
+        assert_eq!(cursor, rows);
+        assert_eq!(plan.span(draw, PLACEMENT).elements, rows);
+    }
+}

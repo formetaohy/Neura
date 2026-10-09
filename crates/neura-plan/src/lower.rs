@@ -4,7 +4,7 @@ use crate::span::{self, Measure, Split};
 use neura_abi::{Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord, strategy};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
-use neura_profile::{AttentionTile, MatmulTile, Profile};
+use neura_profile::{AttentionTile, MatmulTile, Profile, SAMPLE_CANDIDATES};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -447,6 +447,7 @@ fn schedule_unit(
             );
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
+        Kind::Sample => sample(plan, unit, target),
         Kind::SumChunk => reduce(plan, unit, target),
         Kind::SumAxis => fold(plan, unit, profile),
         Kind::SegmentSum => segment_sum(plan, unit),
@@ -778,6 +779,24 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
         task.geometry = geometry;
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn sample(plan: &mut Plan, unit: &TaskInfo, target: u32) {
+    let out = plan.shape(unit.out);
+    let columns = plan.shape(unit.inputs[0]).columns();
+    let rows = out.rows();
+    let measure = measured(plan, unit.out, Measure::Rows);
+    for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(columns) * u64::from(SAMPLE_CANDIDATES + 1),
+        );
+        task.geometry = strategy::WORKGROUP_ROW;
         task.split = split;
         plan.tasks.push(task);
     }

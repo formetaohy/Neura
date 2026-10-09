@@ -63,6 +63,77 @@ fn element_key(at: [u32; 4]) -> u32 {
     key
 }
 
+pub struct Sample {
+    pub keep: u32,
+    pub cumulative: f32,
+}
+
+fn coordinates(flat: u32, dims: [u32; 4]) -> [u32; 4] {
+    let w = flat % dims[3];
+    let z = flat / dims[3] % dims[2];
+    let y = flat / (dims[3] * dims[2]) % dims[1];
+    let x = flat / (dims[3] * dims[2] * dims[1]);
+    [x, y, z, w]
+}
+
+pub fn sample_reference(
+    logits: &[f32],
+    rows: u32,
+    columns: u32,
+    seed: u32,
+    sample: &Sample,
+) -> Vec<f32> {
+    let dims = [1, 1, rows, columns];
+    (0..rows)
+        .map(|row| {
+            let mut candidates = (0..columns)
+                .map(|column| (logits[(row * columns + column) as usize], column))
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                right
+                    .0
+                    .partial_cmp(&left.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(left.1.cmp(&right.1))
+            });
+            candidates.truncate(sample.keep as usize);
+            let max = candidates
+                .first()
+                .map(|(value, _)| *value)
+                .unwrap_or(f32::NEG_INFINITY);
+            let mass_of = |value: f32| (value - max).exp();
+            let total: f32 = (0..columns)
+                .map(|column| mass_of(logits[(row * columns + column) as usize]))
+                .sum();
+            let mass: f32 = candidates.iter().map(|(value, _)| mass_of(*value)).sum();
+            let tail = total - mass;
+            let threshold = sample.cumulative * total;
+            let mut boundary = candidates.len();
+            let mut running = 0.0f32;
+            for (index, (value, _)) in candidates.iter().enumerate() {
+                running += mass_of(*value);
+                if running + tail >= threshold {
+                    boundary = index + 1;
+                    break;
+                }
+            }
+            let mut best = f32::NEG_INFINITY;
+            let mut chosen = 0u32;
+            let mut found = false;
+            for (value, column) in candidates.iter().take(boundary) {
+                let weight =
+                    value + gumbel_reference(seed, coordinates(row * columns + column, dims));
+                if !found || weight > best || (weight == best && *column < chosen) {
+                    best = weight;
+                    chosen = *column;
+                    found = true;
+                }
+            }
+            chosen as f32
+        })
+        .collect()
+}
+
 pub fn gumbel_reference(seed: u32, at: [u32; 4]) -> f32 {
     let mut hash = seed ^ element_key(at).wrapping_mul(0x9e37_79b9);
     hash ^= hash >> 16;

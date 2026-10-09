@@ -535,6 +535,7 @@ fn narrow<W: Walk, V: Values>(
         | Kind::SumAxis
         | Kind::Argmax
         | Kind::Categorical
+        | Kind::Sample
         | Kind::OneHot
         | Kind::Scatter
         | Kind::ScatterWrite

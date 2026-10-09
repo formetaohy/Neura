@@ -1907,6 +1907,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::LogSoftmaxGrad
             | Kind::Argmax
             | Kind::Categorical
+            | Kind::Sample
             | Kind::OneHot
             | Kind::Gather
             | Kind::Scatter

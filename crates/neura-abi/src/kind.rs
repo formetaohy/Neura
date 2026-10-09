@@ -365,6 +365,14 @@ kinds! {
         chain: true,
         origin: false,
     };
+    Sample SAMPLE = "sample" {
+        entry: "run_sample",
+        modules: [Reduce, Choice],
+        geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
     OneHot ONE_HOT = "one_hot" {
         entry: "run_one_hot",
         modules: [Select],

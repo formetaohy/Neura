@@ -928,7 +928,7 @@ impl<'g> Graph<'g> {
 
     pub fn argmax(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        self.choice(Kind::Argmax, value, NO_VALUE)
+        self.choice(Kind::Argmax, value, [NO_VALUE, NO_VALUE, NO_VALUE])
     }
 
     pub fn uniform(&self, shape: Shape, seed: Value<'g>) -> Value<'g> {
@@ -979,10 +979,39 @@ impl<'g> Graph<'g> {
             seed.id(),
             self.shape(seed).elements(),
         );
-        self.choice(Kind::Categorical, logits, seed.id())
+        self.choice(Kind::Categorical, logits, [seed.id(), NO_VALUE, NO_VALUE])
     }
 
-    fn choice(&self, kind: Kind, source: Value<'g>, seed: u32) -> Value<'g> {
+    pub fn sample(
+        &self,
+        logits: Value<'g>,
+        seed: Value<'g>,
+        keep: Value<'g>,
+        cumulative: Value<'g>,
+    ) -> Value<'g> {
+        let logits = self.own(logits);
+        let mut scalars = [NO_VALUE; 3];
+        for (slot, (value, name)) in [
+            (seed, "seed"),
+            (keep, "candidate count"),
+            (cumulative, "cumulative mass"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let value = self.own(value);
+            assert!(
+                self.shape(value).is_scalar(),
+                "a sample takes one {name}, and value {} holds {} elements",
+                value.id(),
+                self.shape(value).elements(),
+            );
+            scalars[slot] = value.id();
+        }
+        self.choice(Kind::Sample, logits, scalars)
+    }
+
+    fn choice(&self, kind: Kind, source: Value<'g>, scalars: [u32; 3]) -> Value<'g> {
         let source = self.own(source);
         assert!(
             self.contiguous(source),
@@ -1001,7 +1030,14 @@ impl<'g> Graph<'g> {
             kind,
             op::NONE,
             out.id(),
-            [source.id(), seed, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+            [
+                source.id(),
+                scalars[0],
+                scalars[1],
+                scalars[2],
+                NO_VALUE,
+                NO_VALUE,
+            ],
         ));
         out
     }

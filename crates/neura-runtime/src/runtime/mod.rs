@@ -978,5 +978,16 @@ fn refusal_message(word: u32) -> String {
         Refusal::Element => unreachable!("an element refusal carries no kind"),
         Refusal::Empty => unreachable!("an empty refusal carries no kind"),
         Refusal::Page => unreachable!("a page refusal carries no kind"),
+        Refusal::Sample => match code {
+            0 => format!(
+                "the device refused the candidate count of the {} task: a sample keeps between 1 and {} of the candidates it walks",
+                kind.name(),
+                neura_profile::SAMPLE_CANDIDATES,
+            ),
+            _ => format!(
+                "the device refused the cumulative mass of the {} task: a sample draws the shortest prefix of its candidates whose mass reaches a cumulative mass in (0, 1]",
+                kind.name(),
+            ),
+        },
     }
 }
