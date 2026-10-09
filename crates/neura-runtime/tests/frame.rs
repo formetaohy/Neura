@@ -80,6 +80,67 @@ fn a_frame_pulls_every_agent_before_it_collects_any() {
 }
 
 #[test]
+fn a_readout_the_frame_never_collects_returns_its_slot() {
+    let slots = 2;
+    let runtime = open(MemoryRequest {
+        readback_bytes: 1 << 16,
+        readback_slots: slots,
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let data = graph.input(Shape::vector(4), Element::Single);
+    let out = graph.mul(data, graph.fill(Shape::vector(4), 2.0));
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+
+    for round in 0..(slots as u32 * 4) {
+        runtime.write(&program, data, &[round as f32; 4]);
+        runtime.run(&program);
+        let readout = runtime.pull(&program, &[out]);
+        if round.is_multiple_of(2) {
+            drop(readout);
+            continue;
+        }
+        assert_eq!(
+            readout.collect().pop().expect("one tensor came back"),
+            vec![2.0 * round as f32; 4],
+            "round {round} of a frame that leaves every other readback behind reads the tensor it pulled",
+        );
+    }
+    assert_eq!(runtime.readback_slots(), slots);
+}
+
+#[test]
+fn a_refusal_a_dropped_readout_carries_reaches_the_next_readback() {
+    let runtime = open(MemoryRequest {
+        readback_bytes: 1 << 16,
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let table = graph.input(Shape::matrix(4, 2), Element::Single);
+    let indices = graph.input(Shape::vector(1), Element::Single);
+    let gathered = graph.gather(table, indices);
+    graph.retain(gathered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, table, &[1.0; 8]);
+    runtime.write(&program, indices, &[7.0]);
+    runtime.run(&program);
+
+    drop(runtime.pull(&program, &[gathered]));
+    let refusal = catch_unwind(AssertUnwindSafe(|| {
+        let _ = runtime.pull(&program, &[gathered]).collect();
+    }))
+    .expect_err("the refusal a dropped readback carried is reported by the next one");
+    let message = refusal
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_else(|| "a refusal without a message".to_owned());
+    assert!(message.contains("refused an index"), "{message}");
+}
+
+#[test]
 fn another_runtime_of_the_same_device_refuses_this_model() {
     let first = open(MemoryRequest::default());
     let second = Runtime::from_device(

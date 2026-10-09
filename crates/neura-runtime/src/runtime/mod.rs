@@ -6,8 +6,8 @@ use crate::program::{Program, Weights};
 use crate::store::WeightStore;
 use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, progress};
 use neura_gpu::{
-    BufferUsages, Device, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback, Submission,
-    SubmissionIndex,
+    BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback,
+    ReadbackLease, Submission, SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::Kernel;
@@ -29,13 +29,13 @@ const TUNE_ROUNDS: u32 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
 pub struct Readout {
-    readback: Arc<Readback>,
+    lease: ReadbackLease,
     queue: Queue,
-    slot: usize,
     submission: SubmissionIndex,
     sources: Vec<Source>,
     total: u64,
-    refusal: u64,
+    refusal_at: u64,
+    refusal_buffer: GpuBuffer,
 }
 
 enum Source {
@@ -46,14 +46,20 @@ enum Source {
 impl Readout {
     pub fn collect(self) -> Vec<Vec<f32>> {
         let bytes = self
-            .readback
-            .finish(&self.queue, self.slot, self.submission, self.total);
+            .lease
+            .buffer()
+            .read(&self.queue, self.submission, self.total);
         let refusal = u32::from_ne_bytes(
-            bytes[self.refusal as usize..(self.refusal + WORD_BYTES) as usize]
+            bytes[self.refusal_at as usize..(self.refusal_at + WORD_BYTES) as usize]
                 .try_into()
                 .expect("a word was copied back"),
         );
-        assert_eq!(refusal, 0, "{}", refusal_message(refusal));
+        if refusal != 0 {
+            let mut submission = Submission::new(self.queue.device(), "neura refusal");
+            submission.clear(&self.refusal_buffer, 0, WORD_BYTES);
+            submission.submit(&self.queue);
+            panic!("{}", refusal_message(refusal));
+        }
         self.sources
             .into_iter()
             .map(|source| match source {
@@ -766,8 +772,8 @@ impl Runtime {
             "pulling {total} bytes outruns the {} byte readback of this runtime",
             self.readback.capacity(),
         );
-        let slot = self.readback.claim();
-        let staging = self.readback.staging(slot);
+        let lease = self.readback.lease();
+        let staging = lease.buffer();
         let device = self.context.device();
         let mut submission = Submission::new(device, "neura pull");
         for (offset, length, at) in copies {
@@ -780,16 +786,15 @@ impl Runtime {
             device_bytes,
             WORD_BYTES,
         );
-        submission.clear(program.refusal.buffer(), 0, WORD_BYTES);
         let submission = submission.submit(self.context.queue());
         Readout {
-            readback: self.readback.clone(),
+            lease,
             queue: self.context.queue().clone(),
-            slot,
             submission,
             sources,
             total,
-            refusal: device_bytes,
+            refusal_at: device_bytes,
+            refusal_buffer: program.refusal.buffer().clone(),
         }
     }
 

@@ -19,5 +19,5 @@ pub use capability::{
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
 pub use library::WARM_PROGRAMS;
 pub use pipeline::{BindGroup, Binding, PipelineHandle};
-pub use readback::{READBACK_TIMEOUT, Readback};
+pub use readback::{READBACK_TIMEOUT, Readback, ReadbackLease};
 pub use submission::{Submission, SubmissionIndex};

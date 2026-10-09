@@ -1,5 +1,5 @@
-use crate::{BufferUsages, Device, GpuBuffer, Queue, SubmissionIndex};
-use std::sync::Mutex;
+use crate::{BufferUsages, Device, GpuBuffer};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub const READBACK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,38 +38,46 @@ impl Readback {
         self.slots[0].size()
     }
 
-    pub fn claim(&self) -> usize {
-        let claimed = self
+    pub fn lease(self: &Arc<Self>) -> ReadbackLease {
+        let slot = self
             .free
             .lock()
             .expect("a readback pool is never poisoned")
             .pop();
-        claimed.unwrap_or_else(|| {
+        let slot = slot.unwrap_or_else(|| {
             panic!(
-                "all {} readbacks of this runtime are in flight, each holding at most {} bytes; collect one before pulling another, or open the runtime with more readback slots",
+                "all {} readbacks of this runtime are held, each holding at most {} bytes; collect or drop one before pulling another, or open the runtime with more readback slots",
                 self.slots.len(),
                 self.capacity(),
             )
-        })
+        });
+        ReadbackLease {
+            readback: self.clone(),
+            slot,
+        }
     }
 
-    pub fn staging(&self, slot: usize) -> &GpuBuffer {
-        &self.slots[slot]
-    }
-
-    pub fn finish(
-        &self,
-        queue: &Queue,
-        slot: usize,
-        submission: SubmissionIndex,
-        bytes: u64,
-    ) -> Vec<u8> {
-        assert!(bytes > 0 && bytes.is_multiple_of(4) && bytes <= self.capacity());
-        let result = self.staging(slot).read(queue, submission, bytes);
+    fn release(&self, slot: usize) {
         self.free
             .lock()
             .expect("a readback pool is never poisoned")
             .push(slot);
-        result
+    }
+}
+
+pub struct ReadbackLease {
+    readback: Arc<Readback>,
+    slot: usize,
+}
+
+impl ReadbackLease {
+    pub fn buffer(&self) -> &GpuBuffer {
+        &self.readback.slots[self.slot]
+    }
+}
+
+impl Drop for ReadbackLease {
+    fn drop(&mut self) {
+        self.readback.release(self.slot);
     }
 }
