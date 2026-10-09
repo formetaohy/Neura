@@ -419,6 +419,21 @@ fn a_metal_program_binds_every_buffer_it_addresses_by_address() {
 }
 
 #[test]
+fn a_metal_program_selects_the_branch_its_condition_accepts() {
+    let ShaderTranslation::Msl { source, .. } = all(0).program().translate(Backend::Metal) else {
+        panic!("Metal requires MSL");
+    };
+    assert!(
+        !source.contains("metal::select"),
+        "the MSL of a program calls a dialect select whose argument order is the reverse of the device select",
+    );
+    assert!(
+        source.contains("? 256.0f : 0.0f"),
+        "the MSL of a program hands the int8 sign the rejected branch",
+    );
+}
+
+#[test]
 fn every_profile_compiles_the_rust_abi_and_bindings() {
     {
         for (index, profile) in profiles().iter().enumerate() {

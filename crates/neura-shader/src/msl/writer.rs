@@ -457,9 +457,8 @@ impl<'m> Writer<'m> {
                 let condition = self.value(*condition);
                 let accept = self.value(*accept);
                 let reject = self.value(*reject);
-                self.out.line(format!(
-                    "{target} = metal::select({accept}, {reject}, {condition});"
-                ));
+                self.out
+                    .line(format!("{target} = ({condition} ? {accept} : {reject});"));
             }
             Instruction::Convert { value, result } => {
                 let target = self.target(*result);
