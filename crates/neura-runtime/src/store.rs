@@ -19,6 +19,7 @@ pub(crate) struct WeightStore {
     pages: u32,
     slots: u32,
     mirror: Option<Mutex<Mirror>>,
+    read_peak: AtomicU64,
 }
 
 struct Mirror {
@@ -54,6 +55,7 @@ pub(crate) const fn page_bytes() -> u64 {
 const WRITEBACK_CHUNKS: usize = 64;
 const CAPTURE_PAGES: usize = 64;
 const UPLOAD_PAGES: usize = 64;
+const STREAM_BYTES: u64 = 1 << 16;
 const SPILL_ATTEMPTS: u32 = 32;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
 const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);
@@ -310,6 +312,7 @@ impl WeightStore {
             pages,
             slots,
             mirror,
+            read_peak: AtomicU64::new(0),
         });
         if let Some(table) = &store.table {
             let empty = vec![NO_PAGE; pages as usize];
@@ -412,6 +415,14 @@ impl WeightStore {
         })
     }
 
+    pub(crate) fn read_peak_bytes(&self) -> u64 {
+        self.read_peak.load(Ordering::Relaxed)
+    }
+
+    fn record_read(&self, bytes: u64) {
+        self.read_peak.fetch_max(bytes, Ordering::Relaxed);
+    }
+
     fn bounds(&self, word: u64, bytes: u64) {
         assert!(
             bytes.is_multiple_of(WORD_BYTES)
@@ -476,6 +487,42 @@ impl WeightStore {
         let mut read = vec![0u8; bytes as usize];
         mirror.backing.read(first, &mut read);
         read
+    }
+
+    pub(crate) fn stream(&self, queue: &Queue, word: u64, bytes: u64, sink: &mut dyn FnMut(&[u8])) {
+        assert!(
+            word * WORD_BYTES + bytes <= self.words * WORD_BYTES,
+            "a weight range of {bytes} bytes at word {word} outruns the {} words of the store",
+            self.words,
+        );
+        if bytes == 0 {
+            return;
+        }
+        let first = word * WORD_BYTES;
+        let end = first + bytes;
+        let Some(mirror) = &self.mirror else {
+            let mut at = first;
+            while at < end {
+                let take = (end - at).min(STREAM_BYTES);
+                let held = take.next_multiple_of(WORD_BYTES);
+                self.record_read(held);
+                sink(&self.read_device(queue, self.store.offset() + at, held)[..take as usize]);
+                at += take;
+            }
+            return;
+        };
+        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
+        self.materialize_range(&mut mirror, queue, first, end);
+        self.flush_range(&mut mirror, queue, first, end);
+        let mut chunk = vec![0u8; bytes.min(STREAM_BYTES) as usize];
+        self.record_read(chunk.len() as u64);
+        let mut at = first;
+        while at < end {
+            let take = (end - at).min(chunk.len() as u64) as usize;
+            mirror.backing.read(at, &mut chunk[..take]);
+            sink(&chunk[..take]);
+            at += take as u64;
+        }
     }
 
     pub(crate) fn ensure(&self, queue: &Queue, pages: &[u32]) -> Vec<SubmissionIndex> {
@@ -809,10 +856,11 @@ impl WeightStore {
         source: &impl crate::checkpoint::Source,
     ) {
         let Some(mirror) = &self.mirror else {
-            let image = source.image(weights, state, self.words);
-            self.store
-                .buffer()
-                .write_at(queue, self.store.offset(), &image);
+            let mut upload = Upload::of(self, queue);
+            source.pour(weights, state, self.words, &mut |at, bytes| {
+                upload.put(at, bytes);
+            });
+            upload.flush();
             return;
         };
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
@@ -823,15 +871,6 @@ impl WeightStore {
             mirror.backing.write(at, bytes);
         });
         self.reload(queue, &mut mirror);
-    }
-
-    pub(crate) fn flush(&self, queue: &Queue) {
-        let Some(mirror) = &self.mirror else {
-            return;
-        };
-        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
-        self.materialize_all(&mut mirror, queue);
-        self.flush_range(&mut mirror, queue, 0, self.words * WORD_BYTES);
     }
 
     fn materialize_range(&self, mirror: &mut Mirror, queue: &Queue, first: u64, end: u64) {
@@ -862,20 +901,6 @@ impl WeightStore {
         self.capture(mirror, queue, &sources);
     }
 
-    pub(crate) fn checkpoint(&self, queue: &Queue) -> Vec<u8> {
-        if self.words == 0 {
-            return Vec::new();
-        }
-        let Some(mirror) = &self.mirror else {
-            return self.read_device(queue, self.store.offset(), self.words * WORD_BYTES);
-        };
-        self.flush(queue);
-        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut image = vec![0u8; (self.words * WORD_BYTES) as usize];
-        mirror.backing.read(0, &mut image);
-        image
-    }
-
     fn reload(&self, queue: &Queue, mirror: &mut Mirror) {
         let table = self
             .table
@@ -896,5 +921,76 @@ impl WeightStore {
         submission.copy(self.store.buffer(), offset, staging.buffer(), 0, bytes);
         let submission = submission.submit(queue);
         staging.buffer().read(queue, submission, bytes)
+    }
+}
+
+struct Upload<'a> {
+    store: &'a WeightStore,
+    queue: &'a Queue,
+    staged: Vec<u8>,
+    copies: Vec<(u64, u64, u64)>,
+}
+
+impl<'a> Upload<'a> {
+    fn of(store: &'a WeightStore, queue: &'a Queue) -> Self {
+        Self {
+            store,
+            queue,
+            staged: Vec::new(),
+            copies: Vec::new(),
+        }
+    }
+
+    fn put(&mut self, at: u64, bytes: &[u8]) {
+        assert!(
+            at.is_multiple_of(WORD_BYTES),
+            "a weight lands at byte {at}, off the word grid the store addresses",
+        );
+        if bytes.is_empty() {
+            return;
+        }
+        let rounded = bytes.len().next_multiple_of(WORD_BYTES as usize);
+        if rounded > self.capacity() {
+            self.flush();
+            let mut padded = vec![0u8; rounded];
+            padded[..bytes.len()].copy_from_slice(bytes);
+            self.store
+                .store
+                .buffer()
+                .write_at(self.queue, self.store.offset() + at, &padded);
+            return;
+        }
+        if self.staged.len() + rounded > self.capacity() {
+            self.flush();
+        }
+        let offset = self.staged.len() as u64;
+        self.staged.resize(offset as usize + rounded, 0);
+        self.staged[offset as usize..offset as usize + bytes.len()].copy_from_slice(bytes);
+        self.copies.push((at, offset, rounded as u64));
+    }
+
+    fn flush(&mut self) {
+        if self.staged.is_empty() {
+            return;
+        }
+        let upload = self.store.upload_buffer();
+        upload.write_at(self.queue, 0, &self.staged);
+        let mut submission = Submission::new(self.queue.device(), "neura weight load");
+        for (at, offset, bytes) in &self.copies {
+            submission.copy(
+                upload,
+                *offset,
+                self.store.store.buffer(),
+                self.store.offset() + *at,
+                *bytes,
+            );
+        }
+        submission.submit(self.queue);
+        self.staged.clear();
+        self.copies.clear();
+    }
+
+    fn capacity(&self) -> usize {
+        (self.store.batch_pages() as u64 * page_bytes()) as usize
     }
 }

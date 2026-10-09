@@ -72,6 +72,10 @@ impl Weights {
         self.store.readback_transfers()
     }
 
+    pub fn read_peak_bytes(&self) -> u64 {
+        self.store.read_peak_bytes()
+    }
+
     pub fn host_bytes(&self) -> u64 {
         self.store.host_bytes()
     }

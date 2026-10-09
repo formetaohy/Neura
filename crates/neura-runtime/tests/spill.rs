@@ -337,6 +337,64 @@ fn a_spilled_store_carries_every_word_of_a_checkpoint() {
     }
 }
 
+fn saves_the_container_it_streams(backends: Backends, directory: &Path) {
+    let source = spilled(backends, directory);
+    let source_graph = Graph::new();
+    let source_session = training(&source_graph);
+    let source_weights = source.weights(&source_graph);
+    let trained = train(&source, &source_graph, &source_session, &source_weights);
+    let expected = parameters(&source, &trained.program, &source_session);
+    let file = directory.join("streamed.safetensors");
+    let container = source.save(&source_weights, &file);
+    assert_eq!(
+        std::fs::read(&file).expect("a container this store wrote"),
+        source.checkpoint(&source_weights).bytes(),
+        "a store streams the container it packs",
+    );
+    assert!(
+        source_weights.read_peak_bytes() <= 1 << 16,
+        "a store of {} bytes read itself out in a buffer of {} bytes",
+        source_weights.bytes(),
+        source_weights.read_peak_bytes(),
+    );
+    assert!(
+        source_weights.host_bytes() == 0,
+        "a store of {} bytes held {} bytes of its pages in host memory",
+        source_weights.bytes(),
+        source_weights.host_bytes(),
+    );
+    assert_eq!(container.tensors(), 2 * LAYERS as usize);
+    assert_eq!(container.names().collect::<Vec<_>>(), layer_names());
+
+    let target = resident(backends);
+    let target_graph = Graph::new();
+    let target_session = training(&target_graph);
+    let target_weights = target.load_streamed(&target_graph, &container);
+    let program = target.compile(&target_graph, &target_weights);
+    let observed = parameters(&target, &program, &target_session);
+    assert_eq!(expected.len(), observed.len());
+    for (at, (expected, observed)) in expected.iter().zip(&observed).enumerate() {
+        assert!(
+            (expected - observed).abs() <= 1e-5,
+            "a resident store loaded from a file reached {observed} where the spilled store reached {expected} at {at}",
+        );
+    }
+    let resting = directory.join("resting.safetensors");
+    target.save(&target_weights, &resting);
+    assert_eq!(
+        std::fs::read(&resting).expect("a container the resident store wrote"),
+        std::fs::read(&file).expect("a container the spilled store wrote"),
+        "a resident store writes the container a spilled store writes",
+    );
+}
+
+#[test]
+fn a_spilled_store_saves_the_container_it_streams() {
+    for backends in Backends::PLATFORM {
+        saves_the_container_it_streams(backends, &directory("save"));
+    }
+}
+
 fn refuses_a_directory_it_cannot_spill_into(backends: Backends, directory: &Path) {
     let missing = directory.join("missing");
     let runtime = open(

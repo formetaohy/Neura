@@ -1,5 +1,5 @@
 use crate::cache::{self, Artifacts, Assembly, Resident};
-use crate::checkpoint::{Checkpoint, CheckpointFile, TensorData};
+use crate::checkpoint::{self, Checkpoint, CheckpointFile, Container};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
@@ -11,12 +11,12 @@ use neura_gpu::{
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::Kernel;
-use neura_plan::{Layout, Plan, Product, Region, Span};
+use neura_plan::{Layout, Plan, Product, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod tune;
@@ -313,12 +313,25 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let store = weights.store().checkpoint(self.context.queue());
-        let mut tensors = stored(weights.region(), &store, "parameter");
-        if weights.state().tensors() > 0 {
-            tensors.extend(stored(weights.state(), &store, "training state"));
-        }
-        Checkpoint::pack(&tensors)
+        let container = container_of(weights);
+        let store = weights.store();
+        Checkpoint::pack(&container, &mut |word, bytes, sink| {
+            store.stream(self.context.queue(), word, bytes, sink)
+        })
+    }
+
+    pub fn save(&self, weights: &Weights, path: &Path) -> CheckpointFile {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        let container = container_of(weights);
+        let store = weights.store();
+        container.write(path, &mut |word, bytes, sink| {
+            store.stream(self.context.queue(), word, bytes, sink)
+        });
+        CheckpointFile::open(path)
     }
 
     fn parameter_store(&self, graph: &Graph) -> (Weights, Layout) {
@@ -849,39 +862,17 @@ impl Runtime {
     }
 }
 
+fn container_of(weights: &Weights) -> Container {
+    let mut entries = checkpoint::described(weights.region(), "parameter");
+    entries.extend(checkpoint::described(weights.state(), "training state"));
+    Container::of(&entries)
+}
+
 pub(crate) fn resident_weight_slots(weights: &Weights) -> u32 {
     match weights.paged() {
         true => weights.resident_pages(),
         false => 0,
     }
-}
-
-fn stored<'s>(region: &'s Region, store: &'s [u8], section: &str) -> Vec<TensorData<'s>> {
-    region
-        .entries()
-        .iter()
-        .map(|entry| {
-            let name = entry.name.as_deref().unwrap_or_else(|| {
-                panic!(
-                    "the {section} at word {} of {} carries no name, and a checkpoint names every tensor it holds; declare it with a named parameter or a named state",
-                    entry.word,
-                    entry.element.name(),
-                )
-            });
-            let at = (entry.word * WORD_BYTES) as usize;
-            let payload = (entry.element.payload_words(entry.elements) * WORD_BYTES) as usize;
-            let quanta = (entry.element.quanta(entry.elements) * WORD_BYTES) as usize;
-            TensorData {
-                name,
-                shape: entry.shape,
-                element: entry.element,
-                elements: entry.elements,
-                scale: entry.scale,
-                payload: &store[at..at + payload],
-                quanta: &store[at + payload..at + payload + quanta],
-            }
-        })
-        .collect()
 }
 
 fn refusal_message(word: u32) -> String {
