@@ -412,3 +412,34 @@ fn a_training_convolution_pages_the_input_gradient_a_weight_budget_holds() {
         "the tasks of a training convolution walk every page of the filter between them",
     );
 }
+
+#[test]
+fn a_convolution_pages_the_filter_a_device_count_rules() {
+    let channels = 2048u32;
+    let slots = 3u32;
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([8, 1, 1, 1]), Element::Single);
+    let images = graph.input(Shape::of([8, 1, 6, 6]), Element::Single);
+    let filter = graph.named_parameter(
+        "filter",
+        Shape::of([channels, 1, 3, 3]),
+        Init::Zero,
+        Element::Single,
+    );
+    let count = graph.sum_axis(probe, 0);
+    let live = graph.trim(images, 0, count);
+    graph.retain(graph.conv2d(live, filter, neura_graph::Window::sliding([3, 3])));
+    let plan = budgeted(&graph, slots);
+    let whole = (u64::from(channels) * 9).div_ceil(PAGE_WORDS) as usize;
+    let (widest, walked, _) = widest_and_walked(&plan);
+    assert!(whole > slots as usize);
+    assert!(
+        widest <= slots as usize,
+        "a task of a convolution a device count rules walks {widest} pages of a filter of {whole}, and the budget of {slots} pages holds them",
+    );
+    assert_eq!(
+        walked,
+        (0..whole as u32).collect::<BTreeSet<_>>(),
+        "the tasks of a convolution a device count rules walk every page of the filter between them",
+    );
+}

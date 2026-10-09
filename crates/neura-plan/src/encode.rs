@@ -8,7 +8,7 @@ use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::record::{self, Recorded};
-use crate::region::{self, Resolved, TableRows, Touches, Values, Walk};
+use crate::region::{self, Resolved, TableRows, Touches, Walk};
 use crate::schedule;
 use crate::span::{self, Extents, Split};
 use neura_abi::{
@@ -289,7 +289,6 @@ pub struct Plan {
     splits: Vec<Split>,
     works: Vec<u64>,
     slot_bounds: Vec<u32>,
-    authored_walks: Vec<bool>,
     depends: Vec<u32>,
     depends_at: Vec<u32>,
     authored: authored::Authored,
@@ -543,6 +542,8 @@ impl Plan {
                 queries: task.queries,
                 tokens: task.tokens,
                 grid: task.grid,
+                planned_first: task.first,
+                planned_count: task.count,
             });
             if task.in_place
                 && task
@@ -607,7 +608,6 @@ impl Plan {
             splits,
             works,
             slot_bounds,
-            authored_walks,
             depends,
             depends_at,
             authored,
@@ -979,6 +979,8 @@ impl Plan {
             }
             record.wave = schedule.waves()[position];
             record.patch = self.patches.owners[source];
+            record.planned_first = record.first;
+            record.planned_count = record.count;
             task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
             waves.push(schedule.waves()[position]);
         }
@@ -1176,11 +1178,8 @@ impl Plan {
         let tiles = self.profile.tiles();
         let mut touched = Touches::default();
         Recorded::of(encoding.tasks(), &self.steps)
-            .zip(encoding.order())
-            .map(|(task, index)| {
-                let walked = !self.authored_walks[*index as usize]
-                    && values.owned(task.out())
-                    && values.dense(task.out());
+            .map(|task| {
+                let walked = region::bounded(&values, &task);
                 match walked {
                     true => region::walked(
                         &mut touched,
@@ -2053,6 +2052,8 @@ fn declared_waves(encoding: &Encoding) -> Vec<u32> {
 fn family_key(mut record: TaskRecord) -> TaskRecord {
     record.first = 0;
     record.count = 0;
+    record.planned_first = 0;
+    record.planned_count = 0;
     record.prelude = 0;
     record.chain = 0;
     record.index = 0;

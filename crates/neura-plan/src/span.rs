@@ -95,6 +95,19 @@ impl Extents {
         })
     }
 
+    pub(crate) fn cut_is_outer(&self, value: u32, authored: &[u32]) -> bool {
+        let dims = self.values[value as usize].shape.dims();
+        (0..neura_abi::MAX_RANK).all(|axis| {
+            self.values[value as usize]
+                .shape
+                .free(axis)
+                .is_none_or(|slot| {
+                    authored.get(slot as usize).copied().unwrap_or(NO_VALUE) == NO_VALUE
+                        || dims[..axis as usize].iter().all(|dim| *dim == 1)
+                })
+        })
+    }
+
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {
         match self.values[value as usize].strides_source {
             None => Shape::dense_strides(self.dims(value, extents)),

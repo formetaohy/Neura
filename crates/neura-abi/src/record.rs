@@ -117,6 +117,8 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     queries: u32 => U32,
     tokens: u32 => U32,
     grid: u32 => U32,
+    planned_first: u32 => U32,
+    planned_count: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

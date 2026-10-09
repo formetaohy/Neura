@@ -254,6 +254,9 @@ fn mismatched(found: &Recorded<'_>, task: &super::lower::Task) -> Option<&'stati
     if record.count != task.count {
         return Some("count");
     }
+    if (record.planned_first, record.planned_count) != (record.first, record.count) {
+        return Some("planned");
+    }
     if record.param.to_bits() != task.param.to_bits() {
         return Some("param");
     }

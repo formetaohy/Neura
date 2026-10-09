@@ -122,6 +122,10 @@ pub(crate) trait Values {
 
     fn exact(&self, value: u32) -> bool;
 
+    fn bounded(&self, value: u32) -> bool {
+        self.exact(value)
+    }
+
     fn elements(&self, value: u32) -> u64 {
         self.dims(value).iter().map(|dim| u64::from(*dim)).product()
     }
@@ -178,6 +182,7 @@ pub(crate) struct Resolved {
     element: Vec<Element>,
     recomputes: Vec<Option<u32>>,
     exact: Vec<bool>,
+    bounded: Vec<bool>,
 }
 
 impl Resolved {
@@ -191,6 +196,7 @@ impl Resolved {
             element: Vec::with_capacity(count),
             recomputes: Vec::with_capacity(count),
             exact: Vec::with_capacity(count),
+            bounded: Vec::with_capacity(count),
         };
         for value in 0..count as u32 {
             let at = value as usize * size_of::<neura_abi::ValueRecord>();
@@ -206,6 +212,13 @@ impl Resolved {
             resolved
                 .exact
                 .push(extents.sealed(value, authored) && extents.sealed(record.storage, authored));
+            let dense = resolved.strides[value as usize]
+                == Shape::dense_strides(resolved.dims[value as usize]);
+            resolved.bounded.push(
+                dense
+                    && extents.cut_is_outer(value, authored)
+                    && extents.cut_is_outer(record.storage, authored),
+            );
         }
         resolved
     }
@@ -242,6 +255,10 @@ impl Values for Resolved {
 
     fn exact(&self, value: u32) -> bool {
         self.exact[value as usize]
+    }
+
+    fn bounded(&self, value: u32) -> bool {
+        self.bounded[value as usize]
     }
 }
 
@@ -300,6 +317,17 @@ pub(crate) fn exact<W: Walk, V: Values>(values: &V, task: &W) -> bool {
             .reads()
             .chain(task.writes())
             .all(|value| values.exact(value))
+}
+
+pub(crate) fn bounded<W: Walk, V: Values>(values: &V, task: &W) -> bool {
+    let out = task.out();
+    values.owned(out)
+        && values.bounded(out)
+        && !matches!(task.split(), Split::Ragged { .. } | Split::Segment { .. })
+        && task
+            .reads()
+            .chain(task.writes())
+            .all(|value| values.exact(value) || values.bounded(value))
 }
 
 pub(crate) fn walked<W: Walk, V: Values>(

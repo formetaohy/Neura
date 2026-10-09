@@ -1368,3 +1368,91 @@ fn a_streamed_store_trains_a_grouped_convolution_of_every_batch_a_binding_holds(
         }
     }
 }
+
+const COUNTED_ROWS: u32 = 8;
+
+fn counted_convolution_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32) {
+    let runtime = open(
+        backends,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([COUNTED_ROWS, 1, 1, 1]), Element::Single);
+    let images = graph.input(Shape::of([COUNTED_ROWS, 1, 4, 4]), Element::Single);
+    let filter = graph.parameter(
+        Shape::of([CONV_CHANNELS, 1, 3, 3]),
+        Init::Uniform {
+            low: -0.02,
+            high: 0.02,
+        },
+        Element::Single,
+    );
+    let count = graph.sum_axis(probe, 0);
+    let live = graph.trim(images, 0, count);
+    let convolved = graph.conv2d(live, filter, neura_graph::Window::sliding([3, 3]));
+    let loss = graph.sum(graph.mul(convolved, convolved));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..(COUNTED_ROWS * 4 * 4))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    let mut losses = Vec::new();
+    for rows in [4u32, 8, 6, 1, 8] {
+        let probe_data = (0..COUNTED_ROWS)
+            .map(|row| f32::from(row < rows))
+            .collect::<Vec<_>>();
+        runtime.write(&program, probe, &probe_data);
+        runtime.write(&program, images, &observations);
+        runtime.run(&program);
+        losses.push(runtime.read(&program, loss)[0]);
+    }
+    (
+        runtime.read(&program, filter),
+        losses,
+        program.weight_windows(),
+    )
+}
+
+#[test]
+fn a_streamed_store_pages_the_filter_a_device_count_rules() {
+    for backends in Backends::PLATFORM {
+        let (resident, resident_losses, windows) =
+            counted_convolution_run(backends, MemoryRequest::default());
+        assert_eq!(
+            windows, 0,
+            "a store that holds every weight resident walks no window",
+        );
+        let (streamed, streamed_losses, windows) = counted_convolution_run(
+            backends,
+            MemoryRequest {
+                resident_weight_bytes: Some(CONV_BYTES),
+                ..Default::default()
+            },
+        );
+        assert!(
+            windows > 1,
+            "a store of {CONV_BYTES} bytes walked {windows} weight windows over a filter of {CONV_PAGES} pages the batch of every step rules",
+        );
+        assert_eq!(resident.len(), streamed.len());
+        for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store whose batch a device count rules reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        for (step, (expected, observed)) in resident_losses.iter().zip(&streamed_losses).enumerate()
+        {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "step {step} of a convolution a device count rules held a loss of {observed} where the resident store held {expected}",
+            );
+        }
+    }
+}

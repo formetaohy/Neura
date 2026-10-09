@@ -128,11 +128,10 @@ mod device {
             return task.index;
         }
         let total = walked_total(task);
-        let within = walked_boundary(total, task.index, task.group);
-        if task.split == split::PLANE {
-            return task.plane * total + within;
+        if task.split == split::PLANE && task.planes > 1u32 {
+            return task.plane * total + walked_boundary(total, task.index, task.group);
         }
-        return within;
+        return min(task.planned_first, total);
     }
 
     fn span_count(task: Task) -> u32 {
@@ -143,8 +142,12 @@ mod device {
             return 1u32;
         }
         let total = walked_total(task);
-        return walked_boundary(total, task.index + 1u32, task.group)
-            - walked_boundary(total, task.index, task.group);
+        if task.split == split::PLANE && task.planes > 1u32 {
+            return walked_boundary(total, task.index + 1u32, task.group)
+                - walked_boundary(total, task.index, task.group);
+        }
+        let first = min(task.planned_first, total);
+        return min(task.planned_count, total - first);
     }
 
     fn segment_keys(task: Task, bound: u32) -> u32 {
