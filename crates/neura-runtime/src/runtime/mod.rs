@@ -1,5 +1,5 @@
 use crate::cache::{self, Artifacts, Assembly, Resident};
-use crate::checkpoint::{Checkpoint, TensorData};
+use crate::checkpoint::{Checkpoint, CheckpointFile, TensorData};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
 use crate::program::{Program, Weights};
@@ -16,6 +16,7 @@ use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 mod tune;
@@ -96,6 +97,7 @@ pub struct MemoryRequest {
     pub heap_bytes: u64,
     pub heap_bank_bytes: Option<u64>,
     pub resident_weight_bytes: Option<u64>,
+    pub weight_spill: Option<PathBuf>,
     pub encoding_bytes: u64,
 }
 
@@ -107,6 +109,7 @@ impl Default for MemoryRequest {
             heap_bytes: DEFAULT_HEAP_BYTES,
             heap_bank_bytes: None,
             resident_weight_bytes: None,
+            weight_spill: None,
             encoding_bytes: neura_plan::DEFAULT_ENCODING_BYTES,
         }
     }
@@ -126,6 +129,7 @@ pub struct Runtime {
     artifacts: Artifacts,
     alignment: u64,
     resident_weight_bytes: Option<u64>,
+    weight_spill: Option<PathBuf>,
     encoding_bytes: u64,
 }
 
@@ -183,6 +187,7 @@ impl Runtime {
             artifacts: Artifacts::new(),
             context,
             resident_weight_bytes: memory.resident_weight_bytes,
+            weight_spill: memory.weight_spill,
             encoding_bytes: memory.encoding_bytes,
         }
     }
@@ -253,7 +258,24 @@ impl Runtime {
     pub fn load(&self, graph: &Graph, checkpoint: &Checkpoint) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
-        self.pour(&layout, &weights, checkpoint);
+        weights.store().load(
+            self.context.queue(),
+            layout.weights(),
+            layout.state(),
+            checkpoint,
+        );
+        weights
+    }
+
+    pub fn load_streamed(&self, graph: &Graph, checkpoint: &CheckpointFile) -> Weights {
+        self.context.assert_alive();
+        let (weights, layout) = self.parameter_store(graph);
+        weights.store().load(
+            self.context.queue(),
+            layout.weights(),
+            layout.state(),
+            checkpoint,
+        );
         weights
     }
 
@@ -263,8 +285,26 @@ impl Runtime {
             weights.lives_on(&self.heap),
             "this weight store lives on the device heap of another runtime",
         );
-        let store = checkpoint.pour(weights.region(), weights.state(), weights.words());
-        weights.store().pour(self.context.queue(), &store);
+        weights.store().load(
+            self.context.queue(),
+            weights.region(),
+            weights.state(),
+            checkpoint,
+        );
+    }
+
+    pub fn restore_streamed(&self, weights: &Weights, checkpoint: &CheckpointFile) {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        weights.store().load(
+            self.context.queue(),
+            weights.region(),
+            weights.state(),
+            checkpoint,
+        );
     }
 
     pub fn checkpoint(&self, weights: &Weights) -> Checkpoint {
@@ -289,6 +329,7 @@ impl Runtime {
             &self.heap,
             layout.words(),
             self.resident_weight_bytes,
+            self.weight_spill.as_deref(),
         );
         let weights = Weights::new(store, layout.weights().clone(), layout.state().clone());
         (weights, layout)
@@ -305,11 +346,6 @@ impl Runtime {
                 &pack(seed.element(), seed.scale(), &values),
             );
         }
-    }
-
-    fn pour(&self, layout: &Layout, weights: &Weights, checkpoint: &Checkpoint) {
-        let store = checkpoint.pour(layout.weights(), layout.state(), layout.words());
-        weights.store().pour(self.context.queue(), &store);
     }
 
     pub fn rebind(&self, weights: &Weights, graph: &Graph<'_>) {

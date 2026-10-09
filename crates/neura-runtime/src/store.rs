@@ -2,6 +2,11 @@ use crate::heap::{Allocation, Heap};
 use crate::pool::{Pool, Recycled};
 use neura_abi::{NO_PAGE, PAGE_WORDS, WORD_BYTES, pages_of};
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext, Queue, Submission, SubmissionIndex};
+use neura_plan::Region;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 pub(crate) struct WeightStore {
@@ -17,7 +22,7 @@ pub(crate) struct WeightStore {
 }
 
 struct Mirror {
-    bytes: Vec<u8>,
+    backing: Backing,
     page_of: Vec<u32>,
     slot_of: Vec<u32>,
     dirty: Vec<bool>,
@@ -49,13 +54,159 @@ pub(crate) const fn page_bytes() -> u64 {
 const WRITEBACK_CHUNKS: usize = 64;
 const CAPTURE_PAGES: usize = 64;
 const UPLOAD_PAGES: usize = 64;
+const SPILL_ATTEMPTS: u32 = 32;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
 const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);
 
+enum Backing {
+    Memory(Vec<u8>),
+    File {
+        file: File,
+        path: PathBuf,
+        read: u64,
+        written: u64,
+    },
+}
+
+impl Backing {
+    fn memory(pages: u32) -> Self {
+        Self::Memory(vec![0; pages as usize * page_bytes() as usize])
+    }
+
+    fn spilled(directory: &Path, pages: u32) -> Self {
+        let bytes = u64::from(pages) * page_bytes();
+        for _ in 0..SPILL_ATTEMPTS {
+            let serial = NEXT_SPILL.fetch_add(1, Ordering::Relaxed);
+            let path = directory.join(format!(
+                "neura-weights-{}-{serial}.spill",
+                std::process::id(),
+            ));
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    file.set_len(bytes).unwrap_or_else(|error| {
+                        panic!(
+                            "a weight spill of {bytes} bytes could not claim its bytes at {}: {error}",
+                            path.display(),
+                        )
+                    });
+                    return Self::File {
+                        file,
+                        path,
+                        read: 0,
+                        written: 0,
+                    };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!(
+                    "a weight spill of {bytes} bytes could not be created at {}: {error}",
+                    path.display(),
+                ),
+            }
+        }
+        panic!(
+            "a weight spill of {bytes} bytes found no free name beside {} stale spills of {}",
+            SPILL_ATTEMPTS,
+            directory.display(),
+        );
+    }
+
+    fn host_bytes(&self) -> u64 {
+        match self {
+            Self::Memory(image) => image.len() as u64,
+            Self::File { .. } => 0,
+        }
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Memory(_) => None,
+            Self::File { path, .. } => Some(path.clone()),
+        }
+    }
+
+    fn read_bytes(&self) -> u64 {
+        match self {
+            Self::Memory(_) => 0,
+            Self::File { read, .. } => *read,
+        }
+    }
+
+    fn written_bytes(&self) -> u64 {
+        match self {
+            Self::Memory(_) => 0,
+            Self::File { written, .. } => *written,
+        }
+    }
+
+    fn read(&mut self, at: u64, bytes: &mut [u8]) {
+        match self {
+            Self::Memory(image) => {
+                bytes.copy_from_slice(&image[at as usize..at as usize + bytes.len()])
+            }
+            Self::File {
+                file, path, read, ..
+            } => {
+                file.seek(SeekFrom::Start(at))
+                    .and_then(|_| file.read_exact(bytes))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "a weight spill at {} could not be read at {at}: {error}",
+                            path.display(),
+                        )
+                    });
+                *read += bytes.len() as u64;
+            }
+        }
+    }
+
+    fn write(&mut self, at: u64, bytes: &[u8]) {
+        match self {
+            Self::Memory(image) => {
+                image[at as usize..at as usize + bytes.len()].copy_from_slice(bytes)
+            }
+            Self::File {
+                file,
+                path,
+                written,
+                ..
+            } => {
+                file.seek(SeekFrom::Start(at))
+                    .and_then(|_| file.write_all(bytes))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "a weight spill at {} could not be written at {at}: {error}",
+                            path.display(),
+                        )
+                    });
+                *written += bytes.len() as u64;
+            }
+        }
+    }
+}
+
+impl Drop for Backing {
+    fn drop(&mut self) {
+        if let Self::File { path, .. } = self {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+static NEXT_SPILL: AtomicU64 = AtomicU64::new(0);
+
 impl Mirror {
-    fn new(pages: u32, slots: u32) -> Self {
+    fn new(pages: u32, slots: u32, spill: Option<&Path>) -> Self {
+        let backing = match spill {
+            Some(directory) => Backing::spilled(directory, pages),
+            None => Backing::memory(pages),
+        };
         Self {
-            bytes: vec![0; pages as usize * page_bytes() as usize],
+            backing,
             page_of: vec![NO_PAGE; slots as usize],
             slot_of: vec![NO_PAGE; pages as usize],
             dirty: vec![false; slots as usize],
@@ -118,6 +269,7 @@ impl WeightStore {
         heap: &Arc<Heap>,
         words: u64,
         resident: Option<u64>,
+        spill: Option<&Path>,
     ) -> Arc<Self> {
         let pages = u32::try_from(pages_of(words)).unwrap_or_else(|_| {
             panic!("a weight store of {words} words spans more pages than a device addresses")
@@ -147,7 +299,7 @@ impl WeightStore {
                 BufferUsages::STORAGE | BufferUsages::COPY_DST,
             )
         });
-        let mirror = paged.then(|| Mutex::new(Mirror::new(pages, slots)));
+        let mirror = paged.then(|| Mutex::new(Mirror::new(pages, slots, spill)));
         let store = Arc::new(Self {
             device: context.device().clone(),
             upload: std::sync::OnceLock::new(),
@@ -164,10 +316,6 @@ impl WeightStore {
             table.write_at(context.queue(), 0, bytemuck::cast_slice(&empty));
         }
         store
-    }
-
-    pub(crate) fn words(&self) -> u64 {
-        self.words
     }
 
     pub(crate) fn bytes(&self) -> u64 {
@@ -192,6 +340,46 @@ impl WeightStore {
 
     pub(crate) fn buffer(&self) -> &GpuBuffer {
         self.store.buffer()
+    }
+
+    pub(crate) fn host_bytes(&self) -> u64 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .backing
+                .host_bytes()
+        })
+    }
+
+    pub(crate) fn spill_file(&self) -> Option<PathBuf> {
+        self.mirror.as_ref().and_then(|mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .backing
+                .path()
+        })
+    }
+
+    pub(crate) fn spill_read_bytes(&self) -> u64 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .backing
+                .read_bytes()
+        })
+    }
+
+    pub(crate) fn spill_write_bytes(&self) -> u64 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .backing
+                .written_bytes()
+        })
     }
 
     pub(crate) fn offset(&self) -> u64 {
@@ -265,11 +453,9 @@ impl WeightStore {
                     mirror.dirty[slot as usize] = true;
                     mirror.touch(slot);
                 }
-                None => {
-                    let start = page as usize * page_bytes() as usize + within as usize;
-                    mirror.bytes[start..start + chunk as usize]
-                        .copy_from_slice(&bytes[at as usize..(at + chunk) as usize]);
-                }
+                None => mirror
+                    .backing
+                    .write(byte, &bytes[at as usize..(at + chunk) as usize]),
             }
             at += chunk;
         }
@@ -287,7 +473,9 @@ impl WeightStore {
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         self.materialize_range(&mut mirror, queue, first, first + bytes);
         self.flush_range(&mut mirror, queue, first, first + bytes);
-        mirror.bytes[first as usize..(first + bytes) as usize].to_vec()
+        let mut read = vec![0u8; bytes as usize];
+        mirror.backing.read(first, &mut read);
+        read
     }
 
     pub(crate) fn ensure(&self, queue: &Queue, pages: &[u32]) -> Vec<SubmissionIndex> {
@@ -365,8 +553,11 @@ impl WeightStore {
             if let Some(batch) = batch {
                 let mut bytes = Vec::with_capacity(batch.len() * page_bytes() as usize);
                 for (page, _) in batch {
-                    let start = *page as usize * page_bytes() as usize;
-                    bytes.extend_from_slice(&mirror.bytes[start..start + page_bytes() as usize]);
+                    let start = bytes.len();
+                    bytes.resize(start + page_bytes() as usize, 0);
+                    mirror
+                        .backing
+                        .read(u64::from(*page) * page_bytes(), &mut bytes[start..]);
                 }
                 self.upload_buffer().write_at(queue, 0, &bytes);
                 for (at, (_, slot)) in batch.iter().enumerate() {
@@ -586,8 +777,8 @@ impl WeightStore {
             let index = submission.submit(queue);
             let read = staging.buffer().read(queue, index, bytes);
             for (at, (page, _)) in batch.iter().enumerate() {
-                let start = *page as usize * page_bytes() as usize;
-                mirror.bytes[start..start + page_bytes() as usize].copy_from_slice(
+                mirror.backing.write(
+                    u64::from(*page) * page_bytes(),
                     &read[at * page_bytes() as usize..(at + 1) * page_bytes() as usize],
                 );
             }
@@ -610,20 +801,27 @@ impl WeightStore {
         }
     }
 
-    pub(crate) fn pour(&self, queue: &Queue, bytes: &[u8]) {
-        self.bounds(0, bytes.len() as u64);
+    pub(crate) fn load(
+        &self,
+        queue: &Queue,
+        weights: &Region,
+        state: &Region,
+        source: &impl crate::checkpoint::Source,
+    ) {
         let Some(mirror) = &self.mirror else {
+            let image = source.image(weights, state, self.words);
             self.store
                 .buffer()
-                .write_at(queue, self.store.offset(), bytes);
+                .write_at(queue, self.store.offset(), &image);
             return;
         };
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         self.materialize_all(&mut mirror, queue);
         mirror.vacuum();
-        let copy = bytes.len().min(mirror.bytes.len());
-        mirror.bytes[..copy].copy_from_slice(&bytes[..copy]);
-        mirror.bytes[copy..].fill(0);
+        source.pour(weights, state, self.words, &mut |at, bytes| {
+            self.bounds(at / WORD_BYTES, bytes.len() as u64);
+            mirror.backing.write(at, bytes);
+        });
         self.reload(queue, &mut mirror);
     }
 
@@ -672,8 +870,10 @@ impl WeightStore {
             return self.read_device(queue, self.store.offset(), self.words * WORD_BYTES);
         };
         self.flush(queue);
-        let mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
-        mirror.bytes[..(self.words * WORD_BYTES) as usize].to_vec()
+        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut image = vec![0u8; (self.words * WORD_BYTES) as usize];
+        mirror.backing.read(0, &mut image);
+        image
     }
 
     fn reload(&self, queue: &Queue, mirror: &mut Mirror) {

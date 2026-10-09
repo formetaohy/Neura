@@ -72,16 +72,28 @@ impl Weights {
         self.store.readback_transfers()
     }
 
+    pub fn host_bytes(&self) -> u64 {
+        self.store.host_bytes()
+    }
+
+    pub fn spill_file(&self) -> Option<std::path::PathBuf> {
+        self.store.spill_file()
+    }
+
+    pub fn spill_read_bytes(&self) -> u64 {
+        self.store.spill_read_bytes()
+    }
+
+    pub fn spill_write_bytes(&self) -> u64 {
+        self.store.spill_write_bytes()
+    }
+
     pub(crate) fn region(&self) -> &Region {
         &self.weights
     }
 
     pub(crate) fn state(&self) -> &Region {
         &self.state
-    }
-
-    pub(crate) fn words(&self) -> u64 {
-        self.store.words()
     }
 
     pub(crate) fn store(&self) -> &Arc<WeightStore> {

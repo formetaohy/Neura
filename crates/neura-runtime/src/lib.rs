@@ -6,7 +6,7 @@ mod program;
 mod runtime;
 mod store;
 
-pub use checkpoint::Checkpoint;
+pub use checkpoint::{Checkpoint, CheckpointFile, CheckpointTensor};
 pub use neura_abi::Placement;
 pub use neura_gpu::{
     ArtifactCache, Backends, Capability, CooperativeMatrix, Device, GpuBuffer, GpuContext,
