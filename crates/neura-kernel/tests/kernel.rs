@@ -23,8 +23,8 @@ fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
         .collect()
 }
 use neura_kernel::{
-    BINDINGS_OF_AUTHORED, BINDINGS_OF_PAGES, BINDINGS_WITHOUT_HEAP, Banks, Kernel, binding_count,
-    bindings,
+    BINDINGS_OF_AUTHORED, BINDINGS_OF_PAGES, BINDINGS_WITHOUT_HEAP, Banks, Kernel, KernelBinding,
+    binding_count, bindings,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
@@ -336,6 +336,84 @@ fn every_program_binds_the_storage_buffers_its_features_need() {
                     usize::from(authored) * BINDINGS_OF_AUTHORED as usize,
                 );
             }
+        }
+    }
+}
+
+fn msl_parameter(binding: &KernelBinding) -> String {
+    let pointee = match binding.element {
+        "AtomicU32" => "atomic_uint",
+        "f32" => "float",
+        "u32" => "uint",
+        "i32" => "int",
+        "f16" => "half",
+        record => record,
+    };
+    let qualifier = if binding.kind.writable() {
+        "device"
+    } else {
+        "device const"
+    };
+    format!(
+        "{qualifier} {pointee}* d_{} [[buffer({})]],",
+        binding.name, binding.binding,
+    )
+}
+
+fn buffers_declared_by_value(text: &str) -> Vec<String> {
+    let mut bound = Vec::new();
+    for qualifier in ["device const ", "device ", "threadgroup "] {
+        for (at, _) in text.match_indices(qualifier) {
+            let rest = &text[at + qualifier.len()..];
+            let end = rest.find([',', ')', ';', '{', '\n']).unwrap_or(rest.len());
+            let declaration = rest[..end].trim();
+            if !declaration.contains('*') && !declaration.ends_with(']') {
+                bound.push(format!("{qualifier}{declaration}"));
+            }
+        }
+    }
+    bound.sort();
+    bound.dedup();
+    bound
+}
+
+#[test]
+fn a_metal_program_binds_every_buffer_it_addresses_by_address() {
+    for (authored, paged) in [(false, false), (true, true)] {
+        for banks in [Banks::SINGLE, Banks::of(3, 10)] {
+            let profile = profiles()[0];
+            let geometry = Geometry::of(
+                profile.workgroup(),
+                profile.shared_bytes(),
+                &walked(profile),
+                &[],
+            );
+            let program = Kernel::assemble(
+                &[Kind::Matmul],
+                &[Element::Single],
+                geometry,
+                authored,
+                banks,
+                paged,
+            )
+            .program();
+            let ShaderTranslation::Msl { source, .. } = program.translate(Backend::Metal) else {
+                panic!("Metal requires MSL");
+            };
+            for binding in bindings(authored, banks, paged) {
+                let parameter = msl_parameter(&binding);
+                assert!(
+                    source.contains(&format!("    {parameter}")),
+                    "the MSL of a program declares {} as something other than {parameter}",
+                    binding.name,
+                );
+            }
+            let by_value = buffers_declared_by_value(&source);
+            assert!(
+                by_value.is_empty(),
+                "the MSL of a program binds {} by value instead of by address",
+                by_value.join(", "),
+            );
         }
     }
 }

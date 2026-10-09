@@ -122,13 +122,13 @@ impl<'m> Writer<'m> {
         match global.space {
             Space::Storage => {
                 let element = self.element_type(global.ty);
-                let pointee = self.pointer_type(element);
+                let pointee = self.pointee_type(element);
                 let qualifier = if global.access.writable() {
                     "device"
                 } else {
                     "device const"
                 };
-                format!("{qualifier} {pointee} {global_name}")
+                format!("{qualifier} {pointee}* {global_name}")
             }
             Space::WorkGroup => {
                 let element = match self.module.ty(global.ty) {
@@ -139,14 +139,14 @@ impl<'m> Writer<'m> {
                         crate::element_name(self.module.ty(global.ty))
                     ),
                 };
-                let pointee = self.pointer_type(element);
-                format!("threadgroup {pointee} {global_name}")
+                let pointee = self.pointee_type(element);
+                format!("threadgroup {pointee}* {global_name}")
             }
             Space::Function => panic!("a device module global lives in function memory"),
         }
     }
 
-    fn pointer_type(&self, ty: TypeId) -> String {
+    fn pointee_type(&self, ty: TypeId) -> String {
         match self.module.ty(ty) {
             Type::Atomic(scalar) => format!("atomic_{}", scalar_name(*scalar)),
             other => self.value_type_of(other),
@@ -313,7 +313,7 @@ impl<'m> Writer<'m> {
                 } => (*element, *count),
                 _ => panic!("an MSL workgroup variable is not an array"),
             };
-            let declared_type = self.pointer_type(element);
+            let declared_type = self.pointee_type(element);
             self.out.line(format!(
                 "threadgroup {declared_type} {}[{count}];",
                 symbol(&declared.name)
