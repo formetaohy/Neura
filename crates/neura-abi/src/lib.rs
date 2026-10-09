@@ -16,9 +16,10 @@ pub use noise::Distribution;
 pub use page::{NO_PAGE, PAGE_MASK, PAGE_SHIFT, PAGE_WORDS, pages_of};
 pub use placement::Placement;
 pub use record::{
-    FieldLayout, FieldType, MEASURE, MeasureFields, MeasureRecord, PATCH, PatchFields, PatchRecord,
-    PlacementFields, PlacementRecord, RECORDS, RecordLayout, SegmentFields, SegmentRecord,
-    StepFields, StepRecord, TASK, TaskFields, TaskRecord, VALUE, ValueFields, ValueRecord,
+    FieldLayout, FieldType, MEASURE, MeasureFields, MeasureRecord, PATCH, PLACEMENT, PatchFields,
+    PatchRecord, PlacementFields, PlacementRecord, RECORDS, RecordLayout, SegmentFields,
+    SegmentRecord, StepFields, StepRecord, TASK, TaskFields, TaskRecord, VALUE, ValueFields,
+    ValueRecord,
 };
 pub use refusal::{Refusal, TENSOR};
 pub use span::{measure, split};

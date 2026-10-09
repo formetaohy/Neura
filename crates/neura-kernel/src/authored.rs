@@ -31,7 +31,23 @@ mod device {
 
     fn walked_extent(slot: u32, bound: u32) -> u32 {
         let free = slot != NO_SLOT;
-        return select(bound, extents[select(0u32, slot, free)], free);
+        return select(
+            bound,
+            tables[EXTENTS_FIRST + select(0u32, slot, free)],
+            free,
+        );
+    }
+
+    fn measure_word(measure: u32, field: u32) -> u32 {
+        return tables[MEASURES_FIRST + measure * MEASURE_WORDS + field];
+    }
+
+    fn patch_word(patch: u32, field: u32) -> u32 {
+        return tables[PATCHES_FIRST + patch * PATCH_WORDS + field];
+    }
+
+    fn patch_list_word(index: u32) -> u32 {
+        return tables[PATCH_LIST_FIRST + index];
     }
 
     fn bounds_of(value: Value) -> uvec4 {
@@ -81,8 +97,12 @@ mod device {
     }
 
     fn measure_total(measure: u32) -> u32 {
-        let record = measures[measure];
-        return base_span(record.kind, record.value, record.rows, record.columns);
+        return base_span(
+            measure_word(measure, MEASURE_KIND),
+            measure_word(measure, MEASURE_VALUE),
+            measure_word(measure, MEASURE_ROWS),
+            measure_word(measure, MEASURE_COLUMNS),
+        );
     }
 
     fn value_dims(value: Value) -> uvec4 {
@@ -104,8 +124,7 @@ mod device {
 
     fn walked_total(task: Task) -> u32 {
         if task.split == split::PLANE {
-            let record = measures[task.measure];
-            let dims = value_dims(values[record.value]);
+            let dims = value_dims(values[measure_word(task.measure, MEASURE_VALUE)]);
             if task.plane >= dims.x * dims.y || task.plane >= task.planes {
                 return 0u32;
             }
@@ -187,8 +206,11 @@ mod device {
         if task.plane >= segments {
             return;
         }
-        let tiles = measures[task.measure];
-        let column_blocks = ceil_div(value_dims(values[tiles.value]).w, tiles.columns);
+        let measured = measure_word(task.measure, MEASURE_VALUE);
+        let column_blocks = ceil_div(
+            value_dims(values[measured]).w,
+            measure_word(task.measure, MEASURE_COLUMNS),
+        );
         let offsets = values[task.segment];
         let start = whole_index(
             fetch(offsets, task.plane),
@@ -202,7 +224,7 @@ mod device {
             refusal::TENSOR,
             refusal::EXTENT,
         );
-        let row = (task.index / column_blocks) * tiles.rows;
+        let row = (task.index / column_blocks) * measure_word(task.measure, MEASURE_ROWS);
         if row < end - start {
             tasks[id].keys = end - start - row;
             tasks[id].count = 1u32;
@@ -243,9 +265,16 @@ mod device {
     }
 
     fn patch_extents(patch: u32, lid: u32) {
-        let record = patches[patch];
-        let author = values[record.count];
-        let declared = extents[patch_list[record.slots]];
+        let count = patch_word(patch, PATCH_COUNT);
+        let slots_first = patch_word(patch, PATCH_SLOTS);
+        let slots_count = patch_word(patch, PATCH_SLOTS_COUNT);
+        let segment = patch_word(patch, PATCH_SEGMENT);
+        let values_first = patch_word(patch, PATCH_VALUES);
+        let values_count = patch_word(patch, PATCH_VALUES_COUNT);
+        let tasks_first = patch_word(patch, PATCH_TASKS);
+        let tasks_count = patch_word(patch, PATCH_TASKS_COUNT);
+        let author = values[count];
+        let declared = tables[EXTENTS_FIRST + patch_list_word(slots_first)];
         storage_barrier();
         let live = whole_index(
             fetch(author, 0u32),
@@ -253,31 +282,31 @@ mod device {
             refusal::TENSOR,
             refusal::EXTENT,
         );
-        for step in stride(lid, record.slots_count, WORKGROUP_SIZE) {
-            let slot = patch_list[record.slots + step];
-            if live > extents[slot] {
+        for step in stride(lid, slots_count, WORKGROUP_SIZE) {
+            let slot = patch_list_word(slots_first + step);
+            if live > tables[EXTENTS_FIRST + slot] {
                 refuse(refusal::TENSOR, refusal::EXTENT, 0u32);
             }
-            extents[slot] = live;
+            tables[EXTENTS_FIRST + slot] = live;
         }
         storage_barrier();
-        for step in stride(lid, record.values_count, WORKGROUP_SIZE) {
-            let id = patch_list[record.values + step];
+        for step in stride(lid, values_count, WORKGROUP_SIZE) {
+            let id = patch_list_word(values_first + step);
             let value = values[id];
             values[id].dims = value_dims(value);
             values[id].strides = value_strides(value);
         }
         storage_barrier();
         let mut segments = 0u32;
-        if record.segment != NO_VALUE {
-            segments = live_segments(values[record.segment], live);
+        if segment != NO_VALUE {
+            segments = live_segments(values[segment], live);
         }
-        for step in stride(lid, record.tasks_count, WORKGROUP_SIZE) {
-            let id = patch_list[record.tasks + step];
+        for step in stride(lid, tasks_count, WORKGROUP_SIZE) {
+            let id = patch_list_word(tasks_first + step);
             let task = tasks[id];
-            let owns_keys = record.segment != NO_VALUE && task.segment == record.segment;
-            let owns_tokens = record.segment != NO_VALUE && task.queries == record.segment;
-            let owns_grid = record.segment != NO_VALUE && task.grid == record.segment;
+            let owns_keys = segment != NO_VALUE && task.segment == segment;
+            let owns_tokens = segment != NO_VALUE && task.queries == segment;
+            let owns_grid = segment != NO_VALUE && task.grid == segment;
             if task.split == split::SEGMENT {
                 if owns_keys {
                     patch_segment(task, id, segments, live);

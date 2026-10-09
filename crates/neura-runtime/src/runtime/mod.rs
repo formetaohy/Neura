@@ -556,7 +556,8 @@ impl Runtime {
         );
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
-        self.assert_storage_bindings(banks, authored, paged);
+        let tables = cache::tables(plan);
+        self.assert_storage_bindings(banks, paged);
         self.artifacts.kernel(
             cache::KernelIdentity {
                 kinds: kinds.clone(),
@@ -565,13 +566,14 @@ impl Runtime {
                 authored,
                 banks,
                 paged,
+                tables,
             },
-            || Kernel::assemble(&kinds, &elements, geometry, authored, banks, paged),
+            || Kernel::assemble(&kinds, &elements, geometry, authored, banks, paged, tables),
         )
     }
 
-    fn assert_storage_bindings(&self, banks: Banks, authored: bool, paged: bool) {
-        let count = binding_count(banks, authored, paged);
+    fn assert_storage_bindings(&self, banks: Banks, paged: bool) {
+        let count = binding_count(banks, paged);
         let slots = self.context.limits().max_storage_buffers_per_shader_stage;
         if count <= slots {
             return;
@@ -588,12 +590,6 @@ impl Runtime {
         ];
         if paged {
             parts.push("the weight page table".to_owned());
-        }
-        if authored {
-            parts.push(format!(
-                "{} tables of the device-authored walks",
-                neura_kernel::BINDINGS_OF_AUTHORED,
-            ));
         }
         panic!(
             "this graph binds {count} storage buffers where this device binds {slots}: {}; raise heap_bank_bytes so the heap spans fewer banks, keep the weights resident, bind fixed lengths instead of device counts, or run on a device that binds {count} storage buffers",
@@ -844,8 +840,8 @@ impl Runtime {
         if let Some(extents) = program.cached_extents() {
             return extents;
         }
-        let buffer = program.extents_buffer();
-        let bytes = buffer.size();
+        let buffer = program.tables_buffer();
+        let bytes = program.slot_count() as u64 * WORD_BYTES;
         let staging = Recycled::claim(
             &self.pool,
             "neura extents",
@@ -853,7 +849,7 @@ impl Runtime {
             BufferUsages::COPY_DST | BufferUsages::MAP_READ,
         );
         let mut submission = Submission::new(self.context.device(), "neura extents");
-        submission.copy(buffer, 0, staging.buffer(), 0, bytes);
+        submission.copy(buffer, program.extents_offset(), staging.buffer(), 0, bytes);
         let submission = submission.submit(self.context.queue());
         let words = staging
             .buffer()

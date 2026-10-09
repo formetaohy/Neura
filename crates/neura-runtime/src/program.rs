@@ -1,4 +1,4 @@
-use crate::cache::Resident;
+use crate::cache::{self, Resident};
 use crate::heap::Allocation;
 use crate::pool::Recycled;
 use crate::store::WeightStore;
@@ -9,7 +9,7 @@ use neura_gpu::{
     SubmissionIndex,
 };
 use neura_graph::{GraphStamp, Revision, Value};
-use neura_kernel::{HEAP, TASKS, VALUES};
+use neura_kernel::{HEAP, TASKS, Tables, VALUES};
 use neura_plan::{Encoding, Plan, Region, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
@@ -113,15 +113,13 @@ impl Weights {
 
 pub struct Program {
     pub(crate) resident: Arc<Resident>,
-    extents: Option<Recycled>,
+    tables: Tables,
     cached: Mutex<Option<Vec<u32>>>,
     pub(crate) state: Recycled,
     pub(crate) group: BindGroup,
     pub(crate) weights: Weights,
-    placement: Recycled,
+    table_buffer: Recycled,
     segments: Recycled,
-    patches: Option<Recycled>,
-    patch_list: Option<Recycled>,
     revision: Revision,
     tasks: Recycled,
     values: Recycled,
@@ -341,11 +339,12 @@ impl Program {
         revision: Revision,
     ) -> Self {
         let pool = resident.pool();
-        let placement = Recycled::claim(
+        let tables = cache::tables(&plan);
+        let table_buffer = Recycled::claim(
             pool,
-            "neura placement",
-            size_of::<PlacementRecord>() as u64,
-            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            "neura tables",
+            tables.bytes().max(WORD_BYTES),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         );
         let queue = context.queue();
         let state_buffer = Recycled::claim(
@@ -360,22 +359,6 @@ impl Program {
             (plan.task_count() as u64 * size_of::<SegmentRecord>() as u64).max(4),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
-        let patches = plan.carries_authored().then(|| {
-            Recycled::claim(
-                pool,
-                "neura patches",
-                (plan.patches().len() as u64 * size_of::<neura_abi::PatchRecord>() as u64).max(4),
-                BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            )
-        });
-        let patch_list = plan.carries_authored().then(|| {
-            Recycled::claim(
-                pool,
-                "neura patch list",
-                (plan.patch_list().len() as u64 * WORD_BYTES).max(4),
-                BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            )
-        });
         let tensors = Tensors {
             active: Some(tensors),
             retired: Vec::new(),
@@ -394,8 +377,9 @@ impl Program {
                     &quantum.scale.to_ne_bytes(),
                 );
             }
-            placement.buffer().write(
+            table_buffer.buffer().write_at(
                 queue,
+                tables.placement() as u64 * WORD_BYTES,
                 bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
                     tensors: u32::try_from(arena.word()).unwrap_or_else(|_| {
                         panic!("the tensors of a program start beyond the device address space")
@@ -431,26 +415,29 @@ impl Program {
                 bound_encoding.wave_tasks(),
             )),
         );
-        if let (Some(patches), Some(patch_list)) = (patches.as_ref(), patch_list.as_ref()) {
-            patches
-                .buffer()
-                .write(queue, bytemuck::cast_slice(bound_encoding.patches()));
-            patch_list
-                .buffer()
-                .write(queue, bytemuck::cast_slice(bound_encoding.patch_list()));
+        if !plan.measures().is_empty() {
+            table_buffer.buffer().write_at(
+                queue,
+                tables.measures_first() as u64 * WORD_BYTES,
+                bytemuck::cast_slice(plan.measures()),
+            );
         }
-        let extents = plan.carries_authored().then(|| {
-            Recycled::claim(
-                pool,
-                "neura extents",
-                (plan.slot_bounds().len() as u64 * WORD_BYTES).max(WORD_BYTES),
-                BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            )
-        });
-        if let Some(extents) = &extents {
-            extents
-                .buffer()
-                .write(queue, bytemuck::cast_slice(&plan.host_extents()));
+        table_buffer.buffer().write_at(
+            queue,
+            tables.patches_first() as u64 * WORD_BYTES,
+            bytemuck::cast_slice(bound_encoding.patches()),
+        );
+        table_buffer.buffer().write_at(
+            queue,
+            tables.list_first() as u64 * WORD_BYTES,
+            bytemuck::cast_slice(bound_encoding.patch_list()),
+        );
+        if plan.carries_authored() {
+            table_buffer.buffer().write_at(
+                queue,
+                tables.extents() as u64 * WORD_BYTES,
+                bytemuck::cast_slice(&plan.host_extents()),
+            );
         }
         let heap = arena.heap();
         let banks = heap.banks();
@@ -513,54 +500,29 @@ impl Program {
                     .binding(0, resident.steps.buffer().size()),
             },
             Binding {
-                index: neura_kernel::placement(banks, paged),
-                buffer: placement.buffer().binding(0, placement.buffer().size()),
-            },
-            Binding {
                 index: neura_kernel::segments(banks, paged),
                 buffer: segments.buffer().binding(0, segments.buffer().size()),
             },
+            Binding {
+                index: neura_kernel::tables(banks, paged),
+                buffer: table_buffer
+                    .buffer()
+                    .binding(0, table_buffer.buffer().size()),
+            },
         ]);
-        if let (Some(extents), Some(measures), Some(patches), Some(patch_list)) = (
-            extents.as_ref(),
-            resident.measures.as_ref(),
-            patches.as_ref(),
-            patch_list.as_ref(),
-        ) {
-            bindings.extend([
-                Binding {
-                    index: neura_kernel::extents(banks, paged),
-                    buffer: extents.buffer().binding(0, extents.buffer().size()),
-                },
-                Binding {
-                    index: neura_kernel::measures(banks, paged),
-                    buffer: measures.buffer().binding(0, measures.buffer().size()),
-                },
-                Binding {
-                    index: neura_kernel::patches(banks, paged),
-                    buffer: patches.buffer().binding(0, patches.buffer().size()),
-                },
-                Binding {
-                    index: neura_kernel::patch_list(banks, paged),
-                    buffer: patch_list.buffer().binding(0, patch_list.buffer().size()),
-                },
-            ]);
-        }
         let group = resident.kernel.bind_group(&bindings);
         let bound = Bound::of(&plan);
         let encoding = (!plan.awaits_a_binding()).then(|| plan.bound_encoding());
         Self {
             resident,
-            extents,
+            tables,
             cached: Mutex::new(None),
             group,
             tensors: Mutex::new(tensors),
             weights,
             state: state_buffer,
-            placement,
+            table_buffer,
             segments,
-            patches,
-            patch_list,
             revision,
             tasks,
             values,
@@ -638,11 +600,12 @@ impl Program {
         self.plan.slot_bounds().len()
     }
 
-    pub(crate) fn extents_buffer(&self) -> &GpuBuffer {
-        self.extents
-            .as_ref()
-            .expect("a program of a device authored extent holds the lengths it walks")
-            .buffer()
+    pub(crate) fn tables_buffer(&self) -> &GpuBuffer {
+        self.table_buffer.buffer()
+    }
+
+    pub(crate) fn extents_offset(&self) -> u64 {
+        self.tables.extents() as u64 * WORD_BYTES
     }
 
     pub(crate) fn cached_extents(&self) -> Option<Vec<u32>> {
@@ -654,12 +617,12 @@ impl Program {
     }
 
     pub(crate) fn write_extents(&self, queue: &Queue) {
-        if self.extents.is_none() {
+        if !self.carries_authored() {
             return;
         }
         let extents = self.host_extents();
-        self.extents_buffer()
-            .write(queue, bytemuck::cast_slice(&extents));
+        self.tables_buffer()
+            .write_at(queue, self.extents_offset(), bytemuck::cast_slice(&extents));
         self.extents_cache().take();
     }
 
@@ -755,8 +718,9 @@ impl Program {
                 &quantum.scale.to_ne_bytes(),
             );
         }
-        self.placement.buffer().write(
+        self.tables_buffer().write_at(
             queue,
+            self.tables.placement() as u64 * WORD_BYTES,
             bytemuck::bytes_of(&PlacementRecord::of(PlacementFields {
                 tensors: u32::try_from(tensors.held().word()).unwrap_or_else(|_| {
                     panic!("the tensors of a program start beyond the device address space")
@@ -836,14 +800,19 @@ impl Program {
                 encoding.wave_tasks(),
             )),
         );
-        if let (Some(patches), Some(patch_list)) = (self.patches.as_ref(), self.patch_list.as_ref())
-        {
-            patches
-                .buffer()
-                .write(queue, bytemuck::cast_slice(encoding.patches()));
-            patch_list
-                .buffer()
-                .write(queue, bytemuck::cast_slice(encoding.patch_list()));
+        if !encoding.patches().is_empty() {
+            self.tables_buffer().write_at(
+                queue,
+                self.tables.patches_first() as u64 * WORD_BYTES,
+                bytemuck::cast_slice(encoding.patches()),
+            );
+        }
+        if !encoding.patch_list().is_empty() {
+            self.tables_buffer().write_at(
+                queue,
+                self.tables.list_first() as u64 * WORD_BYTES,
+                bytemuck::cast_slice(encoding.patch_list()),
+            );
         }
     }
 
@@ -946,7 +915,7 @@ impl Program {
             + self.segments.buffer().size()
             + self.resident.steps.buffer().size()
             + self.state.buffer().size()
-            + self.placement.buffer().size()
+            + self.tables_buffer().size()
     }
 
     pub fn profile(&self) -> Profile {

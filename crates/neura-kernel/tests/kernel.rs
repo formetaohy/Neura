@@ -1,4 +1,4 @@
-use neura_abi::{Element, Kind, RECORDS, WORD_BYTES};
+use neura_abi::{Element, FieldType, Kind, RECORDS, RecordLayout, WORD_BYTES};
 use neura_pointwise::OPS;
 use neura_profile::{
     AttentionTile, Budget, CLAIM_BYTES, CooperativeMatrix, Geometry, MatmulStrategy, MatmulTile,
@@ -23,11 +23,15 @@ fn walked(profile: Profile) -> Vec<(u32, MatmulTile)> {
         .collect()
 }
 use neura_kernel::{
-    BINDINGS_OF_AUTHORED, BINDINGS_OF_PAGES, BINDINGS_WITHOUT_HEAP, Banks, Kernel, KernelBinding,
-    binding_count, bindings,
+    BINDINGS_OF_PAGES, BINDINGS_WITHOUT_HEAP, Banks, Kernel, KernelBinding, Tables, binding_count,
+    bindings,
 };
 use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
+
+fn layout() -> Tables {
+    Tables::of(6, 5, 2, 24)
+}
 
 fn all(profile: usize) -> &'static Kernel {
     static PROGRAMS: OnceLock<Vec<Kernel>> = OnceLock::new();
@@ -47,6 +51,7 @@ fn all(profile: usize) -> &'static Kernel {
                     false,
                     Banks::SINGLE,
                     false,
+                    layout(),
                 )
             })
             .collect()
@@ -67,6 +72,7 @@ fn selected(profile: Profile, kinds: &[Kind], elements: &[Element]) -> Kernel {
         false,
         Banks::SINGLE,
         false,
+        layout(),
     )
 }
 
@@ -115,6 +121,7 @@ fn a_paged_program_binds_the_page_table_it_translates_weights_through() {
         false,
         Banks::SINGLE,
         false,
+        layout(),
     );
     let paged = Kernel::assemble(
         &[Kind::Matmul],
@@ -123,6 +130,7 @@ fn a_paged_program_binds_the_page_table_it_translates_weights_through() {
         false,
         Banks::SINGLE,
         true,
+        layout(),
     );
     assert!(!plain.paged());
     assert!(paged.paged());
@@ -266,6 +274,7 @@ fn a_heap_of_many_banks_binds_and_addresses_every_bank() {
         false,
         banks,
         false,
+        layout(),
     );
     let expected = bindings(false, banks, false);
     assert_eq!(expected.len(), 2 + banks.count() as usize + 4);
@@ -298,13 +307,10 @@ fn every_program_binds_the_storage_buffers_its_features_need() {
         for authored in [false, true] {
             for paged in [false, true] {
                 let declared = bindings(authored, banks, paged);
-                let count = binding_count(banks, authored, paged);
+                let count = binding_count(banks, paged);
                 assert_eq!(
                     count,
-                    BINDINGS_WITHOUT_HEAP
-                        + banks.count()
-                        + u32::from(paged) * BINDINGS_OF_PAGES
-                        + u32::from(authored) * BINDINGS_OF_AUTHORED,
+                    BINDINGS_WITHOUT_HEAP + banks.count() + u32::from(paged) * BINDINGS_OF_PAGES,
                     "the program of {banks:?} banks, {authored} authored walks and {paged} page tables declares another storage budget",
                 );
                 assert_eq!(
@@ -325,19 +331,118 @@ fn every_program_binds_the_storage_buffers_its_features_need() {
                         .count(),
                     usize::from(paged),
                 );
+                let tables = declared
+                    .iter()
+                    .filter(|binding| binding.name == "tables")
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    tables.len(),
+                    1,
+                    "a program carries the device-authored walk in one buffer of tables",
+                );
+                assert_eq!(
+                    tables[0].kind,
+                    match authored {
+                        true => BindingKind::TableStorage,
+                        false => BindingKind::ReadOnlyStorage,
+                    },
+                    "a program writes the tables of an authored walk and reads the tables of a bound one",
+                );
                 assert_eq!(
                     declared
                         .iter()
                         .filter(|binding| matches!(
                             binding.name.as_str(),
-                            "extents" | "measures" | "patches" | "patch_list"
+                            "placement" | "extents" | "measures" | "patches" | "patch_list"
                         ))
                         .count(),
-                    usize::from(authored) * BINDINGS_OF_AUTHORED as usize,
+                    0,
+                    "every table of a plan stands in the one buffer of tables",
                 );
             }
         }
     }
+}
+
+#[test]
+fn the_tables_of_a_plan_lay_every_record_on_the_word_grid() {
+    let tables = Tables::of(6, 5, 2, 24);
+    let record = |name: &str| -> &'static RecordLayout {
+        RECORDS
+            .iter()
+            .find(|record| record.name == name)
+            .unwrap_or_else(|| panic!("the ABI declares a {name} record"))
+    };
+    let placement = record("Placement");
+    let measure = record("Measure");
+    let patch = record("Patch");
+    let words = |record: &RecordLayout| record.size / WORD_BYTES as u32;
+    assert_eq!(
+        tables.extents(),
+        words(placement),
+        "the one buffer of tables opens on the placement record",
+    );
+    assert_eq!(tables.measures_first(), tables.extents() + 6);
+    assert_eq!(
+        tables.patches_first(),
+        tables.measures_first() + 5 * words(measure),
+    );
+    assert_eq!(
+        tables.list_first(),
+        tables.patches_first() + 2 * words(patch)
+    );
+    assert_eq!(tables.words(), tables.list_first() + 24);
+    assert_eq!(tables.bytes(), u64::from(tables.words()) * WORD_BYTES);
+    assert_eq!(words(measure), 4, "a measure record spans four words");
+    assert_eq!(words(patch), 8, "a patch record spans eight words");
+    let fields = |record: &RecordLayout, names: &[&str]| {
+        assert_eq!(
+            record.fields.len(),
+            names.len(),
+            "a {} record holds {} fields",
+            record.name,
+            names.len(),
+        );
+        for (at, field) in record.fields.iter().enumerate() {
+            assert_eq!(field.name, names[at]);
+            assert_eq!(field.ty, FieldType::U32);
+            assert_eq!(
+                field.offset,
+                at as u32 * WORD_BYTES as u32,
+                "a device reads the field {} of a {} record at the word the host writes it",
+                field.name,
+                record.name,
+            );
+        }
+    };
+    fields(measure, &["kind", "value", "rows", "columns"]);
+    fields(
+        patch,
+        &[
+            "slots",
+            "slots_count",
+            "count",
+            "segment",
+            "values",
+            "values_count",
+            "tasks",
+            "tasks_count",
+        ],
+    );
+}
+
+#[test]
+fn the_baseline_of_eight_storage_buffers_holds_every_table_a_plan_carries() {
+    assert_eq!(
+        binding_count(Banks::SINGLE, false),
+        7,
+        "a program of one bank binds its records and the one buffer of tables they ride in",
+    );
+    assert_eq!(
+        binding_count(Banks::SINGLE, true),
+        8,
+        "a program of one bank that pages its weights binds the page table beside them, and a walk the device counts still fits inside the tables",
+    );
 }
 
 fn msl_parameter(binding: &KernelBinding) -> String {
@@ -395,6 +500,7 @@ fn a_metal_program_binds_every_buffer_it_addresses_by_address() {
                 authored,
                 banks,
                 paged,
+                layout(),
             )
             .program();
             let ShaderTranslation::Msl { source, .. } = program.translate(Backend::Metal) else {
@@ -697,6 +803,7 @@ fn a_cooperative_device_program_declares_the_half_panels_its_tiles_stage() {
             false,
             Banks::SINGLE,
             false,
+            layout(),
         );
         let program = kernel.program();
         assert_eq!(
@@ -738,6 +845,7 @@ fn a_device_program_carries_only_the_tiles_its_plan_walks() {
         false,
         Banks::SINGLE,
         false,
+        layout(),
     );
     let program = kernel.program();
     let names = functions(&program);
@@ -805,6 +913,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         false,
         Banks::SINGLE,
         false,
+        layout(),
     );
     let used = workgroup_bytes(&kernel.program());
     assert_eq!(
@@ -848,6 +957,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         false,
         Banks::SINGLE,
         false,
+        layout(),
     );
     let program = kernel.program();
     let names = functions(&program);

@@ -3,15 +3,19 @@ mod element;
 mod pointwise;
 mod scheduler;
 mod substrate;
+mod tables;
 mod task;
 
 use neura_abi::{
-    DeviceModule, Distribution, Element, FP4_BLOCK, INT4_BLOCK, Kind, NO_VALUE, RECORDS, Refusal,
-    TENSOR, control, measure, refusal, split, store, strategy,
+    DeviceModule, Distribution, Element, FP4_BLOCK, INT4_BLOCK, Kind, MEASURE, NO_VALUE, PATCH,
+    PLACEMENT, RECORDS, Refusal, TENSOR, control, measure, refusal, split, store, strategy,
 };
 use neura_compiler::{Compiler, ast};
 use neura_profile::{CLAIM_BYTES, Geometry};
 use neura_shader::{BindingKind, BindingSpec, ComputeProgram, ShaderBinding};
+use tables::{MEASURE_WORDS, PATCH_WORDS, field_word};
+
+pub use tables::Tables;
 
 pub const TASKS: u32 = 0;
 pub const VALUES: u32 = 1;
@@ -50,13 +54,9 @@ impl Banks {
 
 pub const BINDINGS_WITHOUT_HEAP: u32 = 6;
 pub const BINDINGS_OF_PAGES: u32 = 1;
-pub const BINDINGS_OF_AUTHORED: u32 = 4;
 
-pub const fn binding_count(banks: Banks, authored: bool, paged: bool) -> u32 {
-    BINDINGS_WITHOUT_HEAP
-        + banks.count()
-        + paged as u32 * BINDINGS_OF_PAGES
-        + authored as u32 * BINDINGS_OF_AUTHORED
+pub const fn binding_count(banks: Banks, paged: bool) -> u32 {
+    BINDINGS_WITHOUT_HEAP + banks.count() + paged as u32 * BINDINGS_OF_PAGES
 }
 
 pub const fn pages(banks: Banks) -> u32 {
@@ -71,42 +71,20 @@ pub const fn steps(banks: Banks, paged: bool) -> u32 {
     state(banks, paged) + 1
 }
 
-pub const fn placement(banks: Banks, paged: bool) -> u32 {
+pub const fn segments(banks: Banks, paged: bool) -> u32 {
     steps(banks, paged) + 1
 }
 
-pub const fn segments(banks: Banks, paged: bool) -> u32 {
-    placement(banks, paged) + 1
-}
-
-pub const fn extents(banks: Banks, paged: bool) -> u32 {
+pub const fn tables(banks: Banks, paged: bool) -> u32 {
     segments(banks, paged) + 1
-}
-
-pub const fn measures(banks: Banks, paged: bool) -> u32 {
-    extents(banks, paged) + 1
-}
-
-pub const fn patches(banks: Banks, paged: bool) -> u32 {
-    measures(banks, paged) + 1
-}
-
-pub const fn patch_list(banks: Banks, paged: bool) -> u32 {
-    patches(banks, paged) + 1
 }
 
 pub const fn bank_ceiling(slots: u32) -> u32 {
     slots.saturating_sub(BINDINGS_WITHOUT_HEAP)
 }
 
-const _: () =
-    assert!(binding_count(Banks::SINGLE, false, false) == segments(Banks::SINGLE, false) + 1);
-const _: () =
-    assert!(binding_count(Banks::SINGLE, false, true) == segments(Banks::SINGLE, true) + 1);
-const _: () =
-    assert!(binding_count(Banks::SINGLE, true, false) == patch_list(Banks::SINGLE, false) + 1);
-const _: () =
-    assert!(binding_count(Banks::SINGLE, true, true) == patch_list(Banks::SINGLE, true) + 1);
+const _: () = assert!(binding_count(Banks::SINGLE, false) == tables(Banks::SINGLE, false) + 1);
+const _: () = assert!(binding_count(Banks::SINGLE, true) == tables(Banks::SINGLE, true) + 1);
 
 pub struct KernelBinding {
     pub binding: u32,
@@ -133,14 +111,14 @@ fn binding(
 }
 
 pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding> {
-    let tables = if authored {
+    let records = if authored {
         BindingKind::TableStorage
     } else {
         BindingKind::ReadOnlyStorage
     };
     let mut list = vec![
-        binding(TASKS, tables, "tasks", "Task", true),
-        binding(VALUES, tables, "values", "Value", true),
+        binding(TASKS, records, "tasks", "Task", true),
+        binding(VALUES, records, "values", "Value", true),
     ];
     for bank in 0..banks.count() {
         list.push(binding(
@@ -175,50 +153,20 @@ pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding>
         true,
     ));
     list.push(binding(
-        placement(banks, paged),
-        BindingKind::ReadOnlyStorage,
-        "placement",
-        "Placement",
-        false,
-    ));
-    list.push(binding(
         segments(banks, paged),
         BindingKind::ReadOnlyStorage,
         "segments",
         "Segment",
         true,
     ));
-    if authored {
-        list.push(binding(
-            extents(banks, paged),
-            BindingKind::ReadWriteStorage,
-            "extents",
-            "u32",
-            true,
-        ));
-        list.push(binding(
-            measures(banks, paged),
-            BindingKind::ReadOnlyStorage,
-            "measures",
-            "Measure",
-            true,
-        ));
-        list.push(binding(
-            patches(banks, paged),
-            BindingKind::ReadOnlyStorage,
-            "patches",
-            "Patch",
-            true,
-        ));
-        list.push(binding(
-            patch_list(banks, paged),
-            BindingKind::ReadOnlyStorage,
-            "patch_list",
-            "u32",
-            true,
-        ));
-    }
-    let slots = binding_count(banks, authored, paged);
+    list.push(binding(
+        tables(banks, paged),
+        records,
+        "tables",
+        "u32",
+        true,
+    ));
+    let slots = binding_count(banks, paged);
     assert_eq!(
         list.len() as u32,
         slots,
@@ -242,6 +190,7 @@ impl Kernel {
         authored: bool,
         banks: Banks,
         paged: bool,
+        tables: Tables,
     ) -> Self {
         assert!(
             !kinds.is_empty(),
@@ -275,6 +224,31 @@ impl Kernel {
         }
         compiler.constant("store::TENSORS", store::TENSORS);
         compiler.constant("store::WEIGHTS", store::WEIGHTS);
+        for (name, value) in [
+            ("PLACEMENT_FIRST", tables.placement()),
+            ("PLACEMENT_TENSORS", field_word(&PLACEMENT, "tensors")),
+            ("PLACEMENT_WEIGHTS", field_word(&PLACEMENT, "weights")),
+            ("EXTENTS_FIRST", tables.extents()),
+            ("MEASURES_FIRST", tables.measures_first()),
+            ("PATCHES_FIRST", tables.patches_first()),
+            ("PATCH_LIST_FIRST", tables.list_first()),
+            ("MEASURE_WORDS", MEASURE_WORDS),
+            ("PATCH_WORDS", PATCH_WORDS),
+            ("MEASURE_KIND", field_word(&MEASURE, "kind")),
+            ("MEASURE_VALUE", field_word(&MEASURE, "value")),
+            ("MEASURE_ROWS", field_word(&MEASURE, "rows")),
+            ("MEASURE_COLUMNS", field_word(&MEASURE, "columns")),
+            ("PATCH_SLOTS", field_word(&PATCH, "slots")),
+            ("PATCH_SLOTS_COUNT", field_word(&PATCH, "slots_count")),
+            ("PATCH_COUNT", field_word(&PATCH, "count")),
+            ("PATCH_SEGMENT", field_word(&PATCH, "segment")),
+            ("PATCH_VALUES", field_word(&PATCH, "values")),
+            ("PATCH_VALUES_COUNT", field_word(&PATCH, "values_count")),
+            ("PATCH_TASKS", field_word(&PATCH, "tasks")),
+            ("PATCH_TASKS_COUNT", field_word(&PATCH, "tasks_count")),
+        ] {
+            compiler.constant(name, value);
+        }
         for element in Element::ALL {
             compiler.constant(element.symbol(), element.code());
         }

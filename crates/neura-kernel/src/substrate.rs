@@ -183,8 +183,8 @@ mod device {
 
     fn base_of(value: Value) -> u32 {
         return select(
-            placement.weights,
-            placement.tensors,
+            tables[PLACEMENT_FIRST + PLACEMENT_WEIGHTS],
+            tables[PLACEMENT_FIRST + PLACEMENT_TENSORS],
             value.store == store::TENSORS,
         );
     }
@@ -194,18 +194,20 @@ mod device {
     }
 
     fn word_of_paged(value: Value, word: u32) -> u32 {
+        let weights = tables[PLACEMENT_FIRST + PLACEMENT_WEIGHTS];
+        let tensors = tables[PLACEMENT_FIRST + PLACEMENT_TENSORS];
         let mut address = value.base + word;
         if value.store == store::WEIGHTS {
             let page = address >> PAGE_SHIFT;
             let slot = pages[page];
             if slot == NO_PAGE {
                 refuse(refusal::TENSOR, refusal::PAGE, 0u32);
-                return placement.weights;
+                return weights;
             }
-            address = placement.weights + (slot << PAGE_SHIFT) + (address & PAGE_MASK);
+            address = weights + (slot << PAGE_SHIFT) + (address & PAGE_MASK);
             return address;
         }
-        return placement.tensors + address;
+        return tensors + address;
     }
 
     fn publish(value: Value, at: u32, data: f32) {

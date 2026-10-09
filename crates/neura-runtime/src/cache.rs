@@ -2,12 +2,12 @@ use crate::pool::{Pool, Recycled};
 use neura_abi::{Element, Kind, StepRecord};
 use neura_gpu::{BufferUsages, GpuContext, PipelineHandle, WARM_PROGRAMS};
 use neura_graph::GraphStamp;
-use neura_kernel::{Banks, Kernel};
+use neura_kernel::{Banks, Kernel, Tables};
 use neura_plan::{Plan, Product};
 use neura_profile::Geometry;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::mem::{size_of, size_of_val};
+use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -16,7 +16,6 @@ pub(crate) struct Resident {
     pub(crate) plan: Arc<Plan>,
     pub(crate) kernel: PipelineHandle,
     pub(crate) steps: Recycled,
-    pub(crate) measures: Option<Recycled>,
     pool: Arc<Pool>,
 }
 
@@ -49,30 +48,16 @@ impl Resident {
         let kernel = context.declare(kernel.program());
         let steps_bytes = (plan.steps().len() as u64).max(size_of::<StepRecord>() as u64);
         let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
-        let measures = plan.carries_authored().then(|| {
-            Recycled::claim(
-                pool,
-                "neura measures",
-                (size_of_val(plan.measures()) as u64).max(4),
-                storage,
-            )
-        });
         let resident = Self {
             signature,
             plan,
             kernel,
             steps: Recycled::claim(pool, "neura steps", steps_bytes, storage),
-            measures,
             pool: pool.clone(),
         };
         let queue = context.queue();
         if !resident.plan.steps().is_empty() {
             resident.steps.buffer().write(queue, resident.plan.steps());
-        }
-        if let Some(measures) = resident.measures.as_ref() {
-            measures
-                .buffer()
-                .write(queue, bytemuck::cast_slice(resident.plan.measures()));
         }
         Arc::new(resident)
     }
@@ -94,6 +79,7 @@ pub(crate) struct KernelIdentity {
     pub(crate) authored: bool,
     pub(crate) banks: Banks,
     pub(crate) paged: bool,
+    pub(crate) tables: Tables,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -301,6 +287,15 @@ fn keep_assembly(
     while assemblies.len() > ASSEMBLY_CEILING {
         assemblies.remove(0);
     }
+}
+
+pub(crate) fn tables(plan: &Plan) -> Tables {
+    Tables::of(
+        plan.slot_bounds().len() as u32,
+        plan.measures().len() as u32,
+        plan.patches().len() as u32,
+        plan.patch_list().len() as u32,
+    )
 }
 
 pub(crate) fn signature(plan: &Plan, profile: neura_profile::Profile, alignment: u64) -> Vec<u8> {

@@ -672,7 +672,7 @@ fn one_device_program_serves_every_store_of_its_model() {
 }
 
 #[test]
-fn a_device_that_binds_the_baseline_pages_its_weights_and_refuses_the_walks_it_cannot_bind() {
+fn a_device_that_binds_the_baseline_authors_its_walks_the_device_counts() {
     let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
@@ -681,6 +681,11 @@ fn a_device_that_binds_the_baseline_pages_its_weights_and_refuses_the_walks_it_c
         },
     })
     .expect("a device that binds the baseline bindings");
+    assert_eq!(
+        runtime.heap_banks(),
+        1,
+        "the heap of a device that binds the baseline stays in one bank",
+    );
     let plain = Graph::new();
     let (weight, _) = linear(&plain, 4, 4);
     let data = plain.input(Shape::matrix(2, 4), Element::Single);
@@ -696,57 +701,80 @@ fn a_device_that_binds_the_baseline_pages_its_weights_and_refuses_the_walks_it_c
         "a program of resident weights and fixed lengths runs on the baseline bindings",
     );
 
-    let authored = Graph::new();
-    let rows = authored.input(Shape::matrix(8, 1), Element::Single);
-    let count = authored.sum_axis(rows, 2);
-    let live = authored.trim(rows, 2, count);
-    authored.retain(live);
-    let weights = runtime.weights(&authored);
-    let message = refusal(|| {
-        let _ = runtime.compile(&authored, &weights);
-    });
-    assert!(
-        message.contains("11 storage buffers where this device binds 8")
-            && message.contains("6 buffers of its records")
-            && message.contains("4 tables of the device-authored walks"),
-        "a device-authored walk on the baseline bindings is refused with its budget: {message}",
+    let (resident, pages, held) = counted_layers(&runtime);
+    assert_eq!(
+        held, pages,
+        "a store without a weight budget holds all {pages} pages of the model",
     );
 
     let paged = Runtime::open(RuntimeRequest {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
-            readback_bytes: 1 << 16,
-            resident_weight_bytes: Some(2 << 14),
+            readback_bytes: 4 << 20,
+            resident_weight_bytes: Some(4 << 14),
             ..Default::default()
         },
     })
     .expect("a paging device that binds the baseline bindings");
-    let model = Graph::new();
-    let (weight, _) = linear(&model, 128, 128);
-    let data = model.input(Shape::matrix(128, 8), Element::Single);
-    let out = model.matmul(weight, data);
-    model.retain(out);
-    let weights = paged.weights(&model);
+    let (streamed, pages, held) = counted_layers(&paged);
     assert!(
-        weights.resident_pages() < weights.pages(),
-        "a store of {} pages keeps {} of them beside a budget of two",
-        weights.pages(),
-        weights.resident_pages(),
+        held < pages,
+        "a budget of four pages holds {held} of the {pages} pages a device-counted model carries",
     );
-    let program = paged.compile(&model, &weights);
-    let observations = random(128 * 8, 5);
-    paged.write(&program, data, &observations);
-    paged.run(&program);
-    let filter = paged.read(&program, weight);
-    assert_close(
-        &paged.read(&program, out),
-        &matmul_reference(&filter, &observations, 128, 128, 8),
-        1e-4,
+    assert_eq!(resident.len(), streamed.len());
+    for (at, (expected, observed)) in resident.iter().zip(&streamed).enumerate() {
+        assert!(
+            (expected - observed).abs() <= 1e-5,
+            "a store that pages its weights along a walk the device counts reached {observed} where the resident store reached {expected} at {at}",
+        );
+    }
+}
+
+fn counted_layers(runtime: &Runtime) -> (Vec<f32>, u32, u32) {
+    const TOKENS: u32 = 8;
+    const WIDTH: u32 = 128;
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, TOKENS, 1]), Element::Single);
+    let tokens = graph.input(Shape::of([1, 1, TOKENS, WIDTH]), Element::Single);
+    let first = graph.parameter(
+        Shape::matrix(WIDTH, WIDTH),
+        Init::Uniform {
+            low: -0.05,
+            high: 0.05,
+        },
+        Element::Single,
     );
+    let second = graph.parameter(
+        Shape::matrix(WIDTH, WIDTH),
+        Init::Uniform {
+            low: -0.05,
+            high: 0.05,
+        },
+        Element::Single,
+    );
+    let count = graph.sum_axis(probe, 2);
+    let live = graph.trim(tokens, 2, count);
+    let out = graph.matmul(graph.matmul(live, first), second);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let tokens_data = random(TOKENS * WIDTH, 5);
+    let first_data = random(WIDTH * WIDTH, 7);
+    let second_data = random(WIDTH * WIDTH, 11);
+    runtime.write(&program, probe, &[1.0; TOKENS as usize]);
+    runtime.write(&program, tokens, &tokens_data);
+    runtime.write(&program, first, &first_data);
+    runtime.write(&program, second, &second_data);
+    runtime.run(&program);
+    let observed = runtime.read(&program, out);
+    let hidden = matmul_reference(&tokens_data, &first_data, TOKENS, WIDTH, WIDTH);
+    let expected = matmul_reference(&hidden, &second_data, TOKENS, WIDTH, WIDTH);
+    assert_close(&observed, &expected, 1e-4);
+    (observed, weights.pages(), weights.resident_pages())
 }
 
 #[test]
-fn a_heap_of_many_banks_refuses_the_program_that_outgrows_the_device() {
+fn a_heap_of_many_banks_refuses_the_page_table_it_cannot_bind() {
     let device =
         GpuContext::open(&GpuRequest::default()).expect("a device of the adapter's bindings");
     let ceiling = device.limits().max_storage_buffers_per_shader_stage - 6;
@@ -784,20 +812,52 @@ fn a_heap_of_many_banks_refuses_the_program_that_outgrows_the_device() {
     let live = authored.trim(rows, 2, count);
     authored.retain(live);
     let weights = runtime.weights(&authored);
-    let message = refusal(|| {
-        let _ = runtime.compile(&authored, &weights);
-    });
+    let program = runtime.compile(&authored, &weights);
+    runtime.write(&program, rows, &[1.0; 8]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, live).len(),
+        8,
+        "a walk the device counts rides inside the records of a program that fills every bank",
+    );
+
+    let paged = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            readback_bytes: 4 << 20,
+            heap_bytes: u64::from(ceiling) * bank_bytes,
+            heap_bank_bytes: Some(bank_bytes),
+            resident_weight_bytes: Some(16 << 14),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .expect("a paging heap of every bank the device binds");
+    let model = Graph::new();
+    let (weight, _) = linear(&model, 512, 512);
+    let data = model.input(Shape::matrix(512, 512), Element::Single);
+    model.retain(model.matmul(data, weight));
+    let weights = paged.weights(&model);
+    assert!(
+        weights.resident_pages() < weights.pages(),
+        "a budget of sixteen pages holds {} of the {} pages the model carries",
+        weights.resident_pages(),
+        weights.pages(),
+    );
     let banks = match ceiling {
         1 => "1 heap bank".to_owned(),
         banks => format!("{banks} heap banks"),
     };
+    let message = refusal(|| {
+        let _ = paged.compile(&model, &weights);
+    });
     assert!(
         message.contains(&format!(
             "{} storage buffers where this device binds {}",
-            ceiling + 10,
+            ceiling + 7,
             ceiling + 6,
-        )) && message.contains(&banks),
-        "a heap of every bank the device binds is refused the tables of a device-authored walk: {message}",
+        )) && message.contains(&banks)
+            && message.contains("the weight page table"),
+        "a heap of every bank the device binds is refused the page table of a streamed store: {message}",
     );
 }
 
