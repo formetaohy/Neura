@@ -271,7 +271,7 @@ mod device {
         let output = values[task.out];
         let dims = output.dims;
         let elements = dims.x * dims.y * dims.z * dims.w;
-        let scale = task.param;
+        let scale = task.literal;
         for word in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
             let low = int8_bits(
                 convert_at(

@@ -43,7 +43,7 @@ impl<'g> Value<'g> {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct AttentionOptions<'g> {
-    pub scale: f32,
+    pub scale: Option<Value<'g>>,
     pub causal: bool,
     pub origin: Option<Value<'g>>,
     pub segments: Option<Value<'g>>,
@@ -95,7 +95,8 @@ pub struct TaskInfo {
     pub inputs: [u32; 6],
     pub origin: u32,
     pub slot: u32,
-    pub param: f32,
+    pub literal: f32,
+    pub knob: u32,
     pub window: Window,
     pub in_place: bool,
     pub axis: u32,
@@ -117,7 +118,8 @@ impl TaskInfo {
             inputs,
             origin: NO_VALUE,
             slot: 0,
-            param: 0.0,
+            literal: 0.0,
+            knob: NO_VALUE,
             window: Window::sliding([1, 1]),
             in_place: false,
             axis: 0,
@@ -695,6 +697,30 @@ impl<'g> Graph<'g> {
         )
     }
 
+    pub fn knob(&self, value: f32) -> Value<'g> {
+        self.hold(
+            None,
+            Shape::scalar(),
+            Residency::State,
+            Element::Single,
+            1.0,
+            Some(Init::Constant(value)),
+            false,
+        )
+    }
+
+    pub fn named_knob(&self, name: &str, value: f32) -> Value<'g> {
+        self.hold(
+            Some(name),
+            Shape::scalar(),
+            Residency::State,
+            Element::Single,
+            1.0,
+            Some(Init::Constant(value)),
+            false,
+        )
+    }
+
     pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
         assert!(
             !element.quantized(),
@@ -819,7 +845,7 @@ impl<'g> Graph<'g> {
     pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
         let out = self.fresh(shape, Element::Single, Residency::Derived, false);
         let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 6]);
-        task.param = value;
+        task.literal = value;
         self.push(task);
         out
     }

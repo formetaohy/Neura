@@ -89,7 +89,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     e: u32 => U32,
     f: u32 => U32,
     origin: u32 => U32,
-    param: f32 => F32,
+    literal: f32 => F32,
     prelude: u32 => U32,
     prelude_steps: u32 => U32,
     chain: u32 => U32,
@@ -119,6 +119,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     grid: u32 => U32,
     planned_first: u32 => U32,
     planned_count: u32 => U32,
+    knob: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

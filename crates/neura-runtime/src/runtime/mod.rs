@@ -989,5 +989,19 @@ fn refusal_message(word: u32) -> String {
                 kind.name(),
             ),
         },
+        Refusal::Knob => match kind {
+            Kind::Rope | Kind::RopeGrad => format!(
+                "the device refused the rotary base of the {} task: a base places every position on an angle only where it is finite and above one",
+                kind.name(),
+            ),
+            Kind::Attention
+            | Kind::AttentionQueryGrad
+            | Kind::AttentionKeyGrad
+            | Kind::AttentionValueGrad => format!(
+                "the device refused the attention scale of the {} task: a scale weighs every score of a row only where it is finite and nonzero",
+                kind.name(),
+            ),
+            _ => format!("the device refused the knob of the {} task", kind.name()),
+        },
     }
 }

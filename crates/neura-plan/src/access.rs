@@ -35,6 +35,7 @@ impl Reads for TaskInfo {
             .chain(self.chain.iter().map(|step| step.operand))
             .chain([self.segments])
             .chain([self.queries])
+            .chain([self.knob])
             .filter(|value| *value != NO_VALUE)
     }
 }

@@ -57,6 +57,18 @@ mod device {
         return at + keys * ((written - 1u32 - at) / keys);
     }
 
+    fn attention_scale(task: Task, width: u32) -> f32 {
+        if task.knob == NO_VALUE {
+            return 1.0 / sqrt(f32(width));
+        }
+        let scale = fetch(values[task.knob], 0u32);
+        if !finite(scale) || !(scale != 0.0) {
+            refuse(task.kind, refusal::KNOB, 0u32);
+            return 1.0;
+        }
+        return scale;
+    }
+
     fn weighed(at: u32, position: u32, reach: u32) -> bool {
         if at > position {
             return false;
@@ -172,6 +184,7 @@ mod device {
         if task.count == 0u32 {
             return;
         }
+        let scale = attention_scale(task, ATTN_WIDTH);
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -317,7 +330,7 @@ mod device {
                     let at = block * ATTN_KEYS + column;
                     let seen = visible(at, keys, written, position, task.reach, causal);
                     block_keys = block_keys + select(0u32, 1u32, seen);
-                    let weight = select(max_identity(), weights[column] * task.param, seen);
+                    let weight = select(max_identity(), weights[column] * scale, seen);
                     weights[column] = weight;
                     block_largest = max(block_largest, weight);
                 }
@@ -384,6 +397,7 @@ mod device {
         if task.count == 0u32 {
             return;
         }
+        let scale = attention_scale(task, ATTN_WIDTH);
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -628,10 +642,10 @@ mod device {
                     let at = block * ATTN_KEYS + column;
                     let weight = select(
                         0.0,
-                        softmax_exp(weights[column] * task.param - normalizer),
+                        softmax_exp(weights[column] * scale - normalizer),
                         visible(at, keys, written, position, task.reach, causal),
                     );
-                    let scored = weight * (partial[column] - row_dot) * task.param;
+                    let scored = weight * (partial[column] - row_dot) * scale;
                     for at in unroll(0u32, ATTN_SLICE, 1u32) {
                         let depth = start_depth + at;
                         accumulated[at] = accumulated[at]
@@ -674,6 +688,7 @@ mod device {
         if task.count == 0u32 {
             return;
         }
+        let scale = attention_scale(task, ATTN_WIDTH);
         let query = values[task.a];
         let key = values[task.b];
         let value = values[task.c];
@@ -931,7 +946,7 @@ mod device {
                             let weight = select(
                                 0.0,
                                 softmax_exp(
-                                    weights[step] * task.param
+                                    weights[step] * scale
                                         - fetch(
                                             statistic,
                                             statistic_plane + at * statistic.strides.z,
@@ -939,7 +954,7 @@ mod device {
                                 ),
                                 attended(at, tokens, keys, column, origin, task.reach, causal),
                             );
-                            let scored = weight * partial[step] * task.param;
+                            let scored = weight * partial[step] * scale;
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
                                 accumulated[depth] = accumulated[depth]
@@ -984,6 +999,7 @@ mod device {
         if task.count == 0u32 {
             return;
         }
+        let scale = attention_scale(task, ATTN_WIDTH);
         let query = values[task.a];
         let key = values[task.b];
         let gradient = values[task.d];
@@ -1161,7 +1177,7 @@ mod device {
                             let weight = select(
                                 0.0,
                                 softmax_exp(
-                                    weights[step] * task.param
+                                    weights[step] * scale
                                         - fetch(
                                             statistic,
                                             statistic_plane + at * statistic.strides.z,

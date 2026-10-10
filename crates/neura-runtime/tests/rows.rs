@@ -117,7 +117,7 @@ impl Batch {
             packed,
             packed,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),

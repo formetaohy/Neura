@@ -69,7 +69,7 @@ fn graph_of_beside(
         keys,
         values,
         AttentionOptions {
-            scale: shapes.scale,
+            scale: Some(graph.knob(shapes.scale)),
             causal: shapes.causal,
             origin: None,
             segments: None,
@@ -414,7 +414,7 @@ fn an_attention_refuses_values_of_another_width() {
                 keys,
                 values,
                 AttentionOptions {
-                    scale: 0.5,
+                    scale: Some(graph.knob(0.5)),
                     causal: false,
                     origin: None,
                     segments: None,
@@ -547,7 +547,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             key,
             value,
             AttentionOptions {
-                scale: 0.5,
+                scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: None,
                 segments: None,
@@ -556,13 +556,15 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             },
         );
     }));
+    let wide = graph.parameter(Shape::of([1, 1, 3, 8]), Init::Zero, Element::Single);
+    let vector = graph.parameter(Shape::vector(2), Init::Zero, Element::Single);
     assert!(refuses(|| {
         let _ = graph.attention(
             query,
             key,
             value,
             AttentionOptions {
-                scale: 0.0,
+                scale: Some(vector),
                 causal: false,
                 origin: None,
                 segments: None,
@@ -571,14 +573,13 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             },
         );
     }));
-    let wide = graph.parameter(Shape::of([1, 1, 3, 8]), Init::Zero, Element::Single);
     assert!(refuses(|| {
         let _ = graph.attention(
             query,
             wide,
             value,
             AttentionOptions {
-                scale: 0.5,
+                scale: Some(graph.knob(0.5)),
                 causal: false,
                 origin: None,
                 segments: None,
@@ -698,7 +699,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
         tensor,
         tensor,
         AttentionOptions {
-            scale: 1.0 / (width as f32).sqrt(),
+            scale: Some(graph.knob(1.0 / (width as f32).sqrt())),
             causal: true,
             origin: None,
             segments: None,
@@ -814,7 +815,7 @@ fn block<'g>(
             keys,
             values,
             AttentionOptions {
-                scale: shapes.scale,
+                scale: Some(graph.knob(shapes.scale)),
                 causal: shapes.causal,
                 origin: None,
                 segments: None,
@@ -914,4 +915,170 @@ fn a_window_wider_than_the_keys_weighs_them_all() {
     banded.reach = banded.keys + 1;
     run_forward(banded, 1e-5);
     run_backward(banded, 1e-5);
+}
+
+const KNOB_WIDTH: u32 = 4;
+const KNOB_ROWS: u32 = 3;
+
+fn knob_graph<'g>(
+    graph: &Graph<'g>,
+    scale: Option<Value<'g>>,
+) -> (Value<'g>, Value<'g>, Value<'g>, Value<'g>) {
+    let tensor = || {
+        graph.parameter(
+            Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let (queries, keys, values) = (tensor(), tensor(), tensor());
+    let out = graph.attention(
+        queries,
+        keys,
+        values,
+        AttentionOptions {
+            scale,
+            causal: true,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    (queries, keys, values, out)
+}
+
+fn knob_shapes(scale: f32) -> Shapes {
+    Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: KNOB_ROWS,
+        keys: KNOB_ROWS,
+        width: KNOB_WIDTH,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale,
+    }
+}
+
+fn knob_inputs() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    (
+        data(KNOB_ROWS * KNOB_WIDTH, 17),
+        data(KNOB_ROWS * KNOB_WIDTH, 29),
+        data(KNOB_ROWS * KNOB_WIDTH, 43),
+    )
+}
+
+#[test]
+fn an_attention_scale_the_host_writes_steers_every_score_it_weighs() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let knob = graph.named_knob("attention.scale", 1.0);
+    let (queries, keys, values, out) = knob_graph(&graph, Some(knob));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let (queries_data, keys_data, values_data) = knob_inputs();
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    for written in [1.0f32, 0.5, 2.0, 1.0 / (KNOB_WIDTH as f32).sqrt()] {
+        runtime.write(&program, knob, &[written]);
+        runtime.run(&program);
+        let produced = runtime.read(&program, out);
+        let (expected, _) = attention_forward(
+            knob_shapes(written),
+            &queries_data,
+            &keys_data,
+            &values_data,
+        );
+        assert_close(&produced, &expected, 1e-5);
+    }
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a program weighs every scale the host writes",
+    );
+}
+
+#[test]
+fn an_attention_without_a_scale_weighs_its_scores_by_the_width_it_spans() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let (queries, keys, values, out) = knob_graph(&graph, None);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let (queries_data, keys_data, values_data) = knob_inputs();
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    let (expected, _) = attention_forward(
+        knob_shapes(1.0 / (KNOB_WIDTH as f32).sqrt()),
+        &queries_data,
+        &keys_data,
+        &values_data,
+    );
+    assert_close(&produced, &expected, 1e-5);
+}
+
+#[test]
+fn the_device_refuses_an_attention_scale_it_cannot_weigh_with() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let knob = graph.named_knob("attention.scale", 1.0);
+    let (_, _, _, out) = knob_graph(&graph, Some(knob));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    for written in [0.0f32, f32::NAN, f32::INFINITY] {
+        runtime.write(&program, knob, &[written]);
+        runtime.run(&program);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = runtime.read(&program, out);
+        }))
+        .expect_err("a scale no score survives is refused");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "a refusal without a message".to_owned());
+        assert!(
+            message.contains("the device refused the attention scale of the attention task"),
+            "{message}",
+        );
+    }
+}
+
+#[test]
+fn a_device_task_steers_the_scale_of_an_attention_it_feeds() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let knob = graph.named_knob("attention.scale", 1.0);
+    graph.mul_into(knob, graph.fill(Shape::scalar(), 2.0));
+    let (queries, keys, values, out) = knob_graph(&graph, Some(knob));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let (queries_data, keys_data, values_data) = knob_inputs();
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    for round in 1..=2u32 {
+        runtime.run(&program);
+        let written = 2.0f32.powi(round as i32);
+        assert_eq!(
+            runtime.read(&program, knob),
+            [written],
+            "the device doubled the scale it weighs with",
+        );
+        let produced = runtime.read(&program, out);
+        let (expected, _) = attention_forward(
+            knob_shapes(written),
+            &queries_data,
+            &keys_data,
+            &values_data,
+        );
+        assert_close(&produced, &expected, 1e-5);
+    }
 }

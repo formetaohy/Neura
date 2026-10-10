@@ -284,3 +284,40 @@ fn a_four_bit_base_trains_the_bypass_it_carries() {
         "the bypass a four bit base carries is the tensor that learns",
     );
 }
+
+#[test]
+fn an_adapter_scale_the_host_writes_steers_the_bypass_it_names() {
+    let runtime = open();
+    let graph = Graph::new();
+    let adapter = Adapter::new(
+        &graph,
+        "adapter",
+        [2, 1],
+        2,
+        Init::Constant(0.25),
+        Element::Single,
+        1.0,
+    );
+    let inputs = graph.input(Shape::matrix(1, 2), Element::Single);
+    let prediction = adapter.forward(&graph, inputs, graph.fill(Shape::matrix(1, 1), 0.0));
+    graph.retain(prediction);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, adapter.down(), &[1.0, 0.0, 0.0, 1.0]);
+    runtime.write(&program, adapter.up(), &[1.0, 0.0]);
+    runtime.write(&program, inputs, &[2.0, 3.0]);
+    for (written, expected) in [(1.0f32, 2.0f32), (0.5, 1.0), (2.0, 4.0), (0.0, 0.0)] {
+        runtime.write(&program, adapter.scale(), &[written]);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, prediction)[0],
+            expected,
+            "a bypass of 2 scaled by {written} reaches {expected}",
+        );
+    }
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a program steers every scale the host writes",
+    );
+}

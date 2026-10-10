@@ -13,7 +13,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 
 fn causal<'g>(segments: neura_graph::Value<'g>) -> AttentionOptions<'g> {
     AttentionOptions {
-        scale: 1.0,
+        scale: None,
         causal: false,
         origin: None,
         segments: Some(segments),
@@ -216,7 +216,7 @@ fn a_cursor_places_no_row_a_packed_query_holds() {
                 cache,
                 cache,
                 AttentionOptions {
-                    scale: 1.0,
+                    scale: Some(graph.knob(1.0)),
                     causal: true,
                     origin: Some(cursor),
                     segments: Some(ragged.offsets),
@@ -255,7 +255,7 @@ fn chunked<'g>(
     keys: neura_graph::Ragged<'g>,
 ) -> AttentionOptions<'g> {
     AttentionOptions {
-        scale: 1.0,
+        scale: None,
         causal: true,
         origin: None,
         segments: Some(keys.offsets),

@@ -22,10 +22,13 @@ impl<'g> Gradients<'g> {
             })
     }
 
-    pub fn clip(&self, graph: &Graph<'g>, threshold: f32) -> Self {
+    pub fn clip(&self, graph: &Graph<'g>, threshold: Value<'g>) -> Self {
+        let threshold = graph.own(threshold);
         assert!(
-            threshold.is_finite() && threshold > 0.0,
-            "a clip of {threshold} rescales a gradient set to nothing",
+            graph.shape(threshold).is_scalar(),
+            "a clip rescales a gradient set by one threshold, and value {} holds {} numbers",
+            threshold.id(),
+            graph.shape(threshold).elements(),
         );
         let mut squared = graph.fill(Shape::scalar(), 0.0);
         for (id, (_, gradient)) in self.values.iter() {
@@ -37,7 +40,7 @@ impl<'g> Gradients<'g> {
         let factor = graph.min(
             graph.fill(Shape::scalar(), 1.0),
             graph.mul(
-                graph.fill(Shape::scalar(), threshold),
+                threshold,
                 graph
                     .recip(graph.add(graph.sqrt(squared), graph.fill(Shape::scalar(), NORM_FLOOR))),
             ),
@@ -577,7 +580,7 @@ impl<'g> Graph<'g> {
                         ],
                     );
                     grad.origin = task.origin;
-                    grad.param = task.param;
+                    grad.knob = task.knob;
                     grad.segments = task.segments;
                     self.push(grad);
                     self.accumulate(grads, source, out);
@@ -656,7 +659,7 @@ impl<'g> Graph<'g> {
                     );
                     let mut grad = TaskInfo::of(kind, op::NONE, out.id(), inputs);
                     grad.origin = task.origin;
-                    grad.param = task.param;
+                    grad.knob = task.knob;
                     grad.slot = task.slot;
                     grad.reach = task.reach;
                     grad.segments = task.segments;

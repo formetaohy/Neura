@@ -251,11 +251,15 @@ impl<'g> Graph<'g> {
         let key_shape = self.shape(key);
         let value_shape = self.shape(value);
         let origin = attention.origin.map(|origin| self.own(origin));
-        assert!(
-            attention.scale.is_finite() && attention.scale != 0.0,
-            "an attention scaled by {} weighs every score to nothing",
-            attention.scale,
-        );
+        let scale = attention.scale.map(|scale| self.own(scale));
+        if let Some(scale) = scale {
+            assert!(
+                self.shape(scale).is_scalar(),
+                "an attention scale weighs every score of a row alike, and value {} holds {} numbers",
+                scale.id(),
+                self.shape(scale).elements(),
+            );
+        }
         let segments = attention.segments.map(|segments| self.own(segments));
         let reach = attention.reach;
         if let Some(reach) = reach {
@@ -542,14 +546,19 @@ impl<'g> Graph<'g> {
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.segments = segments.map_or(NO_VALUE, |offsets| offsets.id());
         task.queries = queries.map_or(NO_VALUE, |offsets| offsets.id());
-        task.param = attention.scale;
+        task.knob = scale.map_or(NO_VALUE, |scale| scale.id());
         task.slot = u32::from(attention.causal);
         task.reach = reach.unwrap_or(0);
         self.push(task);
         out
     }
 
-    pub fn rope(&self, value: Value<'g>, origin: Option<Value<'g>>, base: f32) -> Value<'g> {
+    pub fn rope(
+        &self,
+        value: Value<'g>,
+        origin: Option<Value<'g>>,
+        base: Option<Value<'g>>,
+    ) -> Value<'g> {
         let value = self.own(value);
         let shape = self.shape(value);
         let width = shape.dims()[3];
@@ -563,10 +572,15 @@ impl<'g> Graph<'g> {
             "a rotation pairs every number of a row with the number half a row away, and {:?} holds {width} numbers per row",
             shape.dims(),
         );
-        assert!(
-            base.is_finite() && base > 1.0,
-            "a rotary base of {base} spreads every position over the same angle",
-        );
+        let base = base.map(|base| self.own(base));
+        if let Some(base) = base {
+            assert!(
+                self.shape(base).is_scalar(),
+                "a rotary base places every position of a row on one angle, and value {} holds {} numbers",
+                base.id(),
+                self.shape(base).elements(),
+            );
+        }
         let element = self.element(value);
         assert!(
             !element.quantized(),
@@ -624,7 +638,7 @@ impl<'g> Graph<'g> {
             [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
         );
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
-        task.param = base;
+        task.knob = base.map_or(NO_VALUE, |base| base.id());
         task.segments = packed.map_or(NO_VALUE, |(_, offsets, _)| offsets);
         self.push(task);
         out
@@ -958,16 +972,19 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn dropout(&self, value: Value<'g>, keep: f32, seed: Value<'g>) -> Value<'g> {
-        assert!(
-            keep > 0.0 && keep <= 1.0,
-            "a dropout that keeps {keep} of the numbers it draws keeps none of them or more than it holds",
-        );
+    pub fn dropout(&self, value: Value<'g>, keep: Value<'g>, seed: Value<'g>) -> Value<'g> {
         let value = self.own(value);
+        let keep = self.own(keep);
+        assert!(
+            self.shape(keep).is_scalar(),
+            "a dropout keeps one fraction of the numbers it draws, and value {} holds {} of them",
+            keep.id(),
+            self.shape(keep).elements(),
+        );
         let shape = self.shape(value);
-        let kept = self.less(self.uniform(shape, seed), self.fill(Shape::scalar(), keep));
+        let kept = self.less(self.uniform(shape, seed), keep);
         let masked = self.select(kept, value, self.fill(shape, 0.0));
-        self.mul(masked, self.fill(Shape::scalar(), 1.0 / keep))
+        self.mul(masked, self.recip(keep))
     }
 
     pub fn categorical(&self, logits: Value<'g>, seed: Value<'g>) -> Value<'g> {

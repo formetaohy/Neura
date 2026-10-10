@@ -22,6 +22,18 @@ mod device {
         return u32(raw);
     }
 
+    fn rope_base(task: Task) -> f32 {
+        if task.knob == NO_VALUE {
+            return 10000.0;
+        }
+        let base = fetch(values[task.knob], 0u32);
+        if !finite(base) || !(base > 1.0) {
+            refuse(task.kind, refusal::KNOB, 0u32);
+            return 10000.0;
+        }
+        return base;
+    }
+
     fn rope_channel(at: uvec4, high: bool, half: u32) -> u32 {
         return select(at.w, at.w - half, high);
     }
@@ -39,6 +51,7 @@ mod device {
         let output = values[task.out];
         let dims = output.dims;
         let half = dims.w / 2u32;
+        let base = rope_base(task);
         if task.segment != NO_VALUE {
             if task.count == 0u32 {
                 return;
@@ -52,7 +65,7 @@ mod device {
                         rope_position(task, at) + row,
                         rope_channel(at, high, half),
                         dims.w,
-                        task.param,
+                        base,
                     );
                     let value = fetch(source, read_address(at, source.strides));
                     let pair = rope_pair(at, high, half);
@@ -83,7 +96,7 @@ mod device {
                 rope_position(task, at) + at.z,
                 rope_channel(at, high, half),
                 dims.w,
-                task.param,
+                base,
             );
             let value = fetch(source, read_address(at, source.strides));
             let pair = rope_pair(at, high, half);
@@ -111,6 +124,7 @@ mod device {
         let output = values[task.out];
         let dims = output.dims;
         let half = dims.w / 2u32;
+        let base = rope_base(task);
         if task.segment != NO_VALUE {
             if task.count == 0u32 {
                 return;
@@ -129,7 +143,7 @@ mod device {
                         rope_position(task, at) + row,
                         rope_channel(at, high, half),
                         dims.w,
-                        task.param,
+                        base,
                     );
                     let value = fetch(source, read_address(at, source.strides));
                     let pair = rope_pair(at, high, half);
@@ -160,7 +174,7 @@ mod device {
                 rope_position(task, at) + at.z,
                 rope_channel(at, high, half),
                 dims.w,
-                task.param,
+                base,
             );
             let value = fetch(source, read_address(at, source.strides));
             let pair = rope_pair(at, high, half);

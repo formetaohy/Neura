@@ -210,7 +210,8 @@ fn clipping_scales_a_gradient_set_by_its_global_norm() {
         graph.mul(second, constant(&graph, 4.0)),
     ));
     let gradients = graph.backward(loss);
-    let clipped = gradients.clip(&graph, 1.0);
+    let threshold = graph.named_knob("clip.threshold", 1.0);
+    let clipped = gradients.clip(&graph, threshold);
     let mut optimizer = Sgd::new(&graph, "descent", 1.0, 0.0);
     optimizer.track_all(&graph, &[first, second]);
     optimizer.step(&graph, &clipped);
@@ -227,6 +228,30 @@ fn clipping_scales_a_gradient_set_by_its_global_norm() {
         (moved[1][0] + 0.8).abs() < 1e-5,
         "a gradient of 4 in a set of norm 5 clipped to 1 moved to {} where -0.8 is the answer",
         moved[1][0],
+    );
+    for (written, factor) in [(2.5f32, 0.5f32), (5.0, 1.0), (0.5, 0.1)] {
+        runtime.write(&program, first, &[0.0]);
+        runtime.write(&program, second, &[0.0]);
+        runtime.write(&program, threshold, &[written]);
+        runtime.run(&program);
+        let moved = runtime.read_many(&program, &[first, second]);
+        assert!(
+            (moved[0][0] + 3.0 * factor).abs() < 1e-5,
+            "a gradient of 3 in a set of norm 5 clipped to {written} moved to {} where {} is the answer",
+            moved[0][0],
+            -3.0 * factor,
+        );
+        assert!(
+            (moved[1][0] + 4.0 * factor).abs() < 1e-5,
+            "a gradient of 4 in a set of norm 5 clipped to {written} moved to {} where {} is the answer",
+            moved[1][0],
+            -4.0 * factor,
+        );
+    }
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a program clips every threshold the host writes",
     );
 }
 

@@ -102,7 +102,7 @@ fn attention_model(
         projected,
         projected,
         AttentionOptions {
-            scale: 0.25,
+            scale: Some(graph.knob(0.25)),
             causal: true,
             origin: None,
             segments: None,
@@ -776,7 +776,7 @@ fn a_free_extent_stops_where_a_second_length_starts() {
         Element::Single,
     );
     assert!(refuses(|| {
-        graph.rope(wide, None, 10_000.0);
+        graph.rope(wide, None, None);
     }));
     let rows = graph.free(8);
     let image = graph.input(Shape::of([1, 4, 8, 8]).freed(&[(2, rows)]), Element::Single);
@@ -1074,7 +1074,7 @@ fn a_static_walk_beside_a_free_extent_walks_its_own_rows() {
             key,
             value,
             AttentionOptions {
-                scale: 0.5,
+                scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: None,
                 segments: None,

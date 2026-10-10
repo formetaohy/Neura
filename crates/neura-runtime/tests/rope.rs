@@ -89,7 +89,7 @@ impl<'a> Packed<'a> {
             Shape::of([1, 1, PACKED_BOUND, PACKED_WIDTH]).freed(&[(2, ragged.extent)]),
             Element::Single,
         );
-        let turned = graph.rope(packed, None, PACKED_BASE);
+        let turned = graph.rope(packed, None, Some(graph.knob(PACKED_BASE)));
         graph.retain(turned);
         Self {
             runtime: open(),
@@ -139,7 +139,7 @@ fn a_packed_rope_turns_the_rows_of_a_plane_wider_than_a_workgroup() {
         Shape::of([1, 1, bound, PACKED_WIDTH]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
-    let turned = graph.rope(packed, None, PACKED_BASE);
+    let turned = graph.rope(packed, None, Some(graph.knob(PACKED_BASE)));
     graph.retain(turned);
     let runtime = open();
     let weights = runtime.weights(&graph);
@@ -194,7 +194,7 @@ fn a_packed_rope_of_one_plane_walks_the_row_its_cursor_names() {
         Element::Single,
     );
     let cursor = graph.input(Shape::scalar(), Element::Single);
-    let turned = graph.rope(packed, Some(cursor), PACKED_BASE);
+    let turned = graph.rope(packed, Some(cursor), Some(graph.knob(PACKED_BASE)));
     graph.retain(turned);
     let runtime = open();
     let weights = runtime.weights(&graph);
@@ -223,7 +223,7 @@ fn a_narrow_packed_rope_packs_the_turn_of_every_plane() {
         Element::Single,
     );
     let halves = graph.cast(data, Element::Half);
-    let turned = graph.rope(halves, None, PACKED_BASE);
+    let turned = graph.rope(halves, None, Some(graph.knob(PACKED_BASE)));
     assert_eq!(graph.element(turned), Element::Half);
     graph.retain(turned);
     let weights = runtime.weights(&graph);
@@ -257,7 +257,7 @@ fn a_packed_rope_leaves_the_planes_a_binding_never_closes() {
         Shape::of([1, 1, PACKED_BOUND, PACKED_WIDTH]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
-    let turned = graph.rope(packed, None, PACKED_BASE);
+    let turned = graph.rope(packed, None, Some(graph.knob(PACKED_BASE)));
     graph.retain(turned);
     let runtime = open();
     let weights = runtime.weights(&graph);
@@ -296,7 +296,7 @@ fn a_packed_rope_carries_the_epilogue_that_folds_into_it() {
     let ragged = graph.ragged(PACKED_BOUND, lengths);
     let shape = Shape::of([1, 1, PACKED_BOUND, PACKED_WIDTH]).freed(&[(2, ragged.extent)]);
     let packed = graph.input(shape, Element::Single);
-    let turned = graph.rope(packed, None, PACKED_BASE);
+    let turned = graph.rope(packed, None, Some(graph.knob(PACKED_BASE)));
     let rows = graph.input(
         Shape::of([1, 1, PACKED_BOUND, 1]).freed(&[(2, ragged.extent)]),
         Element::Single,
@@ -328,7 +328,7 @@ fn a_rope_turns_every_row_by_the_position_its_cursor_names() {
     let shape = Shape::of([2, 1, 4, 6]);
     let data = graph.input(shape, Element::Single);
     let cursor = graph.input(Shape::of([2, 1, 1, 1]), Element::Single);
-    let turned = graph.rope(data, Some(cursor), 10000.0);
+    let turned = graph.rope(data, Some(cursor), None);
     graph.retain(turned);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -352,7 +352,7 @@ fn a_rope_gradient_undoes_the_turn_it_was_shown() {
     let runtime = open();
     let graph = Graph::new();
     let weight = graph.parameter(Shape::of([1, 1, 4, 6]), Init::Zero, Element::Single);
-    let loss = graph.sum(graph.rope(weight, None, 10000.0));
+    let loss = graph.sum(graph.rope(weight, None, None));
     let gradients = graph.backward(loss);
     let gradient = gradients.of(weight);
     graph.retain(gradient);
@@ -372,7 +372,7 @@ fn a_rope_gradient_matches_finite_differences() {
     let graph = Graph::new();
     let weight = graph.parameter(Shape::of([1, 1, 3, 4]), Init::Zero, Element::Single);
     let target = graph.input(Shape::of([1, 1, 3, 4]), Element::Single);
-    let loss = graph.sum(graph.mul(graph.rope(weight, None, 100.0), target));
+    let loss = graph.sum(graph.mul(graph.rope(weight, None, Some(graph.knob(100.0))), target));
     let gradients = graph.backward(loss);
     let gradient = gradients.of(weight);
     graph.retain(loss);
@@ -410,7 +410,7 @@ fn a_cursor_the_device_cannot_walk_stops_the_rope() {
     let graph = Graph::new();
     let data = graph.input(Shape::of([1, 1, 1, 4]), Element::Single);
     let cursor = graph.input(Shape::scalar(), Element::Single);
-    let turned = graph.rope(data, Some(cursor), 10000.0);
+    let turned = graph.rope(data, Some(cursor), None);
     graph.retain(turned);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -430,7 +430,10 @@ fn a_rope_carries_the_epilogue_that_folds_into_it() {
     let graph = Graph::new();
     let shape = Shape::of([1, 1, 2, 4]);
     let data = graph.input(shape, Element::Single);
-    let scaled = graph.mul(graph.rope(data, None, 100.0), graph.fill(shape, 2.0));
+    let scaled = graph.mul(
+        graph.rope(data, None, Some(graph.knob(100.0))),
+        graph.fill(shape, 2.0),
+    );
     graph.retain(scaled);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -456,7 +459,7 @@ fn a_narrow_rope_packs_the_turn_it_computed() {
     let data = graph.input(Shape::of([1, 1, 2, 4]), Element::Single);
     let halves = graph.cast(data, Element::Half);
     graph.retain(halves);
-    let turned = graph.rope(halves, None, 100.0);
+    let turned = graph.rope(halves, None, Some(graph.knob(100.0)));
     assert_eq!(graph.element(turned), Element::Half);
     graph.retain(turned);
     let weights = runtime.weights(&graph);
@@ -474,4 +477,94 @@ fn a_narrow_rope_packs_the_turn_it_computed() {
         ),
         1e-4,
     );
+}
+
+const KNOB_ROWS: u32 = 3;
+const KNOB_WIDTH: u32 = 4;
+
+#[test]
+fn a_rotary_base_the_host_writes_places_each_position_on_the_angle_it_names() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let knob = graph.named_knob("rope.base", 10_000.0);
+    let data = graph.parameter(
+        Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
+        Init::Zero,
+        Element::Single,
+    );
+    let turned = graph.rope(data, None, Some(knob));
+    graph.retain(turned);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(KNOB_ROWS * KNOB_WIDTH, 11);
+    runtime.write(&program, data, &values);
+    for written in [10_000.0f32, 100.0, 500.0] {
+        runtime.write(&program, knob, &[written]);
+        runtime.run(&program);
+        assert_close(
+            &runtime.read(&program, turned),
+            &rotate(KNOB_ROWS, KNOB_WIDTH, 0, written, &values, false),
+            1e-5,
+        );
+    }
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a program turns every base the host writes",
+    );
+}
+
+#[test]
+fn a_rotation_of_the_standard_base_needs_no_knob() {
+    let runtime = open();
+    let graph = Graph::new();
+    let data = graph.parameter(
+        Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
+        Init::Zero,
+        Element::Single,
+    );
+    let turned = graph.rope(data, None, None);
+    graph.retain(turned);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(KNOB_ROWS * KNOB_WIDTH, 11);
+    runtime.write(&program, data, &values);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, turned),
+        &rotate(KNOB_ROWS, KNOB_WIDTH, 0, 10_000.0, &values, false),
+        1e-5,
+    );
+}
+
+#[test]
+fn the_device_refuses_a_rotary_base_it_cannot_turn_with() {
+    let runtime = open();
+    let graph: Graph<'static> = Graph::new();
+    let knob = graph.named_knob("rope.base", 10_000.0);
+    let data = graph.parameter(
+        Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
+        Init::Zero,
+        Element::Single,
+    );
+    let turned = graph.rope(data, None, Some(knob));
+    graph.retain(turned);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    for written in [1.0f32, 0.5, f32::NAN, f32::INFINITY] {
+        runtime.write(&program, knob, &[written]);
+        runtime.run(&program);
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = runtime.read(&program, turned);
+        }))
+        .expect_err("a base every position shares is refused");
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| "a refusal without a message".to_owned());
+        assert!(
+            message.contains("the device refused the rotary base of the rope task"),
+            "{message}",
+        );
+    }
 }

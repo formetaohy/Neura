@@ -174,7 +174,7 @@ mod device {
             publish(
                 output,
                 index,
-                chained(task, walked_at(task.geometry, index, dims), task.param),
+                chained(task, walked_at(task.geometry, index, dims), task.literal),
             );
         }
     }

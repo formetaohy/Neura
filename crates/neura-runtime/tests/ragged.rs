@@ -147,7 +147,7 @@ impl Ragged {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
@@ -244,7 +244,7 @@ fn device_counts_rule_the_key_spans() {
         cache,
         cache,
         AttentionOptions {
-            scale: SCALE,
+            scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -332,7 +332,7 @@ fn a_segmented_attention_names_an_offset_per_plane() {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: false,
                 origin: None,
                 segments: Some(ragged.offsets),
@@ -359,7 +359,7 @@ fn a_causal_segmented_attention_walks_a_cursor() {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: None,
                 segments: Some(ragged.offsets),
@@ -407,7 +407,7 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: false,
                 origin: None,
                 segments: Some(offsets),
@@ -450,7 +450,7 @@ impl Planes {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
@@ -602,7 +602,7 @@ impl CountedPlanes {
             cache,
             cache,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
@@ -715,7 +715,7 @@ fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
         cache,
         cache,
         AttentionOptions {
-            scale: SCALE,
+            scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -970,7 +970,7 @@ impl Trainable {
             keys,
             values,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),

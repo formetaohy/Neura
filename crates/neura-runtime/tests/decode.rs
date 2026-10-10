@@ -31,9 +31,9 @@ fn data(count: u32, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-fn options(cursor: Value<'static>) -> AttentionOptions<'static> {
+fn options<'g>(graph: &Graph<'g>, cursor: Value<'g>) -> AttentionOptions<'g> {
     AttentionOptions {
-        scale: SCALE,
+        scale: Some(graph.knob(SCALE)),
         causal: true,
         origin: Some(cursor),
         segments: None,
@@ -93,7 +93,7 @@ impl Decoder {
             keys,
             values,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
                 segments: None,
@@ -202,7 +202,7 @@ fn a_decode_gradient_reaches_the_keys_a_cursor_exposes() {
     );
     let cursor = graph.input(Shape::scalar(), Element::Single);
     let query = graph.parameter(Shape::of([1, 1, 1, WIDTH]), Init::Zero, Element::Single);
-    let out = graph.attention(query, keys, values, options(cursor));
+    let out = graph.attention(query, keys, values, options(&graph, cursor));
     let loss = graph.sum(out);
     let gradients = graph.backward(loss);
     let query_grad = gradients.of(query);
@@ -321,7 +321,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
         keys,
         values,
         AttentionOptions {
-            scale: SCALE,
+            scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
             segments: None,
@@ -471,7 +471,7 @@ fn a_windowed_decode_gradient_reaches_the_keys_a_ring_exposes() {
         keys,
         values,
         AttentionOptions {
-            scale: SCALE,
+            scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
             segments: None,

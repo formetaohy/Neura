@@ -103,6 +103,10 @@ mod device {
         return -bitcast_f32(0x7f800000u32);
     }
 
+    fn finite(value: f32) -> bool {
+        return value > -bitcast_f32(0x7f800000u32) && value < bitcast_f32(0x7f800000u32);
+    }
+
     fn exp_underflow() -> f32 {
         return -104.0;
     }

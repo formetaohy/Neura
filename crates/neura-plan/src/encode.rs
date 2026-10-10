@@ -514,7 +514,7 @@ impl Plan {
                 d: task.inputs[3],
                 e: task.inputs[4],
                 f: task.inputs[5],
-                param: task.param,
+                literal: task.literal,
                 prelude,
                 prelude_steps: task.prelude.len() as u32,
                 chain,
@@ -544,6 +544,7 @@ impl Plan {
                 grid: task.grid,
                 planned_first: task.first,
                 planned_count: task.count,
+                knob: task.knob,
             });
             if task.in_place
                 && task

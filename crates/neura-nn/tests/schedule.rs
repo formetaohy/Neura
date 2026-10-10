@@ -385,3 +385,80 @@ fn a_checkpoint_carries_the_rate_a_descent_stopped_at() {
         "a descent that resumed from the rate it stopped at",
     );
 }
+
+fn clip_of(step: usize) -> f32 {
+    match step {
+        0 => 1.0,
+        1 => 0.5,
+        2 => 0.25,
+        _ => 0.125,
+    }
+}
+
+#[test]
+fn a_checkpoint_carries_the_clip_a_descent_stopped_at() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.named_parameter(
+        "weight",
+        Shape::vector(2),
+        Init::Constant(1.0),
+        Element::Single,
+    );
+    let loss = graph.sum(graph.mul(weight, graph.fill(Shape::vector(2), GRADIENT)));
+    let gradients = graph.backward(loss);
+    let clip = graph.named_knob("clip.threshold", 1.0);
+    let clipped = gradients.clip(&graph, clip);
+    let mut optimizer = Sgd::new(&graph, "descent", 1.0, 0.0);
+    optimizer.track_all(&graph, &[weight]);
+    optimizer.step(&graph, &clipped);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    for step in 0..2 {
+        runtime.write(&program, clip, &[clip_of(step)]);
+        runtime.run(&program);
+    }
+    let checkpoint = runtime.checkpoint(&weights);
+    assert!(
+        checkpoint.tensor("clip.threshold").is_some(),
+        "a container carries the threshold a descent clipped at",
+    );
+
+    let resumed_graph = Graph::new();
+    let resumed_weight = resumed_graph.named_parameter(
+        "weight",
+        Shape::vector(2),
+        Init::Constant(1.0),
+        Element::Single,
+    );
+    let resumed_loss = resumed_graph.sum(resumed_graph.mul(
+        resumed_weight,
+        resumed_graph.fill(Shape::vector(2), GRADIENT),
+    ));
+    let resumed_gradients = resumed_graph.backward(resumed_loss);
+    let resumed_clip = resumed_graph.named_knob("clip.threshold", 1.0);
+    let resumed_clipped = resumed_gradients.clip(&resumed_graph, resumed_clip);
+    let mut resumed_optimizer = Sgd::new(&resumed_graph, "descent", 1.0, 0.0);
+    resumed_optimizer.track_all(&resumed_graph, &[resumed_weight]);
+    resumed_optimizer.step(&resumed_graph, &resumed_clipped);
+    let resumed_weights = runtime.load(&resumed_graph, &checkpoint);
+    let resumed_program = runtime.compile(&resumed_graph, &resumed_weights);
+    assert_eq!(
+        runtime.read(&resumed_program, resumed_clip),
+        [clip_of(1)],
+        "a descent resumed from a container clips at the threshold it stopped at",
+    );
+
+    for step in 2..STEPS {
+        runtime.write(&program, clip, &[clip_of(step)]);
+        runtime.run(&program);
+        runtime.write(&resumed_program, resumed_clip, &[clip_of(step)]);
+        runtime.run(&resumed_program);
+    }
+    assert_close(
+        &runtime.read(&resumed_program, resumed_weight),
+        &runtime.read(&program, weight),
+        1e-6,
+        "a descent that resumed from the threshold it stopped at",
+    );
+}

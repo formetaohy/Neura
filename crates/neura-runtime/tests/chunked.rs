@@ -280,7 +280,7 @@ impl Chunked {
             key,
             value,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal,
                 origin: cursors,
                 segments: Some(key_axis.offsets),

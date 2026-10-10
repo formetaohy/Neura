@@ -1,6 +1,6 @@
 use neura_abi::{
-    Element, Kind, PatchRecord, Placement, StepRecord, Store, TaskRecord, ValueRecord, WORD_BYTES,
-    strategy,
+    Element, Kind, NO_VALUE, PatchRecord, Placement, StepRecord, Store, TaskRecord, ValueRecord,
+    WORD_BYTES, strategy,
 };
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_pointwise as op;
@@ -1679,7 +1679,8 @@ fn narrow_rows_through_an_image(kind: Kind) {
         .find(|task| task.out == convert.a && Kind::of(task.kind) == Kind::Unary)
         .expect("the image holds the table before the task reaches it");
     assert_eq!(copy.a, table.id());
-    assert_eq!(copy.param, 0.0);
+    assert_eq!(copy.literal, 0.0);
+    assert_eq!(copy.knob, NO_VALUE);
     assert_eq!(copy.op, op::IDENTITY);
 }
 
@@ -1700,7 +1701,7 @@ fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
         keys,
         keys,
         neura_graph::AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
             segments: None,
@@ -1736,7 +1737,7 @@ fn a_cursor_holds_one_position_per_plane() {
     let keys = graph.parameter(Shape::of([2, 1, 4, 4]), Init::Zero, Element::Single);
     let positions = |dims: [u32; 4]| graph.fill(Shape::of(dims), 1.0);
     let options = |origin| neura_graph::AttentionOptions {
-        scale: 0.5,
+        scale: Some(graph.knob(0.5)),
         causal: true,
         origin,
         segments: None,
@@ -1806,7 +1807,7 @@ fn a_wide_attention_head_spreads_its_row_over_the_threads_it_outruns() {
             keys,
             keys,
             neura_graph::AttentionOptions {
-                scale: 0.125,
+                scale: Some(graph.knob(0.125)),
                 causal: true,
                 origin: None,
                 segments: None,
@@ -1854,7 +1855,7 @@ fn a_head_wider_than_the_workgroup_can_hold_is_refused() {
         keys,
         keys,
         neura_graph::AttentionOptions {
-            scale: 0.125,
+            scale: Some(graph.knob(0.125)),
             causal: true,
             origin: None,
             segments: None,
@@ -2223,13 +2224,13 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
     let live = graph.trim(tokens, 2, count);
     let product = graph.matmul(live, weight);
     let centred = graph.sub(product, graph.mean_axis(product, 2));
-    let rotated = graph.rope(centred, None, 10_000.0);
+    let rotated = graph.rope(centred, None, None);
     let attended = graph.attention(
         rotated,
         rotated,
         rotated,
         AttentionOptions {
-            scale: 0.125,
+            scale: Some(graph.knob(0.125)),
             causal: true,
             origin: None,
             segments: None,
@@ -2442,7 +2443,7 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
         cache,
         cache,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -2510,7 +2511,7 @@ fn a_packed_rope_turns_the_rows_of_one_plane_at_a_time() {
         Shape::of([1, 1, 256, 4]).freed(&[(2, ragged.extent)]),
         Element::Single,
     );
-    let turned = graph.rope(packed, None, 10_000.0);
+    let turned = graph.rope(packed, None, None);
     let shape = Shape::of([1, 1, 256, 4]).freed(&[(2, ragged.extent)]);
     let scaled = graph.mul(turned, graph.fill(shape, 2.0));
     graph.retain(scaled);
@@ -2658,7 +2659,7 @@ fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
         cache,
         cache,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -2927,7 +2928,7 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
         key,
         value,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -3039,7 +3040,7 @@ fn a_packed_query_walks_the_rows_its_offsets_close() {
         key,
         value,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
             segments: Some(ragged.offsets),
@@ -3142,7 +3143,7 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
         key,
         value,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
             segments: Some(ragged.offsets),
@@ -3237,7 +3238,7 @@ fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
             key,
             key,
             AttentionOptions {
-                scale: 0.5,
+                scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: Some(cursor),
                 segments: Some(ragged.offsets),
@@ -3490,7 +3491,7 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
         key,
         value,
         AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
             segments: Some(keys.offsets),

@@ -507,7 +507,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
         tensor(tokens),
         tensor(tokens),
         neura_graph::AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
             segments: None,
@@ -544,7 +544,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             assert_ne!(task.extra, neura_abi::NO_VALUE);
             assert!(task.count > 0 && task.count <= profile.workgroup());
             assert_eq!(task.first, plane * tokens + block * profile.workgroup());
-            assert!(task.param > 0.0 && task.slot == 1);
+            assert!(task.knob != neura_abi::NO_VALUE && task.slot == 1);
             block += 1;
             if block == blocks {
                 block = 0;
@@ -572,7 +572,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
         data,
         data,
         neura_graph::AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
             segments: None,
@@ -609,7 +609,7 @@ fn a_head_wider_than_a_thread_carries_splits_every_row_block_across_its_threads(
         tensor,
         tensor,
         neura_graph::AttentionOptions {
-            scale: 0.5,
+            scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
             segments: None,

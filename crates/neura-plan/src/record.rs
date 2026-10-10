@@ -118,6 +118,7 @@ impl Reads for Recorded<'_> {
             record.origin,
             record.segment,
             record.queries,
+            record.knob,
         ]
         .into_iter()
         .chain(self.prelude())
@@ -257,8 +258,11 @@ fn mismatched(found: &Recorded<'_>, task: &super::lower::Task) -> Option<&'stati
     if (record.planned_first, record.planned_count) != (record.first, record.count) {
         return Some("planned");
     }
-    if record.param.to_bits() != task.param.to_bits() {
-        return Some("param");
+    if record.literal.to_bits() != task.literal.to_bits() {
+        return Some("literal");
+    }
+    if record.knob != task.knob {
+        return Some("knob");
     }
     if found.window() != task.window {
         return Some("window");

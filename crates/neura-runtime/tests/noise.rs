@@ -188,7 +188,7 @@ fn a_dropout_keeps_the_share_of_numbers_it_names() {
     let graph = Graph::new();
     let seed = seed_of(&graph);
     let data = graph.input(Shape::matrix(ROWS, COLUMNS), Element::Single);
-    let dropped = graph.dropout(data, 0.75, seed);
+    let dropped = graph.dropout(data, graph.knob(0.75), seed);
     graph.retain(dropped);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -220,7 +220,7 @@ fn a_dropout_gradient_keeps_the_numbers_its_forward_kept() {
     let seed = seed_of(&graph);
     let data = graph.gradient_input(Shape::matrix(ROWS, COLUMNS), Element::Single);
     let weights_value = graph.input(Shape::matrix(ROWS, COLUMNS), Element::Single);
-    let dropped = graph.dropout(data, 0.5, seed);
+    let dropped = graph.dropout(data, graph.knob(0.5), seed);
     let loss = graph.sum(graph.mul(dropped, weights_value));
     let gradients = graph.backward(loss);
     graph.retain(dropped);
@@ -366,4 +366,46 @@ fn distinct(values: &[f32]) -> usize {
         .map(|value| value.to_bits())
         .collect::<std::collections::HashSet<_>>()
         .len()
+}
+
+#[test]
+fn a_dropout_share_the_host_writes_keeps_the_numbers_it_names() {
+    let runtime = open();
+    let graph = Graph::new();
+    let seed = seed_of(&graph);
+    let knob = graph.named_knob("dropout.keep", 0.5);
+    let data = graph.input(Shape::matrix(ROWS, COLUMNS), Element::Single);
+    let dropped = graph.dropout(data, knob, seed);
+    graph.retain(dropped);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, &vec![1.0; ELEMENTS]);
+    runtime.write(&program, seed, &[f32::from_bits(3)]);
+    runtime.write(&program, knob, &[1.0]);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, dropped),
+        vec![1.0; ELEMENTS],
+        "a dropout that keeps every number hands the numbers it read back",
+    );
+    runtime.write(&program, knob, &[0.25]);
+    runtime.run(&program);
+    let values = runtime.read(&program, dropped);
+    let kept = values.iter().filter(|value| **value != 0.0).count();
+    let due = ELEMENTS as f32 * 0.25;
+    assert!(
+        (kept as f32 - due).abs() <= ELEMENTS as f32 * 0.04,
+        "a written share of a quarter kept {kept} of {ELEMENTS} numbers where {due} were due",
+    );
+    for (index, value) in values.iter().enumerate() {
+        assert!(
+            *value == 0.0 || *value == 4.0,
+            "element {index} came back as {value} where a dropout of a quarter keeps 4 or nothing",
+        );
+    }
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "a program keeps every share the host writes",
+    );
 }

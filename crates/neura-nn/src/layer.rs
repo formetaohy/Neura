@@ -4,7 +4,7 @@ use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 pub struct Adapter<'g> {
     down: Value<'g>,
     up: Value<'g>,
-    scale: f32,
+    scale: Value<'g>,
 }
 
 impl<'g> Adapter<'g> {
@@ -39,16 +39,13 @@ impl<'g> Adapter<'g> {
                 Init::Zero,
                 element,
             ),
-            scale,
+            scale: graph.named_knob(&format!("{name}.scale"), scale),
         }
     }
 
     pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>, base: Value<'g>) -> Value<'g> {
         let bypass = graph.matmul(graph.matmul(input, self.down), self.up);
-        graph.add(
-            base,
-            graph.mul(bypass, graph.fill(Shape::scalar(), self.scale)),
-        )
+        graph.add(base, graph.mul(bypass, self.scale))
     }
 
     pub fn down(&self) -> Value<'g> {
@@ -59,7 +56,7 @@ impl<'g> Adapter<'g> {
         self.up
     }
 
-    pub fn scale(&self) -> f32 {
+    pub fn scale(&self) -> Value<'g> {
         self.scale
     }
 
@@ -390,7 +387,7 @@ pub struct MultiHeadAttention<'g> {
     value_bias: Value<'g>,
     output_bias: Value<'g>,
     options: AttentionOptions<'g>,
-    rotary: Option<f32>,
+    rotary: Option<Value<'g>>,
 }
 
 impl<'g> MultiHeadAttention<'g> {
@@ -418,7 +415,15 @@ impl<'g> MultiHeadAttention<'g> {
             base.is_finite() && base > 1.0,
             "an attention rotated by a base of {base} places every position on the same angle",
         );
-        Self::declared(graph, name, head, init, element, options, Some(base))
+        Self::declared(
+            graph,
+            name,
+            head,
+            init,
+            element,
+            options,
+            Some(graph.named_knob(&format!("{name}.base"), base)),
+        )
     }
 
     fn declared(
@@ -428,7 +433,7 @@ impl<'g> MultiHeadAttention<'g> {
         init: Init,
         element: Element,
         options: AttentionOptions<'g>,
-        rotary: Option<f32>,
+        rotary: Option<Value<'g>>,
     ) -> Self {
         let projection = |heads: u32, columns: u32, what: &str| {
             graph.named_parameter(
@@ -489,8 +494,8 @@ impl<'g> MultiHeadAttention<'g> {
         let key = project(input, self.keys, self.key_bias);
         let (query, key) = match self.rotary {
             Some(base) => (
-                graph.rope(query, self.options.origin, base),
-                graph.rope(key, self.options.origin, base),
+                graph.rope(query, self.options.origin, Some(base)),
+                graph.rope(key, self.options.origin, Some(base)),
             ),
             None => (query, key),
         };
@@ -514,6 +519,10 @@ impl<'g> MultiHeadAttention<'g> {
             self.value_bias,
             self.output_bias,
         ]
+    }
+
+    pub fn rotary_base(&self) -> Option<Value<'g>> {
+        self.rotary
     }
 
     pub fn head(&self) -> HeadShape {

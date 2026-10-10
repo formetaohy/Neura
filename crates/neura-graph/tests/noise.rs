@@ -59,7 +59,8 @@ fn a_dropout_scales_the_numbers_it_keeps_and_zeroes_the_rest() {
     let graph = Graph::new();
     let seed = graph.input(Shape::scalar(), Element::Single);
     let data = graph.gradient_input(Shape::matrix(2, 3), Element::Single);
-    let dropped = graph.dropout(data, 0.5, seed);
+    let keep = graph.knob(0.5);
+    let dropped = graph.dropout(data, keep, seed);
     assert_eq!(graph.shape(dropped), Shape::matrix(2, 3));
     let snapshot = graph.snapshot();
     assert!(
@@ -78,31 +79,42 @@ fn a_dropout_scales_the_numbers_it_keeps_and_zeroes_the_rest() {
         .find(|task| task.kind == Kind::Binary && task.op == op::LESS)
         .expect("a dropout compares every draw against the share it keeps");
     assert_eq!(mask.inputs[0], draw.out);
-    let threshold = tasks
-        .iter()
-        .find(|task| task.kind == Kind::Fill && task.param == 0.5)
-        .expect("a dropout compares every draw against the share it keeps");
-    assert_eq!(mask.inputs[1], threshold.out);
+    assert_eq!(mask.inputs[1], keep.id());
     let picked = tasks
         .iter()
         .find(|task| task.kind == Kind::Select)
         .expect("a dropout picks the numbers its mask keeps");
     assert_eq!(picked.inputs[0], mask.out);
     assert_eq!(picked.inputs[1], data.id());
+    let inverse = tasks
+        .iter()
+        .find(|task| task.kind == Kind::Unary && task.inputs[0] == keep.id())
+        .expect("a dropout inverts the share it keeps");
+    let scaled = tasks
+        .iter()
+        .find(|task| task.kind == Kind::Binary && task.op == op::MUL)
+        .expect("a dropout scales the numbers it keeps back by the share it keeps");
+    assert_eq!(scaled.inputs[0], picked.out);
+    assert_eq!(scaled.inputs[1], inverse.out);
+    let knob = &snapshot.values()[keep.id() as usize];
+    assert!(knob.shape.is_scalar());
+    assert_eq!(knob.seed, Some(Init::Constant(0.5)));
 }
 
 #[test]
-fn a_dropout_keeps_between_none_and_all_of_the_numbers() {
+fn a_dropout_keeps_one_share_of_the_numbers_it_draws() {
     let graph = Graph::new();
     let seed = graph.input(Shape::scalar(), Element::Single);
     let data = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
-    for keep in [0.0f32, -0.5, 1.5] {
-        assert!(
-            refuses(|| {
-                let _ = graph.dropout(data, keep, seed);
-            }),
-            "a dropout that keeps {keep} of the numbers it draws is no dropout",
-        );
-    }
-    assert_eq!(graph.dropout(data, 1.0, seed).shape(), Shape::matrix(2, 3));
+    let share = graph.parameter(Shape::vector(2), Init::Zero, Element::Single);
+    assert!(
+        refuses(|| {
+            let _ = graph.dropout(data, share, seed);
+        }),
+        "a dropout that keeps two shares of the numbers it draws is no dropout",
+    );
+    assert_eq!(
+        graph.dropout(data, graph.knob(1.0), seed).shape(),
+        Shape::matrix(2, 3),
+    );
 }

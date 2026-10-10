@@ -26,7 +26,8 @@ pub(crate) struct Task {
     pub(crate) extra: u32,
     pub(crate) inputs: [u32; 6],
     pub(crate) origin: u32,
-    pub(crate) param: f32,
+    pub(crate) literal: f32,
+    pub(crate) knob: u32,
     pub(crate) window: Window,
     pub(crate) splits: u32,
     pub(crate) work: u64,
@@ -71,6 +72,7 @@ impl Reads for Task {
             .chain(self.depends.iter().copied())
             .chain([self.segments])
             .chain([self.queries])
+            .chain([self.knob])
             .filter(|value| *value != NO_VALUE)
     }
 }
@@ -88,7 +90,8 @@ impl Task {
             extra: unit.extra,
             inputs: unit.inputs,
             origin: unit.origin,
-            param: unit.param,
+            literal: unit.literal,
+            knob: unit.knob,
             window: unit.window,
             splits: 1,
             work,
@@ -219,7 +222,8 @@ fn schedule_narrow(
         copy.inputs = [target, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         copy.origin = NO_VALUE;
         copy.extra = NO_VALUE;
-        copy.param = 0.0;
+        copy.literal = 0.0;
+        copy.knob = NO_VALUE;
         copy.splits = 1;
         copy.in_place = false;
         copy.prelude.clear();
@@ -320,7 +324,7 @@ fn convert(
             task.extra = NO_VALUE;
             task.inputs = [source, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
             task.origin = NO_VALUE;
-            task.param = plan.values[target as usize].scale;
+            task.literal = plan.values[target as usize].scale;
             task.splits = 1;
             task.in_place = true;
             task.prelude.clear();

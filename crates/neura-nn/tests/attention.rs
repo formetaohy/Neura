@@ -60,7 +60,7 @@ fn block(width: u32, heads: u32, key_heads: u32, input_heads: u32, causal: bool)
         },
         Element::Single,
         AttentionOptions {
-            scale: 1.0 / (width as f32).sqrt(),
+            scale: Some(graph.knob(1.0 / (width as f32).sqrt())),
             causal,
             origin: None,
             segments: None,
@@ -229,7 +229,7 @@ fn rotary_block() -> Block {
         },
         Element::Single,
         AttentionOptions {
-            scale: 1.0 / (width as f32).sqrt(),
+            scale: None,
             causal: true,
             origin: None,
             segments: None,
@@ -325,5 +325,25 @@ fn a_multi_head_attention_keeps_its_parameters_beside_its_tape() {
             .any(|value| value.shape.dims()[2] == TOKENS * TOKENS
                 && value.residency == Residency::Derived),
         "a fused attention materializes no score tensor",
+    );
+}
+
+#[test]
+fn a_rotary_attention_names_the_base_it_turns_with() {
+    let block = rotary_block();
+    let base = block
+        .model
+        .rotary_base()
+        .expect("a rotary attention turns every row by a base");
+    assert_eq!(
+        block.graph.name_of(base).as_deref(),
+        Some("model.base"),
+        "a rotary attention names the base it turns with",
+    );
+    let weights = block.runtime.weights(&block.graph);
+    let checkpoint = block.runtime.checkpoint(&weights);
+    assert!(
+        checkpoint.tensor("model.base").is_some(),
+        "a container carries the base a rotary attention turns with",
     );
 }

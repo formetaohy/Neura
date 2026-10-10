@@ -230,7 +230,7 @@ impl Packed {
             keys,
             values,
             AttentionOptions {
-                scale: SCALE,
+                scale: Some(graph.knob(SCALE)),
                 causal,
                 origin: None,
                 segments: Some(ragged.offsets),
