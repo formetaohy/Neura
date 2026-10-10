@@ -1,6 +1,6 @@
 use neura_compiler::{Read, ReadWrite, kernel};
 use neura_gpu::{
-    ArtifactCache, Backend, Backends, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest,
+    ArtifactCache, Backend, Binding, BufferUsages, GpuBuffer, GpuContext, GpuRequest, PREFERENCE,
     Submission,
 };
 use std::path::{Path, PathBuf};
@@ -16,10 +16,9 @@ fn directory(name: &str) -> PathBuf {
     path
 }
 
-fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
-    let backend = backends.backend();
+fn round_trip(backend: Backend, directory: &Path) -> (Vec<u32>, u64, u64) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         artifacts: Some(directory.to_path_buf()),
         ..Default::default()
     })
@@ -73,17 +72,16 @@ fn round_trip(backends: Backends, directory: &Path) -> (Vec<u32>, u64, u64) {
     (values, counts.0, counts.1)
 }
 
-fn cached(backends: Backends) {
-    let backend = backends.backend();
+fn cached(backend: Backend) {
     let directory = directory(&format!("{backend:?}"));
-    let (first, loads, stores) = round_trip(backends, &directory);
+    let (first, loads, stores) = round_trip(backend, &directory);
     assert_eq!(
         first,
         (1..=64u32).map(|value| value * 3).collect::<Vec<_>>()
     );
     assert_eq!(loads, 0, "a cold cache holds no artifact");
     assert_eq!(stores, 1, "a cold compile writes one artifact");
-    let (second, warm_loads, warm_stores) = round_trip(backends, &directory);
+    let (second, warm_loads, warm_stores) = round_trip(backend, &directory);
     assert_eq!(second, first, "a cache serves the very pipeline it holds");
     assert!(warm_loads > loads, "a warm cache serves its artifact");
     if backend == Backend::Dx12 {
@@ -144,8 +142,8 @@ fn an_artifact_of_no_byte_a_crashed_writer_left_is_a_miss() {
 
 #[test]
 fn every_platform_backend_reuses_its_compiled_pipeline() {
-    for backends in Backends::PLATFORM {
-        cached(backends);
+    for &backend in PREFERENCE {
+        cached(backend);
     }
 }
 

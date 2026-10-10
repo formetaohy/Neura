@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Graph, Init, Shape};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
@@ -16,15 +16,15 @@ fn directory(name: &str) -> PathBuf {
     path
 }
 
-fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
+fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
     Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the rate tests over {backends:?}: {error}"))
+    .unwrap_or_else(|error| panic!("no device runs the rate tests over {backend:?}: {error}"))
 }
 
 fn rate_of(step: u32) -> f32 {
@@ -37,11 +37,11 @@ fn rate_of(step: u32) -> f32 {
 }
 
 fn scheduled(
-    backends: Backends,
+    backend: Backend,
     memory: MemoryRequest,
     rate: impl Fn(u32) -> f32,
 ) -> (Vec<Vec<f32>>, f32, u64) {
-    let runtime = open(backends, memory);
+    let runtime = open(backend, memory);
     let graph = Graph::new();
     let init = Init::Uniform {
         low: -0.1,
@@ -108,15 +108,15 @@ fn scheduled(
     (parameters, held, weights.readback_pages())
 }
 
-fn a_rate_reaches_the_store_the_device_cannot_hold(backends: Backends, spilled: Option<&Path>) {
+fn a_rate_reaches_the_store_the_device_cannot_hold(backend: Backend, spilled: Option<&Path>) {
     let memory = || MemoryRequest {
         resident_weight_bytes: Some(RESIDENT_BYTES),
         weight_spill: spilled.map(Path::to_path_buf),
         ..Default::default()
     };
-    let (resident, resident_loss, _) = scheduled(backends, MemoryRequest::default(), rate_of);
-    let (streamed, streamed_loss, churn) = scheduled(backends, memory(), rate_of);
-    let (constant, _, _) = scheduled(backends, memory(), |_| rate_of(0));
+    let (resident, resident_loss, _) = scheduled(backend, MemoryRequest::default(), rate_of);
+    let (streamed, streamed_loss, churn) = scheduled(backend, memory(), rate_of);
+    let (constant, _, _) = scheduled(backend, memory(), |_| rate_of(0));
     assert!(
         streamed[0]
             .iter()
@@ -150,15 +150,15 @@ fn a_rate_reaches_the_store_the_device_cannot_hold(backends: Backends, spilled: 
 
 #[test]
 fn a_written_rate_reaches_a_weight_store_that_pages() {
-    for backends in Backends::PLATFORM {
-        a_rate_reaches_the_store_the_device_cannot_hold(backends, None);
+    for &backend in PREFERENCE {
+        a_rate_reaches_the_store_the_device_cannot_hold(backend, None);
     }
 }
 
 #[test]
 fn a_written_rate_reaches_a_weight_store_that_spills() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let path = directory("spilled");
-        a_rate_reaches_the_store_the_device_cannot_hold(backends, Some(&path));
+        a_rate_reaches_the_store_the_device_cannot_hold(backend, Some(&path));
     }
 }

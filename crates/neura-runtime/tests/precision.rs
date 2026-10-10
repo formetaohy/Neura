@@ -336,10 +336,10 @@ fn an_eight_bit_float_weight_feeds_a_product_a_quarter_of_the_bytes() {
     );
 }
 
-fn rounding_contract(backends: neura_gpu::Backends) {
+fn rounding_contract(backend: neura_gpu::Backend) {
     let runtime = Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         memory: MemoryRequest {
@@ -538,8 +538,8 @@ fn probes() -> Vec<f32> {
 
 #[test]
 fn every_platform_backend_rounds_the_numbers_the_host_would() {
-    for backends in neura_gpu::Backends::PLATFORM {
-        rounding_contract(backends);
+    for &backend in neura_gpu::PREFERENCE {
+        rounding_contract(backend);
     }
 }
 

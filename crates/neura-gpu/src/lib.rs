@@ -1,3 +1,4 @@
+mod backend;
 mod buffer;
 mod cache;
 mod capability;
@@ -10,11 +11,12 @@ mod submission;
 #[cfg(test)]
 mod test;
 
+pub use backend::{Backend, PREFERENCE};
 pub use buffer::{BufferBinding, GpuBuffer};
 pub use cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 pub use capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, Backends, BufferUsages, Capability,
-    CooperativeMatrix, DeviceType, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
+    Limits, PowerPreference,
 };
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
 pub use library::WARM_PROGRAMS;

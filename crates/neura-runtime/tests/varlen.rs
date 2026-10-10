@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{AttentionOptions, Graph, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
@@ -198,8 +198,8 @@ struct Packed {
 }
 
 impl Packed {
-    fn over(backends: Backends, case: Case) -> Self {
-        Self::build(backend::open_with(backends), case)
+    fn over(backend: Backend, case: Case) -> Self {
+        Self::build(backend::open_with(backend), case)
     }
 
     fn build(runtime: Runtime, case: Case) -> Self {
@@ -357,7 +357,7 @@ impl Packed {
 
 #[test]
 fn a_packed_query_walks_the_offsets_its_keys_close() {
-    let packed = Packed::over(Backends::PLATFORM, Case::of(PLANES, BOUND, WIDTH));
+    let packed = Packed::over(PREFERENCE[0], Case::of(PLANES, BOUND, WIDTH));
     let program = packed.compile();
     for lengths in [
         [3.0f32, 0.0, 5.0, 2.0].as_slice(),

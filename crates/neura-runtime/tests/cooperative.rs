@@ -17,7 +17,7 @@ const WORKGROUP: u32 = 256;
 fn open() -> Runtime {
     Runtime::open(neura_runtime::RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
-            backends: neura_gpu::Backends::VULKAN,
+            backend: Some(neura_gpu::Backend::Vulkan),
             ..Default::default()
         },
         memory: neura_runtime::MemoryRequest {

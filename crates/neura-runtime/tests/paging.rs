@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Free, Graph, Init, Shape, Value};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
@@ -44,21 +44,21 @@ impl<'g> Model<'g> {
     }
 }
 
-fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
+fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
     Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests over {backends:?}: {error}"))
+    .unwrap_or_else(|error| panic!("no device runs the tests over {backend:?}: {error}"))
 }
 
 const STREAMED_BYTES: u64 = 5 * (1 << 14);
 
-fn train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>, u32) {
-    let runtime = open(backends, memory);
+fn train(backend: Backend, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>, u32) {
+    let runtime = open(backend, memory);
     let graph = Graph::new();
     let model = Model::new(&graph);
     let data = graph.input(Shape::matrix(ROWS, WIDTH), Element::Single);
@@ -95,10 +95,10 @@ fn train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, Vec<f32>,
     (parameters, vec![observed], program.weight_windows())
 }
 
-fn train_streamed_like_the_resident_store(backends: Backends) {
-    let (resident, resident_loss, _) = train(backends, MemoryRequest::default());
+fn train_streamed_like_the_resident_store(backend: Backend) {
+    let (resident, resident_loss, _) = train(backend, MemoryRequest::default());
     let (streamed, streamed_loss, _) = train(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(STREAMED_BYTES),
             ..Default::default()
@@ -126,9 +126,9 @@ fn train_streamed_like_the_resident_store(backends: Backends) {
     );
 }
 
-fn resident_words_stay_within_the_budget(backends: Backends) {
+fn resident_words_stay_within_the_budget(backend: Backend) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(STREAMED_BYTES),
             ..Default::default()
@@ -169,9 +169,9 @@ fn resident_words_stay_within_the_budget(backends: Backends) {
     );
 }
 
-fn a_budget_below_one_task_is_refused(backends: Backends) {
+fn a_budget_below_one_task_is_refused(backend: Backend) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(1 << 14),
             ..Default::default()
@@ -195,10 +195,10 @@ fn a_budget_below_one_task_is_refused(backends: Backends) {
     );
 }
 
-fn host_writes_come_back(backends: Backends) {
+fn host_writes_come_back(backend: Backend) {
     let width = 64;
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(1 << 14),
             ..Default::default()
@@ -234,10 +234,10 @@ fn host_writes_come_back(backends: Backends) {
     );
 }
 
-fn checkpoints_carry_every_word(backends: Backends) {
+fn checkpoints_carry_every_word(backend: Backend) {
     let width = 64;
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(1 << 14),
             ..Default::default()
@@ -288,11 +288,11 @@ fn checkpoints_carry_every_word(backends: Backends) {
     );
 }
 
-fn quantized_weights_cross_pages(backends: Backends) {
+fn quantized_weights_cross_pages(backend: Backend) {
     let rows = 256;
     let width = 128;
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(3 * (1 << 14)),
             ..Default::default()
@@ -349,43 +349,43 @@ fn quantized_weights_cross_pages(backends: Backends) {
 
 #[test]
 fn a_streamed_weight_store_trains_the_model_a_resident_store_trains() {
-    for backends in Backends::PLATFORM {
-        train_streamed_like_the_resident_store(backends);
+    for &backend in PREFERENCE {
+        train_streamed_like_the_resident_store(backend);
     }
 }
 
 #[test]
 fn a_streamed_store_keeps_its_resident_words_within_its_budget() {
-    for backends in Backends::PLATFORM {
-        resident_words_stay_within_the_budget(backends);
+    for &backend in PREFERENCE {
+        resident_words_stay_within_the_budget(backend);
     }
 }
 
 #[test]
 fn a_weight_page_budget_that_cannot_hold_one_task_is_refused() {
-    for backends in Backends::PLATFORM {
-        a_budget_below_one_task_is_refused(backends);
+    for &backend in PREFERENCE {
+        a_budget_below_one_task_is_refused(backend);
     }
 }
 
 #[test]
 fn a_streamed_store_reads_back_the_weights_the_host_writes() {
-    for backends in Backends::PLATFORM {
-        host_writes_come_back(backends);
+    for &backend in PREFERENCE {
+        host_writes_come_back(backend);
     }
 }
 
 #[test]
 fn a_streamed_store_carries_every_word_of_a_checkpoint() {
-    for backends in Backends::PLATFORM {
-        checkpoints_carry_every_word(backends);
+    for &backend in PREFERENCE {
+        checkpoints_carry_every_word(backend);
     }
 }
 
 #[test]
 fn a_streamed_store_reads_and_writes_quantized_weights_across_pages() {
-    for backends in Backends::PLATFORM {
-        quantized_weights_cross_pages(backends);
+    for &backend in PREFERENCE {
+        quantized_weights_cross_pages(backend);
     }
 }
 
@@ -395,9 +395,9 @@ const DEEP_BATCH: u32 = 32;
 const DEEP_STEPS: u32 = 4;
 const DEEP_BYTES: u64 = 96 * (1 << 14);
 
-fn deep_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32) {
+fn deep_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, f32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -452,10 +452,10 @@ fn deep_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32) {
 
 #[test]
 fn a_streamed_store_trains_a_model_that_no_budget_can_hold() {
-    for backends in Backends::PLATFORM {
-        let (resident, resident_loss) = deep_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (resident, resident_loss) = deep_run(backend, MemoryRequest::default());
         let (streamed, streamed_loss) = deep_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(DEEP_BYTES),
                 ..Default::default()
@@ -481,9 +481,9 @@ const CHURN_BATCH: u32 = 16;
 const CHURN_STEPS: u32 = 4;
 const CHURN_BYTES: u64 = 128 * (1 << 14);
 
-fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, u64, u32) {
+fn churn_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, f32, u64, u64, u32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -546,10 +546,10 @@ fn churn_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u64, 
 
 #[test]
 fn a_streamed_store_reads_the_pages_it_churns_back_in_windows() {
-    for backends in Backends::PLATFORM {
-        let (resident, resident_loss, _, _, _) = churn_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (resident, resident_loss, _, _, _) = churn_run(backend, MemoryRequest::default());
         let (streamed, streamed_loss, pages, transfers, windows) = churn_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(CHURN_BYTES),
                 ..Default::default()
@@ -587,9 +587,9 @@ const FREE_BOUND: u32 = 32;
 const FREE_STEPS: u32 = 4;
 const FREE_BYTES: u64 = 96 * (1 << 14);
 
-fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32, usize) {
+fn free_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32, usize) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -668,10 +668,10 @@ fn free_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u
 
 #[test]
 fn a_streamed_store_pages_the_batch_a_binding_holds() {
-    for backends in Backends::PLATFORM {
-        let (resident, resident_losses, _, _) = free_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (resident, resident_losses, _, _) = free_run(backend, MemoryRequest::default());
         let (streamed, streamed_losses, windows, planned) = free_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(FREE_BYTES),
                 ..Default::default()
@@ -702,9 +702,9 @@ fn a_streamed_store_pages_the_batch_a_binding_holds() {
     }
 }
 
-fn wide_run(backends: Backends, memory: MemoryRequest) -> (f32, u32, u32) {
+fn wide_run(backend: Backend, memory: MemoryRequest) -> (f32, u32, u32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -734,14 +734,14 @@ fn wide_run(backends: Backends, memory: MemoryRequest) -> (f32, u32, u32) {
 
 #[test]
 fn a_streamed_store_holds_a_weight_no_budget_holds_whole() {
-    for backends in Backends::PLATFORM {
-        let (expected, pages, resident) = wide_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (expected, pages, resident) = wide_run(backend, MemoryRequest::default());
         assert_eq!(
             resident, pages,
             "a store without a weight budget holds every page its model carries",
         );
         let (observed, pages, held) = wide_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(16 * (1 << 14)),
                 ..Default::default()
@@ -761,9 +761,9 @@ fn a_streamed_store_holds_a_weight_no_budget_holds_whole() {
 
 #[test]
 fn a_streamed_store_pages_a_model_a_device_count_rules() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let counted = |memory: MemoryRequest| {
-            let runtime = open(backends, memory);
+            let runtime = open(backend, memory);
             let graph = Graph::new();
             let probe = graph.input(Shape::of([1, 1, 8, 1]), Element::Single);
             let tokens = graph.input(Shape::of([1, 1, 8, 128]), Element::Single);
@@ -834,8 +834,8 @@ fn a_streamed_store_pages_a_model_a_device_count_rules() {
     }
 }
 
-fn counted_train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, f32, u32) {
-    let runtime = open(backends, memory);
+fn counted_train(backend: Backend, memory: MemoryRequest) -> (Vec<Vec<f32>>, f32, u32) {
+    let runtime = open(backend, memory);
     let graph = Graph::new();
     let model = Model::new(&graph);
     let probe = graph.input(Shape::matrix(ROWS, 1), Element::Single);
@@ -888,22 +888,22 @@ fn counted_train(backends: Backends, memory: MemoryRequest) -> (Vec<Vec<f32>>, f
 
 #[test]
 fn a_streamed_store_trains_the_model_a_device_count_rules() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let (resident, resident_loss, resident_windows) =
-            counted_train(backends, MemoryRequest::default());
+            counted_train(backend, MemoryRequest::default());
         assert_eq!(
             resident_windows, 0,
             "a store that holds every weight resident walks no window",
         );
         let (streamed, streamed_loss, windows) = counted_train(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(STREAMED_BYTES),
                 ..Default::default()
             },
         );
         let (_, _, sealed_windows) = train(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(STREAMED_BYTES),
                 ..Default::default()
@@ -963,11 +963,11 @@ fn table_graph(
 }
 
 fn table_walk(
-    backends: Backends,
+    backend: Backend,
     memory: MemoryRequest,
     steps: &[&[u32]],
 ) -> (Vec<Vec<f32>>, Vec<u32>) {
-    let runtime = open(backends, memory);
+    let runtime = open(backend, memory);
     let bound = steps.iter().map(|rows| rows.len()).max().expect("a step") as u32;
     let graph: Graph<'static> = Graph::new();
     let extent = graph.free(bound);
@@ -993,14 +993,14 @@ fn table_walk(
 
 #[test]
 fn a_streamed_table_reads_the_rows_a_host_names() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let first: Vec<u32> = (0..8).collect();
         let second: Vec<u32> = (0..8).map(|row| 512 + row).collect();
         let third: Vec<u32> = vec![0, 512, 1, 513];
         let steps: Vec<&[u32]> = vec![&first, &second, &third];
-        let (resident, _) = table_walk(backends, MemoryRequest::default(), &steps);
+        let (resident, _) = table_walk(backend, MemoryRequest::default(), &steps);
         let (streamed, windows) = table_walk(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(TABLE_BYTES),
                 ..Default::default()
@@ -1027,9 +1027,9 @@ fn a_streamed_table_reads_the_rows_a_host_names() {
 
 #[test]
 fn a_table_walk_a_host_leaves_unnamed_refuses() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let runtime = open(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(TABLE_BYTES),
                 ..Default::default()
@@ -1096,8 +1096,8 @@ fn a_table_walk_a_host_leaves_unnamed_refuses() {
     }
 }
 
-fn table_training(backends: Backends, memory: MemoryRequest) -> Vec<f32> {
-    let runtime = open(backends, memory);
+fn table_training(backend: Backend, memory: MemoryRequest) -> Vec<f32> {
+    let runtime = open(backend, memory);
     let graph: Graph<'static> = Graph::new();
     let extent = graph.free(8);
     let (indices, table, gathered) = table_graph(&graph, extent, 8);
@@ -1135,10 +1135,10 @@ fn table_training(backends: Backends, memory: MemoryRequest) -> Vec<f32> {
 
 #[test]
 fn a_streamed_table_trains_the_rows_a_host_names() {
-    for backends in Backends::PLATFORM {
-        let resident = table_training(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let resident = table_training(backend, MemoryRequest::default());
         let streamed = table_training(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(TABLE_BYTES),
                 ..Default::default()
@@ -1164,8 +1164,8 @@ fn a_streamed_table_trains_the_rows_a_host_names() {
     }
 }
 
-fn static_table(backends: Backends, memory: MemoryRequest, rows: &[u32]) -> (Vec<f32>, u32) {
-    let runtime = open(backends, memory);
+fn static_table(backend: Backend, memory: MemoryRequest, rows: &[u32]) -> (Vec<f32>, u32) {
+    let runtime = open(backend, memory);
     let graph: Graph<'static> = Graph::new();
     let count = rows.len() as u32;
     let indices = graph.input(Shape::of([1, count, 1, 1]), Element::Single);
@@ -1194,11 +1194,11 @@ fn static_table(backends: Backends, memory: MemoryRequest, rows: &[u32]) -> (Vec
 
 #[test]
 fn a_streamed_table_reads_the_rows_a_host_names_at_a_fixed_shape() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let rows: Vec<u32> = (0..8).collect();
-        let (resident, _) = static_table(backends, MemoryRequest::default(), &rows);
+        let (resident, _) = static_table(backend, MemoryRequest::default(), &rows);
         let (streamed, windows) = static_table(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(TABLE_BYTES),
                 ..Default::default()
@@ -1223,9 +1223,9 @@ const CONV_CHANNELS: u32 = 8192;
 const CONV_BYTES: u64 = 6 * (1 << 14);
 const CONV_PAGES: u32 = (CONV_CHANNELS * 9) / 4096;
 
-fn convolution_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, f32, u32) {
+fn convolution_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, f32, u32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -1269,10 +1269,10 @@ fn a_streamed_store_pages_the_filter_of_a_convolution() {
         (CONV_CHANNELS * 9).div_ceil(4096) >= 2,
         "a filter of {CONV_PAGES} pages holds no more than the budget books it",
     );
-    for backends in Backends::PLATFORM {
-        let (resident, resident_loss, _) = convolution_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (resident, resident_loss, _) = convolution_run(backend, MemoryRequest::default());
         let (streamed, streamed_loss, windows) = convolution_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(CONV_BYTES),
                 ..Default::default()
@@ -1300,9 +1300,9 @@ const INPUT_GRADIENT_CHANNELS: u32 = 8192;
 const INPUT_GRADIENT_BYTES: u64 = 6 * (1 << 14);
 const INPUT_GRADIENT_PAGES: u32 = (INPUT_GRADIENT_CHANNELS * 9) / 4096;
 
-fn input_gradient_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, f32, u32) {
+fn input_gradient_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, f32, u32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -1347,11 +1347,11 @@ fn a_streamed_store_trains_the_input_gradient_of_a_convolution() {
         INPUT_GRADIENT_PAGES > INPUT_GRADIENT_BYTES as u32 / (1 << 14),
         "a filter of {INPUT_GRADIENT_PAGES} pages holds no more than the budget books it",
     );
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let (resident, resident_gradient, resident_loss, _) =
-            input_gradient_run(backends, MemoryRequest::default());
+            input_gradient_run(backend, MemoryRequest::default());
         let (streamed, streamed_gradient, streamed_loss, windows) = input_gradient_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(INPUT_GRADIENT_BYTES),
                 ..Default::default()
@@ -1390,9 +1390,9 @@ const GROUPED_GROUPS: u32 = 8;
 const GROUPED_BOUND: u32 = 4;
 const GROUPED_BYTES: u64 = 4 * (1 << 14);
 
-fn grouped_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<Vec<f32>>) {
+fn grouped_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, Vec<Vec<f32>>) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -1437,10 +1437,10 @@ fn grouped_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<Vec<
 
 #[test]
 fn a_streamed_store_trains_a_grouped_convolution_of_every_batch_a_binding_holds() {
-    for backends in Backends::PLATFORM {
-        let (resident, resident_gradients) = grouped_run(backends, MemoryRequest::default());
+    for &backend in PREFERENCE {
+        let (resident, resident_gradients) = grouped_run(backend, MemoryRequest::default());
         let (streamed, streamed_gradients) = grouped_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(GROUPED_BYTES),
                 ..Default::default()
@@ -1472,9 +1472,9 @@ fn a_streamed_store_trains_a_grouped_convolution_of_every_batch_a_binding_holds(
 
 const COUNTED_ROWS: u32 = 8;
 
-fn counted_convolution_run(backends: Backends, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32) {
+fn counted_convolution_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, Vec<f32>, u32) {
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..memory
@@ -1523,15 +1523,15 @@ fn counted_convolution_run(backends: Backends, memory: MemoryRequest) -> (Vec<f3
 
 #[test]
 fn a_streamed_store_pages_the_filter_a_device_count_rules() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let (resident, resident_losses, windows) =
-            counted_convolution_run(backends, MemoryRequest::default());
+            counted_convolution_run(backend, MemoryRequest::default());
         assert_eq!(
             windows, 0,
             "a store that holds every weight resident walks no window",
         );
         let (streamed, streamed_losses, windows) = counted_convolution_run(
-            backends,
+            backend,
             MemoryRequest {
                 resident_weight_bytes: Some(CONV_BYTES),
                 ..Default::default()

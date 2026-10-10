@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_compiler::{ReadWrite, kernel};
-use neura_gpu::{Backends, Binding, GpuRequest, Submission};
+use neura_gpu::{Backend, Binding, GpuRequest, PREFERENCE, Submission};
 use neura_graph::{Graph, Init, Shape};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
@@ -38,10 +38,10 @@ fn an_engine_compute_pipeline_writes_directly_into_the_model_arena() {
     assert_eq!(runtime.read(&program, action), [3.0, 6.0, 9.0, 12.0]);
 }
 
-fn narrow_precision_inference(backends: Backends, element: Element) {
+fn narrow_precision_inference(backend: Backend, element: Element) {
     let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         ..Default::default()
@@ -73,16 +73,16 @@ fn narrow_precision_inference(backends: Backends, element: Element) {
 
 #[test]
 fn every_platform_backend_runs_narrow_precision_rust_kernels() {
-    for backends in Backends::PLATFORM {
-        narrow_precision_inference(backends, Element::Half);
-        narrow_precision_inference(backends, Element::Bfloat16);
+    for &backend in PREFERENCE {
+        narrow_precision_inference(backend, Element::Half);
+        narrow_precision_inference(backend, Element::Bfloat16);
     }
 }
 
-fn training_tape(backends: Backends) {
+fn training_tape(backend: Backend) {
     let runtime = Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         ..Default::default()
@@ -120,7 +120,7 @@ fn training_tape(backends: Backends) {
 
 #[test]
 fn every_platform_backend_executes_a_complete_training_tape() {
-    for backends in Backends::PLATFORM {
-        training_tape(backends);
+    for &backend in PREFERENCE {
+        training_tape(backend);
     }
 }

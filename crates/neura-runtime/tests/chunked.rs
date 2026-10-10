@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{AttentionOptions, Graph, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
@@ -242,8 +242,8 @@ struct Chunked {
 }
 
 impl Chunked {
-    fn over(backends: Backends, case: Case) -> Self {
-        Self::build(backend::open_with(backends), case)
+    fn over(backend: Backend, case: Case) -> Self {
+        Self::build(backend::open_with(backend), case)
     }
 
     fn build(runtime: Runtime, case: Case) -> Self {
@@ -506,8 +506,8 @@ fn a_chunked_prefill_of_a_plane_longer_than_a_workgroup_trains_every_row() {
 
 #[test]
 fn every_platform_backend_trains_a_chunked_prefill() {
-    for backends in Backends::PLATFORM {
-        let chunked = Chunked::over(backends, Case::of(PLANES, QUERIES, KEYS, WIDTH));
+    for &backend in PREFERENCE {
+        let chunked = Chunked::over(backend, Case::of(PLANES, QUERIES, KEYS, WIDTH));
         let program = chunked.compile();
         chunked.step(&program, &[3.0, 2.0, 1.0, 0.0], &[7.0, 5.0, 3.0, 1.0]);
     }
@@ -515,11 +515,11 @@ fn every_platform_backend_trains_a_chunked_prefill() {
 
 #[test]
 fn a_chunked_prefill_weighs_a_ring_by_the_count_its_slots_wrapped() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let case = Case::of(PLANES, PLANES * QUERIES, PLANES * KEYS, WIDTH)
             .windowed(KEYS)
             .ringed();
-        let chunked = Chunked::over(backends, case);
+        let chunked = Chunked::over(backend, case);
         let program = chunked.compile();
         for (queries, keys, cursors) in [
             (

@@ -1,45 +1,6 @@
+use crate::backend::Backend;
 use bitflags::bitflags;
-pub use neura_shader::Backend;
 use std::fmt::{self, Display, Formatter};
-
-bitflags! {
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    pub struct Backends: u8 {
-        const VULKAN = 1;
-        const METAL = 2;
-        const DX12 = 4;
-    }
-}
-
-impl Backends {
-    pub const COMPILED: Self = Self::from_bits_truncate(
-        Self::bits_of(cfg!(dx12_backend), Self::DX12)
-            | Self::bits_of(cfg!(metal_backend), Self::METAL)
-            | Self::bits_of(cfg!(vulkan_backend), Self::VULKAN),
-    );
-
-    pub const PLATFORM: Self = Self::from_bits_truncate(
-        Self::bits_of(cfg!(platform_dx12), Self::DX12)
-            | Self::bits_of(cfg!(platform_metal), Self::METAL)
-            | Self::bits_of(cfg!(platform_vulkan), Self::VULKAN),
-    );
-
-    const fn bits_of(enabled: bool, backend: Self) -> u8 {
-        if enabled { backend.bits() } else { 0 }
-    }
-
-    pub fn backend(self) -> Backend {
-        if self == Self::VULKAN {
-            Backend::Vulkan
-        } else if self == Self::METAL {
-            Backend::Metal
-        } else if self == Self::DX12 {
-            Backend::Dx12
-        } else {
-            panic!("one backend names one shader language")
-        }
-    }
-}
 
 bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

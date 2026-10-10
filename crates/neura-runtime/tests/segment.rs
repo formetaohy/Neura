@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Graph, Shape, Value};
 use neura_plan::Product;
 use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile};
@@ -386,21 +386,21 @@ fn a_grouped_product_weighs_the_rows_a_chain_operand_holds() {
 
 #[test]
 fn a_grouped_product_weighs_the_rows_of_every_backend() {
-    for backends in Backends::PLATFORM {
-        let grouped = Grouped::over(backend::open_with(backends), 3, 12, 4, 5);
+    for &backend in PREFERENCE {
+        let grouped = Grouped::over(backend::open_with(backend), 3, 12, 4, 5);
         let program = grouped.compile();
         let produced = grouped.step(&program, &[3.0, 0.0, 7.0]);
         assert_eq!(
             produced.len(),
             10 * 5,
-            "{backends:?} walked the rows a ragged axis packs",
+            "{backend:?} walked the rows a ragged axis packs",
         );
     }
 }
 
 #[test]
 fn a_grouped_product_weighs_the_rows_of_a_cooperative_tile() {
-    let runtime = backend::open_with(Backends::VULKAN);
+    let runtime = backend::open_with(Backend::Vulkan);
     let Some(matrix) = runtime.capability().cooperative_matrix else {
         return;
     };

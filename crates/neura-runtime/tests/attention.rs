@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
 
 #[path = "support/backend.rs"]
@@ -250,8 +250,8 @@ fn a_masked_key_weighs_nothing_on_every_platform_backend() {
         reach: 0,
         scale: 0.5,
     };
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let (graph, queries, keys, values, out) = graph_of(shapes);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
@@ -625,8 +625,8 @@ fn a_head_wider_than_a_thread_carries_walks_every_number_of_its_row() {
     };
     run_forward(grouped, 1e-4);
     run_backward(grouped, 1e-4);
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         for (width, causal) in [(67u32, true), (128, false)] {
             let shapes = Shapes {
                 heads: 2,

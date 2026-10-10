@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::{Backends, GpuContext, GpuRequest, LimitsPolicy};
+use neura_gpu::{Backend, GpuContext, GpuRequest, LimitsPolicy, PREFERENCE};
 use neura_graph::{Graph, Shape};
 use neura_runtime::{MemoryRequest, Program, Runtime, RuntimeRequest};
 use std::time::Instant;
@@ -7,9 +7,9 @@ use std::time::Instant;
 const HEAVY_ELEMENTS: u64 = 16 << 20;
 const HEAP_BYTES: u64 = 256 << 20;
 
-fn heap_bytes(backends: Backends) -> u64 {
+fn heap_bytes(backend: Backend) -> u64 {
     let request = GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     };
     let context = GpuContext::open(&request).expect("a device serves a heap probe");
@@ -20,7 +20,7 @@ fn open() -> Runtime {
     Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
-            heap_bytes: heap_bytes(Backends::COMPILED),
+            heap_bytes: heap_bytes(PREFERENCE[0]),
             ..Default::default()
         },
         ..Default::default()
@@ -33,16 +33,16 @@ fn heavy_elements(runtime: &Runtime) -> u32 {
         .expect("a heavy workload fits one word")
 }
 
-fn open_backend(backends: Backends) -> Runtime {
+fn open_backend(backend: Backend) -> Runtime {
     Runtime::open(RuntimeRequest {
         gpu: GpuRequest {
-            backends,
+            backend: Some(backend),
             limits: LimitsPolicy::Adapter,
             ..Default::default()
         },
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
-            heap_bytes: heap_bytes(backends),
+            heap_bytes: heap_bytes(backend),
             ..Default::default()
         },
     })
@@ -105,8 +105,8 @@ fn a_measured_program_reports_the_time_of_its_own_runs() {
 #[test]
 fn every_backend_a_machine_offers_times_the_same_work() {
     let mut measured = Vec::new();
-    for backends in Backends::PLATFORM {
-        let runtime = open_backend(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_backend(backend);
         let graph = Graph::new();
         let program = rectifier(&runtime, &graph, heavy_elements(&runtime));
         let mut fastest = f64::MAX;

@@ -1,6 +1,7 @@
 use neura_compiler::{AtomicU32, Read, ReadWrite, kernel};
 use neura_gpu::{
-    Backends, Binding, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission,
+    Backend, Binding, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, PREFERENCE,
+    Submission,
 };
 
 #[kernel(workgroup_size = 64)]
@@ -8,10 +9,9 @@ fn double(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
     output[lid] = input[lid] * 2u32;
 }
 
-fn compute(backends: Backends) {
-    let backend = backends.backend();
+fn compute(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
@@ -91,8 +91,8 @@ fn compute(backends: Backends) {
 
 #[test]
 fn every_platform_backend_executes_native_compute() {
-    for backends in Backends::PLATFORM {
-        compute(backends);
+    for &backend in PREFERENCE {
+        compute(backend);
     }
 }
 
@@ -114,12 +114,12 @@ fn remainder(left: u32, right: u32, signed: bool) -> u32 {
     }
 }
 
-fn remainders(backends: Backends, signed: bool) {
+fn remainders(backend: Backend, signed: bool) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
     let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -196,15 +196,15 @@ fn remainders(backends: Backends, signed: bool) {
 
 #[test]
 fn every_platform_backend_keeps_the_sign_of_a_signed_remainder() {
-    for backends in Backends::PLATFORM {
-        remainders(backends, true);
+    for &backend in PREFERENCE {
+        remainders(backend, true);
     }
 }
 
 #[test]
 fn every_platform_backend_takes_an_unsigned_remainder() {
-    for backends in Backends::PLATFORM {
-        remainders(backends, false);
+    for &backend in PREFERENCE {
+        remainders(backend, false);
     }
 }
 
@@ -230,12 +230,12 @@ fn sums_before_zero(lid: u32, input: Read<u32>, out: ReadWrite<u32>) {
     out[lid] = total;
 }
 
-fn breaks_out_of_a_match(backends: Backends) {
+fn breaks_out_of_a_match(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
     let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -288,8 +288,8 @@ fn breaks_out_of_a_match(backends: Backends) {
 
 #[test]
 fn every_platform_backend_leaves_the_loop_a_match_breaks() {
-    for backends in Backends::PLATFORM {
-        breaks_out_of_a_match(backends);
+    for &backend in PREFERENCE {
+        breaks_out_of_a_match(backend);
     }
 }
 
@@ -298,10 +298,9 @@ fn stamp_past_a_gigabyte(lid: u32, index: Read<u32>, storage: ReadWrite<u32>) {
     storage[index[lid]] += 7u32;
 }
 
-fn past_a_gigabyte(backends: Backends) {
-    let backend = backends.backend();
+fn past_a_gigabyte(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
     .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
@@ -377,8 +376,8 @@ fn past_a_gigabyte(backends: Backends) {
 
 #[test]
 fn every_platform_backend_reaches_past_a_gigabyte() {
-    for backends in Backends::PLATFORM {
-        past_a_gigabyte(backends);
+    for &backend in PREFERENCE {
+        past_a_gigabyte(backend);
     }
 }
 
@@ -397,12 +396,12 @@ fn activation(value: f32) -> f32 {
     positive.exp().min(value.abs() + 1.0)
 }
 
-fn activated(backends: Backends) {
+fn activated(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
     let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -469,8 +468,8 @@ fn activated(backends: Backends) {
 
 #[test]
 fn every_platform_backend_runs_a_kernel_over_the_device_vocabulary() {
-    for backends in Backends::PLATFORM {
-        activated(backends);
+    for &backend in PREFERENCE {
+        activated(backend);
     }
 }
 
@@ -494,12 +493,12 @@ mod summation {
     }
 }
 
-fn summed(backends: Backends) {
+fn summed(backend: Backend) {
     let context = GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("{backends:?} could not run native compute: {error}"));
+    .unwrap_or_else(|error| panic!("{backend:?} could not run native compute: {error}"));
     let device = context.device().clone();
     let queue = context.queue().clone();
     let storage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
@@ -555,7 +554,7 @@ fn summed(backends: Backends) {
 
 #[test]
 fn every_platform_backend_runs_a_kernel_module_over_shared_memory() {
-    for backends in Backends::PLATFORM {
-        summed(backends);
+    for &backend in PREFERENCE {
+        summed(backend);
     }
 }

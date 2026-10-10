@@ -2,11 +2,12 @@ use super::{
     DeviceFailure, FRAME_TIMEOUT, FRAMES_IN_FLIGHT, NativeBuffer, NativeGroup, NativePipeline,
     STAGING_BYTES, TIME_SLOTS, hang_deadline,
 };
+use crate::backend::Backend;
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, fingerprint};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backend, BufferUsages, Capability, CooperativeMatrix,
-    DeviceType, Limits,
+    AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
+    Limits,
 };
 use crate::submission::{Command, Write};
 use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};

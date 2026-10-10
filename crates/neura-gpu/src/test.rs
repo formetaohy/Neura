@@ -1,19 +1,19 @@
 use crate::native::FRAMES_IN_FLIGHT;
 use crate::{
-    Backends, BufferUsages, Device, DeviceType, GpuBuffer, GpuContext, GpuRequest, PowerPreference,
-    Queue, Submission,
+    Backend, BufferUsages, Device, DeviceType, GpuBuffer, GpuContext, GpuRequest, PREFERENCE,
+    PowerPreference, Queue, Submission,
 };
 use std::sync::Arc;
 
 #[test]
 fn shared_devices_live_only_as_long_as_their_owners() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let directory = std::env::temp_dir().join(format!(
-            "neura-shared-device-{}-{backends:?}",
+            "neura-shared-device-{}-{backend:?}",
             std::process::id(),
         ));
         let request = GpuRequest {
-            backends,
+            backend: Some(backend),
             artifacts: Some(directory.clone()),
             ..Default::default()
         };
@@ -64,9 +64,9 @@ fn shared_devices_live_only_as_long_as_their_owners() {
     }
 }
 
-fn release(backends: Backends) {
+fn release(backend: Backend) {
     let device = Device::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
     .expect("a native compute device");
@@ -85,14 +85,14 @@ fn release(backends: Backends) {
 
 #[test]
 fn pending_uploads_do_not_keep_a_device_alive() {
-    for backends in Backends::PLATFORM {
-        release(backends);
+    for &backend in PREFERENCE {
+        release(backend);
     }
 }
 
-fn recycling(backends: Backends) {
+fn recycling(backend: Backend) {
     let device = Device::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
     .expect("a native compute device");
@@ -121,8 +121,8 @@ fn recycling(backends: Backends) {
 
 #[test]
 fn a_queue_recycles_the_frames_of_its_submissions() {
-    for backends in Backends::PLATFORM {
-        recycling(backends);
+    for &backend in PREFERENCE {
+        recycling(backend);
     }
 }
 
@@ -154,7 +154,7 @@ fn a_cached_dxil_the_driver_refuses_is_a_miss() {
         std::env::temp_dir().join(format!("neura-cache-refused-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
     let context = GpuContext::open(&GpuRequest {
-        backends: Backends::DX12,
+        backend: Some(Backend::Dx12),
         artifacts: Some(directory.clone()),
         ..Default::default()
     })

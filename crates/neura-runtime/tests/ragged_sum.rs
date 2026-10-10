@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Graph, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
@@ -69,8 +69,8 @@ struct Sums {
 }
 
 impl Sums {
-    fn of(backends: Backends, planes: u32, bound: u32, width: u32) -> Self {
-        Self::over(backend::open_with(backends), planes, bound, width)
+    fn of(backend: Backend, planes: u32, bound: u32, width: u32) -> Self {
+        Self::over(backend::open_with(backend), planes, bound, width)
     }
 
     fn over(runtime: Runtime, planes: u32, bound: u32, width: u32) -> Self {
@@ -121,14 +121,14 @@ impl Sums {
 
 #[test]
 fn a_plane_sums_the_rows_a_ragged_axis_closes() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         for lengths in [
             [3.0, 0.0, 5.0, 2.0],
             [16.0, 0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 0.0],
             [1.0, 1.0, 1.0, 1.0],
         ] {
-            let sums = Sums::of(backends, PLANES, BOUND, WIDTH);
+            let sums = Sums::of(backend, PLANES, BOUND, WIDTH);
             let program = sums.compile();
             sums.step(&program, &lengths);
         }
@@ -144,7 +144,7 @@ fn a_plane_sums_the_rows_of_a_long_axis_in_chunks() {
 
 #[test]
 fn a_plane_sums_a_length_a_device_counts() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let mask = graph.input(Shape::of([PLANES, 1, BOUND, 1]), Element::Single);
         let counts = graph.sum_axis(mask, 2);
@@ -155,7 +155,7 @@ fn a_plane_sums_a_length_a_device_counts() {
         );
         let total = graph.segment_sum(cache, ragged);
         graph.retain(total);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let lengths = [3.0f32, 0.0, 5.0, 2.0];
@@ -180,7 +180,7 @@ fn a_plane_sums_a_length_a_device_counts() {
 
 #[test]
 fn a_plane_sums_a_binding_that_narrows_the_plane_axis() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let live = graph.free(PLANES);
         let lengths = graph.input(Shape::of([1, PLANES]).freed(&[(3, live)]), Element::Single);
@@ -191,7 +191,7 @@ fn a_plane_sums_a_binding_that_narrows_the_plane_axis() {
         );
         let total = graph.segment_sum(cache, ragged);
         graph.retain(total);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let image = data(BOUND * WIDTH, 17);
@@ -214,7 +214,7 @@ fn a_plane_sums_a_binding_that_narrows_the_plane_axis() {
 
 #[test]
 fn a_plane_sums_a_batch_the_lengths_lay_out_by_head() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         for broad in [true, false] {
             let heads = 2u32;
             let batch = 3u32;
@@ -231,7 +231,7 @@ fn a_plane_sums_a_batch_the_lengths_lay_out_by_head() {
             );
             let total = graph.segment_sum(cache, ragged);
             graph.retain(total);
-            let runtime = backend::open_with(backends);
+            let runtime = backend::open_with(backend);
             let weights = runtime.weights(&graph);
             let program = runtime.compile(&graph, &weights);
             let planes = if broad { batch } else { batch - 1 };
@@ -252,7 +252,7 @@ fn a_plane_sums_a_batch_the_lengths_lay_out_by_head() {
 
 #[test]
 fn a_per_plane_sum_trains_the_rows_that_reach_it() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
@@ -267,7 +267,7 @@ fn a_per_plane_sum_trains_the_rows_that_reach_it() {
         let gradient = collected.of(cache);
         graph.retain(gradient);
         graph.retain(total);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let lengths_data = [3.0f32, 0.0, 5.0, 2.0];
@@ -293,7 +293,7 @@ fn a_per_plane_sum_trains_the_rows_that_reach_it() {
 
 #[test]
 fn a_per_plane_sum_walks_the_planes_a_device_counts() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let flags = graph.input(Shape::of([1, 1, 1, PLANES]), Element::Single);
         let count = graph.sum(flags);
@@ -309,7 +309,7 @@ fn a_per_plane_sum_walks_the_planes_a_device_counts() {
         );
         let total = graph.segment_sum(cache, ragged);
         graph.retain(total);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let lengths_data = [3.0f32, 0.0, 5.0, 1.0];
@@ -334,7 +334,7 @@ fn a_per_plane_sum_walks_the_planes_a_device_counts() {
 
 #[test]
 fn a_per_plane_sum_folds_the_packs_it_fused() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
@@ -350,7 +350,7 @@ fn a_per_plane_sum_folds_the_packs_it_fused() {
         let gradient = collected.of(cache);
         graph.retain(total);
         graph.retain(gradient);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let lengths_data = [3.0f32, 0.0, 5.0, 2.0];
@@ -385,7 +385,7 @@ fn a_per_plane_sum_folds_the_packs_it_fused() {
 
 #[test]
 fn a_per_plane_sum_carries_the_width_a_binding_rules() {
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let graph: Graph<'static> = Graph::new();
         let widths = graph.free(WIDTH);
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
@@ -396,7 +396,7 @@ fn a_per_plane_sum_carries_the_width_a_binding_rules() {
         );
         let total = graph.segment_sum(cache, ragged);
         graph.retain(total);
-        let runtime = backend::open_with(backends);
+        let runtime = backend::open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         let lengths_data = [3.0f32, 0.0, 5.0, 2.0];

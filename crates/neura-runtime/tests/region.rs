@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape};
 
 #[path = "support/backend.rs"]
@@ -412,8 +412,8 @@ fn a_concatenation_carries_a_gradient_through_its_words() {
 
 #[test]
 fn every_backend_runs_a_region_and_an_axis() {
-    for backends in Backends::PLATFORM {
-        let runtime = backend::open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = backend::open_with(backend);
         let graph = Graph::new();
         let input = graph.input(Shape::of([2, 3, 4, 5]), Element::Single);
         let folded = graph.sum_axis(input, 1);

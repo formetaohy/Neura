@@ -5,8 +5,9 @@ pub(crate) mod metal;
 #[cfg(vulkan_backend)]
 pub(crate) mod vulkan;
 
+use crate::backend::{Backend, PREFERENCE};
 use crate::cache::ArtifactCache;
-use crate::capability::{AdapterInfo, AdapterPolicy, Backends, BufferUsages, Capability, Limits};
+use crate::capability::{AdapterInfo, AdapterPolicy, BufferUsages, Capability, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
@@ -99,40 +100,29 @@ pub(crate) fn open(
     request: &GpuRequest,
     artifacts: ArtifactCache,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), GpuUnavailable> {
+    let order: &[Backend] = match &request.backend {
+        Some(backend) if PREFERENCE.contains(backend) => std::slice::from_ref(backend),
+        Some(backend) => {
+            return Err(GpuUnavailable::BackendMissing {
+                wanted: *backend,
+                offered: PREFERENCE,
+            });
+        }
+        None => PREFERENCE,
+    };
     let mut reasons = Vec::new();
     let mut offered = Vec::new();
     let mut unsupported = None;
-    #[cfg(dx12_backend)]
-    if request.backends.contains(Backends::DX12) {
-        match dx12::Device::open(request.adapter, artifacts.clone()) {
+    for backend in order {
+        match candidate(*backend, request.adapter, &artifacts) {
             Ok((device, info, limits, capability)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Dx12(device), info, limits, capability));
+                return Ok((device, info, limits, capability));
             }
             Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
             Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
-            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("D3D12: {reason}")),
-        }
-    }
-    #[cfg(metal_backend)]
-    if request.backends.contains(Backends::METAL) {
-        match metal::Device::open(request.adapter, artifacts.clone()) {
-            Ok((device, info, limits, capability)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Metal(device), info, limits, capability));
+            Err(DeviceFailure::Unavailable { reason }) => {
+                reasons.push(format!("{backend:?}: {reason}"));
             }
-            Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
-            Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
-            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Metal: {reason}")),
-        }
-    }
-    #[cfg(vulkan_backend)]
-    if request.backends.contains(Backends::VULKAN) {
-        match vulkan::Device::open(request.adapter, artifacts.clone()) {
-            Ok((device, info, limits, capability)) if limits.supports(&Limits::BASELINE) => {
-                return Ok((NativeDevice::Vulkan(device), info, limits, capability));
-            }
-            Ok((_, info, limits, _)) => unsupported = Some((info, limits)),
-            Err(DeviceFailure::Missing { offered: found }) => offered.extend(found),
-            Err(DeviceFailure::Unavailable { reason }) => reasons.push(format!("Vulkan: {reason}")),
         }
     }
     if let Some((info, limits)) = unsupported {
@@ -148,6 +138,34 @@ pub(crate) fn open(
             reasons.join("; ")
         },
     })
+}
+
+fn candidate(
+    backend: Backend,
+    policy: AdapterPolicy,
+    artifacts: &ArtifactCache,
+) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), DeviceFailure> {
+    match backend {
+        #[cfg(dx12_backend)]
+        Backend::Dx12 => dx12::Device::open(policy, artifacts.clone()).map(
+            |(device, info, limits, capability)| {
+                (NativeDevice::Dx12(device), info, limits, capability)
+            },
+        ),
+        #[cfg(metal_backend)]
+        Backend::Metal => metal::Device::open(policy, artifacts.clone()).map(
+            |(device, info, limits, capability)| {
+                (NativeDevice::Metal(device), info, limits, capability)
+            },
+        ),
+        #[cfg(vulkan_backend)]
+        Backend::Vulkan => vulkan::Device::open(policy, artifacts.clone()).map(
+            |(device, info, limits, capability)| {
+                (NativeDevice::Vulkan(device), info, limits, capability)
+            },
+        ),
+        _ => unreachable!("every backend of this build opens a candidate"),
+    }
 }
 
 impl NativePipeline {

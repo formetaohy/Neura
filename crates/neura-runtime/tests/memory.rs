@@ -1,6 +1,6 @@
 use neura_abi::{Element, Store};
 use neura_gpu::{
-    Backends, BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, Submission,
+    BufferUsages, DeviceType, GpuBuffer, GpuContext, GpuRequest, PREFERENCE, Submission,
 };
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, Profile};
@@ -433,10 +433,10 @@ fn a_heap_within_one_binding_needs_no_bank() {
 fn a_heap_across_banks_addresses_the_words_of_every_bank() {
     const ROWS: u32 = 1536;
     const WIDTH: u32 = 4;
-    for backends in Backends::PLATFORM {
+    for &backend in PREFERENCE {
         let runtime = Runtime::open(RuntimeRequest {
             gpu: GpuRequest {
-                backends,
+                backend: Some(backend),
                 ..Default::default()
             },
             memory: MemoryRequest {
@@ -446,7 +446,7 @@ fn a_heap_across_banks_addresses_the_words_of_every_bank() {
                 ..Default::default()
             },
         })
-        .unwrap_or_else(|error| panic!("no device runs the tests over {backends:?}: {error}"));
+        .unwrap_or_else(|error| panic!("no device runs the tests over {backend:?}: {error}"));
         assert_eq!(runtime.heap_banks(), 2);
         assert_eq!(runtime.heap_bank_bytes(), 16 << 10);
 

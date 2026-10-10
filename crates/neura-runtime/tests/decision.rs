@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
@@ -981,8 +981,8 @@ fn a_seeded_sample_rides_every_profile_the_same_way() {
 fn a_sampled_nucleus_rides_every_platform_backend() {
     let rows = 128;
     let classes = 8;
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let model = Sampling::of(rows, classes);
         let program = model.compile(&runtime);
         let logits = random(rows * classes, 17);
@@ -1003,7 +1003,7 @@ fn a_sampled_nucleus_rides_every_platform_backend() {
                     cumulative: 0.75,
                 },
             ),
-            "{backends:?} draws another nucleus",
+            "{backend:?} draws another nucleus",
         );
     }
 }

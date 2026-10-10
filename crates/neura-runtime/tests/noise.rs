@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Shape, Value};
 
 #[path = "support/backend.rs"]
@@ -339,8 +339,8 @@ fn a_reparameterized_draw_descends_through_its_mean_and_its_spread() {
 #[test]
 fn a_uniform_draw_names_the_same_number_on_every_backend() {
     let mut drawn = Vec::new();
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let graph = Graph::new();
         let seed = seed_of(&graph);
         let uniform = graph.uniform(Shape::matrix(ROWS, COLUMNS), seed);
@@ -349,7 +349,7 @@ fn a_uniform_draw_names_the_same_number_on_every_backend() {
         let program = runtime.compile(&graph, &weights);
         runtime.write(&program, seed, &[f32::from_bits(0x5eed)]);
         runtime.run(&program);
-        drawn.push((backends, runtime.read(&program, uniform)));
+        drawn.push((backend, runtime.read(&program, uniform)));
     }
     for pair in drawn.windows(2) {
         assert_eq!(

@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
@@ -121,8 +121,8 @@ fn every_backend_a_machine_offers_streams_a_narrow_product() {
     let left_data = random(512, 3);
     let right_data = random(512 * 512, 7);
     let expected = matmul_reference(&left_data, &right_data, 1, 512, 512);
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         assert!(
@@ -275,8 +275,8 @@ fn every_backend_a_machine_offers_folds_a_row_the_same_way() {
     );
     let sums = graph.sum_rows(data);
     let values = vec![1.0f32; (rows * columns) as usize];
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
         runtime.write(&program, data, &values);
@@ -1292,8 +1292,8 @@ fn an_operand_folded_into_a_subtraction_keeps_its_side() {
 #[test]
 fn a_masked_row_weighs_only_the_columns_that_hold_a_number() {
     let logits_values = [0.0, f32::NEG_INFINITY, f32::NEG_INFINITY, 1.0, 2.0, 3.0];
-    for backends in Backends::PLATFORM {
-        let runtime = open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = open_with(backend);
         let graph = Graph::new();
         let logits = graph.parameter(Shape::matrix(2, 3), Init::Zero, Element::Single);
         let probabilities = graph.softmax(logits);

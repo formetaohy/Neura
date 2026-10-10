@@ -1,8 +1,8 @@
-use neura_gpu::{Backends, BufferUsages, GpuBuffer, GpuContext, GpuRequest, Submission};
+use neura_gpu::{Backend, BufferUsages, GpuBuffer, GpuContext, GpuRequest, PREFERENCE, Submission};
 
-fn context(backends: Backends) -> GpuContext {
+fn context(backend: Backend) -> GpuContext {
     GpuContext::open(&GpuRequest {
-        backends,
+        backend: Some(backend),
         ..Default::default()
     })
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
@@ -28,9 +28,8 @@ fn copy_seconds(context: &GpuContext, bytes: u64) -> f64 {
 
 #[test]
 fn every_platform_backend_times_the_copy_it_ran() {
-    for backends in Backends::PLATFORM {
-        let backend = backends.backend();
-        let context = context(backends);
+    for &backend in PREFERENCE {
+        let context = context(backend);
         let heavy = copy_seconds(&context, 64 << 20);
         let light = copy_seconds(&context, 4 << 10);
         assert!(
@@ -46,9 +45,8 @@ fn every_platform_backend_times_the_copy_it_ran() {
 
 #[test]
 fn every_platform_backend_reports_a_completed_copy() {
-    for backends in Backends::PLATFORM {
-        let backend = backends.backend();
-        let context = context(backends);
+    for &backend in PREFERENCE {
+        let context = context(backend);
         let device = context.device();
         let queue = context.queue();
         let usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;

@@ -1,7 +1,8 @@
+use crate::backend::Backend;
 use crate::buffer::GpuBuffer;
 use crate::cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 use crate::capability::{
-    AdapterId, AdapterInfo, AdapterPolicy, Backends, Capability, Limits, PowerPreference,
+    AdapterId, AdapterInfo, AdapterPolicy, Capability, Limits, PowerPreference,
 };
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
@@ -21,7 +22,7 @@ pub enum LimitsPolicy {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct GpuRequest {
-    pub backends: Backends,
+    pub backend: Option<Backend>,
     pub adapter: AdapterPolicy,
     pub limits: LimitsPolicy,
     pub artifacts: Option<PathBuf>,
@@ -31,7 +32,7 @@ pub struct GpuRequest {
 impl Default for GpuRequest {
     fn default() -> Self {
         Self {
-            backends: Backends::COMPILED,
+            backend: None,
             adapter: AdapterPolicy::Power(PowerPreference::HighPerformance),
             limits: LimitsPolicy::Adapter,
             artifacts: None,
@@ -58,6 +59,10 @@ pub enum GpuUnavailable {
         wanted: AdapterId,
         offered: Vec<AdapterInfo>,
     },
+    BackendMissing {
+        wanted: Backend,
+        offered: &'static [Backend],
+    },
     UnsupportedLimits {
         info: AdapterInfo,
         limits: Limits,
@@ -78,6 +83,10 @@ impl Display for GpuUnavailable {
                 }
                 Ok(())
             }
+            Self::BackendMissing { wanted, offered } => write!(
+                out,
+                "the requested {wanted:?} backend is missing from a build that offers {offered:?}"
+            ),
             Self::UnsupportedLimits { info, limits } => write!(
                 out,
                 "{} ({:?}) cannot provide the compute baseline: {limits:?}",

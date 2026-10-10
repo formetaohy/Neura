@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{CheckpointFile, MemoryRequest, Program, Runtime, RuntimeRequest, Weights};
 use std::path::{Path, PathBuf};
@@ -17,20 +17,20 @@ fn directory(name: &str) -> PathBuf {
     path
 }
 
-fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
+fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
     Runtime::open(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
-            backends,
+            backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the spill tests over {backends:?}: {error}"))
+    .unwrap_or_else(|error| panic!("no device runs the spill tests over {backend:?}: {error}"))
 }
 
-fn resident(backends: Backends) -> Runtime {
+fn resident(backend: Backend) -> Runtime {
     open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             ..Default::default()
@@ -38,13 +38,13 @@ fn resident(backends: Backends) -> Runtime {
     )
 }
 
-fn spilled(backends: Backends, directory: &Path) -> Runtime {
-    spilled_with(backends, directory, SPILL_BYTES)
+fn spilled(backend: Backend, directory: &Path) -> Runtime {
+    spilled_with(backend, directory, SPILL_BYTES)
 }
 
-fn spilled_with(backends: Backends, directory: &Path, bytes: u64) -> Runtime {
+fn spilled_with(backend: Backend, directory: &Path, bytes: u64) -> Runtime {
     open(
-        backends,
+        backend,
         MemoryRequest {
             readback_bytes: 4 << 20,
             resident_weight_bytes: Some(bytes),
@@ -143,8 +143,8 @@ fn parameters(runtime: &Runtime, program: &Program, session: &Session<'_>) -> Ve
         .collect()
 }
 
-fn keeps_its_pages_out_of_host_memory(backends: Backends, directory: &Path) {
-    let resident_runtime = resident(backends);
+fn keeps_its_pages_out_of_host_memory(backend: Backend, directory: &Path) {
+    let resident_runtime = resident(backend);
     let resident_graph = Graph::new();
     let resident_session = training(&resident_graph);
     let resident_weights = resident_runtime.weights(&resident_graph);
@@ -156,7 +156,7 @@ fn keeps_its_pages_out_of_host_memory(backends: Backends, directory: &Path) {
     );
     let expected = parameters(&resident_runtime, &kept.program, &resident_session);
 
-    let runtime = spilled(backends, directory);
+    let runtime = spilled(backend, directory);
     let graph = Graph::new();
     let session = training(&graph);
     let weights = runtime.weights(&graph);
@@ -228,8 +228,8 @@ fn keeps_its_pages_out_of_host_memory(backends: Backends, directory: &Path) {
 
 #[test]
 fn a_spilled_store_keeps_its_pages_out_of_host_memory() {
-    for backends in Backends::PLATFORM {
-        keeps_its_pages_out_of_host_memory(backends, &directory("pages"));
+    for &backend in PREFERENCE {
+        keeps_its_pages_out_of_host_memory(backend, &directory("pages"));
     }
 }
 
@@ -239,8 +239,8 @@ fn layer_names() -> Vec<String> {
         .collect()
 }
 
-fn carries_every_word_of_a_checkpoint(backends: Backends, directory: &Path) {
-    let source = spilled(backends, directory);
+fn carries_every_word_of_a_checkpoint(backend: Backend, directory: &Path) {
+    let source = spilled(backend, directory);
     let source_graph = Graph::new();
     let source_session = training(&source_graph);
     let source_weights = source.weights(&source_graph);
@@ -248,7 +248,7 @@ fn carries_every_word_of_a_checkpoint(backends: Backends, directory: &Path) {
     let expected = parameters(&source, &trained.program, &source_session);
     let checkpoint = source.checkpoint(&source_weights);
 
-    let target = spilled(backends, directory);
+    let target = spilled(backend, directory);
     let target_graph = Graph::new();
     let target_session = training(&target_graph);
     let seeded = target.weights(&target_graph);
@@ -279,7 +279,7 @@ fn carries_every_word_of_a_checkpoint(backends: Backends, directory: &Path) {
     assert_eq!(named.elements, u64::from(WIDTH) * u64::from(WIDTH));
     assert_eq!(named.payload_bytes, u64::from(WIDTH) * u64::from(WIDTH) * 4,);
 
-    let loaded = spilled(backends, directory);
+    let loaded = spilled(backend, directory);
     let loaded_graph = Graph::new();
     let loaded_session = training(&loaded_graph);
     let weights = loaded.load_streamed(&loaded_graph, &container);
@@ -302,7 +302,7 @@ fn carries_every_word_of_a_checkpoint(backends: Backends, directory: &Path) {
         container.reads(),
     );
 
-    let resting = spilled(backends, directory);
+    let resting = spilled(backend, directory);
     let resting_graph = Graph::new();
     let resting_layers = layers(&resting_graph);
     let resting_data = resting_graph.input(Shape::matrix(BATCH, WIDTH), Element::Single);
@@ -331,13 +331,13 @@ fn carries_every_word_of_a_checkpoint(backends: Backends, directory: &Path) {
 
 #[test]
 fn a_spilled_store_carries_every_word_of_a_checkpoint() {
-    for backends in Backends::PLATFORM {
-        carries_every_word_of_a_checkpoint(backends, &directory("checkpoint"));
+    for &backend in PREFERENCE {
+        carries_every_word_of_a_checkpoint(backend, &directory("checkpoint"));
     }
 }
 
-fn saves_the_container_it_streams(backends: Backends, directory: &Path) {
-    let source = spilled(backends, directory);
+fn saves_the_container_it_streams(backend: Backend, directory: &Path) {
+    let source = spilled(backend, directory);
     let source_graph = Graph::new();
     let source_session = training(&source_graph);
     let source_weights = source.weights(&source_graph);
@@ -365,7 +365,7 @@ fn saves_the_container_it_streams(backends: Backends, directory: &Path) {
     assert_eq!(container.tensors(), 2 * LAYERS as usize);
     assert_eq!(container.names().collect::<Vec<_>>(), layer_names());
 
-    let target = resident(backends);
+    let target = resident(backend);
     let target_graph = Graph::new();
     let target_session = training(&target_graph);
     let target_weights = target.load_streamed(&target_graph, &container);
@@ -389,15 +389,15 @@ fn saves_the_container_it_streams(backends: Backends, directory: &Path) {
 
 #[test]
 fn a_spilled_store_saves_the_container_it_streams() {
-    for backends in Backends::PLATFORM {
-        saves_the_container_it_streams(backends, &directory("save"));
+    for &backend in PREFERENCE {
+        saves_the_container_it_streams(backend, &directory("save"));
     }
 }
 
-fn refuses_a_directory_it_cannot_spill_into(backends: Backends, directory: &Path) {
+fn refuses_a_directory_it_cannot_spill_into(backend: Backend, directory: &Path) {
     let missing = directory.join("missing");
     let runtime = open(
-        backends,
+        backend,
         MemoryRequest {
             resident_weight_bytes: Some(SPILL_BYTES),
             weight_spill: Some(missing),
@@ -417,13 +417,13 @@ fn refuses_a_directory_it_cannot_spill_into(backends: Backends, directory: &Path
 
 #[test]
 fn a_spilled_store_refuses_a_directory_it_cannot_spill_into() {
-    for backends in Backends::PLATFORM {
-        refuses_a_directory_it_cannot_spill_into(backends, &directory("missing"));
+    for &backend in PREFERENCE {
+        refuses_a_directory_it_cannot_spill_into(backend, &directory("missing"));
     }
 }
 
-fn a_resident_store_holds_every_page_on_the_device(backends: Backends) {
-    let runtime = resident(backends);
+fn a_resident_store_holds_every_page_on_the_device(backend: Backend) {
+    let runtime = resident(backend);
     let graph = Graph::new();
     let session = training(&graph);
     let weights = runtime.weights(&graph);
@@ -441,19 +441,19 @@ fn a_resident_store_holds_every_page_on_the_device(backends: Backends) {
 
 #[test]
 fn a_resident_store_streams_nothing() {
-    for backends in Backends::PLATFORM {
-        a_resident_store_holds_every_page_on_the_device(backends);
+    for &backend in PREFERENCE {
+        a_resident_store_holds_every_page_on_the_device(backend);
     }
 }
 
-fn carries_every_quantum_of_a_quantized_model(backends: Backends, directory: &Path) {
-    let resident_runtime = resident(backends);
+fn carries_every_quantum_of_a_quantized_model(backend: Backend, directory: &Path) {
+    let resident_runtime = resident(backend);
     let resident_graph = Graph::new();
     let (resident_first, resident_out) = quantized(&resident_graph);
     let resident_weights = resident_runtime.weights(&resident_graph);
     let resident_program = resident_runtime.compile(&resident_graph, &resident_weights);
 
-    let runtime = spilled_with(backends, directory, 3 * (1 << 14));
+    let runtime = spilled_with(backend, directory, 3 * (1 << 14));
     let graph = Graph::new();
     let (first, out) = quantized(&graph);
     let weights = runtime.weights(&graph);
@@ -552,8 +552,8 @@ fn a_container_rides_to_another_thread_of_the_frame() {
 
 #[test]
 fn a_spilled_store_carries_every_quantum_of_a_quantized_model() {
-    for backends in Backends::PLATFORM {
-        carries_every_quantum_of_a_quantized_model(backends, &directory("quantized"));
+    for &backend in PREFERENCE {
+        carries_every_quantum_of_a_quantized_model(backend, &directory("quantized"));
     }
 }
 
@@ -580,7 +580,7 @@ fn a_spill_directory_sweeps_the_leftovers_of_a_crashed_run() {
     let foreign = directory.join("engine-cache.bin");
     std::fs::write(&foreign, b"a file that belongs to the engine").expect("a foreign file");
 
-    let runtime = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let runtime = spilled_with(PREFERENCE[0], &directory, SPILL_BYTES);
     let graph = Graph::new();
     let session = training(&graph);
     let weights = runtime.weights(&graph);
@@ -630,7 +630,7 @@ fn a_spill_directory_sweeps_the_leftovers_of_a_crashed_run() {
 #[test]
 fn a_sweep_keeps_the_spill_a_live_run_holds() {
     let directory = directory("live");
-    let first = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let first = spilled_with(PREFERENCE[0], &directory, SPILL_BYTES);
     let first_graph = Graph::new();
     let first_session = training(&first_graph);
     let first_weights = first.weights(&first_graph);
@@ -643,7 +643,7 @@ fn a_sweep_keeps_the_spill_a_live_run_holds() {
         file.display(),
     );
 
-    let second = spilled_with(Backends::PLATFORM, &directory, SPILL_BYTES);
+    let second = spilled_with(PREFERENCE[0], &directory, SPILL_BYTES);
     let second_graph = Graph::new();
     let second_session = training(&second_graph);
     let second_weights = second.weights(&second_graph);

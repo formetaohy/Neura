@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_gpu::Backends;
+use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape};
 
 #[path = "support/backend.rs"]
@@ -44,8 +44,8 @@ fn scales() -> Vec<f32> {
 
 #[test]
 fn a_comparison_turns_data_into_the_mask_of_a_masked_loss() {
-    for backends in Backends::PLATFORM {
-        let runtime = backend::open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = backend::open_with(backend);
         let graph = Graph::new();
         let value = graph.gradient_input(Shape::vector(WIDTH), Element::Single);
         let limit = graph.input(Shape::vector(WIDTH), Element::Single);
@@ -76,8 +76,8 @@ fn a_comparison_turns_data_into_the_mask_of_a_masked_loss() {
 
 #[test]
 fn a_selection_picks_the_branch_the_condition_names_exactly() {
-    for backends in Backends::PLATFORM {
-        let runtime = backend::open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = backend::open_with(backend);
         let graph = Graph::new();
         let condition = graph.gradient_input(Shape::vector(WIDTH), Element::Single);
         let zeros = graph.parameter(Shape::matrix(ROWS, WIDTH), Init::Zero, Element::Single);
@@ -112,8 +112,8 @@ fn a_selection_picks_the_branch_the_condition_names_exactly() {
 
 #[test]
 fn a_selection_weighs_only_the_branch_it_picked() {
-    for backends in Backends::PLATFORM {
-        let runtime = backend::open_with(backends);
+    for &backend in PREFERENCE {
+        let runtime = backend::open_with(backend);
         let graph = Graph::new();
         let value = graph.gradient_input(Shape::vector(WIDTH), Element::Single);
         let limit = graph.input(Shape::vector(WIDTH), Element::Single);
