@@ -25,8 +25,11 @@ Neura is a **deep learning framework designed for games**, making it easy to bui
 
 ## Documents
 
-- **[NeuraSkill](https://github.com/formetaohy/NeuraSkill)**: An official agent skill for developers using Neura.
 - **[Examples](examples)**: Runnable examples for learning Neura and exploring specific concepts.
+
+## Integrations
+
+- **[bevy-neura](https://github.com/formetaohy/bevy-neura)**: An official integration for building AI-native games in [Bevy](https://bevy.org).
 
 ## Contact
 
