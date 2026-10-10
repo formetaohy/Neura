@@ -335,6 +335,30 @@ impl Shape {
         ]
     }
 
+    pub(crate) fn transposed(self, window: Window) -> [u32; 2] {
+        assert!(
+            self.free(2).is_none() && self.free(3).is_none(),
+            "a window scatters the rows and columns of {:?}, and a free extent of either hands every length the taps reach",
+            self.dims,
+        );
+        let rows = (i64::from(self.dims[2]) - 1) * i64::from(window.stride_rows())
+            + i64::from(window.reach_rows())
+            - 2 * i64::from(window.pad_rows());
+        let columns = (i64::from(self.dims[3]) - 1) * i64::from(window.stride_columns())
+            + i64::from(window.reach_columns())
+            - 2 * i64::from(window.pad_columns());
+        assert!(
+            rows > 0 && columns > 0,
+            "a window of {} by {} taps over {:?} padded by {} by {} scatters into no position",
+            window.reach_rows(),
+            window.reach_columns(),
+            self.dims,
+            window.pad_rows(),
+            window.pad_columns(),
+        );
+        [rows as u32, columns as u32]
+    }
+
     pub fn fixed_axis(self, axis: u32, dim: u32) -> Self {
         assert!(
             axis < MAX_RANK,

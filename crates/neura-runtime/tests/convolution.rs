@@ -5,9 +5,12 @@ use neura_graph::{Graph, Init, Shape, Window};
 mod convolution;
 #[path = "support/mod.rs"]
 mod support;
+#[path = "support/transpose.rs"]
+mod transpose;
 
 use convolution::conv2d_reference;
 use support::{assert_close, open};
+use transpose::{conv2d_transpose_reference, conv2d_transpose_weight_grad_reference};
 
 fn samples(count: u32, seed: u32) -> Vec<f32> {
     let mut entropy = seed | 1;
@@ -142,4 +145,109 @@ fn two_windows_ride_one_tape() {
         *value += addition;
     }
     assert_close(&runtime.read(&program, combined), &expected, 1e-4);
+}
+
+#[test]
+fn a_transposed_convolution_scatters_the_window_it_is_handed() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 4, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let scattered = graph.conv2d_transpose(input, filter, window, 1);
+    assert_eq!(scattered.shape(), Shape::of([2, 4, 11, 11]));
+    graph.retain(scattered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(216, 5);
+    let filter_values = samples(108, 11);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected =
+        conv2d_transpose_reference(&input_values, &filter_values, [2, 3, 6, 6], 1, window);
+    assert_close(&runtime.read(&program, scattered), &expected, 1e-4);
+}
+
+#[test]
+fn a_grouped_transposed_convolution_writes_each_group_its_own_channels() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 4, 5, 5]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let scattered = graph.conv2d_transpose(input, filter, window, 2);
+    assert_eq!(scattered.shape(), Shape::of([1, 6, 9, 9]));
+    graph.retain(scattered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(100, 73);
+    let filter_values = samples(108, 79);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected =
+        conv2d_transpose_reference(&input_values, &filter_values, [1, 4, 5, 5], 2, window);
+    assert_close(&runtime.read(&program, scattered), &expected, 1e-4);
+}
+
+#[test]
+fn a_depthwise_transposed_convolution_writes_one_channel_at_a_time() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 4, 6, 6]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 1, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [1, 1], [1, 1]);
+    let scattered = graph.conv2d_transpose(input, filter, window, 4);
+    assert_eq!(scattered.shape(), Shape::of([2, 4, 6, 6]));
+    graph.retain(scattered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(288, 83);
+    let filter_values = samples(36, 89);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected =
+        conv2d_transpose_reference(&input_values, &filter_values, [2, 4, 6, 6], 4, window);
+    assert_close(&runtime.read(&program, scattered), &expected, 1e-4);
+}
+
+#[test]
+fn a_transposed_convolution_walks_its_gradient_back_into_the_input_and_filter() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.gradient_input(Shape::of([1, 3, 4, 4]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 2, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let scattered = graph.conv2d_transpose(input, filter, window, 1);
+    assert_eq!(scattered.shape(), Shape::of([1, 2, 7, 7]));
+    let upstream = graph.parameter(Shape::of([1, 2, 7, 7]), Init::Zero, Element::Single);
+    let loss = graph.sum(graph.mul(scattered, upstream));
+    let gradients = graph.backward(loss);
+    let input_grad = gradients.of(input);
+    let filter_grad = gradients.of(filter);
+    graph.retain(input_grad);
+    graph.retain(filter_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(48, 97);
+    let filter_values = samples(54, 101);
+    let upstream_values = samples(98, 103);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.write(&program, upstream, &upstream_values);
+    runtime.run(&program);
+    let expected_input =
+        conv2d_reference(&upstream_values, &filter_values, [1, 2, 7, 7], 3, window);
+    let expected_filter = conv2d_transpose_weight_grad_reference(
+        &input_values,
+        [1, 3, 4, 4],
+        &upstream_values,
+        [1, 2, 7, 7],
+        1,
+        window,
+    );
+    assert_close(&runtime.read(&program, input_grad), &expected_input, 1e-4);
+    assert_close(&runtime.read(&program, filter_grad), &expected_filter, 1e-4);
 }

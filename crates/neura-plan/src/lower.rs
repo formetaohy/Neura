@@ -468,7 +468,9 @@ fn schedule_unit(
                 u64::from(count) * taps
             });
         }
-        Kind::Conv2dInputGrad => conv_input_grad(plan, unit, profile, weight_slots),
+        Kind::Conv2dInputGrad | Kind::Conv2dTranspose => {
+            conv_input_grad(plan, unit, profile, weight_slots)
+        }
         Kind::PoolMax2d | Kind::PoolMean2d => {
             let out = plan.shape(unit.out);
             let taps = window_taps(unit.window);

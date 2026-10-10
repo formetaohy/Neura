@@ -502,10 +502,14 @@ fn narrow<W: Walk, V: Values>(
         Kind::Matmul => product(values, tiles, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
         Kind::Conv2d => convolution(values, task, first, count, &mut narrowed),
-        Kind::Conv2dInputGrad if task.geometry() == neura_abi::strategy::INPUT_FOLD => {
+        Kind::Conv2dInputGrad | Kind::Conv2dTranspose
+            if task.geometry() == neura_abi::strategy::INPUT_FOLD =>
+        {
             fold(values, task, first, count, &mut narrowed)
         }
-        Kind::Conv2dInputGrad => convolution_input_grad(values, task, first, count, &mut narrowed),
+        Kind::Conv2dInputGrad | Kind::Conv2dTranspose => {
+            convolution_input_grad(values, task, first, count, &mut narrowed)
+        }
         Kind::Conv2dWeightGrad => {
             convolution_weight_grad(values, task, first, count, &mut narrowed)
         }

@@ -437,6 +437,14 @@ kinds! {
         chain: true,
         origin: false,
     };
+    Conv2dTranspose CONV2D_TRANSPOSE = "conv2d_transpose" {
+        entry: "run_conv2d_transpose",
+        modules: [Conv],
+        geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
     Conv2dWeightGrad CONV2D_WEIGHT_GRAD = "conv2d_weight_grad" {
         entry: "run_conv2d_weight_grad",
         modules: [Conv],

@@ -722,6 +722,58 @@ impl<'g> Graph<'g> {
                     self.accumulate(grads, filter, out);
                 }
             }
+            Kind::Conv2dTranspose => {
+                let filter = self.value_of(task.inputs[0]);
+                let input = self.value_of(task.inputs[1]);
+                if self.tracked(&[input]) {
+                    let out = self.fresh(
+                        self.shape(input),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
+                    let mut grad = TaskInfo::of(
+                        Kind::Conv2d,
+                        op::NONE,
+                        out.id(),
+                        [
+                            gradient.id(),
+                            filter.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    );
+                    grad.window = task.window;
+                    self.push(grad);
+                    self.accumulate(grads, input, out);
+                }
+                if self.tracked(&[filter]) {
+                    let out = self.fresh(
+                        self.shape(filter),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
+                    let mut grad = TaskInfo::of(
+                        Kind::Conv2dWeightGrad,
+                        op::NONE,
+                        out.id(),
+                        [
+                            gradient.id(),
+                            input.id(),
+                            filter.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    );
+                    grad.window = task.window;
+                    self.push(grad);
+                    self.accumulate(grads, filter, out);
+                }
+            }
             Kind::Gather => {
                 let table = self.value_of(task.inputs[0]);
                 let indices = self.value_of(task.inputs[1]);

@@ -55,6 +55,14 @@ mod device {
         }
     }
 
+    fn run_conv2d_transpose(task: Task, lid: u32) {
+        match task.geometry {
+            strategy::INPUT_FOLD => run_conv2d_input_fold(task, lid),
+            strategy::INPUT_CHUNK => run_conv2d_input_chunk(task, lid),
+            _ => refuse(kind::CONV2D_TRANSPOSE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
     fn run_conv2d_input_chunk(task: Task, lid: u32) {
         let filter = values[task.a];
         let gradient = values[task.b];

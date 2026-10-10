@@ -699,6 +699,73 @@ impl<'g> Graph<'g> {
         out
     }
 
+    pub fn conv2d_transpose(
+        &self,
+        input: Value<'g>,
+        filter: Value<'g>,
+        window: Window,
+        groups: u32,
+    ) -> Value<'g> {
+        let input = self.own(input);
+        let filter = self.own(filter);
+        let input_shape = self.shape(input);
+        let filter_shape = self.shape(filter).tapped(window);
+        let input_dims = input_shape.dims();
+        let filter_dims = filter_shape.dims();
+        assert!(
+            groups > 0,
+            "a transposed convolution of no group scatters no channel of {}",
+            filter_dims[1],
+        );
+        assert!(
+            input_shape.free(1).is_none()
+                && filter_shape.free(0).is_none()
+                && filter_shape.free(1).is_none(),
+            "a transposed convolution scatters {} channels through a filter of {} input channels and {} local channels, and a free extent of any channel axis hands every length the group every channel writes",
+            input_dims[1],
+            filter_dims[0],
+            filter_dims[1],
+        );
+        assert_eq!(
+            input_dims[1], filter_dims[0],
+            "a transposed convolution scatters {} channels through a filter of {} input channels",
+            input_dims[1], filter_dims[0],
+        );
+        assert!(
+            filter_dims[0].is_multiple_of(groups),
+            "a transposed convolution of {groups} channel groups scatters {} channels of a filter",
+            filter_dims[0],
+        );
+        let [rows, columns] = input_shape.transposed(window);
+        let element = self.element(input).promote(self.element(filter));
+        let out = self.stored(
+            Shape::from_axes(
+                [input_dims[0], groups * filter_dims[1], rows, columns],
+                [input_shape.free(0), None, None, None],
+            ),
+            element,
+            self.carries(element, &[input, filter]),
+            Residency::Derived,
+            self.tracked(&[input, filter]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Conv2dTranspose,
+            op::NONE,
+            out.id(),
+            [
+                filter.id(),
+                input.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.window = window;
+        self.push(task);
+        out
+    }
+
     pub fn pool2d(&self, input: Value<'g>, window: Window, mode: Pool) -> Value<'g> {
         let input = self.own(input);
         let input_shape = self.shape(input);

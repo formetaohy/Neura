@@ -1851,7 +1851,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
                     exact_length(values, task, task.inputs[1], axis);
                 }
             }
-            Kind::Conv2dInputGrad => {
+            Kind::Conv2dInputGrad | Kind::Conv2dTranspose => {
                 for axis in 1..MAX_RANK {
                     exact_length(values, task, task.inputs[0], axis);
                     exact_length(values, task, task.out, axis);

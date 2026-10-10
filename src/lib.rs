@@ -8,8 +8,8 @@ pub use neura_graph::{
     Window,
 };
 pub use neura_nn::{
-    AdamW, Adapter, Conv2d, Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments,
-    MultiHeadAttention, RmsNorm, Sgd, cross_entropy, mse_loss, policy_loss,
+    AdamW, Adapter, Conv2d, ConvTranspose2d, Embedding, GroupNorm, HeadShape, LayerNorm, Linear,
+    Mlp, Moments, MultiHeadAttention, RmsNorm, Sgd, cross_entropy, mse_loss, policy_loss,
 };
 pub use neura_plan::{Arena, Layout, Seed, Span};
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};

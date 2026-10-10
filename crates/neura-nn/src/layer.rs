@@ -231,6 +231,75 @@ impl<'g> Conv2d<'g> {
     }
 }
 
+pub struct ConvTranspose2d<'g> {
+    filter: Value<'g>,
+    bias: Value<'g>,
+    window: Window,
+    groups: u32,
+}
+
+impl<'g> ConvTranspose2d<'g> {
+    pub fn new(
+        graph: &Graph<'g>,
+        name: &str,
+        channels: [u32; 2],
+        groups: u32,
+        window: Window,
+        init: Init,
+        element: Element,
+    ) -> Self {
+        let [inputs, outputs] = channels;
+        assert!(
+            inputs > 0 && outputs > 0 && groups > 0,
+            "a transposed convolution of {inputs} channels into {outputs} over {groups} groups carries no filter",
+        );
+        assert!(
+            inputs.is_multiple_of(groups) && outputs.is_multiple_of(groups),
+            "a transposed convolution of {inputs} channels into {outputs} cuts {groups} groups",
+        );
+        Self {
+            filter: graph.named_parameter(
+                &format!("{name}.filter"),
+                Shape::of([
+                    inputs,
+                    outputs / groups,
+                    window.reach_rows(),
+                    window.reach_columns(),
+                ]),
+                init,
+                element,
+            ),
+            bias: graph.named_parameter(
+                &format!("{name}.bias"),
+                Shape::of([1, outputs, 1, 1]),
+                Init::Zero,
+                element,
+            ),
+            window,
+            groups,
+        }
+    }
+
+    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+        graph.add(
+            graph.conv2d_transpose(input, self.filter, self.window, self.groups),
+            self.bias,
+        )
+    }
+
+    pub fn filter(&self) -> Value<'g> {
+        self.filter
+    }
+
+    pub fn bias(&self) -> Value<'g> {
+        self.bias
+    }
+
+    pub fn parameters(&self) -> [Value<'g>; 2] {
+        [self.filter, self.bias]
+    }
+}
+
 pub struct LayerNorm<'g> {
     columns: u32,
     scale: Value<'g>,

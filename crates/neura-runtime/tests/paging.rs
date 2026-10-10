@@ -1265,6 +1265,99 @@ fn convolution_run(backend: Backend, memory: MemoryRequest) -> (Vec<f32>, f32, u
     )
 }
 
+const TRANSPOSE_CHANNELS: u32 = 512;
+const TRANSPOSE_OUTPUTS: u32 = 4;
+const TRANSPOSE_BYTES: u64 = 2 * (1 << 14);
+const TRANSPOSE_PAGES: u32 = (TRANSPOSE_CHANNELS * TRANSPOSE_OUTPUTS * 9) / 4096;
+
+fn transposed_convolution_run(
+    backend: Backend,
+    memory: MemoryRequest,
+) -> (Vec<f32>, Vec<f32>, f32, u32) {
+    let runtime = open(
+        backend,
+        MemoryRequest {
+            readback_bytes: 4 << 20,
+            ..memory
+        },
+    );
+    let graph = Graph::new();
+    let images = graph.gradient_input(Shape::of([1, TRANSPOSE_CHANNELS, 4, 4]), Element::Single);
+    let filter = graph.parameter(
+        Shape::of([TRANSPOSE_CHANNELS, TRANSPOSE_OUTPUTS, 3, 3]),
+        Init::Uniform {
+            low: -0.02,
+            high: 0.02,
+        },
+        Element::Single,
+    );
+    let scattered = graph.conv2d_transpose(images, filter, neura_graph::Window::sliding([3, 3]), 1);
+    assert_eq!(scattered.shape(), Shape::of([1, TRANSPOSE_OUTPUTS, 6, 6]));
+    let loss = graph.sum(graph.mul(scattered, scattered));
+    graph.retain(loss);
+    let gradients = graph.backward(loss);
+    let descent = graph.fill(Shape::scalar(), -0.001);
+    graph.add_into(filter, graph.mul(gradients.of(filter), descent));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations = (0..(TRANSPOSE_CHANNELS * 16))
+        .map(|index| ((index * 37) % 101) as f32 / 101.0 - 0.5)
+        .collect::<Vec<_>>();
+    for _ in 0..2 {
+        runtime.write(&program, images, &observations);
+        runtime.run(&program);
+    }
+    (
+        runtime.read(&program, filter),
+        runtime.read(&program, gradients.of(images)),
+        runtime.read(&program, loss)[0],
+        program.weight_windows(),
+    )
+}
+
+#[test]
+fn a_streamed_store_scatters_through_the_filter_it_pages() {
+    assert!(
+        TRANSPOSE_PAGES > TRANSPOSE_BYTES as u32 / (1 << 14),
+        "a filter of {TRANSPOSE_PAGES} pages holds no more than the budget books it",
+    );
+    for &backend in PREFERENCE {
+        let (resident_filter, resident_gradient, resident_loss, _) =
+            transposed_convolution_run(backend, MemoryRequest::default());
+        let (streamed_filter, streamed_gradient, streamed_loss, windows) =
+            transposed_convolution_run(
+                backend,
+                MemoryRequest {
+                    resident_weight_bytes: Some(TRANSPOSE_BYTES),
+                    ..Default::default()
+                },
+            );
+        assert_eq!(resident_filter.len(), streamed_filter.len());
+        for (at, (expected, observed)) in resident_filter.iter().zip(&streamed_filter).enumerate() {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of {TRANSPOSE_BYTES} bytes reached {observed} where the resident store reached {expected} at {at}",
+            );
+        }
+        for (at, (expected, observed)) in
+            resident_gradient.iter().zip(&streamed_gradient).enumerate()
+        {
+            assert!(
+                (expected - observed).abs() <= 1e-5,
+                "a store of {TRANSPOSE_BYTES} bytes scattered {observed} where the resident store scattered {expected} at {at}",
+            );
+        }
+        assert!(
+            (resident_loss - streamed_loss).abs() <= 1e-5,
+            "a streamed transposed convolution held a loss of {streamed_loss} where the resident store held {resident_loss}",
+        );
+        assert!(
+            windows > 1,
+            "a store of {TRANSPOSE_BYTES} bytes walked {windows} weight windows over a filter of {TRANSPOSE_PAGES} pages",
+        );
+    }
+}
+
 #[test]
 fn a_streamed_store_pages_the_filter_of_a_convolution() {
     assert!(
