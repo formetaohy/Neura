@@ -28,15 +28,20 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
+    pub(crate) const fn preferred(preference: PowerPreference) -> Self {
+        match preference {
+            PowerPreference::HighPerformance => Self::Discrete,
+            PowerPreference::LowPower => Self::Integrated,
+        }
+    }
+
     pub(crate) const fn rank(self, preference: PowerPreference) -> u8 {
-        match (preference, self) {
-            (PowerPreference::HighPerformance, Self::Discrete)
-            | (PowerPreference::LowPower, Self::Integrated) => 5,
-            (PowerPreference::HighPerformance, Self::Integrated)
-            | (PowerPreference::LowPower, Self::Discrete) => 4,
-            (_, Self::Virtual) => 3,
-            (_, Self::Cpu) => 2,
-            (_, Self::Other) => 1,
+        match (self, Self::preferred(preference)) {
+            (Self::Discrete, Self::Discrete) | (Self::Integrated, Self::Integrated) => 5,
+            (Self::Discrete, _) | (Self::Integrated, _) => 4,
+            (Self::Virtual, _) => 3,
+            (Self::Cpu, _) => 2,
+            (Self::Other, _) => 1,
         }
     }
 }

@@ -4,6 +4,9 @@ use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{CheckpointFile, MemoryRequest, Program, Runtime, RuntimeRequest, Weights};
 use std::path::{Path, PathBuf};
 
+#[path = "support/shared.rs"]
+mod shared;
+
 const WIDTH: u32 = 256;
 const LAYERS: u32 = 4;
 const BATCH: u32 = 16;
@@ -18,14 +21,13 @@ fn directory(name: &str) -> PathBuf {
 }
 
 fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the spill tests over {backend:?}: {error}"))
 }
 
 fn resident(backend: Backend) -> Runtime {

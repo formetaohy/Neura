@@ -37,6 +37,9 @@ jobs:
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Check Linux compute backend
+        run: cargo check --workspace --all-targets
+
       - name: Check Windows compute backend
         run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 

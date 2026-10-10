@@ -4,14 +4,16 @@ use neura_runtime::{MemoryRequest, Program, Readout, Run, Runtime, RuntimeReques
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 
+#[path = "support/shared.rs"]
+mod shared;
+
 fn assert_static<T: Send + Sync + 'static>() {}
 
 fn open(memory: MemoryRequest) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         memory,
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
 #[test]

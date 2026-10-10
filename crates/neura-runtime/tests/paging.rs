@@ -3,6 +3,9 @@ use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Free, Graph, Init, Shape, Value};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
+#[path = "support/shared.rs"]
+mod shared;
+
 const ROWS: u32 = 16;
 const WIDTH: u32 = 128;
 const STEPS: u32 = 3;
@@ -45,14 +48,13 @@ impl<'g> Model<'g> {
 }
 
 fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests over {backend:?}: {error}"))
 }
 
 const STREAMED_BYTES: u64 = 5 * (1 << 14);

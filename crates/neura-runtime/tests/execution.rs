@@ -2,7 +2,7 @@ use neura_abi::Element;
 use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
-use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, RuntimeRequest};
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -847,14 +847,13 @@ fn a_tensor_wider_than_the_staging_buffer_is_refused_by_a_read() {
     let graph = Graph::new();
     let data = graph.input(Shape::vector(4096), Element::Single);
     let out = graph.mul(data, graph.fill(Shape::vector(4096), 1.0));
-    let runtime = Runtime::open(neura_runtime::RuntimeRequest {
+    let runtime = support::shared::runtime(neura_runtime::RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 256,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("a device with a small staging buffer");
+    });
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let outcome =
@@ -1178,14 +1177,13 @@ fn one_pool_lets_a_plan_stage_every_body_it_runs() {
 
 #[test]
 fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = support::shared::runtime(RuntimeRequest {
         gpu: neura_gpu::GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
             readback_bytes: 1 << 16,
             ..Default::default()
         },
-    })
-    .expect("a device with the baseline pool");
+    });
     let profiles = runtime.profiles();
     assert!(!profiles.is_empty(), "the baseline pool fits no profile");
     assert!(

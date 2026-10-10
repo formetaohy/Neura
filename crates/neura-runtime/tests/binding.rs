@@ -5,7 +5,7 @@ use neura_runtime::{MemoryRequest, Program, Runtime, RuntimeRequest};
 #[path = "support/mod.rs"]
 mod support;
 
-use support::{assert_close, open};
+use support::{assert_close, open, shared};
 
 const WIDTH: u32 = 64;
 const LAYERS: u32 = 3;
@@ -13,14 +13,13 @@ const BOUND: u32 = 4096;
 const HEAP_BYTES: u64 = 2 << 20;
 
 fn bounded(heap_bytes: u64) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             heap_bytes,
             ..Default::default()
         },
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
 struct Model<'g> {

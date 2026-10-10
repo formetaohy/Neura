@@ -14,7 +14,7 @@ mod support;
 
 use input::random;
 use reference::matmul_reference;
-use support::{assert_close, open};
+use support::{assert_close, open, shared};
 
 fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
@@ -337,7 +337,7 @@ fn an_eight_bit_float_weight_feeds_a_product_a_quarter_of_the_bytes() {
 }
 
 fn rounding_contract(backend: neura_gpu::Backend) {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backend: Some(backend),
             ..Default::default()
@@ -346,8 +346,7 @@ fn rounding_contract(backend: neura_gpu::Backend) {
             readback_bytes: 1 << 20,
             ..Default::default()
         },
-    })
-    .expect("a device rounds the numbers the host would");
+    });
     for element in Element::ALL {
         match element {
             Element::Single => {}

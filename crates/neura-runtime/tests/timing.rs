@@ -4,6 +4,9 @@ use neura_graph::{Graph, Shape};
 use neura_runtime::{MemoryRequest, Program, Runtime, RuntimeRequest};
 use std::time::Instant;
 
+#[path = "support/shared.rs"]
+mod shared;
+
 const HEAVY_ELEMENTS: u64 = 16 << 20;
 const HEAP_BYTES: u64 = 256 << 20;
 
@@ -17,7 +20,7 @@ fn heap_bytes(backend: Backend) -> u64 {
 }
 
 fn open() -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
             heap_bytes: heap_bytes(PREFERENCE[0]),
@@ -25,7 +28,6 @@ fn open() -> Runtime {
         },
         ..Default::default()
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
 fn heavy_elements(runtime: &Runtime) -> u32 {
@@ -34,7 +36,7 @@ fn heavy_elements(runtime: &Runtime) -> u32 {
 }
 
 fn open_backend(backend: Backend) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         gpu: GpuRequest {
             backend: Some(backend),
             limits: LimitsPolicy::Adapter,
@@ -46,7 +48,6 @@ fn open_backend(backend: Backend) -> Runtime {
             ..Default::default()
         },
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
 fn rectifier(runtime: &Runtime, graph: &Graph, elements: u32) -> Program {

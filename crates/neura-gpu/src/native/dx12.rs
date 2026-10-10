@@ -13,7 +13,6 @@ use crate::submission::{Command, Write};
 use libloading::Library;
 use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, ShaderTranslation};
 use std::any::Any;
-use std::cmp::Reverse;
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
 use std::ptr;
@@ -319,7 +318,6 @@ fn compiler() -> Result<&'static Library, String> {
 struct Candidate {
     device: ID3D12Device,
     info: AdapterInfo,
-    order: u32,
     limits: Limits,
 }
 
@@ -338,45 +336,92 @@ fn shader_model(device: &ID3D12Device) -> bool {
     queried && model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_0.0
 }
 
-fn candidates(
+fn candidate(
+    adapter: &IDXGIAdapter1,
+    desc: &DXGI_ADAPTER_DESC1,
+) -> Result<Option<Candidate>, String> {
+    let mut raw = None;
+    if unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut raw) }.is_err() {
+        return Ok(None);
+    }
+    let raw: ID3D12Device = raw.expect("a successfully created D3D12 device exists");
+    if !shader_model(&raw) {
+        return Ok(None);
+    }
+    let mut info = describe(desc);
+    info.device_type = if software(desc) {
+        DeviceType::Cpu
+    } else {
+        architecture(&raw)
+    };
+    let limits = limits(&raw);
+    Ok(Some(Candidate {
+        device: raw,
+        info,
+        limits,
+    }))
+}
+
+fn by_identity(
+    adapters: &[(IDXGIAdapter1, DXGI_ADAPTER_DESC1)],
+    wanted: AdapterId,
+) -> Result<Option<Candidate>, String> {
+    for (adapter, desc) in adapters {
+        if describe(desc).id != wanted {
+            continue;
+        }
+        return candidate(adapter, desc);
+    }
+    Ok(None)
+}
+
+fn by_power(
+    adapters: &[(IDXGIAdapter1, DXGI_ADAPTER_DESC1)],
+    preference: PowerPreference,
+) -> Result<Option<Candidate>, String> {
+    let preferred = DeviceType::preferred(preference);
+    let mut chosen: Option<Candidate> = None;
+    let mut rank = 0;
+    for (adapter, desc) in adapters {
+        if software(desc) {
+            continue;
+        }
+        if chosen
+            .as_ref()
+            .is_some_and(|held| held.info.device_type == preferred)
+        {
+            break;
+        }
+        let Some(candidate) = candidate(adapter, desc)? else {
+            continue;
+        };
+        let candidate_rank = candidate.info.device_type.rank(preference);
+        if candidate_rank > rank {
+            rank = candidate_rank;
+            chosen = Some(candidate);
+        }
+    }
+    Ok(chosen)
+}
+
+fn select(
     factory: &IDXGIFactory1,
     policy: AdapterPolicy,
-) -> Result<(Vec<Candidate>, Vec<AdapterInfo>), String> {
-    let mut candidates = Vec::new();
-    let mut offered = Vec::new();
-    for (order, adapter) in adapters(factory, policy)?.into_iter().enumerate() {
-        let desc = unsafe { adapter.GetDesc1() }
-            .map_err(|error| format!("querying a DXGI adapter: {error}"))?;
-        let mut info = describe(&desc);
-        offered.push(info.clone());
-        if !policy.wants(info.id) {
-            continue;
-        }
-        if software(&desc) && matches!(policy, AdapterPolicy::Power(_)) {
-            continue;
-        }
-        let mut raw = None;
-        if unsafe { D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_11_0, &mut raw) }.is_err() {
-            continue;
-        }
-        let raw: ID3D12Device = raw.expect("a successfully created D3D12 device exists");
-        if !shader_model(&raw) {
-            continue;
-        }
-        info.device_type = if software(&desc) {
-            DeviceType::Cpu
-        } else {
-            architecture(&raw)
-        };
-        let limits = limits(&raw);
-        candidates.push(Candidate {
-            device: raw,
-            info,
-            order: order as u32,
-            limits,
-        });
-    }
-    Ok((candidates, offered))
+) -> Result<(Option<Candidate>, Vec<AdapterInfo>), String> {
+    let enumerated = adapters(factory, policy)?
+        .into_iter()
+        .map(|adapter| {
+            let desc = unsafe { adapter.GetDesc1() }
+                .map_err(|error| format!("querying a DXGI adapter: {error}"))?;
+            Ok((adapter, desc))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let offered = enumerated.iter().map(|(_, desc)| describe(desc)).collect();
+    let chosen = match policy {
+        AdapterPolicy::Identity(wanted) => by_identity(&enumerated, wanted)?,
+        AdapterPolicy::Power(preference) => by_power(&enumerated, preference)?,
+    };
+    Ok((chosen, offered))
 }
 
 impl Device {
@@ -387,9 +432,9 @@ impl Device {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
             unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
-        let (mut candidates, offered) = candidates(&factory, policy)
+        let (candidate, offered) = select(&factory, policy)
             .map_err(|error| format!("enumerating DXGI adapters: {error}"))?;
-        if candidates.is_empty() {
+        let Some(candidate) = candidate else {
             return Err(match policy {
                 AdapterPolicy::Identity(wanted)
                     if offered.iter().any(|adapter| adapter.id == wanted) =>
@@ -403,18 +448,6 @@ impl Device {
                     DeviceFailure::reason("no D3D12 adapter runs compute shader model 6.0")
                 }
             });
-        }
-        let candidate = match policy {
-            AdapterPolicy::Identity(_) => candidates.swap_remove(0),
-            AdapterPolicy::Power(preference) => {
-                candidates.sort_by_key(|candidate| {
-                    (
-                        Reverse(candidate.info.device_type.rank(preference)),
-                        candidate.order,
-                    )
-                });
-                candidates.swap_remove(0)
-            }
         };
         let device = Self::assemble(candidate.device, artifacts)?;
         Ok((

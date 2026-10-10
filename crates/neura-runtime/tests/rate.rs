@@ -4,6 +4,9 @@ use neura_graph::{Graph, Init, Shape};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
 
+#[path = "support/shared.rs"]
+mod shared;
+
 const ROWS: u32 = 16;
 const WIDTH: u32 = 128;
 const STEPS: u32 = 4;
@@ -17,14 +20,13 @@ fn directory(name: &str) -> PathBuf {
 }
 
 fn open(backend: Backend, memory: MemoryRequest) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backend: Some(backend),
             ..Default::default()
         },
         memory,
     })
-    .unwrap_or_else(|error| panic!("no device runs the rate tests over {backend:?}: {error}"))
 }
 
 fn rate_of(step: u32) -> f32 {

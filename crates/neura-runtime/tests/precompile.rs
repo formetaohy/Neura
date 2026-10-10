@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 mod input;
 #[path = "support/reference.rs"]
 mod reference;
+#[path = "support/shared.rs"]
+mod shared;
 
 use input::random;
 use reference::matmul_reference;
@@ -28,7 +30,7 @@ fn open(directory: &Path) -> Runtime {
 }
 
 fn open_bounded(directory: &Path, artifact_bytes: u64) -> Runtime {
-    Runtime::open(RuntimeRequest {
+    shared::runtime(RuntimeRequest {
         gpu: GpuRequest {
             artifacts: Some(directory.to_path_buf()),
             artifact_bytes,
@@ -39,7 +41,6 @@ fn open_bounded(directory: &Path, artifact_bytes: u64) -> Runtime {
             ..Default::default()
         },
     })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
 struct Model {

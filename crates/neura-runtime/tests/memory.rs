@@ -20,7 +20,7 @@ mod support;
 
 use input::random;
 use reference::matmul_reference;
-use support::{assert_close, open};
+use support::{assert_close, open, shared};
 
 fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
@@ -305,14 +305,13 @@ fn a_resident_tensor_survives_every_run() {
 
 #[test]
 fn the_engine_writes_a_resident_tensor_without_the_host() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 12,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     let graph = Graph::new();
     let observation = graph.resident(Shape::vector(4), Element::Single);
     let scale = graph.parameter(Shape::scalar(), Init::Constant(3.0), Element::Single);
@@ -350,15 +349,14 @@ fn the_engine_writes_a_resident_tensor_without_the_host() {
 
 #[test]
 fn a_program_wider_than_the_heap_is_refused() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 12,
             heap_bytes: 1 << 12,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     let graph = Graph::new();
     let data = graph.input(Shape::vector(4096), Element::Single);
     graph.relu(data);
@@ -381,15 +379,14 @@ fn a_heap_past_a_gigabyte_serves_a_program() {
         return;
     }
     drop(context);
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
             heap_bytes,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     assert_eq!(runtime.heap_bytes(), heap_bytes);
     let graph = Graph::new();
     let weight = graph.parameter(
@@ -434,7 +431,7 @@ fn a_heap_across_banks_addresses_the_words_of_every_bank() {
     const ROWS: u32 = 1536;
     const WIDTH: u32 = 4;
     for &backend in PREFERENCE {
-        let runtime = Runtime::open(RuntimeRequest {
+        let runtime = shared::runtime(RuntimeRequest {
             gpu: GpuRequest {
                 backend: Some(backend),
                 ..Default::default()
@@ -445,8 +442,7 @@ fn a_heap_across_banks_addresses_the_words_of_every_bank() {
                 heap_bank_bytes: Some(16 << 10),
                 ..Default::default()
             },
-        })
-        .unwrap_or_else(|error| panic!("no device runs the tests over {backend:?}: {error}"));
+        });
         assert_eq!(runtime.heap_banks(), 2);
         assert_eq!(runtime.heap_bank_bytes(), 16 << 10);
 
@@ -482,7 +478,7 @@ fn a_heap_across_banks_addresses_the_words_of_every_bank() {
 fn a_heap_bank_that_splits_no_word_is_refused() {
     assert!(
         refuses(|| {
-            let _ = Runtime::open(RuntimeRequest {
+            let _ = shared::runtime(RuntimeRequest {
                 memory: MemoryRequest {
                     heap_bank_bytes: Some(4000),
                     ..Default::default()
@@ -494,7 +490,7 @@ fn a_heap_bank_that_splits_no_word_is_refused() {
     );
     assert!(
         refuses(|| {
-            let _ = Runtime::open(RuntimeRequest {
+            let _ = shared::runtime(RuntimeRequest {
                 memory: MemoryRequest {
                     heap_bank_bytes: Some(0),
                     ..Default::default()
@@ -510,7 +506,7 @@ fn a_heap_bank_that_splits_no_word_is_refused() {
 fn a_heap_bank_beyond_one_binding_is_refused() {
     assert!(
         refuses(|| {
-            let _ = Runtime::open(RuntimeRequest {
+            let _ = shared::runtime(RuntimeRequest {
                 gpu: GpuRequest::default().minimum_limits(),
                 memory: MemoryRequest {
                     heap_bank_bytes: Some(32 << 20),
@@ -526,7 +522,7 @@ fn a_heap_bank_beyond_one_binding_is_refused() {
 fn a_heap_that_outruns_the_banks_a_device_binds_is_refused() {
     assert!(
         refuses(|| {
-            let _ = Runtime::open(RuntimeRequest {
+            let _ = shared::runtime(RuntimeRequest {
                 gpu: GpuRequest::default().minimum_limits(),
                 memory: MemoryRequest {
                     heap_bytes: 64 << 10,
@@ -541,15 +537,14 @@ fn a_heap_that_outruns_the_banks_a_device_binds_is_refused() {
 
 #[test]
 fn a_dropped_program_returns_its_tensors_to_the_heap() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 20,
             heap_bytes: 1 << 20,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 256, 256);
     let data = graph.input(Shape::matrix(64, 256), Element::Single);
@@ -575,15 +570,14 @@ fn a_dropped_program_returns_its_tensors_to_the_heap() {
 
 #[test]
 fn a_dropped_store_returns_its_words_to_the_heap() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 12,
             heap_bytes: 64 << 10,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 96, 96);
     assert_eq!(weight.shape(), Shape::matrix(96, 96));
@@ -603,15 +597,14 @@ fn a_dropped_store_returns_its_words_to_the_heap() {
 
 #[test]
 fn a_program_keeps_the_store_it_was_built_with() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 12,
             heap_bytes: 40 << 10,
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("device");
+    });
     let graph = Graph::new();
     let (weight, _) = linear(&graph, 64, 64);
     let data = graph.input(Shape::matrix(2, 64), Element::Single);
@@ -676,14 +669,13 @@ fn one_device_program_serves_every_store_of_its_model() {
 
 #[test]
 fn a_device_that_binds_the_baseline_authors_its_walks_the_device_counts() {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
             readback_bytes: 1 << 16,
             ..Default::default()
         },
-    })
-    .expect("a device that binds the baseline bindings");
+    });
     assert_eq!(
         runtime.heap_banks(),
         1,
@@ -710,15 +702,14 @@ fn a_device_that_binds_the_baseline_authors_its_walks_the_device_counts() {
         "a store without a weight budget holds all {pages} pages of the model",
     );
 
-    let paged = Runtime::open(RuntimeRequest {
+    let paged = shared::runtime(RuntimeRequest {
         gpu: GpuRequest::default().minimum_limits(),
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
             resident_weight_bytes: Some(4 << 14),
             ..Default::default()
         },
-    })
-    .expect("a paging device that binds the baseline bindings");
+    });
     let (streamed, pages, held) = counted_layers(&paged);
     assert!(
         held < pages,
@@ -782,7 +773,7 @@ fn a_heap_of_many_banks_refuses_the_page_table_it_cannot_bind() {
         GpuContext::open(&GpuRequest::default()).expect("a device of the adapter's bindings");
     let ceiling = device.limits().max_storage_buffers_per_shader_stage - 6;
     let bank_bytes = 1 << 20;
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 1 << 16,
             heap_bytes: u64::from(ceiling) * bank_bytes,
@@ -790,8 +781,7 @@ fn a_heap_of_many_banks_refuses_the_page_table_it_cannot_bind() {
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("a heap that leaves a plain program every storage buffer it binds");
+    });
     assert_eq!(runtime.heap_banks(), ceiling);
 
     let plain = Graph::new();
@@ -824,7 +814,7 @@ fn a_heap_of_many_banks_refuses_the_page_table_it_cannot_bind() {
         "a walk the device counts rides inside the records of a program that fills every bank",
     );
 
-    let paged = Runtime::open(RuntimeRequest {
+    let paged = shared::runtime(RuntimeRequest {
         memory: MemoryRequest {
             readback_bytes: 4 << 20,
             heap_bytes: u64::from(ceiling) * bank_bytes,
@@ -833,8 +823,7 @@ fn a_heap_of_many_banks_refuses_the_page_table_it_cannot_bind() {
             ..Default::default()
         },
         ..Default::default()
-    })
-    .expect("a paging heap of every bank the device binds");
+    });
     let model = Graph::new();
     let (weight, _) = linear(&model, 512, 512);
     let data = model.input(Shape::matrix(512, 512), Element::Single);

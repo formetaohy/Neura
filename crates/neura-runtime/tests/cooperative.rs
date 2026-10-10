@@ -8,6 +8,8 @@ use neura_runtime::Runtime;
 mod input;
 #[path = "support/reference.rs"]
 mod reference;
+#[path = "support/shared.rs"]
+mod shared;
 
 use input::random;
 use reference::matmul_reference;
@@ -15,7 +17,7 @@ use reference::matmul_reference;
 const WORKGROUP: u32 = 256;
 
 fn open() -> Runtime {
-    Runtime::open(neura_runtime::RuntimeRequest {
+    shared::runtime(neura_runtime::RuntimeRequest {
         gpu: neura_gpu::GpuRequest {
             backend: Some(neura_gpu::Backend::Vulkan),
             ..Default::default()
@@ -25,7 +27,6 @@ fn open() -> Runtime {
             ..Default::default()
         },
     })
-    .unwrap_or_else(|error| panic!("no Vulkan device runs the tests: {error}"))
 }
 
 fn cooperative_tile(runtime: &Runtime, fragments: (u32, u32)) -> Option<MatmulTile> {

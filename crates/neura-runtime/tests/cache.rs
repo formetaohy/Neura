@@ -1,8 +1,11 @@
 use neura_abi::Element;
 use neura_gpu::GpuRequest;
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, RuntimeRequest};
 use std::path::{Path, PathBuf};
+
+#[path = "support/shared.rs"]
+mod shared;
 
 fn directory() -> PathBuf {
     let path = std::env::temp_dir().join(format!("neura-runtime-cache-{}", std::process::id()));
@@ -11,7 +14,7 @@ fn directory() -> PathBuf {
 }
 
 fn step(directory: &Path) -> (Vec<f32>, u64, u64) {
-    let runtime = Runtime::open(RuntimeRequest {
+    let runtime = shared::runtime(RuntimeRequest {
         gpu: GpuRequest {
             artifacts: Some(directory.to_path_buf()),
             ..Default::default()
@@ -20,8 +23,7 @@ fn step(directory: &Path) -> (Vec<f32>, u64, u64) {
             readback_bytes: 1 << 16,
             ..Default::default()
         },
-    })
-    .unwrap_or_else(|error| panic!("no device runs the tests: {error}"));
+    });
     let graph = Graph::new();
     let input = graph.input(Shape::matrix(4, 8), Element::Single);
     let weight = graph.parameter(
