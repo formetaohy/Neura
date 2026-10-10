@@ -565,4 +565,12 @@ kinds! {
         chain: true,
         origin: false,
     };
+    TopK TOP_K = "top_k" {
+        entry: "run_top_k",
+        modules: [Reduce, Choice],
+        geometry: Strategy,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

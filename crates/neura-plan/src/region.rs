@@ -540,6 +540,7 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Argmax
         | Kind::Categorical
         | Kind::Sample
+        | Kind::TopK
         | Kind::OneHot
         | Kind::Scatter
         | Kind::ScatterWrite

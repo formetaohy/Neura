@@ -797,3 +797,39 @@ fn a_sample_folds_every_row_through_its_workgroup() {
         assert_eq!(plan.span(draw, PLACEMENT).elements, rows);
     }
 }
+
+#[test]
+fn a_top_k_folds_every_row_through_its_workgroup() {
+    let rows = 1000u32;
+    let graph = Graph::new();
+    let value = graph.input(Shape::matrix(rows, 16), Element::Single);
+    let (kept_values, kept_indices) = graph.top_k(value, 4);
+    graph.retain(kept_values);
+    graph.retain(kept_indices);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let tasks = tasks_of(&plan, kept_values);
+        assert!(!tasks.is_empty(), "a top k of a thousand rows holds a task");
+        let mut cursor = 0;
+        for task in &tasks {
+            assert_eq!(Kind::of(task.kind), Kind::TopK);
+            assert_eq!(
+                task.geometry,
+                strategy::WORKGROUP_ROW,
+                "a top k folds its rows through the workgroup of {profile:?}",
+            );
+            assert_eq!(task.a, value.id());
+            assert_eq!(task.out, kept_values.id());
+            assert_eq!(task.extra, kept_indices.id());
+            assert_eq!(task.keep, 4);
+            assert_eq!(
+                task.first, cursor,
+                "a block of rows begins where no block before it ended",
+            );
+            cursor += task.count;
+        }
+        assert_eq!(cursor, rows);
+        assert_eq!(plan.span(kept_values, PLACEMENT).elements, rows * 4);
+        assert_eq!(plan.span(kept_indices, PLACEMENT).elements, rows * 4);
+    }
+}

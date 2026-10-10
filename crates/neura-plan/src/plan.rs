@@ -545,6 +545,7 @@ impl Plan {
                 planned_first: task.first,
                 planned_count: task.count,
                 knob: task.knob,
+                keep: task.keep,
             });
             if task.in_place
                 && task
@@ -1909,6 +1910,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Argmax
             | Kind::Categorical
             | Kind::Sample
+            | Kind::TopK
             | Kind::OneHot
             | Kind::Gather
             | Kind::Scatter

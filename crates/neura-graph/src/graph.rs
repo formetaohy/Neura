@@ -104,6 +104,7 @@ pub struct TaskInfo {
     pub segments: u32,
     pub reach: u32,
     pub queries: u32,
+    pub keep: u32,
     pub prelude: Vec<StepRecord>,
     pub chain: Vec<StepRecord>,
 }
@@ -127,6 +128,7 @@ impl TaskInfo {
             segments: NO_VALUE,
             reach: 0,
             queries: NO_VALUE,
+            keep: 0,
             prelude: Vec::new(),
             chain: Vec::new(),
         }

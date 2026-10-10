@@ -843,6 +843,10 @@ impl<'g> Graph<'g> {
                     task.kind.name(),
                 )
             }
+            Kind::TopK => panic!(
+                "the {} task yields the largest numbers of a row and the classes they stood in, and a selection carries no gradient",
+                task.kind.name(),
+            ),
             Kind::Compact => panic!(
                 "the {} task yields the rows a mask selects, and an index carries no gradient",
                 task.kind.name(),

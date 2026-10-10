@@ -4,7 +4,7 @@ use neura_profile::Geometry;
 pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_CHOICE", geometry.choice());
     compiler.constant("SCRATCH_SAMPLE", 2u32 * geometry.workgroup());
-    compiler.constant("SAMPLE_CANDIDATES", neura_profile::SAMPLE_CANDIDATES);
+    compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
     device::define(compiler);
 }
 
@@ -274,7 +274,7 @@ mod device {
             }
             if lid == 0u32 {
                 scratch[SCRATCH_SAMPLE + count] = chosen_value;
-                scratch[SCRATCH_SAMPLE + SAMPLE_CANDIDATES + count] = bitcast_f32(chosen_index);
+                scratch[SCRATCH_SAMPLE + CANDIDATES + count] = bitcast_f32(chosen_index);
             }
             count = count + 1u32;
             workgroup_barrier();
@@ -283,8 +283,7 @@ mod device {
         if lid == 0u32 {
             let mut mass = 0.0;
             for candidate in stride(0u32, count, 1u32) {
-                if bitcast_u32(scratch[SCRATCH_SAMPLE + SAMPLE_CANDIDATES + candidate]) != NO_VALUE
-                {
+                if bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]) != NO_VALUE {
                     mass = mass + softmax_exp(scratch[SCRATCH_SAMPLE + candidate] - row_max);
                 }
             }
@@ -293,8 +292,7 @@ mod device {
             let mut boundary = count;
             let mut running = 0.0;
             for candidate in stride(0u32, count, 1u32) {
-                if bitcast_u32(scratch[SCRATCH_SAMPLE + SAMPLE_CANDIDATES + candidate]) != NO_VALUE
-                {
+                if bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]) != NO_VALUE {
                     running = running + softmax_exp(scratch[SCRATCH_SAMPLE + candidate] - row_max);
                     if running + tail >= threshold && candidate + 1u32 < boundary {
                         boundary = candidate + 1u32;
@@ -304,7 +302,7 @@ mod device {
             let mut best = max_identity();
             for candidate in stride(0u32, boundary, 1u32) {
                 let value = scratch[SCRATCH_SAMPLE + candidate];
-                let column = bitcast_u32(scratch[SCRATCH_SAMPLE + SAMPLE_CANDIDATES + candidate]);
+                let column = bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]);
                 let weight =
                     value + gumbel_noise(seed, coordinates(row * columns + column, source.dims));
                 if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
@@ -344,9 +342,8 @@ mod device {
         }
         let declared = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE]);
         let cumulative = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE + 1u32]);
-        let whole = declared > 0.0
-            && declared < f32(SAMPLE_CANDIDATES + 1u32)
-            && trunc(declared) == declared;
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
         if !whole {
             refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
             return;
@@ -359,6 +356,72 @@ mod device {
         match task.geometry {
             strategy::WORKGROUP_ROW => sample_rows(task, lid, source, seed, keep, cumulative),
             _ => refuse(kind::SAMPLE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn top_k_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) {
+        let kept_values = values[task.out];
+        let kept_indices = values[task.extra];
+        let mut count = 0u32;
+        let mut previous_value = max_identity();
+        let mut previous_index = NO_VALUE;
+        loop {
+            if count >= keep {
+                break;
+            }
+            let mut local_value = max_identity();
+            let mut local_index = NO_VALUE;
+            for column in stride(lid, columns, WORKGROUP_SIZE) {
+                let value = read_flat(task, source, row * columns + column);
+                if sample_after(value, column, previous_value, previous_index)
+                    && (local_index == NO_VALUE
+                        || choice_precedes(local_value, local_index, value, column))
+                {
+                    local_value = value;
+                    local_index = column;
+                }
+            }
+            let chosen_index = workgroup_choice(lid, local_value, local_index);
+            let chosen_value = scratch[0u32];
+            if chosen_index != NO_VALUE {
+                previous_value = chosen_value;
+                previous_index = chosen_index;
+            }
+            if lid == 0u32 {
+                scratch[SCRATCH_SAMPLE + count] = chosen_value;
+                scratch[SCRATCH_SAMPLE + CANDIDATES + count] = bitcast_f32(chosen_index);
+            }
+            count = count + 1u32;
+            workgroup_barrier();
+        }
+        for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+            publish(
+                kept_values,
+                row * keep + candidate,
+                scratch[SCRATCH_SAMPLE + candidate],
+            );
+            publish(
+                kept_indices,
+                row * keep + candidate,
+                f32(bitcast_u32(
+                    scratch[SCRATCH_SAMPLE + CANDIDATES + candidate],
+                )),
+            );
+        }
+    }
+
+    fn run_top_k(task: Task, lid: u32) {
+        let source = values[task.a];
+        let keep = task.keep;
+        let columns = source.dims.w;
+        match task.geometry {
+            strategy::WORKGROUP_ROW => {
+                for row in stride(task.first, task.first + task.count, 1u32) {
+                    top_k_row(task, lid, source, row, columns, keep);
+                    workgroup_barrier();
+                }
+            }
+            _ => refuse(kind::TOP_K, refusal::GEOMETRY, task.geometry),
         }
     }
 }

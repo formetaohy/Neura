@@ -120,6 +120,7 @@ record!(TaskRecord, TaskFields, TASK, "Task" {
     planned_first: u32 => U32,
     planned_count: u32 => U32,
     knob: u32 => U32,
+    keep: u32 => U32,
 });
 
 record!(MeasureRecord, MeasureFields, MEASURE, "Measure" {

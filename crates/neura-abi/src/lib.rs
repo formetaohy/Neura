@@ -31,3 +31,4 @@ pub const REFUSAL_WORDS: u32 = 1;
 pub const NO_VALUE: u32 = u32::MAX;
 pub const NO_SLOT: u32 = u8::MAX as u32;
 pub const WORD_BYTES: u64 = 4;
+pub const CANDIDATES: u32 = 64;

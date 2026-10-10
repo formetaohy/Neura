@@ -2,7 +2,7 @@ use crate::graph::{AttentionOptions, Declaration, Graph, Ragged, Residency, Task
 use crate::pool::Pool;
 use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
-use neura_abi::{Distribution, EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
+use neura_abi::{CANDIDATES, Distribution, EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
 
 const SEGMENT_CHUNK_ROWS: u32 = 512;
@@ -1064,6 +1064,44 @@ impl<'g> Graph<'g> {
             self.shape(seed).elements(),
         );
         self.choice(Kind::Categorical, logits, [seed.id(), NO_VALUE, NO_VALUE])
+    }
+
+    pub fn top_k(&self, value: Value<'g>, keep: u32) -> (Value<'g>, Value<'g>) {
+        let value = self.own(value);
+        let shape = self.shape(value);
+        assert!(
+            self.contiguous(value),
+            "a top k folds the rows of a tensor stored row by row, and value {} is a view",
+            value.id(),
+        );
+        assert!(
+            shape.free(3).is_none(),
+            "a top k weighs every number a row holds, and axis 3 of {:?} walks free extent {}",
+            shape.dims(),
+            shape.free(3).unwrap_or_default(),
+        );
+        assert!(
+            keep > 0 && keep <= CANDIDATES,
+            "a top k keeps between one and {CANDIDATES} of the numbers a row holds, and {keep} names another count",
+        );
+        assert!(
+            keep <= shape.dims()[3],
+            "a top k of {keep} candidates reads a row of {} numbers",
+            shape.dims()[3],
+        );
+        let kept = shape.fixed_axis(3, keep);
+        let values = self.fresh(kept, Element::Single, Residency::Derived, false);
+        let indices = self.fresh(kept, Element::Single, Residency::Derived, false);
+        let mut task = TaskInfo::of(
+            Kind::TopK,
+            op::NONE,
+            values.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        );
+        task.extra = indices.id();
+        task.keep = keep;
+        self.push(task);
+        (values, indices)
     }
 
     pub fn sample(

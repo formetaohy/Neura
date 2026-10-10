@@ -639,7 +639,6 @@ const COOPERATIVE_FRAGMENTS: [(u32, u32); 4] = [(2, 2), (2, 1), (1, 2), (1, 1)];
 const COOPERATIVE_STAGE_FRAGMENTS: u32 = 1;
 const COOPERATIVE_MENU: usize = 6;
 const POOL_BYTES: u64 = 21 << 10;
-pub const SAMPLE_CANDIDATES: u32 = 64;
 const BLOCKINGS_PER_GRID: usize = 2;
 const DEPTH: u32 = 8;
 pub const CLAIM_WORDS: u32 = 4;
@@ -1125,7 +1124,7 @@ impl Geometry {
             DeviceModule::MatmulWeight => (self.left_stage + self.right_stage) as u32,
             DeviceModule::Attention => self.attention_scratch_words(),
             DeviceModule::Reduce => self.workgroup,
-            DeviceModule::Choice => 2 * self.workgroup + 2 * SAMPLE_CANDIDATES,
+            DeviceModule::Choice => 2 * self.workgroup + 2 * neura_abi::CANDIDATES,
             DeviceModule::Scan => self.workgroup,
             _ => 0,
         }
