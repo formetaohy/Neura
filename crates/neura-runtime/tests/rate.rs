@@ -1,6 +1,7 @@
 use neura_abi::Element;
+use neura_gpu::Backends;
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::{Backends, MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
 
 const ROWS: u32 = 16;
@@ -17,7 +18,7 @@ fn directory(name: &str) -> PathBuf {
 
 fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
     Runtime::open(RuntimeRequest {
-        gpu: neura_runtime::GpuRequest {
+        gpu: neura_gpu::GpuRequest {
             backends,
             ..Default::default()
         },

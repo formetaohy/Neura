@@ -1,4 +1,6 @@
-use crate::graph::{Graph, NORM_FLOOR, Ragged, Residency, TaskInfo, Value, ValueInfo, advance};
+use crate::graph::{
+    Declaration, Graph, NORM_FLOOR, Ragged, Residency, TaskInfo, Value, ValueInfo, advance,
+};
 use crate::shape::{Free, Shape};
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
@@ -134,7 +136,7 @@ impl Recomputing {
         if let Some(view) = self.views.get(&value) {
             return *view;
         }
-        let view = graph.alias(
+        let view = graph.declare(Declaration::view(
             shape,
             strides,
             strides_source,
@@ -142,7 +144,7 @@ impl Recomputing {
             element,
             scale,
             tracked,
-        );
+        ));
         if graph.prefix_owner(value).is_some() {
             graph.mark_prefix(view.id(), copy);
         }
@@ -1009,7 +1011,7 @@ impl<'g> Graph<'g> {
                 "a gradient of a tensor the storage lays out row by row arrives row by row, and value {} walks other strides",
                 contribution.id(),
             );
-            return self.alias(
+            return self.declare(Declaration::view(
                 owner_shape,
                 owner_shape.strides(),
                 None,
@@ -1017,7 +1019,7 @@ impl<'g> Graph<'g> {
                 self.element(contribution),
                 self.scale(contribution),
                 false,
-            );
+            ));
         }
         let element = self.element(contribution);
         let out = self.stored(

@@ -3,12 +3,15 @@ use neura_gpu::WARM_PROGRAMS;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Program, Runtime};
 
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 use support::{assert_close, open};
 
 const ELEMENTS: [Element; 3] = [Element::Single, Element::Half, Element::Fp8E4M3];

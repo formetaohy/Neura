@@ -249,6 +249,79 @@ impl GraphSnapshot {
     }
 }
 
+pub(crate) struct Declaration<'a> {
+    name: Option<&'a str>,
+    shape: Shape,
+    strides: [u32; 4],
+    strides_source: Option<[u8; 4]>,
+    storage: Option<u32>,
+    residency: Residency,
+    element: Element,
+    scale: f32,
+    seed: Option<Init>,
+    requires_grad: bool,
+}
+
+impl<'a> Declaration<'a> {
+    pub(crate) fn of(shape: Shape, element: Element, residency: Residency) -> Self {
+        Self {
+            name: None,
+            shape,
+            strides: shape.strides(),
+            strides_source: None,
+            storage: None,
+            residency,
+            element,
+            scale: 1.0,
+            seed: None,
+            requires_grad: false,
+        }
+    }
+
+    pub(crate) fn view(
+        shape: Shape,
+        strides: [u32; 4],
+        strides_source: Option<[u8; 4]>,
+        storage: u32,
+        element: Element,
+        scale: f32,
+        tracked: bool,
+    ) -> Self {
+        Self {
+            name: None,
+            shape,
+            strides,
+            strides_source,
+            storage: Some(storage),
+            residency: Residency::View,
+            element,
+            scale,
+            seed: None,
+            requires_grad: tracked,
+        }
+    }
+
+    fn named(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    fn scaled(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    fn seeded(mut self, init: Init) -> Self {
+        self.seed = Some(init);
+        self
+    }
+
+    fn trained(mut self, tracked: bool) -> Self {
+        self.requires_grad = tracked;
+        self
+    }
+}
+
 pub struct Graph<'g> {
     pub(crate) instance: u64,
     pub(crate) state: RefCell<GraphState>,
@@ -362,7 +435,7 @@ impl<'g> Graph<'g> {
         let free = self.counted(shape.dims()[axis as usize], count);
         let mut frees = shape.frees();
         frees[axis as usize] = Some(free.slot());
-        let live = self.alias(
+        let live = self.declare(Declaration::view(
             Shape::from_axes(shape.dims(), frees),
             strides,
             strides_source,
@@ -370,7 +443,7 @@ impl<'g> Graph<'g> {
             element,
             scale,
             tracked,
-        );
+        ));
         self.state.borrow_mut().prefixes.insert(live.id(), storage);
         live
     }
@@ -636,7 +709,7 @@ impl<'g> Graph<'g> {
             "an input of {} storage is declared with the quantum it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(None, shape, Residency::Input, element, 1.0, None, false)
+        self.hold(Declaration::of(shape, element, Residency::Input))
     }
 
     pub fn gradient_input(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -645,7 +718,7 @@ impl<'g> Graph<'g> {
             "a gradient input of {} storage is declared with the quantum it reconstructs by, and a gradient input carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(None, shape, Residency::Input, element, 1.0, None, true)
+        self.hold(Declaration::of(shape, element, Residency::Input).trained(true))
     }
 
     pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
@@ -654,7 +727,7 @@ impl<'g> Graph<'g> {
             "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
             element.name(),
         );
-        self.hold(None, shape, Residency::Resident, element, 1.0, None, false)
+        self.hold(Declaration::of(shape, element, Residency::Resident))
     }
 
     pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -664,13 +737,9 @@ impl<'g> Graph<'g> {
             element.name(),
         );
         self.hold(
-            None,
-            shape,
-            Residency::Parameter,
-            element,
-            1.0,
-            Some(init),
-            true,
+            Declaration::of(shape, element, Residency::Parameter)
+                .seeded(init)
+                .trained(true),
         )
     }
 
@@ -687,37 +756,25 @@ impl<'g> Graph<'g> {
             element.name(),
         );
         self.hold(
-            Some(name),
-            shape,
-            Residency::Parameter,
-            element,
-            1.0,
-            Some(init),
-            true,
+            Declaration::of(shape, element, Residency::Parameter)
+                .named(name)
+                .seeded(init)
+                .trained(true),
         )
     }
 
     pub fn knob(&self, value: f32) -> Value<'g> {
         self.hold(
-            None,
-            Shape::scalar(),
-            Residency::State,
-            Element::Single,
-            1.0,
-            Some(Init::Constant(value)),
-            false,
+            Declaration::of(Shape::scalar(), Element::Single, Residency::State)
+                .seeded(Init::Constant(value)),
         )
     }
 
     pub fn named_knob(&self, name: &str, value: f32) -> Value<'g> {
         self.hold(
-            Some(name),
-            Shape::scalar(),
-            Residency::State,
-            Element::Single,
-            1.0,
-            Some(Init::Constant(value)),
-            false,
+            Declaration::of(Shape::scalar(), Element::Single, Residency::State)
+                .named(name)
+                .seeded(Init::Constant(value)),
         )
     }
 
@@ -727,15 +784,7 @@ impl<'g> Graph<'g> {
             "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
             element.name(),
         );
-        self.hold(
-            None,
-            shape,
-            Residency::State,
-            element,
-            1.0,
-            Some(init),
-            false,
-        )
+        self.hold(Declaration::of(shape, element, Residency::State).seeded(init))
     }
 
     pub fn named_state(&self, name: &str, shape: Shape, init: Init, element: Element) -> Value<'g> {
@@ -745,25 +794,17 @@ impl<'g> Graph<'g> {
             element.name(),
         );
         self.hold(
-            Some(name),
-            shape,
-            Residency::State,
-            element,
-            1.0,
-            Some(init),
-            false,
+            Declaration::of(shape, element, Residency::State)
+                .named(name)
+                .seeded(init),
         )
     }
 
     pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
         self.hold(
-            None,
-            shape,
-            Residency::Parameter,
-            Element::Int8,
-            scale,
-            Some(init),
-            false,
+            Declaration::of(shape, Element::Int8, Residency::Parameter)
+                .scaled(scale)
+                .seeded(init),
         )
     }
 
@@ -775,13 +816,10 @@ impl<'g> Graph<'g> {
         scale: f32,
     ) -> Value<'g> {
         self.hold(
-            Some(name),
-            shape,
-            Residency::Parameter,
-            Element::Int8,
-            scale,
-            Some(init),
-            false,
+            Declaration::of(shape, Element::Int8, Residency::Parameter)
+                .named(name)
+                .scaled(scale)
+                .seeded(init),
         )
     }
 
@@ -796,15 +834,7 @@ impl<'g> Graph<'g> {
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
             element.name(),
         );
-        self.hold(
-            None,
-            shape,
-            Residency::Parameter,
-            element,
-            1.0,
-            Some(init),
-            false,
-        )
+        self.hold(Declaration::of(shape, element, Residency::Parameter).seeded(init))
     }
 
     pub fn named_block_quantized_parameter(
@@ -820,13 +850,9 @@ impl<'g> Graph<'g> {
             element.name(),
         );
         self.hold(
-            Some(name),
-            shape,
-            Residency::Parameter,
-            element,
-            1.0,
-            Some(init),
-            false,
+            Declaration::of(shape, element, Residency::Parameter)
+                .named(name)
+                .seeded(init),
         )
     }
 
@@ -1014,7 +1040,7 @@ impl<'g> Graph<'g> {
                 info.scale,
             )
         };
-        self.alias(
+        self.declare(Declaration::view(
             shape,
             strides,
             strides_source,
@@ -1022,7 +1048,7 @@ impl<'g> Graph<'g> {
             element,
             scale,
             false,
-        )
+        ))
     }
 
     pub(crate) fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
@@ -1370,30 +1396,37 @@ impl<'g> Graph<'g> {
         self.state.borrow().tasks[index].clone()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn hold(
-        &self,
-        name: Option<&str>,
-        shape: Shape,
-        residency: Residency,
-        element: Element,
-        scale: f32,
-        seed: Option<Init>,
-        requires_grad: bool,
-    ) -> Value<'g> {
+    fn hold(&self, declared: Declaration<'_>) -> Value<'g> {
         assert!(
-            !matches!(residency, Residency::Parameter | Residency::State) || !shape.dynamic(),
+            !matches!(declared.residency, Residency::Parameter | Residency::State)
+                || !declared.shape.dynamic(),
             "a weight or a training state of {:?} holds one tensor of every run, and a free extent takes a length it cannot hold",
-            shape.dims(),
+            declared.shape.dims(),
         );
+        self.declare(declared)
+    }
+
+    pub(crate) fn declare(&self, declared: Declaration<'_>) -> Value<'g> {
+        let Declaration {
+            name,
+            shape,
+            strides,
+            strides_source,
+            storage,
+            residency,
+            element,
+            scale,
+            seed,
+            requires_grad,
+        } = declared;
         let mut state = self.state.borrow_mut();
         let name = name.map(|name| intern(&mut state, name));
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
-            strides: shape.strides(),
-            strides_source: None,
-            storage: id,
+            strides,
+            strides_source,
+            storage: storage.unwrap_or(id),
             element,
             scale,
             residency,
@@ -1440,57 +1473,11 @@ impl<'g> Graph<'g> {
             element.name(),
             element.block(),
         );
-        let mut state = self.state.borrow_mut();
-        let id = state.values.len() as u32;
-        state.values.push(ValueInfo {
-            shape,
-            strides: shape.strides(),
-            strides_source: None,
-            storage: id,
-            element,
-            scale,
-            residency,
-            requires_grad: tracked,
-            retained: false,
-            written_in_place: false,
-            recomputes: None,
-            seed: None,
-            name: None,
-        });
-        advance(&mut state);
-        Value::of(self.instance, id, shape)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn alias(
-        &self,
-        shape: Shape,
-        strides: [u32; 4],
-        strides_source: Option<[u8; 4]>,
-        storage: u32,
-        element: Element,
-        scale: f32,
-        tracked: bool,
-    ) -> Value<'g> {
-        let mut state = self.state.borrow_mut();
-        let id = state.values.len() as u32;
-        state.values.push(ValueInfo {
-            shape,
-            strides,
-            strides_source,
-            storage,
-            element,
-            scale,
-            residency: Residency::View,
-            requires_grad: tracked,
-            retained: false,
-            written_in_place: false,
-            recomputes: None,
-            seed: None,
-            name: None,
-        });
-        advance(&mut state);
-        Value::of(self.instance, id, shape)
+        self.declare(
+            Declaration::of(shape, element, residency)
+                .scaled(scale)
+                .trained(tracked),
+        )
     }
 
     pub(crate) fn push(&self, task: TaskInfo) {

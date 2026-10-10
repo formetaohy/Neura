@@ -13,13 +13,13 @@ pub struct Entry {
 }
 
 #[derive(Clone, Debug)]
-pub struct Region {
+pub struct Arena {
     words: u64,
     entries: Vec<Entry>,
     placed: Vec<Option<(u64, Element, f32)>>,
 }
 
-impl Region {
+impl Arena {
     fn of(
         values: &[ValueInfo],
         wants: impl Fn(&ValueInfo) -> bool,
@@ -89,7 +89,7 @@ impl Region {
     }
 }
 
-impl PartialEq for Region {
+impl PartialEq for Arena {
     fn eq(&self, other: &Self) -> bool {
         self.words == other.words
             && self.entries.len() == other.entries.len()
@@ -132,9 +132,9 @@ impl Seed {
 }
 
 pub struct Layout {
-    weights: Region,
-    state: Region,
-    tensors: Region,
+    weights: Arena,
+    state: Arena,
+    tensors: Arena,
     seeds: Vec<Seed>,
 }
 
@@ -144,19 +144,19 @@ impl Layout {
     }
 
     pub(crate) fn of_values(values: &[ValueInfo], alignment: u64) -> Self {
-        let weights = Region::of(
+        let weights = Arena::of(
             values,
             |info| info.residency == Residency::Parameter,
             alignment,
             0,
         );
-        let state = Region::of(
+        let state = Arena::of(
             values,
             |info| info.residency == Residency::State,
             alignment,
             weights.words(),
         );
-        let tensors = Region::of(
+        let tensors = Arena::of(
             values,
             |info| info.residency == Residency::Resident,
             alignment,
@@ -193,15 +193,15 @@ impl Layout {
         }
     }
 
-    pub fn weights(&self) -> &Region {
+    pub fn weights(&self) -> &Arena {
         &self.weights
     }
 
-    pub fn state(&self) -> &Region {
+    pub fn state(&self) -> &Arena {
         &self.state
     }
 
-    pub fn tensors(&self) -> &Region {
+    pub fn tensors(&self) -> &Arena {
         &self.tensors
     }
 

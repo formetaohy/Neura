@@ -33,9 +33,10 @@ impl Schedule {
     ) -> Self {
         let barriers = barriers(values, tasks);
         let depths = depths(values, tiles, tasks, &barriers);
-        let packed = pack(
+        let packed = Packer::new(
             values, tiles, tasks, &barriers, &depths, workgroups, declared,
-        );
+        )
+        .pack();
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -237,62 +238,116 @@ enum Placement {
     Open { wave: u32 },
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pack<T: Scheduled, V: region::Values>(
-    values: &V,
-    tiles: &[MatmulTile],
-    tasks: &[T],
-    barriers: &[Vec<u32>],
-    depths: &[u32],
+struct Packer<'a, T, V> {
+    values: &'a V,
+    tiles: &'a [MatmulTile],
+    tasks: &'a [T],
+    barriers: &'a [Vec<u32>],
     workgroups: u32,
-    declared: &[u32],
-) -> Packed {
-    let lonely = lonely(depths);
-    let mut hazards = Hazards::of(values.len());
-    let mut waves = vec![0u32; tasks.len()];
-    let mut segments = Vec::<Vec<u32>>::new();
-    let mut work = Vec::<u64>::new();
-    let mut created = Vec::<u32>::new();
-    let mut rebuilt = Vec::<bool>::new();
-    let mut segment_of = vec![0u32; tasks.len()];
-    let mut segment_wave = Vec::<u32>::new();
-    let mut ancestry = Ancestry::default();
-    let mut prefix = 0u32;
-    let mut stage = 0u32;
-    let mut in_recompute = false;
-    let mut entry = Hazard::default();
-    let mut touches = region::Touches::default();
-    for index in 0..tasks.len() as u32 {
-        let task = &tasks[index as usize];
-        region::touches(values, tiles, task, task.span(), &mut touches);
-        let recomputed = touches
+    declared: &'a [u32],
+    lonely: Vec<bool>,
+    hazards: Hazards,
+    waves: Vec<u32>,
+    segments: Vec<Vec<u32>>,
+    work: Vec<u64>,
+    created: Vec<u32>,
+    rebuilt: Vec<bool>,
+    segment_of: Vec<u32>,
+    segment_wave: Vec<u32>,
+    ancestry: Ancestry,
+    entry: Hazard,
+    touches: region::Touches,
+    prefix: u32,
+    stage: u32,
+    in_recompute: bool,
+}
+
+impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
+    fn new(
+        values: &'a V,
+        tiles: &'a [MatmulTile],
+        tasks: &'a [T],
+        barriers: &'a [Vec<u32>],
+        depths: &'a [u32],
+        workgroups: u32,
+        declared: &'a [u32],
+    ) -> Self {
+        Self {
+            values,
+            tiles,
+            tasks,
+            barriers,
+            workgroups,
+            declared,
+            lonely: lonely(depths),
+            hazards: Hazards::of(values.len()),
+            waves: vec![0u32; tasks.len()],
+            segments: Vec::new(),
+            work: Vec::new(),
+            created: Vec::new(),
+            rebuilt: Vec::new(),
+            segment_of: vec![0u32; tasks.len()],
+            segment_wave: Vec::new(),
+            ancestry: Ancestry::default(),
+            entry: Hazard::default(),
+            touches: region::Touches::default(),
+            prefix: 0,
+            stage: 0,
+            in_recompute: false,
+        }
+    }
+
+    fn pack(mut self) -> Packed {
+        for index in 0..self.tasks.len() as u32 {
+            self.place(index);
+        }
+        Packed {
+            waves: self.waves,
+            segments: self.segments,
+        }
+    }
+
+    fn place(&mut self, index: u32) {
+        let task = &self.tasks[index as usize];
+        region::touches(
+            self.values,
+            self.tiles,
+            task,
+            task.span(),
+            &mut self.touches,
+        );
+        let recomputed = self
+            .touches
             .reads
             .iter()
-            .chain(&touches.writes)
-            .any(|(storage, _)| values.recomputes(*storage).is_some());
-        if recomputed && !in_recompute {
-            stage = prefix + 1;
+            .chain(&self.touches.writes)
+            .any(|(storage, _)| self.values.recomputes(*storage).is_some());
+        if recomputed && !self.in_recompute {
+            self.stage = self.prefix + 1;
         }
-        in_recompute = recomputed;
-        let mut evidence = hazards.inspect(values, &touches, task.in_place());
-        for dependency in &barriers[index as usize] {
+        self.in_recompute = recomputed;
+        let mut evidence = self
+            .hazards
+            .inspect(self.values, &self.touches, task.in_place());
+        for dependency in &self.barriers[index as usize] {
             evidence.join(&Hazard::at(
-                waves[*dependency as usize],
-                ancestry.root(segment_of[*dependency as usize]),
+                self.waves[*dependency as usize],
+                self.ancestry.root(self.segment_of[*dependency as usize]),
             ));
         }
         let earliest = evidence.wave;
         let mut dependencies = std::mem::take(&mut evidence.segments);
         for reached in dependencies.as_mut_slice() {
-            *reached = ancestry.root(*reached);
+            *reached = self.ancestry.root(*reached);
         }
         dependencies.settle();
         let folded = earliest
             .filter(|earliest| {
-                lonely[index as usize]
+                self.lonely[index as usize]
                     && !recomputed
                     && dependencies.len() == 1
-                    && segment_wave.get(dependencies.get(0) as usize).copied() == Some(*earliest)
+                    && self.segment_wave.get(dependencies.get(0) as usize).copied()
+                        == Some(*earliest)
             })
             .map(|earliest| (earliest, dependencies.get(0)));
         let placement = match dependencies.overflowed() {
@@ -301,17 +356,16 @@ fn pack<T: Scheduled, V: region::Values>(
             },
             false => match folded {
                 Some((wave, segment)) => Placement::Fold { wave, segment },
-                None => close(
-                    task.work(),
-                    dependencies.slice(),
-                    earliest,
-                    &work,
-                    &created,
-                    &rebuilt,
-                    recomputed,
-                    workgroups,
-                    declared.get(index as usize).copied().unwrap_or(0),
-                ),
+                None => {
+                    let declared = self.declared.get(index as usize).copied().unwrap_or(0);
+                    self.close(
+                        task.work(),
+                        dependencies.slice(),
+                        earliest,
+                        recomputed,
+                        declared,
+                    )
+                }
             },
         };
         let (wave, segment) = match placement {
@@ -322,27 +376,31 @@ fn pack<T: Scheduled, V: region::Values>(
             } => {
                 let kept = merged[0];
                 for absorbed in &merged[1..] {
-                    let moved = std::mem::take(&mut segments[*absorbed as usize]);
-                    work[kept as usize] += work[*absorbed as usize];
-                    work[*absorbed as usize] = 0;
-                    segments[kept as usize].extend(moved);
-                    ancestry.adopt(kept, *absorbed);
+                    let moved = std::mem::take(&mut self.segments[*absorbed as usize]);
+                    self.work[kept as usize] += self.work[*absorbed as usize];
+                    self.work[*absorbed as usize] = 0;
+                    self.segments[kept as usize].extend(moved);
+                    self.ancestry.adopt(kept, *absorbed);
                 }
                 for reached in dependencies.as_mut_slice() {
-                    *reached = ancestry.root(*reached);
+                    *reached = self.ancestry.root(*reached);
                 }
                 (wave, kept)
             }
             Placement::Open { wave } => {
-                segments.push(Vec::new());
-                work.push(0);
-                rebuilt.push(false);
-                segment_wave.push(wave);
-                ancestry.push();
-                (wave, (segments.len() - 1) as u32)
+                self.segments.push(Vec::new());
+                self.work.push(0);
+                self.rebuilt.push(false);
+                self.segment_wave.push(wave);
+                self.ancestry.push();
+                (wave, (self.segments.len() - 1) as u32)
             }
         };
-        let wave = if recomputed { wave.max(stage) } else { wave };
+        let wave = if recomputed {
+            wave.max(self.stage)
+        } else {
+            wave
+        };
         if let Some(earliest) = earliest {
             let ordered = wave > earliest
                 || (wave == earliest && dependencies.iter().all(|reached| *reached == segment));
@@ -351,72 +409,68 @@ fn pack<T: Scheduled, V: region::Values>(
                 "task {index} lands in wave {wave} while a hazard of its own reaches wave {earliest} of segments {dependencies:?}, and the device gates two waves apart only what a segment orders",
             );
         }
-        segment_wave[segment as usize] = segment_wave[segment as usize].max(wave);
-        waves[index as usize] = wave;
-        segment_of[index as usize] = segment;
-        if segments[segment as usize].is_empty() {
-            if created.len() <= wave as usize {
-                created.resize(wave as usize + 1, 0);
+        self.segment_wave[segment as usize] = self.segment_wave[segment as usize].max(wave);
+        self.waves[index as usize] = wave;
+        self.segment_of[index as usize] = segment;
+        if self.segments[segment as usize].is_empty() {
+            if self.created.len() <= wave as usize {
+                self.created.resize(wave as usize + 1, 0);
             }
-            created[wave as usize] += 1;
+            self.created[wave as usize] += 1;
         }
-        work[segment as usize] += task.work();
-        rebuilt[segment as usize] |= recomputed;
-        segments[segment as usize].push(index);
-        prefix = prefix.max(wave);
-        entry.wave = Some(wave);
-        entry.segments.clear();
-        entry.segments.extend_from(&[segment]);
-        hazards.record(values, &touches, &entry);
+        self.work[segment as usize] += task.work();
+        self.rebuilt[segment as usize] |= recomputed;
+        self.segments[segment as usize].push(index);
+        self.prefix = self.prefix.max(wave);
+        self.entry.wave = Some(wave);
+        self.entry.segments.clear();
+        self.entry.segments.extend_from(&[segment]);
+        self.hazards.record(self.values, &self.touches, &self.entry);
     }
-    Packed { waves, segments }
-}
 
-#[allow(clippy::too_many_arguments)]
-fn close(
-    work_of_task: u64,
-    dependencies: &[u32],
-    earliest: Option<u32>,
-    work: &[u64],
-    created: &[u32],
-    rebuilt: &[bool],
-    recomputed: bool,
-    workgroups: u32,
-    declared: u32,
-) -> Placement {
-    let Some(earliest) = earliest else {
-        return Placement::Open { wave: declared };
-    };
-    let heaviest = dependencies
-        .iter()
-        .map(|segment| work[*segment as usize])
-        .max()
-        .unwrap_or(0);
-    let claimed = dependencies
-        .iter()
-        .map(|segment| work[*segment as usize])
-        .sum::<u64>();
-    let segments_after_the_merge = created
-        .get(earliest as usize)
-        .copied()
-        .unwrap_or(0)
-        .saturating_sub(dependencies.len().saturating_sub(1) as u32);
-    let keeps_every_workgroup_busy = segments_after_the_merge >= workgroups;
-    if dependencies.len() > 1
-        && heaviest > 0
-        && keeps_every_workgroup_busy
-        && !recomputed
-        && dependencies
-            .iter()
-            .all(|segment| !rebuilt[*segment as usize])
-        && claimed + work_of_task <= MERGE_SPREAD * heaviest
-    {
-        return Placement::Merge {
-            wave: earliest,
-            segments: dependencies.to_vec(),
+    fn close(
+        &self,
+        work_of_task: u64,
+        dependencies: &[u32],
+        earliest: Option<u32>,
+        recomputed: bool,
+        declared: u32,
+    ) -> Placement {
+        let Some(earliest) = earliest else {
+            return Placement::Open { wave: declared };
         };
+        let heaviest = dependencies
+            .iter()
+            .map(|segment| self.work[*segment as usize])
+            .max()
+            .unwrap_or(0);
+        let claimed = dependencies
+            .iter()
+            .map(|segment| self.work[*segment as usize])
+            .sum::<u64>();
+        let segments_after_the_merge = self
+            .created
+            .get(earliest as usize)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(dependencies.len().saturating_sub(1) as u32);
+        let keeps_every_workgroup_busy = segments_after_the_merge >= self.workgroups;
+        if dependencies.len() > 1
+            && heaviest > 0
+            && keeps_every_workgroup_busy
+            && !recomputed
+            && dependencies
+                .iter()
+                .all(|segment| !self.rebuilt[*segment as usize])
+            && claimed + work_of_task <= MERGE_SPREAD * heaviest
+        {
+            return Placement::Merge {
+                wave: earliest,
+                segments: dependencies.to_vec(),
+            };
+        }
+        Placement::Open { wave: earliest + 1 }
     }
-    Placement::Open { wave: earliest + 1 }
 }
 
 fn assert_barriers<T: Scheduled>(tasks: &[T], barriers: &[Vec<u32>], schedule: &Schedule) {

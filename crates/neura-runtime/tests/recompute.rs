@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
-use neura_runtime::{Budget, Profile};
+use neura_profile::{Budget, Profile};
 
 #[path = "support/mod.rs"]
 mod support;

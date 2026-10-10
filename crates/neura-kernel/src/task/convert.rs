@@ -14,7 +14,7 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
                 compiler.specialize(
                     "template_run_convert_fp8",
                     &name,
-                    &crate::element::format_constants(format),
+                    &crate::fetch::format_constants(format),
                 );
                 name
             }

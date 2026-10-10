@@ -1,14 +1,14 @@
 use crate::access::{Access, Reads};
 use crate::authored;
-use crate::encodings::Encodings;
 use crate::fuse;
-use crate::layout::{Layout, Region, store_of};
+use crate::layout::{Arena, Layout, store_of};
 use crate::lower;
 use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::record::{self, Recorded};
 use crate::region::{self, Resolved, TableRows, Touches, Walk};
+use crate::remembered::Remembered;
 use crate::schedule;
 use crate::span::{self, Extents, Split};
 use neura_abi::{
@@ -298,7 +298,7 @@ pub struct Plan {
     shapes: Arc<Vec<ValueInfo>>,
     alignment: u64,
     bound: Arc<Encoding>,
-    encodings: Mutex<Encodings>,
+    remembered: Mutex<Remembered>,
     derived: AtomicU64,
 }
 
@@ -618,7 +618,7 @@ impl Plan {
             shapes,
             alignment,
             bound: Arc::new(Encoding::empty()),
-            encodings: Mutex::new(Encodings::of(encoding_bytes)),
+            remembered: Mutex::new(Remembered::of(encoding_bytes)),
             derived: AtomicU64::new(0),
         };
         let bound = plan.deliver(&plan.slot_bounds);
@@ -768,8 +768,8 @@ impl Plan {
         self.store().insert(lengths, derived)
     }
 
-    fn store(&self) -> MutexGuard<'_, Encodings> {
-        self.encodings
+    fn store(&self) -> MutexGuard<'_, Remembered> {
+        self.remembered
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
@@ -1165,7 +1165,7 @@ impl Plan {
         self.bound.quanta()
     }
 
-    pub fn weights(&self) -> &Region {
+    pub fn weights(&self) -> &Arena {
         self.layout.weights()
     }
 
@@ -1205,11 +1205,11 @@ impl Plan {
         self.layout.words()
     }
 
-    pub fn state(&self) -> &Region {
+    pub fn state(&self) -> &Arena {
         self.layout.state()
     }
 
-    pub fn tensors(&self) -> &Region {
+    pub fn tensors(&self) -> &Arena {
         self.layout.tensors()
     }
 

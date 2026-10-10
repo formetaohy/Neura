@@ -1,6 +1,7 @@
 use neura_abi::Element;
+use neura_gpu::Backends;
 use neura_graph::{Free, Graph, Init, Shape, Value};
-use neura_runtime::{Backends, MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 const ROWS: u32 = 16;
 const WIDTH: u32 = 128;
@@ -45,7 +46,7 @@ impl<'g> Model<'g> {
 
 fn open(backends: Backends, memory: MemoryRequest) -> Runtime {
     Runtime::open(RuntimeRequest {
-        gpu: neura_runtime::GpuRequest {
+        gpu: neura_gpu::GpuRequest {
             backends,
             ..Default::default()
         },

@@ -3,7 +3,7 @@ use crate::pool::{Pool, Recycled};
 use crate::spill::{Spill, SpillFile};
 use neura_abi::{NO_PAGE, PAGE_WORDS, WORD_BYTES, pages_of};
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext, Queue, Submission, SubmissionIndex};
-use neura_plan::Region;
+use neura_plan::Arena;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -769,8 +769,8 @@ impl WeightStore {
     pub(crate) fn load(
         &self,
         queue: &Queue,
-        weights: &Region,
-        state: &Region,
+        weights: &Arena,
+        state: &Arena,
         source: &impl crate::checkpoint::Source,
     ) {
         let Some(mirror) = &self.mirror else {

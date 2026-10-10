@@ -1,11 +1,10 @@
 mod arithmetic;
-pub mod hlsl;
 pub mod instruction;
 mod literal;
 pub mod module;
-pub mod msl;
 pub mod program;
 pub mod spirv;
+pub mod text;
 pub mod ty;
 mod validate;
 
@@ -22,4 +21,5 @@ pub use program::{
     Backend, BindingKind, BindingSpec, ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT,
     ShaderBinding, ShaderTranslation, describe, reflect,
 };
+pub use text::Language;
 pub use ty::{MatrixUse, Member, Scalar, Type, TypeId, ValueId};

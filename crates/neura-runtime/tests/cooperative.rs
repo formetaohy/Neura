@@ -1,19 +1,23 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
+use neura_plan::Product;
 use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile};
-use neura_runtime::{Product, Runtime};
+use neura_runtime::Runtime;
 
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 
 const WORKGROUP: u32 = 256;
 
 fn open() -> Runtime {
     Runtime::open(neura_runtime::RuntimeRequest {
-        gpu: neura_runtime::GpuRequest {
-            backends: neura_runtime::Backends::VULKAN,
+        gpu: neura_gpu::GpuRequest {
+            backends: neura_gpu::Backends::VULKAN,
             ..Default::default()
         },
         memory: neura_runtime::MemoryRequest {

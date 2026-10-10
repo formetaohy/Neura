@@ -1,6 +1,6 @@
 use neura_shader::{
     Access, Address, Argument, BinaryOp, Binding, BuiltIn, Constant, Function, Global, Instruction,
-    Module, Scalar, Space,
+    Language, Module, Scalar, Space,
 };
 
 #[derive(Clone, Copy)]
@@ -109,13 +109,13 @@ fn control(placement: Placement) -> Module {
 fn a_text_writer_chains_the_cases_a_break_leaves_a_loop_through() {
     for placement in [Placement::InACase, Placement::UnderACaseBranch] {
         let module = control(placement);
-        let hlsl = neura_shader::hlsl::write(&module);
+        let hlsl = neura_shader::text::write(&module, Language::HLSL);
         assert!(!hlsl.contains("switch ("), "{hlsl}");
         assert!(hlsl.contains("else if"), "{hlsl}");
         let loop_at = hlsl.find("while (true)").expect("a device loop");
         let break_at = hlsl.find("break;").expect("a device break");
         assert!(loop_at < break_at, "{hlsl}");
-        let msl = neura_shader::msl::write(&module);
+        let msl = neura_shader::text::write(&module, Language::MSL);
         assert!(!msl.contains("switch ("), "{msl}");
         assert!(msl.contains("else if"), "{msl}");
         let loop_at = msl.find("while (true)").expect("a device loop");
@@ -128,10 +128,10 @@ fn a_text_writer_chains_the_cases_a_break_leaves_a_loop_through() {
 fn a_text_writer_keeps_the_cases_of_a_switch_no_break_leaves() {
     for placement in [Placement::InANestedLoop, Placement::Nowhere] {
         let module = control(placement);
-        let hlsl = neura_shader::hlsl::write(&module);
+        let hlsl = neura_shader::text::write(&module, Language::HLSL);
         assert!(hlsl.contains("switch ("), "{hlsl}");
         assert!(!hlsl.contains("else if"), "{hlsl}");
-        let msl = neura_shader::msl::write(&module);
+        let msl = neura_shader::text::write(&module, Language::MSL);
         assert!(msl.contains("switch ("), "{msl}");
         assert!(!msl.contains("else if"), "{msl}");
     }

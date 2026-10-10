@@ -1,6 +1,7 @@
 use neura_abi::Element;
+use neura_gpu::GpuRequest;
 use neura_graph::{Graph, Init, Shape};
-use neura_runtime::{GpuRequest, MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
 
 fn directory() -> PathBuf {

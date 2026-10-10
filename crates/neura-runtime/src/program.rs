@@ -10,7 +10,7 @@ use neura_gpu::{
 };
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, TASKS, Tables, VALUES};
-use neura_plan::{Encoding, Plan, Region, Span, TableRows, WeightPages};
+use neura_plan::{Arena, Encoding, Plan, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,12 +21,12 @@ const REMEMBERED_WINDOWS: usize = 8;
 #[derive(Clone)]
 pub struct Weights {
     store: Arc<WeightStore>,
-    weights: Region,
-    state: Region,
+    weights: Arena,
+    state: Arena,
 }
 
 impl Weights {
-    pub(crate) fn new(store: Arc<WeightStore>, weights: Region, state: Region) -> Self {
+    pub(crate) fn new(store: Arc<WeightStore>, weights: Arena, state: Arena) -> Self {
         Self {
             store,
             weights,
@@ -90,11 +90,11 @@ impl Weights {
         self.store.spill_write_bytes()
     }
 
-    pub(crate) fn region(&self) -> &Region {
+    pub(crate) fn region(&self) -> &Arena {
         &self.weights
     }
 
-    pub(crate) fn state(&self) -> &Region {
+    pub(crate) fn state(&self) -> &Arena {
         &self.state
     }
 

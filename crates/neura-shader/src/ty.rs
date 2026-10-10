@@ -28,8 +28,6 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    pub const U32_BYTES: u32 = 4;
-
     pub const fn name(self) -> &'static str {
         match self {
             Self::U32 => "u32",

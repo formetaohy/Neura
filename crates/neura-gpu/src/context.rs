@@ -263,8 +263,6 @@ pub struct GpuContext {
 }
 
 impl GpuContext {
-    pub const MINIMUM_LIMITS: Limits = Limits::BASELINE;
-
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
         Device::shared(request).map(Self::of_device)
     }

@@ -1,6 +1,6 @@
 use neura_shader::{
-    Access, Address, Argument, Binding, BuiltIn, Constant, Function, Global, Instruction, Module,
-    Scalar, Space,
+    Access, Address, Argument, Binding, BuiltIn, Constant, Function, Global, Instruction, Language,
+    Module, Scalar, Space,
 };
 
 const CONSTANTS: [f32; 10] = [
@@ -147,8 +147,8 @@ fn floats(text: &str) -> Vec<String> {
 fn both_text_writers_spell_every_f32_constant_as_a_float_literal() {
     let module = module_of(&CONSTANTS);
     for written in [
-        neura_shader::hlsl::write(&module),
-        neura_shader::msl::write(&module),
+        neura_shader::text::write(&module, Language::HLSL),
+        neura_shader::text::write(&module, Language::MSL),
     ] {
         let spelled = floats(&written);
         assert_eq!(

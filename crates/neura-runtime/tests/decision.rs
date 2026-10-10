@@ -1,11 +1,14 @@
 use neura_abi::Element;
+use neura_gpu::Backends;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{Backends, Program, Runtime};
+use neura_runtime::{Program, Runtime};
 
 #[path = "support/backend.rs"]
 mod backend;
 #[path = "support/decision.rs"]
 mod decision;
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/mod.rs"]
@@ -16,7 +19,8 @@ use decision::{
     Sample, argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference,
     sample_reference, scatter_reference, write_reference,
 };
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {

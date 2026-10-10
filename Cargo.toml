@@ -57,6 +57,7 @@ repository.workspace = true
 neura-abi = { workspace = true }
 neura-graph = { workspace = true }
 neura-plan = { workspace = true }
+neura-profile = { workspace = true }
 neura-runtime = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }

@@ -1,6 +1,6 @@
 use neura_shader::{
     Access, Address, Argument, BinaryOp, Binding, BuiltIn, Constant, Function, Global, Instruction,
-    IntegerArithmetic, Module, Scalar, Space,
+    IntegerArithmetic, Language, Module, Scalar, Space,
 };
 
 fn arithmetic(op: BinaryOp, scalar: Scalar) -> Module {
@@ -138,10 +138,10 @@ fn spirv_keeps_an_unsigned_remainder_unsigned() {
 #[test]
 fn the_text_writers_take_the_remainder_of_the_dividend() {
     let module = arithmetic(BinaryOp::Modulo, Scalar::I32);
-    let hlsl = neura_shader::hlsl::write(&module);
+    let hlsl = neura_shader::text::write(&module, Language::HLSL);
     assert!(hlsl.contains("(-7 % 3)"), "{hlsl}");
     assert!(!hlsl.contains("fmod"), "{hlsl}");
-    let msl = neura_shader::msl::write(&module);
+    let msl = neura_shader::text::write(&module, Language::MSL);
     assert!(msl.contains("(-7 % 3)"), "{msl}");
     assert!(!msl.contains("fmod"), "{msl}");
 }

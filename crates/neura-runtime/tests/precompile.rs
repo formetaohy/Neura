@@ -1,13 +1,17 @@
 use neura_abi::Element;
 use neura_gpu::Backend;
+use neura_gpu::GpuRequest;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{GpuRequest, MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use std::path::{Path, PathBuf};
 
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 
 fn directory() -> PathBuf {
     directory_named("precompile")

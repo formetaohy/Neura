@@ -16,6 +16,7 @@ pub struct Binding<'a> {
 pub(crate) struct BoundBuffer {
     pub(crate) buffer: GpuBuffer,
     pub(crate) offset: u64,
+    #[cfg(vulkan_backend)]
     pub(crate) size: u64,
 }
 
@@ -99,6 +100,7 @@ impl PipelineHandle {
                 BoundBuffer {
                     buffer: buffer.clone(),
                     offset: entry.buffer.offset,
+                    #[cfg(vulkan_backend)]
                     size: entry.buffer.size,
                 }
             })

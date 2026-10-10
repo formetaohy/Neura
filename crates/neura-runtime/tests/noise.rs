@@ -1,6 +1,6 @@
 use neura_abi::Element;
+use neura_gpu::Backends;
 use neura_graph::{Graph, Shape, Value};
-use neura_runtime::Backends;
 
 #[path = "support/backend.rs"]
 mod backend;

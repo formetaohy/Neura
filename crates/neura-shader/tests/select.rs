@@ -1,6 +1,6 @@
 use neura_shader::{
     Access, Address, Argument, BinaryOp, Binding, BuiltIn, Constant, Function, Global, Instruction,
-    Module, Scalar, Space, ValueId,
+    Language, Module, Scalar, Space, ValueId,
 };
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -196,12 +196,12 @@ fn every_backend_selects_the_branch_its_condition_accepts() {
         choosing.chosen.index(),
         choosing.condition.index(),
     );
-    let hlsl = neura_shader::hlsl::write(&choosing.module);
+    let hlsl = neura_shader::text::write(&choosing.module, Language::HLSL);
     assert!(
         hlsl.contains(&expected),
         "the HLSL of a select hands its condition the rejected branch:\n{hlsl}",
     );
-    let msl = neura_shader::msl::write(&choosing.module);
+    let msl = neura_shader::text::write(&choosing.module, Language::MSL);
     assert!(
         msl.contains(&expected),
         "the MSL of a select hands its condition the rejected branch:\n{msl}",

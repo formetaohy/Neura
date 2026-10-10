@@ -1,8 +1,8 @@
-use crate::encode;
-use crate::encodings::Encodings;
 use crate::hazard::{Accesses, Hazard, quanta};
 use crate::lower;
+use crate::plan;
 use crate::region::{self, Region};
+use crate::remembered::Remembered;
 use crate::span;
 use neura_abi::{Element, Kind, NO_VALUE, StepFields, StepRecord};
 use neura_graph::{Graph, Shape, ValueInfo, Window};
@@ -536,7 +536,7 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
         grid: NO_VALUE,
     };
     assert!(
-        !refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+        !refuses(|| plan::assert_a_task_needs_exact_lengths_the_plan_froze(
             &values,
             std::slice::from_ref(&exact),
         )),
@@ -545,7 +545,7 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
     let mut walked = exact.clone();
     walked.inputs = [0, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
     assert!(
-        refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+        refuses(|| plan::assert_a_task_needs_exact_lengths_the_plan_froze(
             &values,
             std::slice::from_ref(&walked),
         )),
@@ -555,7 +555,7 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
     taps.kind = Kind::Conv2d;
     taps.inputs = [1, 0, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
     assert!(
-        refuses(|| encode::assert_a_task_needs_exact_lengths_the_plan_froze(
+        refuses(|| plan::assert_a_task_needs_exact_lengths_the_plan_froze(
             &values,
             std::slice::from_ref(&taps),
         )),
@@ -611,7 +611,7 @@ fn a_rotation_of_a_packed_tensor_walks_the_segments_of_its_axis() {
     let loose = rotation(0, NO_VALUE);
     assert!(
         refuses(
-            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+            || plan::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
                 &values,
                 std::slice::from_ref(&loose),
                 &ragged,
@@ -630,7 +630,7 @@ fn a_rotation_of_a_packed_tensor_walks_the_segments_of_its_axis() {
     };
     assert!(
         refuses(
-            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+            || plan::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
                 &values,
                 std::slice::from_ref(&sideways),
                 &ragged,
@@ -648,7 +648,7 @@ fn a_rotation_of_a_packed_tensor_walks_the_segments_of_its_axis() {
     };
     assert!(
         !refuses(
-            || encode::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
+            || plan::assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
                 &values,
                 std::slice::from_ref(&packed),
                 &ragged,
@@ -675,11 +675,11 @@ fn an_encoding_store_evicts_the_shape_it_touched_longest_ago() {
         value = graph.relu(graph.matmul(value, weight));
     }
     graph.retain(value);
-    let plan = encode::Plan::of(
+    let plan = plan::Plan::of(
         &graph,
         256,
         Profile::derive(Budget::BASELINE, None)[0],
-        crate::encodings::DEFAULT_ENCODING_BYTES,
+        crate::remembered::DEFAULT_ENCODING_BYTES,
     );
     let mut shapes = [8u32, 16, 24]
         .into_iter()
@@ -690,7 +690,7 @@ fn an_encoding_store_evicts_the_shape_it_touched_longest_ago() {
     let (middle_shape, middle) = shapes[1].clone();
     let (largest_shape, largest) = shapes[2].clone();
     let room = largest.bytes() + middle.bytes() + 8;
-    let mut store = Encodings::of(room);
+    let mut store = Remembered::of(room);
     store.insert(&[largest_shape], largest.clone());
     store.insert(&[middle_shape], middle.clone());
     assert_eq!(

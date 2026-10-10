@@ -1,4 +1,4 @@
-use crate::graph::{AttentionOptions, Graph, Ragged, Residency, TaskInfo, Value};
+use crate::graph::{AttentionOptions, Declaration, Graph, Ragged, Residency, TaskInfo, Value};
 use crate::pool::Pool;
 use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
@@ -1324,7 +1324,7 @@ impl<'g> Graph<'g> {
             permuted_strides[axis] = strides[walked];
             permuted_source[axis] = source[walked];
         }
-        self.alias(
+        self.declare(Declaration::view(
             Shape::from_axes(permuted_dims, permuted_frees),
             permuted_strides,
             Some(permuted_source),
@@ -1332,7 +1332,7 @@ impl<'g> Graph<'g> {
             element,
             scale,
             tracked,
-        )
+        ))
     }
 
     pub fn reshape(&self, value: Value<'g>, shape: Shape) -> Value<'g> {
@@ -1361,7 +1361,7 @@ impl<'g> Graph<'g> {
             let info = &state.values[value.id() as usize];
             (info.storage, info.element, info.scale, info.requires_grad)
         };
-        self.alias(
+        self.declare(Declaration::view(
             shape,
             shape.strides(),
             None,
@@ -1369,7 +1369,7 @@ impl<'g> Graph<'g> {
             element,
             scale,
             tracked,
-        )
+        ))
     }
 
     pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {

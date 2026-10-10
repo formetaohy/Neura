@@ -1,9 +1,9 @@
-use crate::encode::Encoding;
+use crate::plan::Encoding;
 use std::sync::Arc;
 
 pub const DEFAULT_ENCODING_BYTES: u64 = 16 << 20;
 
-pub(crate) struct Encodings {
+pub(crate) struct Remembered {
     entries: Vec<Held>,
     bytes: u64,
     budget: u64,
@@ -17,7 +17,7 @@ struct Held {
     used: u64,
 }
 
-impl Encodings {
+impl Remembered {
     pub(crate) fn of(budget: u64) -> Self {
         assert!(
             budget > 0,

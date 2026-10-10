@@ -2,12 +2,15 @@ use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::Runtime;
 
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 use support::{assert_close, open};
 
 struct Sensor<'g> {

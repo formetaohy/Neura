@@ -1,13 +1,12 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
 
-#[path = "support/reference.rs"]
-#[allow(dead_code)]
-mod reference;
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/mod.rs"]
 mod support;
 
-use reference::random;
+use input::random;
 use support::{assert_close, open};
 
 const ROWS: u32 = 6;

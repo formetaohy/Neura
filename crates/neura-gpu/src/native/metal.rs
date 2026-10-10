@@ -23,7 +23,6 @@ use objc2_metal::{
 use std::any::Any;
 use std::cmp::Reverse;
 use std::fs;
-use std::mem::size_of;
 use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -126,7 +125,6 @@ pub(crate) struct Buffer {
 struct PipelineResource {
     compiled: OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     threads: OnceLock<u32>,
-    sizes: OnceLock<Vec<u32>>,
 }
 
 pub(crate) struct Pipeline {
@@ -310,19 +308,13 @@ impl Device {
             resource: Arc::new(PipelineResource {
                 compiled: OnceLock::new(),
                 threads: OnceLock::new(),
-                sizes: OnceLock::new(),
             }),
         }
     }
 
     pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
         pipeline.resource.compiled.get_or_init(|| {
-            let ShaderTranslation::Msl {
-                source,
-                entry,
-                size_bindings,
-            } = program.translate(Backend::Metal)
-            else {
+            let ShaderTranslation::Msl { source, entry } = program.translate(Backend::Metal) else {
                 panic!("Metal accepts MSL compute programs");
             };
             let library = self
@@ -403,11 +395,6 @@ impl Device {
                 .threads
                 .set(workgroup)
                 .expect("a pipeline stores its workgroup once");
-            pipeline
-                .resource
-                .sizes
-                .set(size_bindings)
-                .expect("a pipeline stores its bindings once");
             compiled
         });
     }
@@ -539,25 +526,6 @@ impl Device {
                             )
                         };
                         frame.resources.push(target.clone());
-                    }
-                    let sizes = pipeline
-                        .sizes
-                        .get()
-                        .expect("Metal runtime array bindings are known")
-                        .iter()
-                        .map(|index| {
-                            u32::try_from(group.buffers[*index as usize].size)
-                                .expect("Metal binding bytes fit in u32")
-                        })
-                        .collect::<Vec<_>>();
-                    if let Some(first) = sizes.first() {
-                        unsafe {
-                            compute.setBytes_length_atIndex(
-                                std::ptr::NonNull::from(first).cast(),
-                                sizes.len() * size_of::<u32>(),
-                                usize::from(METAL_SIZE_BUFFER_SLOT),
-                            )
-                        };
                     }
                     compute.dispatchThreadgroups_threadsPerThreadgroup(
                         MTLSize {

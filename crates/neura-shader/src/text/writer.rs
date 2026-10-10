@@ -1,14 +1,38 @@
-use crate::hlsl::source::Source;
+use super::source::Source;
+use super::walk::{argument_value, collect, nested, terminates, usage};
 use crate::instruction::leaves_a_loop;
 use crate::{
-    Address, AtomicOp, Barrier, Constant, Function, Instruction, MathFun, Module, Scalar, Space,
-    Target, Type, TypeId, UnaryOp, ValueId,
+    Address, AtomicOp, Barrier, Constant, Function, Instruction, MathFun, MatrixLayout, Module,
+    Scalar, Space, Target, Type, TypeId, UnaryOp, ValueId,
 };
 use std::collections::{HashMap, HashSet};
 
-pub fn write(module: &Module) -> String {
-    Target::HLSL.supports(module.requirements(), "the D3D12 device program");
-    Writer::new(module).run()
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Language {
+    HLSL,
+    MSL,
+}
+
+impl Language {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::HLSL => "HLSL",
+            Self::MSL => "MSL",
+        }
+    }
+
+    const fn target(self) -> (Target, &'static str) {
+        match self {
+            Self::HLSL => (Target::HLSL, "the D3D12 device program"),
+            Self::MSL => (Target::MSL, "the Metal device program"),
+        }
+    }
+}
+
+pub fn write(module: &Module, language: Language) -> String {
+    let (target, label) = language.target();
+    target.supports(module.requirements(), label);
+    Writer::new(module, language).run()
 }
 
 pub fn symbol(identifier: &str) -> String {
@@ -27,37 +51,56 @@ fn scalar_name(scalar: Scalar) -> &'static str {
 
 struct Writer<'m> {
     module: &'m Module,
+    language: Language,
     out: Source,
     declarations: HashMap<ValueId, &'m Instruction>,
     names: HashMap<ValueId, String>,
     loops: Vec<String>,
+    used: Vec<Vec<u32>>,
 }
 
 impl<'m> Writer<'m> {
-    fn new(module: &'m Module) -> Self {
+    fn new(module: &'m Module, language: Language) -> Self {
         let mut declarations = HashMap::new();
         for function in module.functions() {
             collect(&function.body, &mut declarations);
         }
+        let used = match language {
+            Language::HLSL => Vec::new(),
+            Language::MSL => usage(module),
+        };
         Self {
             module,
+            language,
             out: Source::new(),
             declarations,
             names: HashMap::new(),
             loops: Vec::new(),
+            used,
         }
     }
 
     fn run(mut self) -> String {
+        if self.language == Language::MSL {
+            self.out.line("// language: metal2.3");
+            self.out.line("#include <metal_stdlib>");
+            self.out.line("#include <simd/simd.h>");
+            self.out.line("");
+            self.out.line("using namespace metal;");
+            self.out.line("");
+        }
         self.layouts();
         self.structures();
-        self.resources();
-        for (index, function) in self.module.functions().iter().enumerate() {
-            if index as u32 == self.module.entry_index() {
+        if self.language == Language::HLSL {
+            self.resources();
+        }
+        for index in 0..self.module.functions().len() as u32 {
+            if index == self.module.entry_index() {
                 continue;
             }
+            let function = &self.module.functions()[index as usize];
             let prototype = format!("{} {}(", self.result_name(function), symbol(&function.name));
-            let parameters = self.parameters(function);
+            let parameters = self.parameters(index);
             self.out.line(format!("{prototype}{parameters});"));
         }
         self.out.line("");
@@ -78,8 +121,9 @@ impl<'m> Writer<'m> {
         }
     }
 
-    fn parameters(&self, function: &Function) -> String {
-        function
+    fn parameters(&self, index: u32) -> String {
+        let function = &self.module.functions()[index as usize];
+        let mut parameters = function
             .arguments
             .iter()
             .map(|argument| {
@@ -89,8 +133,62 @@ impl<'m> Writer<'m> {
                     symbol(&argument.name)
                 )
             })
-            .collect::<Vec<_>>()
-            .join(", ")
+            .collect::<Vec<_>>();
+        if self.language == Language::MSL {
+            for global in &self.used[index as usize] {
+                parameters.push(self.global_parameter(*global));
+            }
+        }
+        parameters.join(", ")
+    }
+
+    fn arguments(&self, index: u32, arguments: &[ValueId]) -> String {
+        let mut rendered = arguments
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Vec<_>>();
+        for global in &self.used[index as usize] {
+            rendered.push(symbol(&self.module.global(*global).name));
+        }
+        rendered.join(", ")
+    }
+
+    fn global_parameter(&self, index: u32) -> String {
+        let global = self.module.global(index);
+        let global_name = symbol(&global.name);
+        match global.space {
+            Space::Storage => {
+                let element = self.element_type(global.ty);
+                let pointee = self.pointee_type(element);
+                let qualifier = if global.access.writable() {
+                    "device"
+                } else {
+                    "device const"
+                };
+                format!("{qualifier} {pointee}* {global_name}")
+            }
+            Space::WorkGroup => {
+                let element = match self.module.ty(global.ty) {
+                    Type::Array { element, .. } => *element,
+                    _ => panic!(
+                        "the {} workgroup variable {} is {}",
+                        self.language.name(),
+                        global.name,
+                        crate::element_name(self.module.ty(global.ty))
+                    ),
+                };
+                let pointee = self.pointee_type(element);
+                format!("threadgroup {pointee}* {global_name}")
+            }
+            Space::Function => panic!("a device module global lives in function memory"),
+        }
+    }
+
+    fn pointee_type(&self, ty: TypeId) -> String {
+        match self.module.ty(ty) {
+            Type::Atomic(scalar) => format!("atomic_{}", scalar_name(*scalar)),
+            _ => self.value_type(ty),
+        }
     }
 
     fn value_type(&self, ty: TypeId) -> String {
@@ -102,11 +200,31 @@ impl<'m> Writer<'m> {
                 format!("{}[{count}]", self.value_type(*element))
             }
             Type::Struct { name, .. } => name.clone(),
-            Type::Atomic(scalar) => scalar_name(*scalar).to_owned(),
-            Type::Pointer { .. } => panic!("an HLSL shader carries no device pointer type"),
-            Type::CooperativeMatrix { .. } => {
-                panic!("an HLSL shader cannot carry a cooperative matrix")
-            }
+            Type::Atomic(scalar) => match self.language {
+                Language::HLSL => scalar_name(*scalar).to_owned(),
+                Language::MSL => format!("atomic_{}", scalar_name(*scalar)),
+            },
+            Type::Pointer { .. } => panic!(
+                "a {} shader carries no device pointer type",
+                self.language.name()
+            ),
+            Type::CooperativeMatrix {
+                scalar,
+                rows,
+                columns,
+                ..
+            } => match self.language {
+                Language::HLSL => panic!(
+                    "a {} shader cannot carry a cooperative matrix",
+                    self.language.name()
+                ),
+                Language::MSL => {
+                    format!(
+                        "simdgroup_matrix<{}, {rows}, {columns}>",
+                        scalar_name(*scalar)
+                    )
+                }
+            },
         }
     }
 
@@ -133,17 +251,22 @@ impl<'m> Writer<'m> {
                 let align = self.module.alignment(member.ty).clamp(1, 16);
                 offset = offset.div_ceil(align) * align;
                 assert_eq!(
-                    offset, member.offset,
-                    "the device struct {structure} member {} sits at {} while HLSL packs it at {offset}",
-                    member.name, member.offset
+                    offset,
+                    member.offset,
+                    "the device struct {structure} member {} sits at {} while {} packs it at {offset}",
+                    member.name,
+                    member.offset,
+                    self.language.name(),
                 );
                 offset += self.module.size(member.ty);
                 alignment = alignment.max(align);
             }
             offset = offset.div_ceil(alignment) * alignment;
             assert_eq!(
-                offset, *span,
-                "the device struct {structure} spans {span} bytes while HLSL packs it into {offset}"
+                offset,
+                *span,
+                "the device struct {structure} spans {span} bytes while {} packs it into {offset}",
+                self.language.name(),
             );
         }
     }
@@ -158,8 +281,7 @@ impl<'m> Writer<'m> {
             else {
                 continue;
             };
-            let declared = structure.clone();
-            self.out.open(format!("struct {declared}"));
+            self.out.open(format!("struct {structure}"));
             for member in members {
                 let ty = self.value_type(member.ty);
                 let member = symbol(&member.name);
@@ -213,7 +335,7 @@ impl<'m> Writer<'m> {
     fn function(&mut self, index: u32) {
         let function = &self.module.functions()[index as usize];
         let result = self.result_name(function);
-        let parameters = self.parameters(function);
+        let parameters = self.parameters(index);
         self.out
             .open(format!("{result} {}({parameters})", symbol(&function.name)));
         self.locals(function);
@@ -225,6 +347,13 @@ impl<'m> Writer<'m> {
 
     fn entry(&mut self) {
         let entry = self.module.entry();
+        match self.language {
+            Language::HLSL => self.hlsl_entry(entry),
+            Language::MSL => self.msl_entry(entry),
+        }
+    }
+
+    fn hlsl_entry(&mut self, entry: &'m Function) {
         let parameters = entry
             .arguments
             .iter()
@@ -248,6 +377,75 @@ impl<'m> Writer<'m> {
         ));
         self.out
             .open(format!("void {}({parameters})", symbol(&entry.name)));
+        self.locals(entry);
+        self.prepare(entry);
+        self.block(&entry.body);
+        self.out.close("}");
+    }
+
+    fn msl_entry(&mut self, entry: &'m Function) {
+        let index = self.module.entry_index();
+        let mut parameters = entry
+            .arguments
+            .iter()
+            .map(|argument| {
+                let attribute = match argument.builtin.expect("an entry argument is a builtin") {
+                    crate::BuiltIn::LocalInvocationIndex => "[[thread_index_in_threadgroup]]",
+                    crate::BuiltIn::WorkGroupId => "[[threadgroup_position_in_grid]]",
+                    crate::BuiltIn::GlobalInvocationId => "[[thread_position_in_grid]]",
+                };
+                format!(
+                    "{} {} {attribute}",
+                    self.value_type(argument.ty),
+                    symbol(&argument.name)
+                )
+            })
+            .collect::<Vec<_>>();
+        for global in &self.used[index as usize] {
+            let declared = self.module.global(*global);
+            if declared.space == Space::Storage {
+                parameters.push(format!(
+                    "{} [[buffer({})]]",
+                    self.global_parameter(*global),
+                    declared
+                        .binding
+                        .expect("a storage resource is bound")
+                        .binding
+                ));
+            }
+        }
+        let entry_name = symbol(&entry.name);
+        self.out.line(format!(
+            "[[max_total_threads_per_threadgroup({})]] kernel void {entry_name}(",
+            self.module.workgroup_size()
+        ));
+        for parameter in &parameters {
+            self.out.line(format!("    {parameter},"));
+        }
+        self.out.line(") {");
+        self.out.enter();
+        for global in &self.used[index as usize] {
+            let declared = self.module.global(*global);
+            if declared.space != Space::WorkGroup {
+                continue;
+            }
+            let (element, count) = match self.module.ty(declared.ty) {
+                Type::Array {
+                    element,
+                    count: Some(count),
+                } => (*element, *count),
+                _ => panic!(
+                    "the {} workgroup variable {} is not an array",
+                    self.language.name(),
+                    declared.name
+                ),
+            };
+            let declared_type = self.pointee_type(element);
+            self.out.line(format!(
+                "threadgroup {declared_type} {}[{count}];",
+                symbol(&declared.name)
+            ));
+        }
         self.locals(entry);
         self.prepare(entry);
         self.block(&entry.body);
@@ -335,12 +533,24 @@ impl<'m> Writer<'m> {
             Instruction::Load { pointer, result } => {
                 let target = self.target(*result);
                 let text = self.place_value(*pointer);
-                self.out.line(format!("{target} = {text};"));
+                match self.language {
+                    Language::HLSL => self.out.line(format!("{target} = {text};")),
+                    Language::MSL if self.is_atomic_pointer(*pointer) => self.out.line(format!(
+                        "{target} = atomic_load_explicit(&{text}, memory_order_relaxed);"
+                    )),
+                    Language::MSL => self.out.line(format!("{target} = {text};")),
+                }
             }
             Instruction::Store { pointer, value } => {
                 let text = self.place_value(*pointer);
                 let value = self.value(*value);
-                self.out.line(format!("{text} = {value};"));
+                match self.language {
+                    Language::HLSL => self.out.line(format!("{text} = {value};")),
+                    Language::MSL if self.is_atomic_pointer(*pointer) => self.out.line(format!(
+                        "atomic_store_explicit(&{text}, {value}, memory_order_relaxed);"
+                    )),
+                    Language::MSL => self.out.line(format!("{text} = {value};")),
+                }
             }
             Instruction::Unary { op, value, result } => {
                 let target = self.target(*result);
@@ -381,18 +591,31 @@ impl<'m> Writer<'m> {
                 let target = self.target(*result);
                 let declared = self.value_type(self.module.value_ty(*result));
                 let value = self.value(*value);
-                self.out.line(format!("{target} = ({declared})({value});"));
+                let text = match self.language {
+                    Language::HLSL => format!("({declared})({value})"),
+                    Language::MSL => format!("{declared}({value})"),
+                };
+                self.out.line(format!("{target} = {text};"));
             }
             Instruction::Bitcast { value, result } => {
                 let target = self.target(*result);
                 let value = self.value(*value);
-                let conversion = match self.scalar(*result) {
-                    Scalar::F32 => "asfloat",
-                    Scalar::U32 => "asuint",
-                    Scalar::I32 => "asint",
-                    other => panic!("an HLSL bitcast cannot reach the {}", other.name()),
+                let text = match self.language {
+                    Language::HLSL => {
+                        let conversion = match self.scalar(*result) {
+                            Scalar::F32 => "asfloat",
+                            Scalar::U32 => "asuint",
+                            Scalar::I32 => "asint",
+                            other => panic!("an HLSL bitcast cannot reach the {}", other.name()),
+                        };
+                        format!("{conversion}({value})")
+                    }
+                    Language::MSL => {
+                        let declared = self.value_type(self.module.value_ty(*result));
+                        format!("as_type<{declared}>({value})")
+                    }
                 };
-                self.out.line(format!("{target} = {conversion}({value});"));
+                self.out.line(format!("{target} = {text};"));
             }
             Instruction::Math {
                 fun,
@@ -402,14 +625,23 @@ impl<'m> Writer<'m> {
                 let target = self.target(*result);
                 let text = if *fun == MathFun::UnpackHalf2x16 {
                     let value = self.value(arguments[0]);
-                    format!("float2(f16tof32({value}), f16tof32(({value}) >> 16))")
+                    match self.language {
+                        Language::HLSL => {
+                            format!("float2(f16tof32({value}), f16tof32(({value}) >> 16))")
+                        }
+                        Language::MSL => format!("float2(as_type<half2>({value}))"),
+                    }
                 } else {
                     let arguments = arguments
                         .iter()
                         .map(|argument| self.value(*argument))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    format!("{}({arguments})", fun.name())
+                    let name = fun.name();
+                    match self.language {
+                        Language::HLSL => format!("{name}({arguments})"),
+                        Language::MSL => format!("metal::{name}({arguments})"),
+                    }
                 };
                 self.out.line(format!("{target} = {text};"));
             }
@@ -433,11 +665,14 @@ impl<'m> Writer<'m> {
                 result,
             } => {
                 let callee = symbol(&self.module.functions()[*function as usize].name);
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| self.value(*argument))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let arguments = match self.language {
+                    Language::HLSL => arguments
+                        .iter()
+                        .map(|argument| self.value(*argument))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    Language::MSL => self.arguments(*function, arguments),
+                };
                 match result {
                     Some(result) => {
                         let target = self.target(*result);
@@ -455,18 +690,33 @@ impl<'m> Writer<'m> {
                 let target = self.target(*result);
                 let cell = self.place_value(*pointer);
                 let value = self.value(*value);
-                let call = match op {
-                    AtomicOp::Add => format!("InterlockedAdd({cell}, {value}, {target})"),
-                    AtomicOp::Subtract => {
-                        format!("InterlockedAdd({cell}, (0 - {value}), {target})")
-                    }
-                    AtomicOp::Min => format!("InterlockedMin({cell}, {value}, {target})"),
-                    AtomicOp::Max => format!("InterlockedMax({cell}, {value}, {target})"),
-                    AtomicOp::And => format!("InterlockedAnd({cell}, {value}, {target})"),
-                    AtomicOp::Or => format!("InterlockedOr({cell}, {value}, {target})"),
-                    AtomicOp::Xor => format!("InterlockedXor({cell}, {value}, {target})"),
-                    AtomicOp::Exchange => {
-                        format!("InterlockedExchange({cell}, {value}, {target})")
+                let call = match self.language {
+                    Language::HLSL => match op {
+                        AtomicOp::Add => format!("InterlockedAdd({cell}, {value}, {target})"),
+                        AtomicOp::Subtract => {
+                            format!("InterlockedAdd({cell}, (0 - {value}), {target})")
+                        }
+                        AtomicOp::Min => format!("InterlockedMin({cell}, {value}, {target})"),
+                        AtomicOp::Max => format!("InterlockedMax({cell}, {value}, {target})"),
+                        AtomicOp::And => format!("InterlockedAnd({cell}, {value}, {target})"),
+                        AtomicOp::Or => format!("InterlockedOr({cell}, {value}, {target})"),
+                        AtomicOp::Xor => format!("InterlockedXor({cell}, {value}, {target})"),
+                        AtomicOp::Exchange => {
+                            format!("InterlockedExchange({cell}, {value}, {target})")
+                        }
+                    },
+                    Language::MSL => {
+                        let name = match op {
+                            AtomicOp::Add => "atomic_fetch_add_explicit",
+                            AtomicOp::Subtract => "atomic_fetch_sub_explicit",
+                            AtomicOp::Min => "atomic_fetch_min_explicit",
+                            AtomicOp::Max => "atomic_fetch_max_explicit",
+                            AtomicOp::And => "atomic_fetch_and_explicit",
+                            AtomicOp::Or => "atomic_fetch_or_explicit",
+                            AtomicOp::Xor => "atomic_fetch_xor_explicit",
+                            AtomicOp::Exchange => "atomic_exchange_explicit",
+                        };
+                        format!("{target} = {name}(&{cell}, {value}, memory_order_relaxed)")
                     }
                 };
                 self.out.line(format!("{call};"));
@@ -563,16 +813,83 @@ impl<'m> Writer<'m> {
                 None => self.out.line("return;"),
             },
             Instruction::Block(body) => self.block(body),
-            Instruction::MatrixFill { .. }
-            | Instruction::MatrixLoad { .. }
-            | Instruction::MatrixStore { .. }
-            | Instruction::MatrixMulAdd { .. }
-            | Instruction::MatrixLength { .. }
-            | Instruction::MatrixExtract { .. }
-            | Instruction::MatrixInsert { .. } => {
-                panic!("an HLSL shader cannot carry a cooperative matrix")
+            Instruction::MatrixFill { value, result } => {
+                self.cooperative_matrix();
+                let target = self.target(*result);
+                let value = self.value(*value);
+                self.out.line(format!("{target} = {value};"));
+            }
+            Instruction::MatrixLoad {
+                pointer,
+                stride,
+                layout,
+                result,
+            } => {
+                self.cooperative_matrix();
+                let target = self.target(*result);
+                let pointer = self.place_value(*pointer);
+                let stride = self.value(*stride);
+                let transpose = matches!(layout, MatrixLayout::ColumnMajor);
+                self.out.line(format!(
+                    "simdgroup_load({target}, &{pointer}, {stride}, ushort2(0, 0), {transpose});"
+                ));
+            }
+            Instruction::MatrixStore {
+                pointer,
+                value,
+                stride,
+                layout,
+            } => {
+                self.cooperative_matrix();
+                let pointer = self.place_value(*pointer);
+                let value = self.value(*value);
+                let stride = self.value(*stride);
+                let transpose = matches!(layout, MatrixLayout::ColumnMajor);
+                self.out.line(format!(
+                    "simdgroup_store({value}, &{pointer}, {stride}, ushort2(0, 0), {transpose});"
+                ));
+            }
+            Instruction::MatrixMulAdd {
+                left,
+                right,
+                accumulate,
+                result,
+            } => {
+                self.cooperative_matrix();
+                let target = self.target(*result);
+                let left = self.value(*left);
+                let right = self.value(*right);
+                let accumulate = self.value(*accumulate);
+                self.out.line(format!("{target} = {accumulate};"));
+                self.out.line(format!(
+                    "simdgroup_multiply_accumulate({target}, {left}, {right}, {target});"
+                ));
+            }
+            Instruction::MatrixLength { .. } => panic!(
+                "a {} shader cannot measure a cooperative matrix",
+                self.language.name()
+            ),
+            Instruction::MatrixExtract { value, result, .. } => {
+                self.cooperative_matrix();
+                let target = self.target(*result);
+                let value = self.value(*value);
+                self.out.line(format!("{target} = {value}"));
+            }
+            Instruction::MatrixInsert { value, result, .. } => {
+                self.cooperative_matrix();
+                let target = self.target(*result);
+                let value = self.value(*value);
+                self.out.line(format!("{target} = {value};"));
             }
         }
+    }
+
+    fn cooperative_matrix(&self) {
+        assert!(
+            self.language == Language::MSL,
+            "an {} shader cannot carry a cooperative matrix",
+            self.language.name(),
+        );
     }
 
     fn step(&mut self, continuing: &[Instruction]) -> String {
@@ -582,9 +899,19 @@ impl<'m> Writer<'m> {
     }
 
     fn barrier(&mut self, barrier: Barrier) {
-        match barrier {
-            Barrier::WorkGroup => self.out.line("GroupMemoryBarrierWithGroupSync();"),
-            Barrier::Storage => self.out.line("DeviceMemoryBarrierWithGroupSync();"),
+        match (self.language, barrier) {
+            (Language::HLSL, Barrier::WorkGroup) => {
+                self.out.line("GroupMemoryBarrierWithGroupSync();")
+            }
+            (Language::HLSL, Barrier::Storage) => {
+                self.out.line("DeviceMemoryBarrierWithGroupSync();")
+            }
+            (Language::MSL, Barrier::WorkGroup) => self
+                .out
+                .line("threadgroup_barrier(mem_flags::mem_threadgroup);"),
+            (Language::MSL, Barrier::Storage) => {
+                self.out.line("threadgroup_barrier(mem_flags::mem_device);")
+            }
         }
     }
 
@@ -605,6 +932,13 @@ impl<'m> Writer<'m> {
         }
     }
 
+    fn is_atomic_pointer(&self, value: ValueId) -> bool {
+        match self.module.ty(self.module.value_ty(value)) {
+            Type::Pointer { base, .. } => matches!(self.module.ty(*base), Type::Atomic(_)),
+            _ => false,
+        }
+    }
+
     fn value(&self, value: ValueId) -> String {
         if let Some(text) = self.names.get(&value) {
             return text.clone();
@@ -616,7 +950,10 @@ impl<'m> Writer<'m> {
             Some(Constant::Bool(flag)) => format!("{flag}"),
             Some(Constant::Zero(ty)) => {
                 let declared = self.value_type(ty);
-                format!("({declared})0")
+                match self.language {
+                    Language::HLSL => format!("({declared})0"),
+                    Language::MSL => format!("{declared}({{}})"),
+                }
             }
             None => format!("d_v{}", value.index()),
         }
@@ -673,54 +1010,7 @@ impl<'m> Writer<'m> {
     }
 }
 
-fn argument_value(body: &[Instruction], index: usize) -> Option<ValueId> {
-    body.iter().find_map(|instruction| match instruction {
-        Instruction::Argument {
-            index: present,
-            result,
-        } if *present as usize == index => Some(*result),
-        _ => None,
-    })
-}
-
-fn terminates(body: &[Instruction]) -> bool {
-    match body.last() {
-        Some(Instruction::Return { .. } | Instruction::Break | Instruction::Continue) => true,
-        Some(Instruction::If { accept, reject, .. }) => terminates(accept) && terminates(reject),
-        Some(Instruction::Switch { cases, default, .. }) => {
-            cases.iter().all(|(_, body)| terminates(body)) && terminates(default)
-        }
-        _ => false,
-    }
-}
-
-fn collect<'m>(body: &'m [Instruction], declarations: &mut HashMap<ValueId, &'m Instruction>) {
-    for instruction in body {
-        if let Some(result) = instruction.result() {
-            declarations.insert(result, instruction);
-        }
-        match instruction {
-            Instruction::If { accept, reject, .. } => {
-                collect(accept, declarations);
-                collect(reject, declarations);
-            }
-            Instruction::Switch { cases, default, .. } => {
-                for (_, body) in cases {
-                    collect(body, declarations);
-                }
-                collect(default, declarations);
-            }
-            Instruction::Loop { body, continuing } => {
-                collect(body, declarations);
-                collect(continuing, declarations);
-            }
-            Instruction::Block(body) => collect(body, declarations),
-            _ => {}
-        }
-    }
-}
-
-fn addresses<'m>(
+pub(super) fn addresses<'m>(
     module: &'m Module,
     locals: &[String],
     body: &'m [Instruction],
@@ -740,27 +1030,15 @@ fn addresses<'m>(
             } => {
                 names.insert(*result, symbol(&module.global(*index).name));
             }
-            Instruction::If { accept, reject, .. } => {
-                addresses(module, locals, accept, names);
-                addresses(module, locals, reject, names);
-            }
-            Instruction::Switch { cases, default, .. } => {
-                for (_, block) in cases {
-                    addresses(module, locals, block, names);
-                }
-                addresses(module, locals, default, names);
-            }
-            Instruction::Loop { body, continuing } => {
-                addresses(module, locals, body, names);
-                addresses(module, locals, continuing, names);
-            }
-            Instruction::Block(block) => addresses(module, locals, block, names),
             _ => {}
         }
+        nested(instruction, &mut |block| {
+            addresses(module, locals, block, names)
+        });
     }
 }
 
-fn local_names(module: &Module, function: &Function) -> Vec<String> {
+pub(super) fn local_names(module: &Module, function: &Function) -> Vec<String> {
     let mut used = function
         .arguments
         .iter()

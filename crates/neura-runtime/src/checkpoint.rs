@@ -1,7 +1,7 @@
 pub(crate) use container::Container;
 use container::{Entry, LENGTH_BYTES, Reader, Tensor, parse, tight_bytes};
 use neura_abi::{Element, WORD_BYTES};
-use neura_plan::Region;
+use neura_plan::Arena;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -126,13 +126,7 @@ pub(crate) trait Source {
     fn placed(&self, name: &str) -> Option<Placed>;
     fn payload(&self, range: Range<usize>, sink: &mut dyn FnMut(&[u8]));
 
-    fn pour(
-        &self,
-        weights: &Region,
-        state: &Region,
-        words: u64,
-        write: &mut dyn FnMut(u64, &[u8]),
-    ) {
+    fn pour(&self, weights: &Arena, state: &Arena, words: u64, write: &mut dyn FnMut(u64, &[u8])) {
         for entry in weights.entries().iter().chain(state.entries()) {
             let name = entry.name.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -380,7 +374,7 @@ impl std::fmt::Debug for CheckpointFile {
     }
 }
 
-pub(crate) fn described<'r>(region: &'r Region, section: &str) -> Vec<Entry<'r>> {
+pub(crate) fn described<'r>(region: &'r Arena, section: &str) -> Vec<Entry<'r>> {
     region
         .entries()
         .iter()

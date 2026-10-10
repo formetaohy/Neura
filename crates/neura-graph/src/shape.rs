@@ -351,14 +351,6 @@ impl Shape {
         Self::from_axes(dims, self.frees())
     }
 
-    pub fn adopting(self, other: Self, axis: u32) -> Self {
-        let mut dims = self.dims;
-        let mut frees = self.frees();
-        dims[axis as usize] = other.dims[axis as usize];
-        frees[axis as usize] = other.free(axis);
-        Self::from_axes(dims, frees)
-    }
-
     pub(crate) fn frees(self) -> [Option<u32>; 4] {
         let mut frees = [None; 4];
         for (axis, free) in frees.iter_mut().enumerate() {

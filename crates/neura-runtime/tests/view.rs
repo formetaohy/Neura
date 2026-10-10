@@ -3,13 +3,16 @@ use neura_graph::{Graph, Init, Shape, Window};
 
 #[path = "support/convolution.rs"]
 mod convolution;
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/mod.rs"]
 mod support;
 
 use convolution::conv2d_reference;
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 use support::{assert_close, open};
 
 fn refuses(action: impl FnOnce()) -> bool {

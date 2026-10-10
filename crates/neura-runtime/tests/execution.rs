@@ -1,10 +1,13 @@
 use neura_abi::Element;
+use neura_gpu::Backends;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
-use neura_runtime::{Backends, MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
 #[path = "support/backend.rs"]
 mod backend;
+#[path = "support/input.rs"]
+mod input;
 #[path = "support/reference.rs"]
 mod reference;
 #[path = "support/softmax.rs"]
@@ -13,7 +16,8 @@ mod softmax;
 mod support;
 
 use backend::open_with;
-use reference::{matmul_reference, random};
+use input::random;
+use reference::matmul_reference;
 use softmax::{log_softmax_reference, softmax_reference};
 use support::{assert_close, open};
 
@@ -125,7 +129,7 @@ fn every_backend_a_machine_offers_streams_a_narrow_product() {
             program
                 .matmul_geometries()
                 .iter()
-                .all(|(tile, _)| tile.strategy() == neura_runtime::MatmulStrategy::Streamed),
+                .all(|(tile, _)| tile.strategy() == neura_profile::MatmulStrategy::Streamed),
             "a product of one row stages its operands through a workgroup instead of streaming them",
         );
         assert!(

@@ -141,6 +141,7 @@ dependencies = [
  "neura-graph",
  "neura-nn",
  "neura-plan",
+ "neura-profile",
  "neura-runtime",
 ]
 

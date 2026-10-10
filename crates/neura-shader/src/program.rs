@@ -1,4 +1,4 @@
-use crate::{Access, Module, Target, element_name};
+use crate::{Access, Language, Module, Target, element_name};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -67,15 +67,8 @@ pub struct ShaderBinding {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShaderTranslation {
     Spirv(Vec<u32>),
-    Hlsl {
-        source: String,
-        entry: String,
-    },
-    Msl {
-        source: String,
-        entry: String,
-        size_bindings: Vec<u32>,
-    },
+    Hlsl { source: String, entry: String },
+    Msl { source: String, entry: String },
 }
 
 pub fn reflect(module: &Module) -> Vec<ShaderBinding> {
@@ -263,18 +256,17 @@ impl ComputeProgram {
                 ShaderTranslation::Spirv(compiled.spirv.clone())
             }
             Backend::Dx12 => {
-                let source = crate::hlsl::write(&compiled.module);
+                let source = crate::text::write(&compiled.module, Language::HLSL);
                 ShaderTranslation::Hlsl {
-                    entry: crate::hlsl::symbol(&compiled.entry),
+                    entry: crate::text::symbol(&compiled.entry),
                     source,
                 }
             }
             Backend::Metal => {
-                let source = crate::msl::write(&compiled.module);
+                let source = crate::text::write(&compiled.module, Language::MSL);
                 ShaderTranslation::Msl {
-                    entry: crate::msl::symbol(&compiled.entry),
+                    entry: crate::text::symbol(&compiled.entry),
                     source,
-                    size_bindings: Vec::new(),
                 }
             }
         }

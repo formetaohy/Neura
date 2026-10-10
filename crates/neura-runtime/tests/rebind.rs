@@ -187,7 +187,7 @@ fn tuning_leaves_the_parameter_store_untouched() {
 fn one_device_program_serves_every_batch_of_one_model() {
     let runtime = open();
     assert_eq!(runtime.assembled_kernels(), 0);
-    let mut walked: Vec<Vec<neura_runtime::MatmulTile>> = Vec::new();
+    let mut walked: Vec<Vec<neura_profile::MatmulTile>> = Vec::new();
     for samples in [8, 32, 96, 128, 8, 32] {
         let graph = Graph::new();
         let model = trained(&graph, samples, 5);

@@ -192,16 +192,10 @@ fn rust_source_compiles_into_three_native_shader_formats() {
             bare.is_empty(),
             "an HLSL program leaves these float literals to the compiler's default type: {bare:?}"
         );
-        let ShaderTranslation::Msl {
-            source,
-            entry,
-            size_bindings,
-        } = program.translate(Backend::Metal)
-        else {
+        let ShaderTranslation::Msl { source, entry } = program.translate(Backend::Metal) else {
             panic!("Metal requires MSL");
         };
         assert!(!entry.is_empty());
-        assert!(size_bindings.is_empty());
         assert!(source.contains("[[buffer(2)]]"));
         assert!(source.contains("[[buffer(6)]]"));
         let bare = bare_float_literals(&source);
