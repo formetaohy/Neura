@@ -10,7 +10,7 @@ use crate::submission::{Command, SubmissionIndex, Write};
 use neura_shader::ComputeProgram;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,26 +103,32 @@ pub struct Device {
     pub(crate) state: Arc<DeviceState>,
 }
 
-const DEVICE_POOL_CEILING: usize = 8;
+struct Registration {
+    request: GpuRequest,
+    state: Weak<DeviceState>,
+}
 
-static DEVICE_POOL: LazyLock<Mutex<Vec<(GpuRequest, Device)>>> =
+static DEVICE_REGISTRY: LazyLock<Mutex<Vec<Registration>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
 impl Device {
     pub(crate) fn shared(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        let mut pool = DEVICE_POOL
+        let mut registry = DEVICE_REGISTRY
             .lock()
-            .expect("the shared device pool is never poisoned");
-        if let Some(index) = pool.iter().position(|(kept, _)| kept == request) {
-            let (kept, device) = pool.remove(index);
-            pool.push((kept, device.clone()));
-            return Ok(device);
+            .expect("the shared device registry is never poisoned");
+        registry.retain(|entry| entry.state.strong_count() > 0);
+        if let Some(state) = registry
+            .iter()
+            .filter(|entry| entry.request == *request)
+            .find_map(|entry| entry.state.upgrade())
+        {
+            return Ok(Self { state });
         }
         let device = Self::open(request)?;
-        pool.push((request.clone(), device.clone()));
-        if pool.len() > DEVICE_POOL_CEILING {
-            pool.remove(0);
-        }
+        registry.push(Registration {
+            request: request.clone(),
+            state: Arc::downgrade(&device.state),
+        });
         Ok(device)
     }
 

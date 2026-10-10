@@ -88,15 +88,14 @@ fn cached(backends: Backends) {
     assert!(warm_loads > loads, "a warm cache serves its artifact");
     if backend == Backend::Dx12 {
         assert_eq!(
-            warm_stores, stores,
-            "a cached DXIL feeds the pipeline without DXC",
+            warm_stores, 0,
+            "a cached DXIL feeds a new device's pipeline without DXC",
         );
     }
     if backend == Backend::Vulkan {
         assert_eq!(
-            warm_stores,
-            stores + 1,
-            "a Vulkan pipeline cache persists every compile",
+            warm_stores, 1,
+            "a new Vulkan device persists its pipeline cache after compiling",
         );
     }
     std::fs::remove_dir_all(&directory).expect("a test cache directory is removable");

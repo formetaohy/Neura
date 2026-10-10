@@ -1155,18 +1155,26 @@ impl Device {
         let fences = state
             .frames
             .iter()
+            .filter(|frame| frame.index > state.completed)
             .map(|frame| frame.fence)
             .collect::<Vec<_>>();
         if fences.is_empty() {
             return;
         }
-        let _ = unsafe {
+        let result = unsafe {
             self.raw.wait_for_fences(
                 &fences,
                 true,
                 RELEASE_TIMEOUT.as_nanos().min(u64::MAX as u128) as u64,
             )
         };
+        match result {
+            Ok(()) | Err(vk::Result::ERROR_DEVICE_LOST) => {}
+            Err(error) => {
+                eprintln!("releasing unfinished Vulkan compute work: {error:?}");
+                std::process::abort();
+            }
+        }
     }
 
     fn discard(&mut self) {

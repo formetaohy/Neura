@@ -1,9 +1,68 @@
 use crate::native::FRAMES_IN_FLIGHT;
 use crate::{
-    Backends, BufferUsages, Device, DeviceType, GpuBuffer, GpuRequest, PowerPreference, Queue,
-    Submission,
+    Backends, BufferUsages, Device, DeviceType, GpuBuffer, GpuContext, GpuRequest, PowerPreference,
+    Queue, Submission,
 };
 use std::sync::Arc;
+
+#[test]
+fn shared_devices_live_only_as_long_as_their_owners() {
+    for backends in Backends::PLATFORM {
+        let directory = std::env::temp_dir().join(format!(
+            "neura-shared-device-{}-{backends:?}",
+            std::process::id(),
+        ));
+        let request = GpuRequest {
+            backends,
+            artifacts: Some(directory.clone()),
+            ..Default::default()
+        };
+        for round in 0..2 {
+            let context = GpuContext::open(&request).expect("a shared compute device");
+            let state = Arc::downgrade(&context.device().state);
+            std::thread::scope(|scope| {
+                for worker in 0..8u32 {
+                    let request = &request;
+                    let device = context.device();
+                    scope.spawn(move || {
+                        let peer = GpuContext::open(request).expect("a shared compute device");
+                        assert!(peer.device().same(device));
+                        let buffer = GpuBuffer::new(
+                            peer.device(),
+                            "a concurrent upload",
+                            16,
+                            BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                        );
+                        let readback = GpuBuffer::new(
+                            peer.device(),
+                            "a concurrent readback",
+                            16,
+                            BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+                        );
+                        let words = [worker, round, worker + 1, round + 1];
+                        buffer.write(peer.queue(), bytemuck::cast_slice(&words));
+                        let mut submission = Submission::new(peer.device(), "a concurrent copy");
+                        submission.copy(&buffer, 0, &readback, 0, 16);
+                        let index = submission.submit(peer.queue());
+                        assert_eq!(
+                            readback.read(peer.queue(), index, 16),
+                            bytemuck::cast_slice::<u32, u8>(&words),
+                        );
+                        let mut pending = Submission::new(peer.device(), "a pending clear");
+                        pending.clear(&buffer, 0, 16);
+                        pending.submit(peer.queue());
+                    });
+                }
+            });
+            drop(context);
+            assert!(
+                state.upgrade().is_none(),
+                "the registry retained an unused device"
+            );
+        }
+        std::fs::remove_dir_all(directory).expect("removing an empty device artifact cache");
+    }
+}
 
 fn release(backends: Backends) {
     let device = Device::open(&GpuRequest {
