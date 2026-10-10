@@ -4,7 +4,7 @@ pub use neura_gpu::{
     GpuRequest, GpuUnavailable, PowerPreference, Queue,
 };
 pub use neura_graph::{
-    AttentionOptions, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,
+    AttentionOptions, Fan, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,
     Window,
 };
 pub use neura_nn::{

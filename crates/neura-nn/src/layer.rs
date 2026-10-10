@@ -1,5 +1,5 @@
 use neura_abi::{Element, MAX_RANK};
-use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
+use neura_graph::{AttentionOptions, Fan, Graph, Init, Shape, Value, Window};
 
 pub struct Adapter<'g> {
     down: Value<'g>,
@@ -30,7 +30,10 @@ impl<'g> Adapter<'g> {
             down: graph.named_parameter(
                 &format!("{name}.down"),
                 Shape::matrix(inputs, rank),
-                init,
+                init.spread(Fan {
+                    inputs,
+                    outputs: rank,
+                }),
                 element,
             ),
             up: graph.named_parameter(
@@ -81,7 +84,12 @@ impl<'g> Linear<'g> {
     ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.named_parameter(&format!("{name}.weight"), weight, init, element),
+                graph.named_parameter(
+                    &format!("{name}.weight"),
+                    weight,
+                    init.spread(Fan { inputs, outputs }),
+                    element,
+                ),
                 graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
             )
         })
@@ -98,7 +106,12 @@ impl<'g> Linear<'g> {
     ) -> Self {
         Self::declared(graph, inputs, outputs, element, |graph, weight, bias| {
             (
-                graph.named_quantized_parameter(&format!("{name}.weight"), weight, init, quantum),
+                graph.named_quantized_parameter(
+                    &format!("{name}.weight"),
+                    weight,
+                    init.spread(Fan { inputs, outputs }),
+                    quantum,
+                ),
                 graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
             )
         })
@@ -118,7 +131,7 @@ impl<'g> Linear<'g> {
                 graph.named_block_quantized_parameter(
                     &format!("{name}.weight"),
                     weight,
-                    init,
+                    init.spread(Fan { inputs, outputs }),
                     storage,
                 ),
                 graph.named_parameter(&format!("{name}.bias"), bias, Init::Zero, element),
@@ -192,6 +205,7 @@ impl<'g> Conv2d<'g> {
             inputs.is_multiple_of(groups) && outputs.is_multiple_of(groups),
             "a convolution of {inputs} channels into {outputs} cuts {groups} groups",
         );
+        let taps = window.reach_rows() * window.reach_columns();
         Self {
             filter: graph.named_parameter(
                 &format!("{name}.filter"),
@@ -201,7 +215,10 @@ impl<'g> Conv2d<'g> {
                     window.reach_rows(),
                     window.reach_columns(),
                 ]),
-                init,
+                init.spread(Fan {
+                    inputs: (inputs / groups) * taps,
+                    outputs: (outputs / groups) * taps,
+                }),
                 element,
             ),
             bias: graph.named_parameter(
@@ -257,6 +274,7 @@ impl<'g> ConvTranspose2d<'g> {
             inputs.is_multiple_of(groups) && outputs.is_multiple_of(groups),
             "a transposed convolution of {inputs} channels into {outputs} cuts {groups} groups",
         );
+        let taps = window.reach_rows() * window.reach_columns();
         Self {
             filter: graph.named_parameter(
                 &format!("{name}.filter"),
@@ -266,7 +284,10 @@ impl<'g> ConvTranspose2d<'g> {
                     window.reach_rows(),
                     window.reach_columns(),
                 ]),
-                init,
+                init.spread(Fan {
+                    inputs: (outputs / groups) * taps,
+                    outputs: inputs * taps,
+                }),
                 element,
             ),
             bias: graph.named_parameter(
@@ -508,7 +529,10 @@ impl<'g> MultiHeadAttention<'g> {
             graph.named_parameter(
                 &format!("{name}.{what}.weight"),
                 Shape::of([heads, 1, columns, columns]),
-                init,
+                init.spread(Fan {
+                    inputs: columns,
+                    outputs: columns,
+                }),
                 element,
             )
         };
