@@ -444,6 +444,12 @@ impl Plan {
                 "a product split across the depth hands its chain to the fold",
             );
             assert!(
+                !matches!(task.kind, Kind::Attention | Kind::AttentionQueryGrad)
+                    || task.splits == 1
+                    || task.chain.is_empty(),
+                "an attention split across the keys hands its chain to the fold",
+            );
+            assert!(
                 task.origin == NO_VALUE || task.kind.reads_origin(),
                 "a {} task carries a cursor no device body of it reads",
                 task.kind.name(),
@@ -548,6 +554,7 @@ impl Plan {
                 planned_count: task.count,
                 knob: task.knob,
                 keep: task.keep,
+                section: task.section,
             });
             if task.in_place
                 && task
@@ -1294,6 +1301,10 @@ impl Walk for Walked<'_, '_> {
         self.recorded.slot()
     }
 
+    fn section(&self) -> u32 {
+        self.recorded.section()
+    }
+
     fn input(&self, slot: usize) -> u32 {
         self.recorded.input(slot)
     }
@@ -1500,6 +1511,12 @@ fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
         .filter(|kind| {
             tasks.iter().any(|task| task.kind == *kind)
                 || (*kind == Kind::MatmulFold && tasks.iter().any(|task| task.kind == Kind::Matmul))
+                || (*kind == Kind::AttentionFold
+                    && tasks.iter().any(|task| task.kind == Kind::Attention))
+                || (*kind == Kind::AttentionQueryGradFold
+                    && tasks
+                        .iter()
+                        .any(|task| task.kind == Kind::AttentionQueryGrad))
         })
         .collect()
 }
@@ -1887,6 +1904,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             Kind::Rope | Kind::RopeGrad => exact_length(values, task, task.inputs[0], 3),
             Kind::Matmul
             | Kind::MatmulFold
+            | Kind::AttentionFold
+            | Kind::AttentionQueryGradFold
             | Kind::Attention
             | Kind::AttentionQueryGrad
             | Kind::AttentionKeyGrad

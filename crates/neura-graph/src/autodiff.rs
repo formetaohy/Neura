@@ -829,6 +829,8 @@ impl<'g> Graph<'g> {
             | Kind::PoolMax2dInputGrad
             | Kind::PoolMean2dInputGrad
             | Kind::MatmulFold
+            | Kind::AttentionFold
+            | Kind::AttentionQueryGradFold
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite

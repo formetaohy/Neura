@@ -145,6 +145,10 @@ impl Walk for Recorded<'_> {
         self.record.slot
     }
 
+    fn section(&self) -> u32 {
+        self.record.section
+    }
+
     fn input(&self, slot: usize) -> u32 {
         match slot {
             0 => self.record.a,

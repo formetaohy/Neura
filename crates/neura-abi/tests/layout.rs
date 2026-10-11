@@ -21,7 +21,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, bounds), 32);
     assert_eq!(offset_of!(ValueRecord, dims), 48);
     assert_eq!(offset_of!(ValueRecord, strides), 64);
-    assert_eq!(size_of::<TaskRecord>(), 200);
+    assert_eq!(size_of::<TaskRecord>(), 204);
     assert_eq!(offset_of!(TaskRecord, op), 4);
     assert_eq!(offset_of!(TaskRecord, geometry), 8);
     assert_eq!(offset_of!(TaskRecord, count), 16);
@@ -62,6 +62,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(TaskRecord, planned_count), 188);
     assert_eq!(offset_of!(TaskRecord, knob), 192);
     assert_eq!(offset_of!(TaskRecord, keep), 196);
+    assert_eq!(offset_of!(TaskRecord, section), 200);
     assert_eq!(size_of::<StepRecord>(), 12);
     assert_eq!(offset_of!(StepRecord, op), 0);
     assert_eq!(offset_of!(StepRecord, operand), 4);
@@ -361,9 +362,10 @@ fn a_record_declares_what_the_device_reads() {
         planned_count: 5,
         knob: 13,
         keep: 1,
+        section: 2,
     });
     let bytes = bytemuck::bytes_of(&task);
-    assert_eq!(bytes.len(), 200);
+    assert_eq!(bytes.len(), 204);
     assert_eq!(
         u32::from_ne_bytes(bytes[0..4].try_into().unwrap()),
         Kind::Matmul.code()
@@ -407,6 +409,7 @@ fn a_record_declares_what_the_device_reads() {
     assert_eq!(u32::from_ne_bytes(bytes[188..192].try_into().unwrap()), 5);
     assert_eq!(u32::from_ne_bytes(bytes[192..196].try_into().unwrap()), 13);
     assert_eq!(u32::from_ne_bytes(bytes[196..200].try_into().unwrap()), 1);
+    assert_eq!(u32::from_ne_bytes(bytes[200..204].try_into().unwrap()), 2);
 }
 
 #[test]

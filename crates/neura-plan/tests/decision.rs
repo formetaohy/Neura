@@ -681,7 +681,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
 }
 
 #[test]
-fn a_head_wider_than_a_thread_carries_splits_every_row_block_across_its_threads() {
+fn a_starved_attention_parts_every_row_block_across_its_threads_and_key_sections() {
     let graph = Graph::new();
     let tokens = 100u32;
     let width = 96u32;
@@ -713,14 +713,59 @@ fn a_head_wider_than_a_thread_carries_splits_every_row_block_across_its_threads(
         "a row of {width} numbers spreads over two threads",
     );
     let per_task = profile.workgroup() / (tile.groups() * tile.slices());
-    let tasks = tasks_of(&plan, out);
-    assert_eq!(
-        tasks.len() as u32,
-        tokens.div_ceil(per_task),
-        "an attention hands the device one task per {per_task} row block",
+    let records = tasks(&plan);
+    let partials = records
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Attention)
+        .collect::<Vec<_>>();
+    let sections = partials
+        .iter()
+        .map(|task| task.section)
+        .max()
+        .expect("a starved attention walks a key section")
+        + 1;
+    assert!(
+        sections > 1,
+        "an attention whose rows starve the device parts the keys {tokens} rows walk",
     );
-    for task in tasks {
+    let blocks = tokens.div_ceil(per_task);
+    let partials_value = partials[0].out;
+    assert_eq!(
+        partials.len() as u32,
+        blocks * sections,
+        "an attention hands the device one task per {per_task} row block of each of {sections} key sections",
+    );
+    for section in 0..sections {
+        let mut firsts = partials
+            .iter()
+            .filter(|task| task.section == section)
+            .map(|task| task.first)
+            .collect::<Vec<_>>();
+        firsts.sort_unstable();
+        firsts.dedup();
+        assert_eq!(
+            firsts.len() as u32,
+            blocks,
+            "key section {section} walks every row block once",
+        );
+    }
+    for task in &partials {
+        assert_eq!(task.splits, sections);
+        assert_eq!(task.out, partials_value);
         assert!(task.count > 0 && task.count <= per_task);
+    }
+    let folds = records
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::AttentionFold)
+        .collect::<Vec<_>>();
+    assert!(
+        !folds.is_empty(),
+        "the key sections of a row block come back together in a fold",
+    );
+    for fold in folds {
+        assert_eq!(fold.out, out.id());
+        assert_eq!(fold.a, partials_value);
+        assert_eq!(fold.splits, sections);
     }
 }
 

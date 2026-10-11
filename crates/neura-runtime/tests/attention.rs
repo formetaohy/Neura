@@ -1,6 +1,7 @@
-use neura_abi::Element;
+use neura_abi::{Element, Kind};
 use neura_gpu::PREFERENCE;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 
 #[path = "support/backend.rs"]
 mod backend;
@@ -1113,6 +1114,86 @@ fn a_starved_attention_weighs_the_keys_of_every_key_group() {
     );
     run_forward_on(&runtime, shapes, 1e-5);
     run_backward_on(&runtime, shapes, 1e-5, None);
+}
+
+#[test]
+fn a_starved_attention_parts_its_keys_between_the_tasks_of_its_rows() {
+    let shapes = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 3,
+        keys: 96,
+        width: 64,
+        causal: false,
+        origin: 0,
+        reach: 0,
+        scale: 1.0 / 64.0f32.sqrt(),
+    };
+    let runtime = open();
+    let (graph, queries, keys, values, out) = graph_of(shapes);
+    let loss = graph.sum(out);
+    let gradients = graph.backward(loss);
+    let query_grad = gradients.of(queries);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(out);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::AttentionFold),
+        "three rows of {} keys starve the key groups of one task",
+        shapes.keys,
+    );
+    assert!(plan.kinds().contains(&Kind::AttentionQueryGradFold));
+    assert!(
+        program.tensor_bytes() < 1 << 20,
+        "a fused attention of {} keys holds {} bytes",
+        shapes.keys,
+        program.tensor_bytes(),
+    );
+    let queries_data = data(
+        shapes.heads * shapes.batch * shapes.queries * shapes.width,
+        17,
+    );
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    let (expected, stats) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+    assert_close(&produced, &expected, 1e-5);
+    let gradient = vec![1.0f32; expected.len()];
+    let (expected_query, expected_key, expected_value) = attention_backward(
+        shapes,
+        &queries_data,
+        &keys_data,
+        &values_data,
+        &expected,
+        &stats,
+        &gradient,
+    );
+    let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+    assert_close(&produced[0], &expected_query, 1e-5);
+    assert_close(&produced[1], &expected_key, 1e-5);
+    assert_close(&produced[2], &expected_value, 1e-5);
 }
 
 const HEAD_TOKENS: u32 = 4;

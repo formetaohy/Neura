@@ -573,4 +573,20 @@ kinds! {
         chain: false,
         origin: false,
     };
+    AttentionFold ATTENTION_FOLD = "attention_fold" {
+        entry: "run_attention_fold",
+        modules: [Attention],
+        geometry: None,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
+    AttentionQueryGradFold ATTENTION_QUERY_GRAD_FOLD = "attention_query_grad_fold" {
+        entry: "run_attention_query_grad_fold",
+        modules: [Attention],
+        geometry: None,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
 }

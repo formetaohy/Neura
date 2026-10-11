@@ -145,6 +145,7 @@ fn a_product_narrows_every_operand_to_the_tile_it_walks() {
         tokens: 0,
         grid: NO_VALUE,
         keep: 0,
+        section: 0,
     };
     let mut touched = region::Touches::default();
     region::touches(
@@ -536,6 +537,7 @@ fn a_task_that_addresses_the_length_the_plan_froze_walks_only_exact_lengths() {
         tokens: 0,
         grid: NO_VALUE,
         keep: 0,
+        section: 0,
     };
     assert!(
         !refuses(|| plan::assert_a_task_needs_exact_lengths_the_plan_froze(
@@ -599,6 +601,7 @@ fn rotation(out: u32, segments: u32) -> lower::Task {
         tokens: 0,
         grid: NO_VALUE,
         keep: 0,
+        section: 0,
     }
 }
 
@@ -763,6 +766,7 @@ fn windowed(kind: Kind, out: u32, inputs: [u32; 6], first: u32, count: u32) -> l
         tokens: 0,
         grid: NO_VALUE,
         keep: 0,
+        section: 0,
     }
 }
 

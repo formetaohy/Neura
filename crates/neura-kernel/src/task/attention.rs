@@ -216,7 +216,7 @@ mod device {
         let key = values[task.b];
         let value = values[task.c];
         let output = values[task.out];
-        let statistic = values[task.extra];
+        let statistic = values[select(task.extra, task.out, task.extra == NO_VALUE)];
         let segmented = task.segment != NO_VALUE;
         let packed = walks_the_rows_its_offsets_close(task, query, key);
         let keys = select(key.dims.z, task.keys, segmented);
@@ -289,6 +289,10 @@ mod device {
             task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
+        let sections = task.splits;
+        let span = walked - first_block;
+        let first_walk = first_block + span * task.section / sections;
+        let last_walk = first_block + span * (task.section + 1u32) / sections;
         let first_key = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut queries = scalar_array(0.0, ATTN_SLICE);
@@ -314,7 +318,7 @@ mod device {
                 );
             }
         }
-        for block in stride(first_block, walked, 1u32) {
+        for block in stride(first_walk, last_walk, 1u32) {
             workgroup_barrier();
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
@@ -470,7 +474,23 @@ mod device {
                 }
             }
         }
-        if inside && group == 0u32 {
+        if inside && group == 0u32 && sections > 1u32 {
+            let rows = query.dims.x * query.dims.y * query.dims.z;
+            let words = key.dims.w + 2u32;
+            let row = (plane.x * query.dims.y + plane.y) * query.dims.z + plane.z + unit;
+            let base = task.section * rows * words + row * words;
+            let partials = values[task.out];
+            if slice == 0u32 {
+                publish(partials, base + key.dims.w, row_largest);
+                publish(partials, base + key.dims.w + 1u32, row_total);
+            }
+            for depth in unroll(0u32, ATTN_SLICE, 1u32) {
+                let walked = start_depth + depth;
+                if walked < ATTN_WIDTH {
+                    publish(partials, base + walked, accumulated[depth]);
+                }
+            }
+        } else if inside && group == 0u32 {
             let carries_keys = row_total > 0.0;
             let normalized = select(0.0, 1.0 / row_total, carries_keys);
             let at = uvec4(
@@ -500,6 +520,79 @@ mod device {
                     select(0.0, row_largest + positive_log(row_total), carries_keys),
                 );
             }
+        }
+    }
+
+    fn run_attention_fold(task: Task, lid: u32) {
+        let output = values[task.out];
+        let statistic = values[task.extra];
+        let partials = values[task.a];
+        let dims = output.dims;
+        let width = dims.w;
+        let words = width + 2u32;
+        let rows = dims.x * dims.y * dims.z;
+        let slot_words = rows * words;
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let at = coordinates(index, dims);
+            let base = (index / width) * words;
+            let mut largest = max_identity();
+            for section in stride(0u32, task.splits, 1u32) {
+                largest = max(
+                    largest,
+                    fetch(partials, section * slot_words + base + width),
+                );
+            }
+            let mut total = 0.0;
+            for section in stride(0u32, task.splits, 1u32) {
+                let top = fetch(partials, section * slot_words + base + width);
+                let mass = fetch(partials, section * slot_words + base + width + 1u32);
+                total = total
+                    + select(
+                        0.0,
+                        mass * softmax_exp(top - largest),
+                        largest != max_identity(),
+                    );
+            }
+            let carries = total > 0.0;
+            let normalized = select(0.0, 1.0 / total, carries);
+            if at.w == 0u32 {
+                publish(
+                    statistic,
+                    read_address(uvec4(at.x, at.y, at.z, 0u32), statistic.strides),
+                    select(0.0, largest + positive_log(total), carries),
+                );
+            }
+            let mut accumulated = 0.0;
+            for section in stride(0u32, task.splits, 1u32) {
+                let top = fetch(partials, section * slot_words + base + width);
+                accumulated = accumulated
+                    + select(0.0, softmax_exp(top - largest), largest != max_identity())
+                        * fetch(partials, section * slot_words + base + at.w);
+            }
+            publish(
+                output,
+                read_address(at, output.strides),
+                chained(task, at, accumulated * normalized),
+            );
+        }
+    }
+
+    fn run_attention_query_grad_fold(task: Task, lid: u32) {
+        let output = values[task.out];
+        let partials = values[task.a];
+        let dims = output.dims;
+        let elements = dims.x * dims.y * dims.z * dims.w;
+        for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut total = 0.0;
+            for section in stride(0u32, task.splits, 1u32) {
+                total = total + fetch(partials, section * elements + index);
+            }
+            let at = coordinates(index, dims);
+            publish(
+                output,
+                read_address(at, output.strides),
+                chained(task, at, total),
+            );
         }
     }
 
@@ -606,6 +699,10 @@ mod device {
             task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
+        let sections = task.splits;
+        let span = walked - first_block;
+        let first_walk = first_block + span * task.section / sections;
+        let last_walk = first_block + span * (task.section + 1u32) / sections;
         let first_key = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut queries = scalar_array(0.0, ATTN_SLICE);
@@ -675,7 +772,7 @@ mod device {
             }
             row_dot = sum;
         }
-        for block in stride(first_block, walked, 1u32) {
+        for block in stride(first_walk, last_walk, 1u32) {
             workgroup_barrier();
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
@@ -809,7 +906,18 @@ mod device {
                 }
             }
         }
-        if inside && group == 0u32 {
+        if inside && group == 0u32 && sections > 1u32 {
+            let rows = query.dims.x * query.dims.y * query.dims.z;
+            let row = (plane.x * query.dims.y + plane.y) * query.dims.z + plane.z + unit;
+            let base = task.section * rows * key.dims.w + row * key.dims.w;
+            let partials = values[task.out];
+            for depth in unroll(0u32, ATTN_SLICE, 1u32) {
+                let walked = start_depth + depth;
+                if walked < ATTN_WIDTH {
+                    publish(partials, base + walked, accumulated[depth]);
+                }
+            }
+        } else if inside && group == 0u32 {
             let at = uvec4(
                 plane.x,
                 plane.y,

@@ -50,6 +50,7 @@ pub(crate) struct Task {
     pub(crate) tokens: u32,
     pub(crate) grid: u32,
     pub(crate) keep: u32,
+    pub(crate) section: u32,
 }
 
 impl Reads for Task {
@@ -115,6 +116,7 @@ impl Task {
             tokens: 0,
             grid: NO_VALUE,
             keep: unit.keep,
+            section: 0,
         }
     }
 }
@@ -383,10 +385,19 @@ fn schedule_unit(
         Kind::Attention | Kind::AttentionQueryGrad => {
             let rows = plan.shape(unit.out).dims();
             let tokens = rows[2];
-            let wanted = attention_rows(tokens, rows[0] * rows[1], profile.workgroup());
+            let planes = rows[0] * rows[1];
+            let wanted = attention_rows(tokens, planes, profile.workgroup());
             let geometry = attention_geometry(plan, profile, rows[3], wanted);
             let tile = plan.attention[geometry as usize];
             let per_task = profile.workgroup() / (tile.groups() * tile.slices());
+            let sections = attention_sections(plan, unit, tokens, planes, tile, per_task, profile);
+            let partials = (sections > 1).then(|| {
+                let words = match unit.kind {
+                    Kind::Attention => rows[3] + 2,
+                    _ => rows[3],
+                };
+                plan.publish(Shape::vector(sections * planes * tokens * words))
+            });
             let grid = if unit.queries != NO_VALUE {
                 unit.queries
             } else {
@@ -406,14 +417,57 @@ fn schedule_unit(
                 ragged_spans(plan.shape(grid).elements() - 1, tokens, per_task)
             } else {
                 let measure = measured(plan, unit.out, Measure::Tokens);
-                attention_spans(tokens, rows[0] * rows[1], per_task, measure)
+                attention_spans(tokens, planes, per_task, measure)
             };
             for (plane, first, count, split) in spans {
-                let mut task = Task::span(unit, first, count, attention_work(count, tokens, tile));
-                task.geometry = geometry;
+                let work = attention_work(count, tokens, tile)
+                    .div_ceil(u64::from(sections))
+                    .max(1);
+                for section in 0..sections {
+                    let mut task = Task::span(unit, first, count, work);
+                    task.geometry = geometry;
+                    task.split = split;
+                    task.plane = plane;
+                    task.grid = if packed { grid } else { NO_VALUE };
+                    if let Some(partials) = partials {
+                        task.out = partials;
+                        task.extra = NO_VALUE;
+                        task.section = section;
+                        task.splits = sections;
+                        task.prelude.clear();
+                        task.chain.clear();
+                        task.in_place = false;
+                    }
+                    plan.tasks.push(task);
+                }
+            }
+            let Some(partials) = partials else {
+                return;
+            };
+            let kind = match unit.kind {
+                Kind::Attention => Kind::AttentionFold,
+                _ => Kind::AttentionQueryGradFold,
+            };
+            let elements = planes * tokens * rows[3];
+            let per_task = task_elements(elements, target)
+                .next_multiple_of(rows[3].max(1))
+                .min(elements.max(1));
+            for (first, count, split) in span::chunks(elements, per_task, None) {
+                let mut task =
+                    Task::span(unit, first, count, u64::from(count) * u64::from(sections));
+                task.kind = kind;
+                task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+                task.extra = match kind {
+                    Kind::AttentionFold => unit.extra,
+                    _ => NO_VALUE,
+                };
+                task.origin = NO_VALUE;
+                task.segments = NO_VALUE;
+                task.queries = NO_VALUE;
+                task.knob = NO_VALUE;
+                task.splits = sections;
+                task.prelude.clear();
                 task.split = split;
-                task.plane = plane;
-                task.grid = if packed { grid } else { NO_VALUE };
                 plan.tasks.push(task);
             }
         }
@@ -512,6 +566,9 @@ fn schedule_unit(
         Kind::Conv2dWeightGrad => conv_weight_grad(plan, unit, profile),
         Kind::MatmulFold => {
             panic!("a fold of depth partials comes from the product whose depth split")
+        }
+        Kind::AttentionFold | Kind::AttentionQueryGradFold => {
+            panic!("a fold of attention partials comes from the attention whose key split")
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
@@ -734,6 +791,44 @@ fn attention_rows(units: u32, planes: u32, workgroup: u32) -> u32 {
         return workgroup;
     }
     u32::try_from(walked.div_ceil(ATTENTION_WANTED_TASKS).max(1)).unwrap_or(u32::MAX)
+}
+
+fn attention_sections(
+    plan: &Plan,
+    unit: &TaskInfo,
+    tokens: u32,
+    planes: u32,
+    tile: AttentionTile,
+    per_task: u32,
+    profile: Profile,
+) -> u32 {
+    if unit.segments != NO_VALUE || !attention_sealed(plan, unit) {
+        return 1;
+    }
+    let rows = u64::from(planes) * u64::from(tokens);
+    let row_tasks = u64::from(planes) * u64::from(tokens.div_ceil(per_task.max(1)));
+    if row_tasks >= ATTENTION_ENOUGH_TASKS {
+        return 1;
+    }
+    let keys = plan.shape(unit.inputs[1]).dims()[2];
+    let width = plan.shape(unit.inputs[1]).dims()[3];
+    let blocks = u64::from(keys.div_ceil(tile.keys().max(1)));
+    let words = rows * u64::from(width + 2);
+    let sections = u64::from(profile.workgroups())
+        .div_ceil(row_tasks.max(1))
+        .min(blocks)
+        .min(PARTIALS_CEILING / words.max(1))
+        .min(u64::from(SPLITS_CEILING))
+        .max(1);
+    u32::try_from(sections).unwrap_or(u32::MAX)
+}
+
+fn attention_sealed(plan: &Plan, unit: &TaskInfo) -> bool {
+    [unit.out, unit.extra, unit.origin]
+        .into_iter()
+        .chain(unit.inputs)
+        .filter(|value| *value != NO_VALUE)
+        .all(|value| !plan.shape(value).dynamic())
 }
 
 fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32, rows: u32) -> u32 {

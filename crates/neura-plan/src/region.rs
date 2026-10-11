@@ -66,6 +66,7 @@ pub(crate) trait Walk: Reads {
     fn geometry(&self) -> u32;
     fn splits(&self) -> u32;
     fn slot(&self) -> u32;
+    fn section(&self) -> u32;
     fn input(&self, slot: usize) -> u32;
     fn prelude(&self) -> impl Iterator<Item = u32>;
     fn chain(&self) -> impl Iterator<Item = u32>;
@@ -88,6 +89,10 @@ impl Walk for Task {
 
     fn slot(&self) -> u32 {
         self.slot
+    }
+
+    fn section(&self) -> u32 {
+        self.section
     }
 
     fn input(&self, slot: usize) -> u32 {
@@ -526,6 +531,12 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Noise
         | Kind::Broadcast
         | Kind::Partial => elementwise(values, task, first, count, &mut narrowed),
+        Kind::Attention | Kind::AttentionQueryGrad if task.splits() > 1 => {
+            attention(values, task, first, count, &mut narrowed)
+        }
+        Kind::AttentionFold | Kind::AttentionQueryGradFold => {
+            attention_fold(values, task, first, count, &mut narrowed)
+        }
         Kind::Attention
         | Kind::AttentionQueryGrad
         | Kind::AttentionKeyGrad
@@ -821,6 +832,88 @@ fn fold<W: Walk, V: Values>(values: &V, task: &W, first: u32, count: u32, narrow
         Region::Whole
     };
     narrowed.read(partials, read);
+    for step in task.chain() {
+        if step == NO_VALUE {
+            continue;
+        }
+        let region = if walks_its_range(values, step, out) {
+            Region::run(u64::from(first), u64::from(count))
+        } else {
+            Region::Whole
+        };
+        narrowed.read(step, region);
+    }
+}
+
+fn attention<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let query = values.dims(task.input(0));
+    let width = values.dims(task.input(1))[3];
+    let words = match task.kind() {
+        Kind::Attention => u64::from(width) + 2,
+        _ => u64::from(width),
+    };
+    let rows = u64::from(query[0]) * u64::from(query[1]) * u64::from(query[2]);
+    let slot = u64::from(task.section()) * rows * words;
+    narrowed.write(
+        task.out(),
+        Region::run(slot + u64::from(first) * words, u64::from(count) * words),
+    );
+}
+
+fn attention_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let out = task.out();
+    let dims = values.dims(out);
+    let width = u64::from(dims[3].max(1));
+    let words = match task.kind() {
+        Kind::AttentionFold => width + 2,
+        _ => width,
+    };
+    let rows = u64::from(dims[0]) * u64::from(dims[1]) * u64::from(dims[2]);
+    let sections = u64::from(task.splits().max(1));
+    let first_row = u64::from(first) / width;
+    let last_row = (u64::from(first) + u64::from(count)).div_ceil(width);
+    let span = last_row - first_row;
+    narrowed.read(
+        task.input(0),
+        Region::band(first_row * words, span * words, rows * words, sections),
+    );
+    narrowed.write(
+        out,
+        if values.dense(out) {
+            Region::run(u64::from(first), u64::from(count))
+        } else {
+            Region::Whole
+        },
+    );
+    let statistic = task.extra();
+    if task.kind() == Kind::AttentionFold && statistic != NO_VALUE {
+        narrowed.write(
+            statistic,
+            if values.dense(statistic) {
+                Region::run(first_row, span)
+            } else {
+                Region::Whole
+            },
+        );
+    }
     for step in task.chain() {
         if step == NO_VALUE {
             continue;
