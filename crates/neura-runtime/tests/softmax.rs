@@ -1,4 +1,4 @@
-use neura_abi::{Element, Kind};
+use neura_abi::{Element, Kind, TaskRecord, strategy};
 use neura_graph::{Graph, Init, Shape};
 use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_precision::{pack, unpack};
@@ -84,6 +84,23 @@ fn log_softmax_reference(input: &[f32], columns: u32) -> Vec<f32> {
         let normalizer = total.ln();
         for (column, value) in chunk.iter().enumerate() {
             out[row * columns as usize + column] = (f64::from(value - largest) - normalizer) as f32;
+        }
+    }
+    out
+}
+
+fn log_weighted_gradient_reference(input: &[f32], weight: &[f32], columns: u32) -> Vec<f32> {
+    let log_probabilities = log_softmax_reference(input, columns);
+    let mut out = vec![0.0f32; input.len()];
+    for row in 0..input.len() / columns as usize {
+        let base = row * columns as usize;
+        let total: f64 = (0..columns as usize)
+            .map(|column| f64::from(weight[base + column]))
+            .sum();
+        for column in 0..columns as usize {
+            out[base + column] = (f64::from(weight[base + column])
+                - f64::from(log_probabilities[base + column]).exp() * total)
+                as f32;
         }
     }
     out
@@ -344,5 +361,239 @@ fn a_starved_softmax_narrows_every_column_section_it_folds() {
         &expected,
         1e-3,
         "a narrow sectioned softmax",
+    );
+}
+
+#[test]
+fn a_narrow_softmax_row_streams_through_one_thread() {
+    let rows = 4096u32;
+    let columns = 64u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let probabilities = graph.softmax(logits);
+    graph.retain(probabilities);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let profile = runtime
+        .profiles()
+        .into_iter()
+        .max_by_key(|profile| profile.workgroup())
+        .expect("a profile");
+    let program = runtime.compile_with(&graph, &weights, profile);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut covered = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::Softmax {
+            continue;
+        }
+        assert_eq!(
+            task.geometry,
+            strategy::THREAD_ROW,
+            "a row of {columns} numbers folds through one thread",
+        );
+        covered += task.count;
+    }
+    assert_eq!(
+        covered, rows,
+        "every row walks through one thread of its own"
+    );
+    let values = data((rows * columns) as usize, 59);
+    runtime.write(&program, logits, &values);
+    runtime.run(&program);
+    close(
+        &runtime.read(&program, probabilities),
+        &softmax_reference(&values, columns),
+        1e-6,
+        "a streamed softmax",
+    );
+}
+
+#[test]
+fn a_narrow_log_softmax_row_streams_through_one_thread() {
+    let rows = 16384u32;
+    let columns = 16u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let probabilities = graph.log_softmax(logits);
+    graph.retain(probabilities);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let profile = runtime
+        .profiles()
+        .into_iter()
+        .max_by_key(|profile| profile.workgroup())
+        .expect("a profile");
+    let program = runtime.compile_with(&graph, &weights, profile);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut covered = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::LogSoftmax {
+            continue;
+        }
+        assert_eq!(
+            task.geometry,
+            strategy::THREAD_ROW,
+            "a row of {columns} numbers folds through one thread",
+        );
+        covered += task.count;
+    }
+    assert_eq!(
+        covered, rows,
+        "every row walks through one thread of its own"
+    );
+    let values = data((rows * columns) as usize, 61);
+    runtime.write(&program, logits, &values);
+    runtime.run(&program);
+    let produced = runtime.read(&program, probabilities);
+    close(
+        &produced,
+        &log_softmax_reference(&values, columns),
+        1e-5,
+        "a streamed log softmax",
+    );
+    for row in 0..rows as usize {
+        let mass: f32 = produced[row * columns as usize..(row + 1) * columns as usize]
+            .iter()
+            .map(|value| value.exp())
+            .sum();
+        assert!(
+            (mass - 1.0).abs() < 1e-4,
+            "row {row} of a streamed log softmax weighs {mass}",
+        );
+    }
+}
+
+#[test]
+fn a_narrow_softmax_gradient_streams_through_one_thread() {
+    let rows = 4096u32;
+    let columns = 64u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let weighted = graph.mul(graph.softmax(logits), weight);
+    let loss = graph.sum(weighted);
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(logits);
+    graph.retain(loss);
+    graph.retain(gradient);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let profile = runtime
+        .profiles()
+        .into_iter()
+        .max_by_key(|profile| profile.workgroup())
+        .expect("a profile");
+    let program = runtime.compile_with(&graph, &weights, profile);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut forward = 0u32;
+    let mut backward = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        match Kind::of(task.kind) {
+            Kind::Softmax => {
+                assert_eq!(task.geometry, strategy::THREAD_ROW);
+                forward += 1;
+            }
+            Kind::SoftmaxGrad => {
+                assert_eq!(
+                    task.geometry,
+                    strategy::THREAD_ROW,
+                    "a row of {columns} numbers folds its gradient through one thread",
+                );
+                backward += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(forward > 0 && backward > 0);
+    let logits_data = data((rows * columns) as usize, 17);
+    let weight_data = data((rows * columns) as usize, 29);
+    runtime.write(&program, logits, &logits_data);
+    runtime.write(&program, weight, &weight_data);
+    runtime.run(&program);
+    close(
+        &runtime.read(&program, gradient),
+        &weighted_gradient_reference(&logits_data, &weight_data, columns),
+        1e-5,
+        "a streamed softmax gradient",
+    );
+}
+
+#[test]
+fn a_narrow_log_softmax_gradient_streams_through_one_thread() {
+    let rows = 2048u32;
+    let columns = 32u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(rows, columns), Init::Zero, Element::Single);
+    let weighted = graph.mul(graph.log_softmax(logits), weight);
+    let loss = graph.sum(weighted);
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(logits);
+    graph.retain(loss);
+    graph.retain(gradient);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let profile = runtime
+        .profiles()
+        .into_iter()
+        .max_by_key(|profile| profile.workgroup())
+        .expect("a profile");
+    let program = runtime.compile_with(&graph, &weights, profile);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut backward = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::LogSoftmaxGrad {
+            continue;
+        }
+        assert_eq!(task.geometry, strategy::THREAD_ROW);
+        backward += 1;
+    }
+    assert!(backward > 0);
+    let logits_data = data((rows * columns) as usize, 71);
+    let weight_data = data((rows * columns) as usize, 73);
+    runtime.write(&program, logits, &logits_data);
+    runtime.write(&program, weight, &weight_data);
+    runtime.run(&program);
+    close(
+        &runtime.read(&program, gradient),
+        &log_weighted_gradient_reference(&logits_data, &weight_data, columns),
+        1e-5,
+        "a streamed log softmax gradient",
     );
 }

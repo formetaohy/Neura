@@ -14,6 +14,11 @@ const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
+const SOFTMAX_FORWARD_PASSES: u64 = 3;
+const SOFTMAX_GRADIENT_PASSES: u64 = 2;
+const SOFTMAX_FORWARD_ROUND_ELEMENTS: u64 = 3125;
+const SOFTMAX_GRADIENT_ROUND_ELEMENTS: u64 = 2000;
+const SOFTMAX_WORKGROUP_ROW: u64 = 7;
 const SOFTMAX_SECTION_COLUMNS: u32 = 1024;
 const SOFTMAX_SECTION_FLOOR: u32 = 4096;
 const FOLD_DEPTH: u32 = 16;
@@ -905,15 +910,46 @@ fn softmax(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         softmax_sectioned(plan, unit, rows, columns, sections, profile);
         return;
     }
+    let geometry = softmax_body(unit, rows, columns, profile);
+    let target = device_workgroups(profile);
+    let per_task = match geometry {
+        strategy::THREAD_ROW => choice_rows_per_task(rows, target),
+        _ => softmax_rows_per_task(rows, target),
+    };
     let measure = measured(plan, unit.out, Measure::Rows);
-    spread(
-        plan,
-        unit,
-        rows,
-        softmax_rows_per_task(rows, device_workgroups(profile)),
-        measure,
-        |_, count| u64::from(count) * u64::from(columns),
-    );
+    for (first, count, split) in span::chunks(rows, per_task, measure) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
+        task.geometry = geometry;
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn softmax_body(unit: &TaskInfo, rows: u32, columns: u32, profile: Profile) -> u32 {
+    let (passes, round_elements) = match unit.kind {
+        Kind::Softmax | Kind::LogSoftmax => {
+            (SOFTMAX_FORWARD_PASSES, SOFTMAX_FORWARD_ROUND_ELEMENTS)
+        }
+        Kind::SoftmaxGrad | Kind::LogSoftmaxGrad => {
+            (SOFTMAX_GRADIENT_PASSES, SOFTMAX_GRADIENT_ROUND_ELEMENTS)
+        }
+        _ => panic!(
+            "a {} task walks no row of the softmax family",
+            unit.kind.name(),
+        ),
+    };
+    let workgroup = u64::from(profile.workgroup());
+    let workgroups = u64::from(profile.workgroups());
+    let rounds = u64::from(columns).div_ceil(u64::from(neura_abi::SOFTMAX_STREAM));
+    let traffic = u64::from(rows) * u64::from(columns) / round_elements;
+    let threaded =
+        u64::from(rows).div_ceil(workgroup * workgroups) * (passes * rounds).max(traffic);
+    let folded = u64::from(rows).div_ceil(workgroups) * SOFTMAX_WORKGROUP_ROW;
+    if threaded < folded {
+        strategy::THREAD_ROW
+    } else {
+        strategy::WORKGROUP_ROW
+    }
 }
 
 fn softmax_sectioned(

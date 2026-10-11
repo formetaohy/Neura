@@ -320,7 +320,7 @@ kinds! {
     Softmax SOFTMAX = "softmax" {
         entry: "run_softmax",
         modules: [Reduce, Softmax],
-        geometry: None,
+        geometry: Strategy,
         prelude: false,
         chain: true,
         origin: false,
@@ -328,7 +328,7 @@ kinds! {
     SoftmaxGrad SOFTMAX_GRAD = "softmax_grad" {
         entry: "run_softmax_grad",
         modules: [Reduce, Softmax],
-        geometry: None,
+        geometry: Strategy,
         prelude: false,
         chain: true,
         origin: false,
@@ -336,7 +336,7 @@ kinds! {
     LogSoftmax LOG_SOFTMAX = "log_softmax" {
         entry: "run_log_softmax",
         modules: [Reduce, Softmax],
-        geometry: None,
+        geometry: Strategy,
         prelude: false,
         chain: true,
         origin: false,
@@ -344,7 +344,7 @@ kinds! {
     LogSoftmaxGrad LOG_SOFTMAX_GRAD = "log_softmax_grad" {
         entry: "run_log_softmax_grad",
         modules: [Reduce, Softmax],
-        geometry: None,
+        geometry: Strategy,
         prelude: false,
         chain: true,
         origin: false,

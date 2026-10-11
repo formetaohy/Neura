@@ -99,6 +99,54 @@ fn a_row_walks_the_strategy_its_rounds_ask_for() {
 }
 
 #[test]
+fn a_softmax_walks_the_body_its_rounds_ask_for() {
+    let graph = Graph::new();
+    let narrow_rows = graph.softmax(graph.input(Shape::matrix(4096, 64), Element::Single));
+    let wide_rows = graph.softmax(graph.input(Shape::matrix(4096, 1024), Element::Single));
+    let starved_rows = graph.softmax(graph.input(Shape::matrix(128, 64), Element::Single));
+    graph.retain(narrow_rows);
+    graph.retain(wide_rows);
+    graph.retain(starved_rows);
+    for (profile, narrow_geometry) in [
+        (narrow(), strategy::WORKGROUP_ROW),
+        (wide(), strategy::THREAD_ROW),
+    ] {
+        let plan = plan_with(&graph, profile);
+        for (value, rows, geometry, label) in [
+            (
+                narrow_rows,
+                4096u32,
+                narrow_geometry,
+                "4096 rows of 64 columns",
+            ),
+            (
+                wide_rows,
+                4096,
+                strategy::WORKGROUP_ROW,
+                "4096 rows of 1024 columns",
+            ),
+            (
+                starved_rows,
+                128,
+                strategy::WORKGROUP_ROW,
+                "128 rows of 64 columns",
+            ),
+        ] {
+            let tasks = tasks_of(&plan, value);
+            let mut covered = 0;
+            for task in &tasks {
+                assert_eq!(
+                    task.geometry, geometry,
+                    "{label} fold through {geometry} on {profile:?}",
+                );
+                covered += task.count;
+            }
+            assert_eq!(covered, rows, "{label} cover every row once");
+        }
+    }
+}
+
+#[test]
 fn a_starved_row_folds_out_of_the_partials_its_workgroups_fill() {
     let columns = 32000u32;
     let graph = Graph::new();
