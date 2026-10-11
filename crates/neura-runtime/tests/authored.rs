@@ -577,3 +577,50 @@ fn a_device_count_beyond_one_bound_it_walks_is_refused() {
         "a count beyond the bound of one tensor it walks was accepted",
     );
 }
+
+const PLANE_ROWS: u32 = 6;
+const PLANE_DEPTH: u32 = 6;
+const PLANE_HEADS: u32 = 2;
+const PLANE_WIDTH: u32 = 3;
+
+#[test]
+fn a_head_plane_view_of_a_counted_tensor_walks_the_planes_the_count_leaves_live() {
+    let runtime = open();
+    let graph = Graph::new();
+    let probe = graph.input(Shape::of([1, 1, PLANE_ROWS, 1]), Element::Single);
+    let count = graph.sum_axis(probe, 2);
+    let extent = graph.counted(PLANE_ROWS, count);
+    let tokens = graph.input(
+        Shape::of([1, PLANE_ROWS, PLANE_DEPTH, 1]).freed(&[(1, extent)]),
+        Element::Single,
+    );
+    let planes = graph.reshape(
+        tokens,
+        Shape::of([1, PLANE_ROWS, PLANE_HEADS, PLANE_WIDTH]).freed(&[(1, extent)]),
+    );
+    let turned = graph.permute(planes, [0, 2, 3, 1]);
+    let pooled = graph.sum_rows(turned);
+    graph.retain(pooled);
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    assert!(
+        program.carries_authored(),
+        "a graph that counts a walk by a device extent carries a patch",
+    );
+    let tokens_data = data(PLANE_ROWS * PLANE_DEPTH, 13);
+    runtime.write(&program, tokens, &tokens_data);
+    for live in [PLANE_ROWS, 5, 2, 0] {
+        runtime.write(&program, probe, &live_probe(PLANE_ROWS, live));
+        runtime.run(&program);
+        let mut expected = vec![0.0f32; (PLANE_HEADS * PLANE_WIDTH) as usize];
+        for row in 0..live as usize {
+            for head in 0..PLANE_HEADS as usize {
+                for depth in 0..PLANE_WIDTH as usize {
+                    expected[head * PLANE_WIDTH as usize + depth] += tokens_data
+                        [row * PLANE_DEPTH as usize + head * PLANE_WIDTH as usize + depth];
+                }
+            }
+        }
+        assert_close(&runtime.read(&program, pooled), &expected, 1e-4);
+    }
+}

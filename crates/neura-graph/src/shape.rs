@@ -408,11 +408,22 @@ impl Shape {
     }
 
     pub fn dense_strides(dims: [u32; 4]) -> [u32; 4] {
+        Self::ranked_strides(dims, [0, 1, 2, 3])
+    }
+
+    pub fn ranked_strides(dims: [u32; 4], rank: [u8; 4]) -> [u32; 4] {
         let mut strides = [0u32; 4];
-        let mut stride = 1u32;
-        for axis in (0..4).rev() {
-            strides[axis] = if dims[axis] == 1 { 0 } else { stride };
-            stride *= dims[axis];
+        for axis in 0..MAX_RANK as usize {
+            if dims[axis] == 1 {
+                continue;
+            }
+            let mut stride = 1u32;
+            for inner in 0..MAX_RANK as usize {
+                if rank[inner] > rank[axis] {
+                    stride *= dims[inner];
+                }
+            }
+            strides[axis] = stride;
         }
         strides
     }

@@ -1114,3 +1114,119 @@ fn a_starved_attention_weighs_the_keys_of_every_key_group() {
     run_forward_on(&runtime, shapes, 1e-5);
     run_backward_on(&runtime, shapes, 1e-5, None);
 }
+
+const HEAD_TOKENS: u32 = 4;
+const HEAD_HEADS: u32 = 2;
+const HEAD_WIDTH: u32 = 3;
+const HEAD_DEPTH: u32 = HEAD_HEADS * HEAD_WIDTH;
+const HEAD_SCALE: f32 = 0.5;
+
+fn head_shapes() -> Shapes {
+    Shapes {
+        heads: HEAD_HEADS,
+        key_heads: HEAD_HEADS,
+        batch: 1,
+        queries: HEAD_TOKENS,
+        keys: HEAD_TOKENS,
+        width: HEAD_WIDTH,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: HEAD_SCALE,
+    }
+}
+
+fn head_plane_of_dense(dense: &[f32]) -> Vec<f32> {
+    let mut planes = vec![0.0f32; dense.len()];
+    for row in 0..HEAD_TOKENS as usize {
+        for head in 0..HEAD_HEADS as usize {
+            for depth in 0..HEAD_WIDTH as usize {
+                planes[(head * HEAD_TOKENS as usize + row) * HEAD_WIDTH as usize + depth] =
+                    dense[row * HEAD_DEPTH as usize + head * HEAD_WIDTH as usize + depth];
+            }
+        }
+    }
+    planes
+}
+
+fn dense_of_head_plane(planes: &[f32]) -> Vec<f32> {
+    let mut dense = vec![0.0f32; planes.len()];
+    for row in 0..HEAD_TOKENS as usize {
+        for head in 0..HEAD_HEADS as usize {
+            for depth in 0..HEAD_WIDTH as usize {
+                dense[row * HEAD_DEPTH as usize + head * HEAD_WIDTH as usize + depth] =
+                    planes[(head * HEAD_TOKENS as usize + row) * HEAD_WIDTH as usize + depth];
+            }
+        }
+    }
+    dense
+}
+
+#[test]
+fn an_attention_reads_the_head_planes_a_dense_token_row_carries() {
+    let runtime = open();
+    let graph = Graph::new();
+    let tensor = |graph: &Graph<'static>| {
+        let dense = graph.parameter(
+            Shape::of([1, HEAD_TOKENS, HEAD_DEPTH]),
+            Init::Zero,
+            Element::Single,
+        );
+        let split = graph.reshape(dense, Shape::of([1, HEAD_TOKENS, HEAD_HEADS, HEAD_WIDTH]));
+        (dense, graph.permute(split, [2, 0, 1, 3]))
+    };
+    let (queries, query_planes) = tensor(&graph);
+    let (keys, key_planes) = tensor(&graph);
+    let (values, value_planes) = tensor(&graph);
+    let out = graph.attention(
+        query_planes,
+        key_planes,
+        value_planes,
+        AttentionOptions {
+            scale: Some(graph.knob(HEAD_SCALE)),
+            causal: true,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    let gradients = graph.backward(graph.sum(out));
+    let query_grad = gradients.of(queries);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(out);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let count = HEAD_TOKENS * HEAD_DEPTH;
+    let queries_data = data(count, 17);
+    let keys_data = data(count, 29);
+    let values_data = data(count, 43);
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let shapes = head_shapes();
+    let query_table = head_plane_of_dense(&queries_data);
+    let key_table = head_plane_of_dense(&keys_data);
+    let value_table = head_plane_of_dense(&values_data);
+    let (expected, statistics) = attention_forward(shapes, &query_table, &key_table, &value_table);
+    assert_close(&runtime.read(&program, out), &expected, 1e-5);
+    let gradient = vec![1.0f32; expected.len()];
+    let (expected_query, expected_key, expected_value) = attention_backward(
+        shapes,
+        &query_table,
+        &key_table,
+        &value_table,
+        &expected,
+        &statistics,
+        &gradient,
+    );
+    let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+    assert_close(&produced[0], &dense_of_head_plane(&expected_query), 1e-5);
+    assert_close(&produced[1], &dense_of_head_plane(&expected_key), 1e-5);
+    assert_close(&produced[2], &dense_of_head_plane(&expected_value), 1e-5);
+}

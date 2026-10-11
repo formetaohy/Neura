@@ -140,7 +140,7 @@ impl TaskInfo {
 pub struct ValueInfo {
     pub shape: Shape,
     pub strides: [u32; 4],
-    pub strides_source: Option<[u8; 4]>,
+    pub strides_rank: Option<[u8; 4]>,
     pub storage: u32,
     pub element: Element,
     pub scale: f32,
@@ -158,7 +158,7 @@ impl ValueInfo {
         Self {
             shape,
             strides: shape.strides(),
-            strides_source: None,
+            strides_rank: None,
             storage: id,
             element: Element::Single,
             scale: 1.0,
@@ -255,7 +255,7 @@ pub(crate) struct Declaration<'a> {
     name: Option<&'a str>,
     shape: Shape,
     strides: [u32; 4],
-    strides_source: Option<[u8; 4]>,
+    strides_rank: Option<[u8; 4]>,
     storage: Option<u32>,
     residency: Residency,
     element: Element,
@@ -270,7 +270,7 @@ impl<'a> Declaration<'a> {
             name: None,
             shape,
             strides: shape.strides(),
-            strides_source: None,
+            strides_rank: None,
             storage: None,
             residency,
             element,
@@ -282,8 +282,7 @@ impl<'a> Declaration<'a> {
 
     pub(crate) fn view(
         shape: Shape,
-        strides: [u32; 4],
-        strides_source: Option<[u8; 4]>,
+        strides_rank: Option<[u8; 4]>,
         storage: u32,
         element: Element,
         scale: f32,
@@ -292,8 +291,8 @@ impl<'a> Declaration<'a> {
         Self {
             name: None,
             shape,
-            strides,
-            strides_source,
+            strides: Shape::ranked_strides(shape.dims(), strides_rank.unwrap_or([0, 1, 2, 3])),
+            strides_rank,
             storage: Some(storage),
             residency: Residency::View,
             element,
@@ -404,7 +403,7 @@ impl<'g> Graph<'g> {
             axis < MAX_RANK,
             "a trim names one of the {MAX_RANK} axes, and {axis} is not one of them",
         );
-        let (shape, strides, strides_source, storage, element, scale, tracked) = {
+        let (shape, strides_rank, storage, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             assert!(
@@ -415,8 +414,7 @@ impl<'g> Graph<'g> {
             );
             (
                 info.shape,
-                info.strides,
-                info.strides_source,
+                info.strides_rank,
                 info.storage,
                 info.element,
                 info.scale,
@@ -439,8 +437,7 @@ impl<'g> Graph<'g> {
         frees[axis as usize] = Some(free.slot());
         let live = self.declare(Declaration::view(
             Shape::from_axes(shape.dims(), frees),
-            strides,
-            strides_source,
+            strides_rank,
             storage,
             element,
             scale,
@@ -1030,13 +1027,12 @@ impl<'g> Graph<'g> {
 
     pub fn detach(&self, value: Value<'g>) -> Value<'g> {
         let value = self.own(value);
-        let (shape, strides, strides_source, storage, element, scale) = {
+        let (shape, strides_rank, storage, element, scale) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
                 info.shape,
-                info.strides,
-                info.strides_source,
+                info.strides_rank,
                 info.storage,
                 info.element,
                 info.scale,
@@ -1044,8 +1040,7 @@ impl<'g> Graph<'g> {
         };
         self.declare(Declaration::view(
             shape,
-            strides,
-            strides_source,
+            strides_rank,
             storage,
             element,
             scale,
@@ -1413,7 +1408,7 @@ impl<'g> Graph<'g> {
             name,
             shape,
             strides,
-            strides_source,
+            strides_rank,
             storage,
             residency,
             element,
@@ -1427,7 +1422,7 @@ impl<'g> Graph<'g> {
         state.values.push(ValueInfo {
             shape,
             strides,
-            strides_source,
+            strides_rank,
             storage: storage.unwrap_or(id),
             element,
             scale,

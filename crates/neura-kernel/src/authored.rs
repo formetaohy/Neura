@@ -60,11 +60,39 @@ mod device {
         );
     }
 
-    fn dense_strides(dims: uvec4) -> uvec4 {
-        let x = select(0u32, dims.y * dims.z * dims.w, dims.x != 1u32);
-        let y = select(0u32, dims.z * dims.w, dims.y != 1u32);
-        let z = select(0u32, dims.w, dims.z != 1u32);
-        let w = select(0u32, 1u32, dims.w != 1u32);
+    fn ranked_strides(dims: uvec4, rank: u32) -> uvec4 {
+        let rx = slot_of(rank, 0u32);
+        let ry = slot_of(rank, 1u32);
+        let rz = slot_of(rank, 2u32);
+        let rw = slot_of(rank, 3u32);
+        let x = select(
+            0u32,
+            select(1u32, dims.y, ry > rx)
+                * select(1u32, dims.z, rz > rx)
+                * select(1u32, dims.w, rw > rx),
+            dims.x != 1u32,
+        );
+        let y = select(
+            0u32,
+            select(1u32, dims.x, rx > ry)
+                * select(1u32, dims.z, rz > ry)
+                * select(1u32, dims.w, rw > ry),
+            dims.y != 1u32,
+        );
+        let z = select(
+            0u32,
+            select(1u32, dims.x, rx > rz)
+                * select(1u32, dims.y, ry > rz)
+                * select(1u32, dims.w, rw > rz),
+            dims.z != 1u32,
+        );
+        let w = select(
+            0u32,
+            select(1u32, dims.x, rx > rw)
+                * select(1u32, dims.y, ry > rw)
+                * select(1u32, dims.z, rz > rw),
+            dims.w != 1u32,
+        );
         return uvec4(x, y, z, w);
     }
 
@@ -110,16 +138,7 @@ mod device {
     }
 
     fn value_strides(value: Value) -> uvec4 {
-        if slot_of(value.source, 0u32) == NO_SLOT {
-            return dense_strides(value_dims(value));
-        }
-        let owner = dense_strides(value_dims(values[value.storage]));
-        return uvec4(
-            component(owner, slot_of(value.source, 0u32)),
-            component(owner, slot_of(value.source, 1u32)),
-            component(owner, slot_of(value.source, 2u32)),
-            component(owner, slot_of(value.source, 3u32)),
-        );
+        return ranked_strides(value_dims(value), value.rank);
     }
 
     fn walked_total(task: Task) -> u32 {

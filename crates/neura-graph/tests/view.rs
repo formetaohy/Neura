@@ -57,3 +57,18 @@ fn a_permutation_walks_each_axis_of_its_source_once() {
     assert_eq!(turned_again.shape(), tensor.shape());
     assert_eq!(strides(&graph, turned_again), strides(&graph, tensor));
 }
+
+#[test]
+fn a_head_plane_view_walks_the_axis_a_reshape_splits() {
+    let graph = Graph::new();
+    let tokens = graph.parameter(Shape::of([1, 4, 6]), Init::Zero, Element::Single);
+    let planes = graph.reshape(tokens, Shape::of([1, 4, 2, 3]));
+    assert_eq!(planes.shape(), Shape::of([1, 4, 2, 3]));
+    assert_eq!(strides(&graph, planes), [0, 6, 3, 1]);
+    let heads = graph.permute(planes, [2, 0, 1, 3]);
+    assert_eq!(heads.shape(), Shape::of([2, 1, 4, 3]));
+    assert_eq!(strides(&graph, heads), [3, 0, 6, 1]);
+    let walked = graph.permute(heads, [1, 3, 0, 2]);
+    assert_eq!(walked.shape(), Shape::of([1, 3, 2, 4]));
+    assert_eq!(strides(&graph, walked), [0, 1, 3, 6]);
+}

@@ -120,14 +120,13 @@ impl Recomputing {
             (info.residency == Residency::View).then_some((
                 info.storage,
                 info.shape,
-                info.strides,
-                info.strides_source,
+                info.strides_rank,
                 info.element,
                 info.scale,
                 info.requires_grad,
             ))
         };
-        let Some((storage, shape, strides, strides_source, element, scale, tracked)) = view else {
+        let Some((storage, shape, strides_rank, element, scale, tracked)) = view else {
             return value;
         };
         let Some(copy) = self.copies.get(&storage).copied() else {
@@ -138,8 +137,7 @@ impl Recomputing {
         }
         let view = graph.declare(Declaration::view(
             shape,
-            strides,
-            strides_source,
+            strides_rank,
             copy,
             element,
             scale,
@@ -1069,7 +1067,6 @@ impl<'g> Graph<'g> {
             );
             return self.declare(Declaration::view(
                 owner_shape,
-                owner_shape.strides(),
                 None,
                 self.owner_of(contribution.id()),
                 self.element(contribution),

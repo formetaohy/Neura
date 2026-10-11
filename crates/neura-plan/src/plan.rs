@@ -1014,10 +1014,10 @@ impl Plan {
                     free[axis as usize] = slot;
                 }
             }
-            let source = match self.shapes[id as usize].strides_source {
-                Some(source) => source.map(u32::from),
-                None => [NO_SLOT; 4],
-            };
+            let rank = self.shapes[id as usize]
+                .strides_rank
+                .unwrap_or([0, 1, 2, 3])
+                .map(u32::from);
             let record = ValueRecord::of(ValueFields {
                 base: u32::try_from(address).unwrap_or_else(|_| {
                     panic!("value {id} lies at {address}, beyond the device address space")
@@ -1028,7 +1028,7 @@ impl Plan {
                 storage: owner,
                 bounds: self.shapes[id as usize].shape.dims(),
                 free,
-                source,
+                rank,
                 dims: sized.dims(id),
                 strides: sized.strides(id),
             });

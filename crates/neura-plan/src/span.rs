@@ -46,7 +46,7 @@ pub(crate) enum Split {
 
 struct Extent {
     shape: Shape,
-    strides_source: Option<[u8; 4]>,
+    strides_rank: Option<[u8; 4]>,
     storage: u32,
     element: Element,
     recomputes: Option<u32>,
@@ -65,7 +65,7 @@ impl Extents {
                 .iter()
                 .map(|info| Extent {
                     shape: info.shape,
-                    strides_source: info.strides_source,
+                    strides_rank: info.strides_rank,
                     storage: info.storage,
                     element: info.element,
                     recomputes: info.recomputes,
@@ -113,18 +113,12 @@ impl Extents {
     }
 
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {
-        match self.values[value as usize].strides_source {
-            None => Shape::dense_strides(self.dims(value, extents)),
-            Some(source) => {
-                let owner = self.values[value as usize].storage;
-                let owner_strides = Shape::dense_strides(self.dims(owner, extents));
-                let mut strides = [0u32; 4];
-                for axis in 0..4 {
-                    strides[axis] = owner_strides[source[axis] as usize];
-                }
-                strides
-            }
-        }
+        Shape::ranked_strides(
+            self.dims(value, extents),
+            self.values[value as usize]
+                .strides_rank
+                .unwrap_or([0, 1, 2, 3]),
+        )
     }
 
     pub(crate) fn planes(&self, measure: u32, extents: &[u32]) -> u32 {

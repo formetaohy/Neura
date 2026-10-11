@@ -99,6 +99,64 @@ fn a_permuted_view_reads_back_through_the_axes_it_names() {
 }
 
 #[test]
+fn a_head_plane_view_walks_the_numbers_of_the_tensor_it_splits() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 4, 6]), Element::Single);
+    let squared = graph.mul(input, input);
+    let planes = graph.reshape(squared, Shape::of([1, 4, 2, 3]));
+    let heads = graph.permute(planes, [2, 0, 1, 3]);
+    let summed = graph.sum_rows(heads);
+    graph.retain(summed);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(24, 5);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 8];
+    for head in 0..2usize {
+        for row in 0..4usize {
+            for depth in 0..3usize {
+                let value = values[row * 6 + head * 3 + depth];
+                expected[head * 4 + row] += value * value;
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, summed), &expected, 1e-5);
+}
+
+#[test]
+fn a_gradient_walks_back_through_a_head_plane_view() {
+    let runtime = open();
+    let graph = Graph::new();
+    let dense = graph.parameter(Shape::of([1, 4, 6]), Init::Zero, Element::Single);
+    let planes = graph.reshape(dense, Shape::of([1, 4, 2, 3]));
+    let heads = graph.permute(planes, [2, 0, 1, 3]);
+    let factor = graph.input(Shape::of([2, 1, 4, 3]), Element::Single);
+    let loss = graph.sum(graph.mul(heads, factor));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(dense));
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    let factors = random(24, 31);
+    runtime.write(&program, factor, &factors);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..4usize {
+        for head in 0..2usize {
+            for depth in 0..3usize {
+                expected[row * 6 + head * 3 + depth] = factors[(head * 4 + row) * 3 + depth];
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(dense)),
+        &expected,
+        1e-6,
+    );
+}
+
+#[test]
 fn a_gradient_walks_back_through_a_reshape() {
     let runtime = open();
     let graph = Graph::new();

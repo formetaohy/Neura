@@ -1404,13 +1404,12 @@ impl<'g> Graph<'g> {
             );
             walked |= 1 << axis;
         }
-        let (shape, strides, strides_source, storage, element, scale, tracked) = {
+        let (shape, strides_rank, storage, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
                 info.shape,
-                info.strides,
-                info.strides_source,
+                info.strides_rank,
                 info.storage,
                 info.element,
                 info.scale,
@@ -1419,20 +1418,17 @@ impl<'g> Graph<'g> {
         };
         let mut permuted_dims = [1u32; MAX_RANK as usize];
         let mut permuted_frees = [None; MAX_RANK as usize];
-        let mut permuted_strides = [0u32; MAX_RANK as usize];
-        let mut permuted_source = [0u8; MAX_RANK as usize];
-        let source = strides_source.unwrap_or([0, 1, 2, 3]);
+        let mut permuted_rank = [0u8; MAX_RANK as usize];
+        let rank = strides_rank.unwrap_or([0, 1, 2, 3]);
         for axis in 0..MAX_RANK as usize {
             let walked = order[axis] as usize;
             permuted_dims[axis] = shape.dims()[walked];
             permuted_frees[axis] = shape.free(walked as u32);
-            permuted_strides[axis] = strides[walked];
-            permuted_source[axis] = source[walked];
+            permuted_rank[axis] = rank[walked];
         }
         self.declare(Declaration::view(
             Shape::from_axes(permuted_dims, permuted_frees),
-            permuted_strides,
-            Some(permuted_source),
+            Some(permuted_rank),
             storage,
             element,
             scale,
@@ -1467,13 +1463,7 @@ impl<'g> Graph<'g> {
             (info.storage, info.element, info.scale, info.requires_grad)
         };
         self.declare(Declaration::view(
-            shape,
-            shape.strides(),
-            None,
-            storage,
-            element,
-            scale,
-            tracked,
+            shape, None, storage, element, scale, tracked,
         ))
     }
 

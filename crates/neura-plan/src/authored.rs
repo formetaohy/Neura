@@ -81,9 +81,6 @@ pub(crate) fn analyse(
                     slots.push(slot);
                 }
             }
-            if info.strides_source.is_some() {
-                slots.extend_from_slice(&authored.value_slots[info.storage as usize]);
-            }
             changed |= merge(&mut authored.value_slots[id], slots);
         }
     }

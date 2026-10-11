@@ -17,7 +17,7 @@ fn records_follow_the_shader_layout() {
     assert_eq!(offset_of!(ValueRecord, table), 12);
     assert_eq!(offset_of!(ValueRecord, storage), 16);
     assert_eq!(offset_of!(ValueRecord, free), 20);
-    assert_eq!(offset_of!(ValueRecord, source), 24);
+    assert_eq!(offset_of!(ValueRecord, rank), 24);
     assert_eq!(offset_of!(ValueRecord, bounds), 32);
     assert_eq!(offset_of!(ValueRecord, dims), 48);
     assert_eq!(offset_of!(ValueRecord, strides), 64);
@@ -273,7 +273,7 @@ fn a_record_declares_what_the_device_reads() {
         storage: 3,
         bounds: [4, 3, 2, 1],
         free: [0, 1, 2, 3],
-        source: [3, 2, 1, 0],
+        rank: [3, 2, 1, 0],
         dims: [1, 2, 3, 4],
         strides: [12, 6, 2, 1],
     });
