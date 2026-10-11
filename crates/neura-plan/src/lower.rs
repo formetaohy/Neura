@@ -13,6 +13,8 @@ const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
+const SOFTMAX_SECTION_COLUMNS: u32 = 1024;
+const SOFTMAX_SECTION_FLOOR: u32 = 4096;
 const FOLD_DEPTH: u32 = 16;
 const FOLD_TASKS: u32 = 1 << 15;
 const ATTENTION_ENOUGH_TASKS: u64 = 16;
@@ -501,18 +503,7 @@ fn schedule_unit(
         }
         Kind::MatmulWeightGrad => matmul_weight_grad(plan, unit, profile, chosen),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
-            let out = plan.shape(unit.out);
-            let rows = out.rows();
-            let columns = out.columns();
-            let measure = measured(plan, unit.out, Measure::Rows);
-            spread(
-                plan,
-                unit,
-                rows,
-                softmax_rows_per_task(rows, target),
-                measure,
-                |_, count| u64::from(count) * u64::from(columns),
-            );
+            softmax(plan, unit, profile);
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::Sample => sample(plan, unit, profile),
@@ -576,6 +567,9 @@ fn schedule_unit(
         }
         Kind::TopKFold | Kind::SampleFold => {
             panic!("a fold of candidate partials comes from the choice whose columns are split")
+        }
+        Kind::SoftmaxFold | Kind::SoftmaxGradFold => {
+            panic!("a fold of row statistics comes from the softmax whose columns are split")
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
@@ -893,6 +887,132 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         task.geometry = strategy::WEIGHT_FOLD;
         task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         plan.tasks.push(task);
+    }
+}
+
+fn softmax(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let out = plan.shape(unit.out);
+    let rows = out.rows();
+    let columns = out.columns();
+    let sections = softmax_sections(plan, unit, rows, columns, profile);
+    if sections > 1 {
+        softmax_sectioned(plan, unit, rows, columns, sections, profile);
+        return;
+    }
+    let measure = measured(plan, unit.out, Measure::Rows);
+    spread(
+        plan,
+        unit,
+        rows,
+        softmax_rows_per_task(rows, device_workgroups(profile)),
+        measure,
+        |_, count| u64::from(count) * u64::from(columns),
+    );
+}
+
+fn softmax_sectioned(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let words = softmax_words(unit.kind);
+    let stats = plan.publish(Shape::of([1, 1, rows, words * sections]));
+    let folded = plan.publish(Shape::of([1, 1, rows, words]));
+    let measure = measured(plan, unit.out, Measure::Rows);
+    let spans = span::chunks(
+        rows,
+        softmax_rows_per_task(rows, device_workgroups(profile)),
+        measure,
+    );
+    let band = columns.div_ceil(sections);
+    for (first, count, split) in spans.iter().copied() {
+        for section in 0..sections {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(band) * 2);
+            task.out = stats;
+            task.extra = NO_VALUE;
+            task.splits = sections;
+            task.section = section;
+            task.chain.clear();
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in spans.iter().copied() {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(sections) * u64::from(words),
+        );
+        task.kind = if words == 2 {
+            Kind::SoftmaxFold
+        } else {
+            Kind::SoftmaxGradFold
+        };
+        task.inputs = [stats, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.out = folded;
+        task.extra = NO_VALUE;
+        task.origin = NO_VALUE;
+        task.splits = sections;
+        task.section = 0;
+        task.prelude.clear();
+        task.chain.clear();
+        task.split = split;
+        plan.tasks.push(task);
+    }
+    for (first, count, split) in spans {
+        for section in 0..sections {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(band));
+            task.inputs[2] = folded;
+            task.splits = sections;
+            task.section = section;
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+}
+
+fn softmax_sections(
+    plan: &Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    profile: Profile,
+) -> u32 {
+    if rows == 0 || columns < SOFTMAX_SECTION_FLOOR || !softmax_sealed(plan, unit) {
+        return 1;
+    }
+    let row_tasks = u64::from(rows).div_ceil(u64::from(softmax_rows_per_task(
+        rows,
+        device_workgroups(profile),
+    )));
+    if row_tasks * 2 > u64::from(profile.workgroups()) {
+        return 1;
+    }
+    let per_section = u64::from(rows) * u64::from(softmax_words(unit.kind));
+    let sections = (u64::from(profile.workgroups()) / row_tasks.max(1))
+        .min(u64::from(columns / SOFTMAX_SECTION_COLUMNS))
+        .min(PARTIALS_CEILING / per_section.max(1))
+        .min(u64::from(SPLITS_CEILING))
+        .max(1);
+    u32::try_from(sections).unwrap_or(u32::MAX)
+}
+
+fn softmax_sealed(plan: &Plan, unit: &TaskInfo) -> bool {
+    [unit.out, unit.extra]
+        .into_iter()
+        .chain(unit.inputs)
+        .filter(|value| *value != NO_VALUE)
+        .all(|value| !plan.shape(value).dynamic())
+}
+
+pub(crate) fn softmax_words(kind: Kind) -> u32 {
+    match kind {
+        Kind::Softmax | Kind::LogSoftmax => 2,
+        _ => 1,
     }
 }
 

@@ -605,4 +605,20 @@ kinds! {
         chain: false,
         origin: false,
     };
+    SoftmaxFold SOFTMAX_FOLD = "softmax_fold" {
+        entry: "run_softmax_fold",
+        modules: [Reduce],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    SoftmaxGradFold SOFTMAX_GRAD_FOLD = "softmax_grad_fold" {
+        entry: "run_softmax_grad_fold",
+        modules: [Reduce],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

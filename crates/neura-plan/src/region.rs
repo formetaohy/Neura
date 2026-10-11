@@ -1,5 +1,5 @@
 use crate::access::Reads;
-use crate::lower::Task;
+use crate::lower::{Task, softmax_words};
 use crate::span::{Extents, Split};
 use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE};
 use neura_graph::{Shape, ValueInfo};
@@ -521,6 +521,19 @@ fn narrow<W: Walk, V: Values>(
         Kind::Convert => convert(values, task, first, count, &mut narrowed),
         Kind::Gather => gather(values, task, rows, &mut narrowed),
         Kind::Rope | Kind::RopeGrad => rope(values, task, first, count, &mut narrowed),
+        Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
+            if task.splits() > 1 && task.input(2) != NO_VALUE =>
+        {
+            softmax_apply(values, task, first, count, &mut narrowed)
+        }
+        Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
+            if task.splits() > 1 =>
+        {
+            softmax_section(values, task, first, count, &mut narrowed)
+        }
+        Kind::SoftmaxFold | Kind::SoftmaxGradFold => {
+            softmax_fold(values, task, first, count, &mut narrowed)
+        }
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
@@ -1050,6 +1063,106 @@ fn rope<W: Walk, V: Values>(values: &V, task: &W, first: u32, count: u32, narrow
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
             Region::run(first.saturating_sub(half), count + 2 * half)
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
+}
+
+fn softmax_section<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3]);
+    let sections = u64::from(task.splits().max(1));
+    let section = u64::from(task.section());
+    let first_column = columns * section / sections;
+    let width = columns * (section + 1) / sections - first_column;
+    let rows = u64::from(first);
+    let count = u64::from(count);
+    let words = u64::from(softmax_words(task.kind()));
+    let stats = task.out();
+    narrowed.write(
+        stats,
+        Region::band(
+            rows * sections * words + section * words,
+            words,
+            sections * words,
+            count,
+        ),
+    );
+    for value in task.reads() {
+        let region = if walks_its_range(values, value, source) {
+            Region::band(rows * columns + first_column, width, columns, count)
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
+}
+
+fn softmax_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let stats = task.input(0);
+    let folded = task.out();
+    let sections = u64::from(values.dims(stats)[3]);
+    let held = u64::from(values.dims(folded)[3]);
+    narrowed.read(
+        stats,
+        Region::run(u64::from(first) * sections, u64::from(count) * sections),
+    );
+    narrowed.write(
+        folded,
+        Region::run(u64::from(first) * held, u64::from(count) * held),
+    );
+}
+
+fn softmax_apply<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3]);
+    let sections = u64::from(task.splits().max(1));
+    let section = u64::from(task.section());
+    let first_column = columns * section / sections;
+    let width = columns * (section + 1) / sections - first_column;
+    let rows = u64::from(first);
+    let count = u64::from(count);
+    let held = u64::from(values.dims(task.input(2))[3]);
+    narrowed.read(task.input(2), Region::run(rows * held, count * held));
+    narrowed.write(
+        task.out(),
+        Region::band(rows * columns + first_column, width, columns, count),
+    );
+    for value in task.reads() {
+        if value == task.input(2) {
+            continue;
+        }
+        let region = if walks_its_range(values, value, source) {
+            Region::band(rows * columns + first_column, width, columns, count)
         } else {
             Region::Whole
         };

@@ -1,4 +1,4 @@
-use neura_abi::{Element, Kind, Placement, TaskRecord, ValueRecord, strategy};
+use neura_abi::{Element, Kind, NO_VALUE, Placement, TaskRecord, ValueRecord, strategy};
 use neura_graph::{Graph, Init, Shape, Value, Window};
 use neura_profile::{AttentionTile, Budget, Profile};
 
@@ -1071,5 +1071,80 @@ fn a_choice_that_already_fills_the_device_walks_whole_rows() {
             "sixty four rows already fill the device",
         );
         assert!(!plan.kinds().contains(&Kind::SampleFold));
+    }
+}
+
+#[test]
+fn a_starved_softmax_parts_a_row_between_its_column_sections() {
+    let columns = 8192u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(1, columns), Init::Zero, Element::Single);
+    let probabilities = graph.softmax(logits);
+    graph.retain(probabilities);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Softmax && task.c == NO_VALUE)
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::SoftmaxFold)
+            .collect::<Vec<_>>();
+        let applies = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Softmax && task.c != NO_VALUE)
+            .collect::<Vec<_>>();
+        let sections = columns / 1024;
+        assert_eq!(
+            chunks.len() as u32,
+            sections,
+            "one row of {columns} numbers parts its columns between {sections} tasks",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its column sections once");
+        assert_eq!(applies.len() as u32, sections);
+        assert_eq!(folds[0].out, applies[0].c);
+        assert_eq!(folds[0].a, chunks[0].out);
+        assert_eq!(folds[0].splits, sections);
+        for task in chunks.iter().chain(&applies) {
+            assert_eq!(task.splits, sections);
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+        }
+        for (section, task) in chunks.iter().enumerate() {
+            assert_eq!(task.section as usize, section);
+            assert_ne!(task.out, probabilities.id());
+        }
+        for (section, task) in applies.iter().enumerate() {
+            assert_eq!(task.section as usize, section);
+            assert_eq!(task.out, probabilities.id());
+        }
+    }
+}
+
+#[test]
+fn a_softmax_that_already_fills_the_device_walks_whole_rows() {
+    let rows = 512u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(rows, 4096), Init::Zero, Element::Single);
+    let probabilities = graph.softmax(logits);
+    graph.retain(probabilities);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        assert!(
+            !plan.kinds().contains(&Kind::SoftmaxFold),
+            "{rows} rows fill the {profile:?} device without parting their columns",
+        );
+        for task in tasks(&plan)
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Softmax)
+        {
+            assert_eq!(
+                task.splits, 1,
+                "a row the device already fills walks its whole row",
+            );
+        }
     }
 }

@@ -833,6 +833,8 @@ impl<'g> Graph<'g> {
             | Kind::AttentionQueryGradFold
             | Kind::TopKFold
             | Kind::SampleFold
+            | Kind::SoftmaxFold
+            | Kind::SoftmaxGradFold
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite
