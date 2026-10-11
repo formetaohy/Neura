@@ -266,7 +266,7 @@ fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
             profile.workgroup(),
             profile.shared_bytes(),
             &walked(profile)[..],
-            &[AttentionTile::new(4, 8, 1)],
+            &[AttentionTile::new(4, 8, 1, AttentionTile::PANELS)],
         );
         let bodies = [Kind::Matmul, Kind::Attention, Kind::SumAxis, Kind::Argmax];
         let demands = bodies.map(|kind| geometry.scratch_bytes(&[kind]));
@@ -288,6 +288,31 @@ fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
             "a pool outruns the profile that offers it",
         );
     }
+}
+
+#[test]
+fn a_key_gradient_stages_the_forward_output_beside_its_query() {
+    let workgroup = 1024u32;
+    let width = 256u32;
+    let floor = AttentionTile::new(2, width, 1, AttentionTile::PANELS).shared_bytes(workgroup);
+    let staged = AttentionTile::fit(floor, workgroup, width, 1, AttentionTile::RECOMPUTED_PANELS);
+    assert_eq!(
+        staged.panels(),
+        AttentionTile::PANELS,
+        "a pool that holds no more than its query and its gradient leaves the key gradient the forward output it reads again",
+    );
+    assert_eq!(
+        AttentionTile::fit(48 << 10, 512, 64, 1, AttentionTile::RECOMPUTED_PANELS).panels(),
+        AttentionTile::RECOMPUTED_PANELS,
+        "a pool with room beside the two panels a forward stages carries the forward output a key gradient stages",
+    );
+    let two = AttentionTile::new(4, 32, 1, AttentionTile::PANELS);
+    assert!(
+        two.scratch_words(workgroup)
+            < AttentionTile::new(4, 32, 1, AttentionTile::RECOMPUTED_PANELS)
+                .scratch_words(workgroup),
+        "a tile that stages the forward output reserves the panel it stages it in",
+    );
 }
 
 #[test]

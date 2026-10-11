@@ -401,7 +401,8 @@ fn schedule_unit(
             let tokens = rows[2];
             let planes = rows[0] * rows[1];
             let wanted = attention_rows(tokens, planes, profile.workgroup());
-            let geometry = attention_geometry(plan, profile, rows[3], wanted);
+            let geometry =
+                attention_geometry(plan, profile, rows[3], wanted, AttentionTile::PANELS);
             let tile = plan.attention[geometry as usize];
             let per_task = profile.workgroup() / (tile.groups() * tile.slices());
             let sections = attention_sections(plan, unit, tokens, planes, tile, per_task, profile);
@@ -488,7 +489,11 @@ fn schedule_unit(
         Kind::AttentionKeyGrad | Kind::AttentionValueGrad => {
             let keys = plan.shape(unit.inputs[1]).dims();
             let wanted = attention_rows(keys[2], keys[0] * keys[1], profile.workgroup());
-            let geometry = attention_geometry(plan, profile, keys[3], wanted);
+            let panels = match unit.kind {
+                Kind::AttentionKeyGrad => AttentionTile::RECOMPUTED_PANELS,
+                _ => AttentionTile::PANELS,
+            };
+            let geometry = attention_geometry(plan, profile, keys[3], wanted, panels);
             let tile = plan.attention[geometry as usize];
             let per_task = profile.workgroup() / (tile.groups() * tile.slices());
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
@@ -843,8 +848,20 @@ fn attention_sealed(plan: &Plan, unit: &TaskInfo) -> bool {
         .all(|value| !plan.shape(value).dynamic())
 }
 
-fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32, rows: u32) -> u32 {
-    let tile = AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), width, rows);
+fn attention_geometry(
+    plan: &mut Plan,
+    profile: Profile,
+    width: u32,
+    rows: u32,
+    panels: u32,
+) -> u32 {
+    let tile = AttentionTile::fit(
+        profile.scratch_bytes(),
+        profile.workgroup(),
+        width,
+        rows,
+        panels,
+    );
     if let Some(index) = plan
         .attention
         .iter()

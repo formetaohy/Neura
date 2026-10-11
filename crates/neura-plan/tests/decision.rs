@@ -764,8 +764,89 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
             profile.workgroup(),
             width,
             rows,
+            AttentionTile::PANELS,
         )],
         "an attention keys as deep as the pool its profile offers, while the products beside it stage from that same pool",
+    );
+}
+
+#[test]
+fn a_key_gradient_stages_the_forward_output_it_recomputes_with() {
+    let tokens = 8u32;
+    let width = 32u32;
+    fn options<'g>(graph: &Graph<'g>) -> neura_graph::AttentionOptions<'g> {
+        neura_graph::AttentionOptions {
+            scale: Some(graph.knob(0.5)),
+            causal: true,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        }
+    }
+    let graph = Graph::new();
+    let tensor = || {
+        graph.parameter(
+            Shape::of([1, 1, tokens, width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let queries = tensor();
+    let keys = tensor();
+    let values = tensor();
+    let out = graph.attention(queries, keys, values, options(&graph));
+    let loss = graph.sum(out);
+    let gradients = graph.backward(loss);
+    let query_grad = gradients.of(queries);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let profile = narrow();
+    let plan = plan_with(&graph, profile);
+    let tile_of = |kind: Kind| {
+        let records = tasks(&plan);
+        let task = records
+            .iter()
+            .find(|task| Kind::of(task.kind) == kind)
+            .unwrap_or_else(|| panic!("the plan walks no {kind:?} task"));
+        plan.attention()[task.geometry as usize]
+    };
+    assert_eq!(
+        tile_of(Kind::Attention).panels(),
+        AttentionTile::PANELS,
+        "a forward stages the keys and the values it walks, and no more",
+    );
+    assert_eq!(
+        tile_of(Kind::AttentionQueryGrad).panels(),
+        AttentionTile::PANELS,
+        "a query gradient stages the keys and the values a row weighs",
+    );
+    assert_eq!(
+        tile_of(Kind::AttentionValueGrad).panels(),
+        AttentionTile::PANELS,
+        "a value gradient stages the queries and the gradient a key reads",
+    );
+    assert_eq!(
+        tile_of(Kind::AttentionKeyGrad).panels(),
+        AttentionTile::RECOMPUTED_PANELS,
+        "a key gradient stages the forward output it recomputes with beside the query and its gradient",
+    );
+    let forward = Graph::new();
+    let data = forward.parameter(
+        Shape::of([1, 1, tokens, width]),
+        Init::Zero,
+        Element::Single,
+    );
+    forward.retain(forward.attention(data, data, data, options(&forward)));
+    let plan = plan_with(&forward, profile);
+    assert!(
+        plan.attention()
+            .iter()
+            .all(|tile| tile.panels() == AttentionTile::PANELS),
+        "a plan without a key gradient stages no more than the operands its bodies walk",
     );
 }
 

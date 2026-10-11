@@ -53,6 +53,7 @@ pub struct AttentionTile {
     width: u32,
     slices: u32,
     groups: u32,
+    panels: u32,
 }
 
 impl AttentionTile {
@@ -64,8 +65,10 @@ impl AttentionTile {
     pub const WIDTH_PER_THREAD: u32 = 64;
     pub const REDUCTIONS: u32 = 1;
     pub const COMBINE_WORDS: u64 = 512;
+    pub const PANELS: u32 = 2;
+    pub const RECOMPUTED_PANELS: u32 = 3;
 
-    pub fn new(keys: u32, width: u32, groups: u32) -> Self {
+    pub fn new(keys: u32, width: u32, groups: u32, panels: u32) -> Self {
         let ceiling = if groups == 1 {
             Self::KEYS_CEILING
         } else {
@@ -78,6 +81,12 @@ impl AttentionTile {
         assert!(
             groups > 0 && groups <= Self::GROUPS_CEILING && keys.is_multiple_of(groups),
             "an attention tile hands its {keys} keys to {groups} groups of its workgroup, and no whole number of keys reaches every group",
+        );
+        assert!(
+            (Self::PANELS..=Self::RECOMPUTED_PANELS).contains(&panels),
+            "an attention tile stages {panels} operands of its keys, and a body stages {} of them or {}",
+            Self::PANELS,
+            Self::RECOMPUTED_PANELS,
         );
         let slices = Self::slices_of(width);
         let slice_width = width.div_ceil(slices);
@@ -93,10 +102,11 @@ impl AttentionTile {
             width,
             slices,
             groups,
+            panels,
         }
     }
 
-    pub fn fit(pool: u64, workgroup: u32, width: u32, rows: u32) -> Self {
+    pub fn fit(pool: u64, workgroup: u32, width: u32, rows: u32, panels: u32) -> Self {
         assert!(rows > 0, "an attention tile serves no row per task");
         let slices = Self::slices_of(width);
         assert!(
@@ -114,21 +124,35 @@ impl AttentionTile {
             .div_ceil(rows.saturating_mul(slices))
             .next_power_of_two()
             .clamp(1, Self::GROUPS_CEILING);
-        let mut groups = wanted;
+        let mut panels = panels.clamp(Self::PANELS, Self::RECOMPUTED_PANELS);
         loop {
-            if let Some(tile) = Self::holding(pool, workgroup, width, slices, groups) {
-                return tile;
+            let mut groups = wanted;
+            loop {
+                if let Some(tile) = Self::holding(pool, workgroup, width, slices, groups, panels) {
+                    return tile;
+                }
+                if groups == 1 {
+                    break;
+                }
+                groups /= 2;
             }
-            if groups == 1 {
+            if panels == Self::PANELS {
                 panic!(
                     "an attention of width {width} fits no key of {workgroup} threads beside the {pool} bytes of workgroup scratch its profile offers",
                 );
             }
-            groups /= 2;
+            panels = Self::PANELS;
         }
     }
 
-    fn holding(pool: u64, workgroup: u32, width: u32, slices: u32, groups: u32) -> Option<Self> {
+    fn holding(
+        pool: u64,
+        workgroup: u32,
+        width: u32,
+        slices: u32,
+        groups: u32,
+        panels: u32,
+    ) -> Option<Self> {
         if groups.saturating_mul(slices) > workgroup {
             return None;
         }
@@ -142,7 +166,7 @@ impl AttentionTile {
         let mut keys = ceiling.min(groups * per_thread);
         keys -= keys % groups;
         while keys >= groups * Self::KEYS_PER_GROUP {
-            let tile = Self::new(keys, width, groups);
+            let tile = Self::new(keys, width, groups, panels);
             if tile.shared_bytes(workgroup) <= pool {
                 return Some(tile);
             }
@@ -169,6 +193,10 @@ impl AttentionTile {
 
     pub const fn groups(self) -> u32 {
         self.groups
+    }
+
+    pub const fn panels(self) -> u32 {
+        self.panels
     }
 
     pub const fn slice_width(self) -> u32 {
@@ -223,7 +251,7 @@ impl AttentionTile {
     }
 
     pub const fn scratch_words(self, workgroup: u32) -> u32 {
-        2 * self.stage_words()
+        self.panels * self.stage_words()
             + self.reduction_words(workgroup)
             + self.combine_words(workgroup)
             + self.row_dot_words(workgroup)

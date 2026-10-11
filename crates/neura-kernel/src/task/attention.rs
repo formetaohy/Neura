@@ -20,20 +20,28 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
             ("ATTN_COMBINE_ROWS", tile.combine_rows(geometry.workgroup())),
             ("ATTN_STRIDE", tile.stride()),
             ("SCRATCH_ATTENTION_RIGHT", tile.stage_words()),
-            ("SCRATCH_ATTENTION_REDUCE", 2 * tile.stage_words()),
+            (
+                "SCRATCH_ATTENTION_FORWARD",
+                (tile.panels() - 1) * tile.stage_words(),
+            ),
+            ("ATTN_STAGES_FORWARD", tile.panels() - AttentionTile::PANELS),
+            (
+                "SCRATCH_ATTENTION_REDUCE",
+                tile.panels() * tile.stage_words(),
+            ),
             (
                 "SCRATCH_ATTENTION_ROW",
-                2 * tile.stage_words() + tile.reduction_words(geometry.workgroup()),
+                tile.panels() * tile.stage_words() + tile.reduction_words(geometry.workgroup()),
             ),
             (
                 "SCRATCH_ATTENTION_ML",
-                2 * tile.stage_words()
+                tile.panels() * tile.stage_words()
                     + tile.reduction_words(geometry.workgroup())
                     + tile.row_dot_words(geometry.workgroup()),
             ),
             (
                 "SCRATCH_ATTENTION_OUT",
-                2 * tile.stage_words()
+                tile.panels() * tile.stage_words()
                     + tile.reduction_words(geometry.workgroup())
                     + tile.row_dot_words(geometry.workgroup())
                     + if tile.groups() > 1 {
@@ -46,6 +54,11 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
         compiler.specialize(
             "template_stage_attention",
             &format!("stage_attention_{suffix}"),
+            &constants,
+        );
+        compiler.specialize(
+            "template_stage_forward",
+            &format!("stage_forward_{suffix}"),
             &constants,
         );
         for (template, dispatcher) in [
@@ -204,6 +217,22 @@ mod device {
             );
             scratch[SCRATCH_ATTENTION_RIGHT + column * ATTN_STRIDE + depth] =
                 select(0.0, fetch(right, address), inside);
+        }
+    }
+
+    fn template_stage_forward(lid: u32, block: u32, plane: u32, forward: Value, bound: u32) {
+        for unit in stride(lid, ATTN_KEYS * ATTN_WIDTH, WORKGROUP_SIZE) {
+            let column = unit / ATTN_WIDTH;
+            let depth = unit % ATTN_WIDTH;
+            let at = block * ATTN_KEYS + column;
+            let inside = at < bound;
+            let address = select(
+                0u32,
+                plane + at * forward.strides.z + depth * forward.strides.w,
+                inside,
+            );
+            scratch[SCRATCH_ATTENTION_FORWARD + column * ATTN_STRIDE + depth] =
+                select(0.0, fetch(forward, address), inside);
         }
     }
 
@@ -1095,6 +1124,9 @@ mod device {
                     tokens,
                     tokens,
                 );
+                if ATTN_STAGES_FORWARD > 0u32 {
+                    template_stage_forward(lid, block, output_grad_plane, output_grad, tokens);
+                }
                 workgroup_barrier();
                 if inside {
                     for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
@@ -1105,16 +1137,22 @@ mod device {
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
                                 let held = walked < ATTN_WIDTH;
-                                let forward = fetch(
-                                    output_grad,
-                                    select(
-                                        0u32,
-                                        output_grad_plane
-                                            + at_row * output_grad.strides.z
-                                            + walked * output_grad.strides.w,
-                                        held,
-                                    ),
-                                );
+                                let mut forward = 0.0;
+                                if ATTN_STAGES_FORWARD > 0u32 {
+                                    forward = scratch[SCRATCH_ATTENTION_FORWARD
+                                        + (step * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))];
+                                } else {
+                                    forward = fetch(
+                                        output_grad,
+                                        select(
+                                            0u32,
+                                            output_grad_plane
+                                                + at_row * output_grad.strides.z
+                                                + walked * output_grad.strides.w,
+                                            held,
+                                        ),
+                                    );
+                                }
                                 difference = difference
                                     + select(
                                         0.0,

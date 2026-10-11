@@ -894,6 +894,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         profile.workgroup(),
         8,
         1,
+        AttentionTile::PANELS,
     )];
     let geometry = Geometry::of(
         profile.workgroup(),
@@ -937,8 +938,20 @@ fn the_same_rust_specialization_produces_the_same_device_program() {
 fn attention_specialization_contains_every_tile_of_its_geometry() {
     let profile = *profiles().last().expect("a profile");
     let attention = [
-        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 8, 1),
-        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 16, 1),
+        AttentionTile::fit(
+            profile.scratch_bytes(),
+            profile.workgroup(),
+            8,
+            1,
+            AttentionTile::PANELS,
+        ),
+        AttentionTile::fit(
+            profile.scratch_bytes(),
+            profile.workgroup(),
+            16,
+            1,
+            AttentionTile::RECOMPUTED_PANELS,
+        ),
     ];
     let kernel = Kernel::assemble(
         &[
@@ -963,6 +976,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
             format!("run_attention_key_grad_{index}"),
             format!("run_attention_value_grad_{index}"),
             format!("stage_attention_{index}"),
+            format!("stage_forward_{index}"),
         ] {
             assert!(names.contains(name.as_str()), "{name} is missing");
         }
