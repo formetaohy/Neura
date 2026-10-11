@@ -111,6 +111,29 @@ fn a_top_k_hands_back_the_largest_numbers_of_a_row_and_where_they_stood() {
 }
 
 #[test]
+fn a_row_whose_largest_numbers_stand_in_one_share_keeps_every_one_of_them() {
+    let runtime = open();
+    let (rows, columns, keep) = (2u32, 2048u32, 8u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let share = 5usize;
+    for rank in 0..keep as usize {
+        data[share + rank * 256] = 100.0 + rank as f32;
+    }
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        &indices[..keep as usize],
+        &[1797.0, 1541.0, 1285.0, 1029.0, 773.0, 517.0, 261.0, 5.0],
+        "the numbers of one strided share stand in one thread's hands",
+    );
+    assert_close(
+        &values[..keep as usize],
+        &[107.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0],
+        1e-6,
+    );
+}
+
+#[test]
 fn a_top_k_keeps_the_smaller_class_of_a_tie() {
     let runtime = open();
     let (rows, columns, keep) = (4u32, 9u32, 4u32);

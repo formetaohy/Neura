@@ -4,6 +4,15 @@ use neura_profile::Geometry;
 pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_CHOICE", geometry.choice());
     compiler.constant("SCRATCH_SAMPLE", 2u32 * geometry.workgroup());
+    compiler.constant(
+        "SCRATCH_UNION",
+        2u32 * geometry.workgroup() + 2u32 * neura_abi::CANDIDATES,
+    );
+    let layout = geometry.choice_layout();
+    compiler.constant("CHOICE_LOCAL", layout.local());
+    compiler.constant("CHOICE_OWNERS", layout.owners());
+    compiler.constant("CHOICE_ENTRIES", layout.entries());
+    compiler.constant("CHOICE_LEVELS", layout.levels());
     compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
     device::define(compiler);
 }
@@ -189,6 +198,144 @@ mod device {
         return value == previous_value && column > previous_index;
     }
 
+    fn better(value: f32, index: u32, other_value: f32, other_index: u32) -> bool {
+        if other_index == NO_VALUE {
+            return true;
+        }
+        if value > other_value {
+            return true;
+        }
+        return value == other_value && index < other_index;
+    }
+
+    fn rank_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) -> u32 {
+        let mut count = 0u32;
+        let mut previous_value = max_identity();
+        let mut previous_index = NO_VALUE;
+        loop {
+            if count >= keep {
+                break;
+            }
+            let mut local_value = scalar_array(max_identity(), CHOICE_LOCAL);
+            let mut local_index = scalar_array(NO_VALUE, CHOICE_LOCAL);
+            if lid < CHOICE_OWNERS {
+                for base in stride(lid, columns, CHOICE_OWNERS * 4u32) {
+                    let mut held = scalar_array(max_identity(), 4u32);
+                    for at in unroll(0u32, 4u32, 1u32) {
+                        let column = base + at * CHOICE_OWNERS;
+                        held[at] = select(
+                            max_identity(),
+                            read_flat(task, source, row * columns + min(column, columns - 1u32)),
+                            column < columns,
+                        );
+                    }
+                    for at in unroll(0u32, 4u32, 1u32) {
+                        let column = base + at * CHOICE_OWNERS;
+                        let value = held[at];
+                        if column < columns
+                            && sample_after(value, column, previous_value, previous_index)
+                            && better(
+                                value,
+                                column,
+                                local_value[CHOICE_LOCAL - 1u32],
+                                local_index[CHOICE_LOCAL - 1u32],
+                            )
+                        {
+                            let mut held_value = value;
+                            let mut held_index = column;
+                            for seat in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                                if better(
+                                    held_value,
+                                    held_index,
+                                    local_value[seat],
+                                    local_index[seat],
+                                ) {
+                                    let swap_value = local_value[seat];
+                                    let swap_index = local_index[seat];
+                                    local_value[seat] = held_value;
+                                    local_index[seat] = held_index;
+                                    held_value = swap_value;
+                                    held_index = swap_index;
+                                }
+                            }
+                        }
+                    }
+                }
+                for seat in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                    scratch[SCRATCH_UNION + lid * CHOICE_LOCAL + seat] = local_value[seat];
+                    scratch[SCRATCH_UNION + CHOICE_ENTRIES + lid * CHOICE_LOCAL + seat] =
+                        bitcast_f32(local_index[seat]);
+                }
+            }
+            workgroup_barrier();
+            let mut distance = 1u32;
+            for level in unroll(0u32, CHOICE_LEVELS, 1u32) {
+                let slot = lid * 2u32 * distance;
+                if slot + 2u32 * distance <= CHOICE_OWNERS {
+                    let mut carried = scalar_array(max_identity(), CHOICE_LOCAL);
+                    let mut carried_index = scalar_array(NO_VALUE, CHOICE_LOCAL);
+                    for half in unroll(0u32, 2u32, 1u32) {
+                        for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                            let seat = slot + half * distance;
+                            let mut held_value = scratch[SCRATCH_UNION + seat * CHOICE_LOCAL + at];
+                            let mut held_index = bitcast_u32(
+                                scratch[SCRATCH_UNION + CHOICE_ENTRIES + seat * CHOICE_LOCAL + at],
+                            );
+                            for place in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                                if better(
+                                    held_value,
+                                    held_index,
+                                    carried[place],
+                                    carried_index[place],
+                                ) {
+                                    let swap_value = carried[place];
+                                    let swap_index = carried_index[place];
+                                    carried[place] = held_value;
+                                    carried_index[place] = held_index;
+                                    held_value = swap_value;
+                                    held_index = swap_index;
+                                }
+                            }
+                        }
+                    }
+                    for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                        scratch[SCRATCH_UNION + slot * CHOICE_LOCAL + at] = carried[at];
+                        scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot * CHOICE_LOCAL + at] =
+                            bitcast_f32(carried_index[at]);
+                    }
+                }
+                workgroup_barrier();
+                distance = distance * 2u32;
+            }
+            let taken = min(keep - count, CHOICE_LOCAL);
+            let mut last_value = previous_value;
+            let mut last_index = previous_index;
+            for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                if at < taken {
+                    let index = bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + at]);
+                    if index != NO_VALUE {
+                        last_value = scratch[SCRATCH_UNION + at];
+                        last_index = index;
+                    }
+                }
+            }
+            if lid == 0u32 {
+                for at in unroll(0u32, CHOICE_LOCAL, 1u32) {
+                    if at < taken {
+                        scratch[SCRATCH_SAMPLE + count + at] = scratch[SCRATCH_UNION + at];
+                        scratch[SCRATCH_SAMPLE + CANDIDATES + count + at] =
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + at];
+                    }
+                }
+            }
+            previous_value = last_value;
+            previous_index = last_index;
+            count = count + taken;
+            workgroup_barrier();
+        }
+        return count;
+    }
+
     fn sample_mass(lid: u32, max_value: f32, total: f32) -> f32 {
         scratch[lid] = max_value;
         scratch[SCRATCH_CHOICE + lid] = total;
@@ -230,55 +377,39 @@ mod device {
     ) -> u32 {
         let mut local_max = max_identity();
         let mut local_total = 0.0;
-        for column in stride(lid, columns, WORKGROUP_SIZE) {
-            let value = read_flat(task, source, row * columns + column);
-            if local_max == max_identity() {
-                local_max = value;
-                local_total = select(0.0, 1.0, value > max_identity());
-            } else {
-                if value > local_max {
-                    local_total = local_total * softmax_exp(local_max - value) + 1.0;
-                    local_max = value;
-                } else {
-                    local_total = local_total + softmax_exp(value - local_max);
+        for base in stride(lid, columns, WORKGROUP_SIZE * 4u32) {
+            let mut held = scalar_array(max_identity(), 4u32);
+            for at in unroll(0u32, 4u32, 1u32) {
+                let column = base + at * WORKGROUP_SIZE;
+                held[at] = select(
+                    max_identity(),
+                    read_flat(task, source, row * columns + min(column, columns - 1u32)),
+                    column < columns,
+                );
+            }
+            for at in unroll(0u32, 4u32, 1u32) {
+                let column = base + at * WORKGROUP_SIZE;
+                let value = held[at];
+                if column < columns {
+                    if local_max == max_identity() {
+                        local_max = value;
+                        local_total = select(0.0, 1.0, value > max_identity());
+                    } else {
+                        if value > local_max {
+                            local_total = local_total * softmax_exp(local_max - value) + 1.0;
+                            local_max = value;
+                        } else {
+                            local_total = local_total + softmax_exp(value - local_max);
+                        }
+                    }
                 }
             }
         }
         let total = sample_mass(lid, local_max, local_total);
         let row_max = scratch[0u32];
         workgroup_barrier();
-        let mut count = 0u32;
-        let mut previous_value = max_identity();
-        let mut previous_index = NO_VALUE;
-        loop {
-            if count >= keep {
-                break;
-            }
-            let mut local_value = max_identity();
-            let mut local_index = NO_VALUE;
-            for column in stride(lid, columns, WORKGROUP_SIZE) {
-                let value = read_flat(task, source, row * columns + column);
-                if sample_after(value, column, previous_value, previous_index)
-                    && (local_index == NO_VALUE
-                        || choice_precedes(local_value, local_index, value, column))
-                {
-                    local_value = value;
-                    local_index = column;
-                }
-            }
-            let chosen_index = workgroup_choice(lid, local_value, local_index);
-            let chosen_value = scratch[0u32];
-            if chosen_index != NO_VALUE {
-                previous_value = chosen_value;
-                previous_index = chosen_index;
-            }
-            if lid == 0u32 {
-                scratch[SCRATCH_SAMPLE + count] = chosen_value;
-                scratch[SCRATCH_SAMPLE + CANDIDATES + count] = bitcast_f32(chosen_index);
-            }
-            count = count + 1u32;
-            workgroup_barrier();
-        }
+        let count = rank_row(task, lid, source, row, columns, keep);
+        workgroup_barrier();
         let mut chosen = NO_VALUE;
         if lid == 0u32 {
             let mut mass = 0.0;
@@ -362,38 +493,7 @@ mod device {
     fn top_k_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) {
         let kept_values = values[task.out];
         let kept_indices = values[task.extra];
-        let mut count = 0u32;
-        let mut previous_value = max_identity();
-        let mut previous_index = NO_VALUE;
-        loop {
-            if count >= keep {
-                break;
-            }
-            let mut local_value = max_identity();
-            let mut local_index = NO_VALUE;
-            for column in stride(lid, columns, WORKGROUP_SIZE) {
-                let value = read_flat(task, source, row * columns + column);
-                if sample_after(value, column, previous_value, previous_index)
-                    && (local_index == NO_VALUE
-                        || choice_precedes(local_value, local_index, value, column))
-                {
-                    local_value = value;
-                    local_index = column;
-                }
-            }
-            let chosen_index = workgroup_choice(lid, local_value, local_index);
-            let chosen_value = scratch[0u32];
-            if chosen_index != NO_VALUE {
-                previous_value = chosen_value;
-                previous_index = chosen_index;
-            }
-            if lid == 0u32 {
-                scratch[SCRATCH_SAMPLE + count] = chosen_value;
-                scratch[SCRATCH_SAMPLE + CANDIDATES + count] = bitcast_f32(chosen_index);
-            }
-            count = count + 1u32;
-            workgroup_barrier();
-        }
+        rank_row(task, lid, source, row, columns, keep);
         for candidate in stride(lid, keep, WORKGROUP_SIZE) {
             publish(
                 kept_values,

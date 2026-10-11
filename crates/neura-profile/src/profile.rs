@@ -1,6 +1,37 @@
 use neura_abi::{DeviceModule, Kind, WORD_BYTES};
 use std::collections::HashMap;
 
+pub const CHOICE_LOCAL_CEILING: u32 = 4;
+pub const CHOICE_CAP: u32 = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ChoiceLayout {
+    owners: u32,
+    local: u32,
+}
+
+impl ChoiceLayout {
+    pub const fn owners(self) -> u32 {
+        self.owners
+    }
+
+    pub const fn local(self) -> u32 {
+        self.local
+    }
+
+    pub const fn entries(self) -> u32 {
+        self.owners * self.local
+    }
+
+    pub const fn words(self, workgroup: u32) -> u32 {
+        2 * workgroup + 2 * neura_abi::CANDIDATES + 2 * self.entries()
+    }
+
+    pub const fn levels(self) -> u32 {
+        self.owners.next_power_of_two().trailing_zeros()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct AttentionTile {
     keys: u32,
@@ -1204,7 +1235,7 @@ impl Geometry {
             DeviceModule::MatmulWeight => (self.left_stage + self.right_stage) as u32,
             DeviceModule::Attention => self.attention_scratch_words(),
             DeviceModule::Reduce => self.workgroup,
-            DeviceModule::Choice => 2 * self.workgroup + 2 * neura_abi::CANDIDATES,
+            DeviceModule::Choice => self.choice_layout().words(self.workgroup),
             DeviceModule::Scan => self.workgroup,
             _ => 0,
         }
@@ -1227,6 +1258,17 @@ impl Geometry {
 
     pub const fn choice(&self) -> u32 {
         self.workgroup
+    }
+
+    pub fn choice_layout(&self) -> ChoiceLayout {
+        let owners = self.workgroup.min(CHOICE_CAP);
+        let room = (self.budget / WORD_BYTES) as u32;
+        let fixed = 2 * self.workgroup + 2 * neura_abi::CANDIDATES + CLAIM_WORDS;
+        let mut local = 1;
+        while local < CHOICE_LOCAL_CEILING && fixed + 2 * owners * (local + 1) <= room {
+            local += 1;
+        }
+        ChoiceLayout { owners, local }
     }
 
     pub fn attention(&self) -> &[AttentionTile] {
