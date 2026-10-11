@@ -1,4 +1,4 @@
-use neura_abi::{Element, Kind};
+use neura_abi::{Element, Kind, TaskRecord, strategy};
 use neura_graph::{Graph, Shape, Value};
 use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::Runtime;
@@ -155,6 +155,40 @@ fn a_top_k_keeps_the_smaller_class_of_a_tie() {
         "a tie keeps the smaller class first",
     );
     assert_close(&values[..keep as usize], &[2.0, 2.0, 2.0, 2.0], 1e-6);
+}
+
+#[test]
+fn a_narrow_row_ranks_through_one_thread() {
+    let runtime = open();
+    let (rows, columns, keep) = (4096u32, 64u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut covered = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::TopK {
+            continue;
+        }
+        assert_eq!(
+            task.geometry,
+            strategy::THREAD_ROW,
+            "a row of {columns} numbers ranks through one thread, not with a whole workgroup",
+        );
+        covered += task.count;
+    }
+    assert_eq!(covered, rows, "every row is ranked exactly once");
+    let data = random(rows * columns, 61);
+    selecting.run(&runtime, &data, keep, rows, columns);
 }
 
 #[test]

@@ -11,6 +11,18 @@ pub struct ChoiceLayout {
 }
 
 impl ChoiceLayout {
+    pub fn of(workgroup: u32, budget: u64) -> Self {
+        let owners = workgroup.min(CHOICE_CAP);
+        let room = (budget / WORD_BYTES) as u32;
+        let fixed =
+            2 * workgroup + 2 * neura_abi::CANDIDATES + neura_abi::CHOICE_MERGE_WORDS + CLAIM_WORDS;
+        let mut local = 1;
+        while local < CHOICE_LOCAL_CEILING && fixed + 2 * owners * (local + 1) <= room {
+            local += 1;
+        }
+        Self { owners, local }
+    }
+
     pub const fn owners(self) -> u32 {
         self.owners
     }
@@ -1264,17 +1276,7 @@ impl Geometry {
     }
 
     pub fn choice_layout(&self) -> ChoiceLayout {
-        let owners = self.workgroup.min(CHOICE_CAP);
-        let room = (self.budget / WORD_BYTES) as u32;
-        let fixed = 2 * self.workgroup
-            + 2 * neura_abi::CANDIDATES
-            + neura_abi::CHOICE_MERGE_WORDS
-            + CLAIM_WORDS;
-        let mut local = 1;
-        while local < CHOICE_LOCAL_CEILING && fixed + 2 * owners * (local + 1) <= room {
-            local += 1;
-        }
-        ChoiceLayout { owners, local }
+        ChoiceLayout::of(self.workgroup, self.budget)
     }
 
     pub fn attention(&self) -> &[AttentionTile] {

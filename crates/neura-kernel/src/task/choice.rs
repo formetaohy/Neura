@@ -15,6 +15,7 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("CHOICE_LEVELS", layout.levels());
     compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
     compiler.constant("CHOICE_SECTIONS", neura_abi::CHOICE_SECTIONS);
+    compiler.constant("CHOICE_ROUND", neura_abi::CHOICE_ROUND);
     compiler.constant("CHOICE_STREAM", neura_abi::CHOICE_STREAM);
     let merge =
         2u32 * geometry.workgroup() + 2u32 * neura_abi::CANDIDATES + 2u32 * layout.entries();
@@ -481,6 +482,234 @@ mod device {
         return count;
     }
 
+    fn rank_round_by_thread(
+        source: Value,
+        row: u32,
+        columns: u32,
+        previous_value: f32,
+        previous_index: u32,
+    ) -> uvec4 {
+        let mut local_value = scalar_array(max_identity(), CHOICE_ROUND);
+        let mut local_index = scalar_array(NO_VALUE, CHOICE_ROUND);
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                held[at] = fetch(source, row * columns + base + at);
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                let value = held[at];
+                if sample_after(value, column, previous_value, previous_index)
+                    && better(
+                        value,
+                        column,
+                        local_value[CHOICE_ROUND - 1u32],
+                        local_index[CHOICE_ROUND - 1u32],
+                    )
+                {
+                    let mut carried_value = value;
+                    let mut carried_index = column;
+                    for seat in unroll(0u32, CHOICE_ROUND, 1u32) {
+                        if better(
+                            carried_value,
+                            carried_index,
+                            local_value[seat],
+                            local_index[seat],
+                        ) {
+                            let swapped_value = local_value[seat];
+                            let swapped_index = local_index[seat];
+                            local_value[seat] = carried_value;
+                            local_index[seat] = carried_index;
+                            carried_value = swapped_value;
+                            carried_index = swapped_index;
+                        }
+                    }
+                }
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            let value = fetch(source, row * columns + column);
+            if sample_after(value, column, previous_value, previous_index)
+                && better(
+                    value,
+                    column,
+                    local_value[CHOICE_ROUND - 1u32],
+                    local_index[CHOICE_ROUND - 1u32],
+                )
+            {
+                let mut carried_value = value;
+                let mut carried_index = column;
+                for seat in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    if better(
+                        carried_value,
+                        carried_index,
+                        local_value[seat],
+                        local_index[seat],
+                    ) {
+                        let swapped_value = local_value[seat];
+                        let swapped_index = local_index[seat];
+                        local_value[seat] = carried_value;
+                        local_index[seat] = carried_index;
+                        carried_value = swapped_value;
+                        carried_index = swapped_index;
+                    }
+                }
+            }
+        }
+        return uvec4(
+            local_index[0u32],
+            local_index[1u32],
+            local_index[2u32],
+            local_index[3u32],
+        );
+    }
+
+    fn top_k_rows_by_thread(task: Task, lid: u32, source: Value, keep: u32) {
+        let kept_values = values[task.out];
+        let kept_indices = values[task.extra];
+        let columns = source.dims.w;
+        let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut previous_value = max_identity();
+            let mut previous_index = NO_VALUE;
+            for round in stride(0u32, rounds, 1u32) {
+                let held =
+                    rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    let column = held[at];
+                    let kept = column != NO_VALUE;
+                    let slot = round * CHOICE_ROUND + at;
+                    if slot < keep {
+                        publish(
+                            kept_values,
+                            row * keep + slot,
+                            select(
+                                max_identity(),
+                                fetch(source, row * columns + min(column, columns - 1u32)),
+                                kept,
+                            ),
+                        );
+                        publish(kept_indices, row * keep + slot, f32(column));
+                    }
+                    if kept {
+                        previous_value = fetch(source, row * columns + column);
+                        previous_index = column;
+                    }
+                }
+            }
+        }
+    }
+
+    fn sample_largest_by_thread(source: Value, row: u32, columns: u32) -> f32 {
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        let mut largest = max_identity();
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                largest = max(largest, fetch(source, row * columns + base + at));
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            largest = max(largest, fetch(source, row * columns + column));
+        }
+        return largest;
+    }
+
+    fn sample_mass_by_thread(source: Value, row: u32, columns: u32, largest: f32) -> f32 {
+        let streamed = columns / CHOICE_STREAM * CHOICE_STREAM;
+        let mut mass = 0.0;
+        for base in stride(0u32, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                held[at] = softmax_exp(fetch(source, row * columns + base + at) - largest);
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                mass = mass + held[at];
+            }
+        }
+        for column in stride(streamed, columns, 1u32) {
+            mass = mass + softmax_exp(fetch(source, row * columns + column) - largest);
+        }
+        return mass;
+    }
+
+    fn sample_rows_by_thread(
+        task: Task,
+        lid: u32,
+        source: Value,
+        keep: u32,
+        cumulative: f32,
+        seed: u32,
+    ) {
+        let output = values[task.out];
+        let columns = source.dims.w;
+        let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let largest = sample_largest_by_thread(source, row, columns);
+            let total = sample_mass_by_thread(source, row, columns, largest);
+            let mut previous_value = max_identity();
+            let mut previous_index = NO_VALUE;
+            let mut kept_mass = 0.0;
+            let mut ranked = 0u32;
+            for round in stride(0u32, rounds, 1u32) {
+                let held =
+                    rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                    let column = held[at];
+                    if ranked + at < keep && column != NO_VALUE {
+                        previous_value = fetch(source, row * columns + column);
+                        previous_index = column;
+                        kept_mass = kept_mass + softmax_exp(previous_value - largest);
+                    }
+                }
+                ranked = ranked + min(keep - ranked, CHOICE_ROUND);
+            }
+            previous_value = max_identity();
+            previous_index = NO_VALUE;
+            let mut running = 0.0;
+            let mut best = max_identity();
+            let mut chosen = NO_VALUE;
+            let mut open = true;
+            let mut drawn = 0u32;
+            for round in stride(0u32, rounds, 1u32) {
+                if open {
+                    let held =
+                        rank_round_by_thread(source, row, columns, previous_value, previous_index);
+                    for at in unroll(0u32, CHOICE_ROUND, 1u32) {
+                        let column = held[at];
+                        if open && drawn + at < keep && column != NO_VALUE {
+                            let value = fetch(source, row * columns + column);
+                            previous_value = value;
+                            previous_index = column;
+                            running = running + softmax_exp(value - largest);
+                            let weight = value
+                                + gumbel_noise(
+                                    seed,
+                                    coordinates(row * columns + column, source.dims),
+                                );
+                            if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
+                                best = weight;
+                                chosen = column;
+                            }
+                            if running + total - kept_mass >= cumulative * total {
+                                open = false;
+                            }
+                        }
+                    }
+                    drawn = drawn + min(keep - drawn, CHOICE_ROUND);
+                }
+            }
+            if chosen == NO_VALUE {
+                chosen = 0u32;
+            }
+            publish(
+                output,
+                row,
+                chained(task, coordinates(row, output.dims), f32(chosen)),
+            );
+        }
+    }
+
     fn sample_mass(lid: u32, max_value: f32, total: f32) -> f32 {
         scratch[lid] = max_value;
         scratch[SCRATCH_CHOICE + lid] = total;
@@ -685,6 +914,9 @@ mod device {
         }
         let keep = u32(declared);
         match task.geometry {
+            strategy::THREAD_ROW => {
+                sample_rows_by_thread(task, lid, source, keep, cumulative, seed)
+            }
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
                     sample_chunk(task, lid, source, seed, keep, cumulative);
@@ -990,6 +1222,7 @@ mod device {
         let keep = task.keep;
         let columns = source.dims.w;
         match task.geometry {
+            strategy::THREAD_ROW => top_k_rows_by_thread(task, lid, source, keep),
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
                     top_k_chunk(task, lid);

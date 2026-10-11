@@ -32,7 +32,13 @@ pub const NO_VALUE: u32 = u32::MAX;
 pub const NO_SLOT: u32 = u8::MAX as u32;
 pub const WORD_BYTES: u64 = 4;
 pub const CANDIDATES: u32 = 64;
+pub const CHOICE_ROUND: u32 = 4;
 pub const CHOICE_SECTIONS: u32 = 32;
 pub const CHOICE_STREAM: u32 = 4;
 pub const SOFTMAX_STREAM: u32 = 4;
 pub const CHOICE_MERGE_WORDS: u32 = 5 * CHOICE_SECTIONS + 3 * CANDIDATES;
+
+const _: () = assert!(
+    CHOICE_ROUND == MAX_RANK,
+    "a round of the choice family hands back the lanes of one device vector",
+);

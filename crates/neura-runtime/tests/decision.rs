@@ -1,4 +1,4 @@
-use neura_abi::{Element, Kind};
+use neura_abi::{Element, Kind, TaskRecord, strategy};
 use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
@@ -798,6 +798,53 @@ fn a_row_wider_than_the_workgroup_samples_with_it() {
             ),
             "a row of {classes} numbers folds through the workgroup of a profile",
         );
+    }
+}
+
+#[test]
+fn a_narrow_row_draws_through_one_thread() {
+    let runtime = open();
+    let (rows, classes) = (4096u32, 64u32);
+    let model = Sampling::of(rows, classes);
+    let weights = runtime.weights(&model.graph);
+    let program = runtime.compile(&model.graph, &weights);
+    let plan = Plan::of(
+        &model.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut covered = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::Sample {
+            continue;
+        }
+        assert_eq!(
+            task.geometry,
+            strategy::THREAD_ROW,
+            "a row of {classes} numbers draws through one thread, not with a whole workgroup",
+        );
+        covered += task.count;
+    }
+    assert_eq!(covered, rows, "every row draws exactly once");
+    let logits = tied(rows * classes, 71);
+    runtime.write(&program, model.logits, &logits);
+    for (keep, cumulative) in [(8u32, 0.6f32), (8, 1.0), (40, 0.85)] {
+        runtime.write(&program, model.keep, &[keep as f32]);
+        runtime.write(&program, model.cumulative, &[cumulative]);
+        for raw in [0u32, 7, 0x5eed] {
+            runtime.write(&program, model.seed, &[f32::from_bits(raw)]);
+            runtime.run(&program);
+            assert_eq!(
+                runtime.read(&program, model.draw),
+                sample_reference(&logits, rows, classes, raw, &Sample { keep, cumulative },),
+                "a nucleus of {cumulative} over {keep} candidates of a {classes} class row drew another action",
+            );
+        }
     }
 }
 

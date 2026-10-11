@@ -7,7 +7,7 @@ use neura_abi::{
 };
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
-use neura_profile::{AttentionTile, MatmulTile, Profile};
+use neura_profile::{AttentionTile, ChoiceLayout, MatmulTile, Profile};
 
 const TASK_ELEMENTS_FLOOR: u32 = 2048;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
@@ -1097,6 +1097,44 @@ fn choice_body(rows: u32, columns: u32, profile: Profile, noised: bool) -> u32 {
     }
 }
 
+fn top_k_body(keep: u32, rows: u32, columns: u32, profile: Profile) -> u32 {
+    let keep = u64::from(keep);
+    let step = u64::from(neura_abi::CHOICE_ROUND);
+    rank_body(keep.div_ceil(step), keep, rows, columns, profile)
+}
+
+fn sample_body(rows: u32, columns: u32, profile: Profile) -> u32 {
+    let step = u64::from(neura_abi::CHOICE_ROUND);
+    let rounds = u64::from(CANDIDATES).div_ceil(step);
+    rank_body(
+        2 * rounds + 2,
+        u64::from(CANDIDATES),
+        rows,
+        columns,
+        profile,
+    )
+}
+
+fn rank_body(passes: u64, keep: u64, rows: u32, columns: u32, profile: Profile) -> u32 {
+    let layout = ChoiceLayout::of(profile.workgroup(), profile.shared_bytes());
+    let workgroup = u64::from(profile.workgroup());
+    let workgroups = u64::from(profile.workgroups());
+    let columns = u64::from(columns);
+    let threaded = u64::from(rows).div_ceil(workgroup * workgroups)
+        * passes
+        * columns.div_ceil(u64::from(CHOICE_STREAM));
+    let owners = u64::from(layout.owners());
+    let local = u64::from(layout.local());
+    let folded = u64::from(rows).div_ceil(workgroups)
+        * keep.div_ceil(local)
+        * (columns.div_ceil(owners * local) + u64::from(layout.levels()) + 2);
+    if threaded < folded {
+        strategy::THREAD_ROW
+    } else {
+        strategy::WORKGROUP_ROW
+    }
+}
+
 fn choice_sectioned(
     plan: &mut Plan,
     unit: &TaskInfo,
@@ -1161,6 +1199,7 @@ fn top_k(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         top_k_sections(plan, unit, rows, columns, sections, profile);
         return;
     }
+    let geometry = top_k_body(unit.keep, rows, columns, profile);
     let target = device_workgroups(profile);
     let measure = measured(plan, unit.out, Measure::Rows);
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
@@ -1170,7 +1209,7 @@ fn top_k(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             count,
             u64::from(count) * u64::from(columns) * u64::from(unit.keep + 1),
         );
-        task.geometry = strategy::WORKGROUP_ROW;
+        task.geometry = geometry;
         task.split = split;
         plan.tasks.push(task);
     }
@@ -1247,6 +1286,7 @@ fn sample(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
     let target = device_workgroups(profile);
     let measure = measured(plan, unit.out, Measure::Rows);
+    let geometry = sample_body(rows, columns, profile);
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(
             unit,
@@ -1254,7 +1294,7 @@ fn sample(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
             count,
             u64::from(count) * u64::from(columns) * u64::from(CANDIDATES + 1),
         );
-        task.geometry = strategy::WORKGROUP_ROW;
+        task.geometry = geometry;
         task.split = split;
         plan.tasks.push(task);
     }

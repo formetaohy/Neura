@@ -979,47 +979,112 @@ fn a_convert_walks_the_plan_index_over_the_tensor_it_narrows() {
 }
 
 #[test]
-fn a_sample_folds_every_row_through_its_workgroup() {
-    let rows = 1000u32;
+fn a_sample_walks_the_body_its_rounds_ask_for() {
     let graph = Graph::new();
-    let logits = graph.input(Shape::matrix(rows, 16), Element::Single);
-    let seed = graph.input(Shape::scalar(), Element::Single);
-    let keep = graph.parameter(Shape::scalar(), Init::Constant(4.0), Element::Single);
-    let cumulative = graph.parameter(Shape::scalar(), Init::Constant(0.9), Element::Single);
-    let draw = graph.sample(logits, seed, keep, cumulative);
-    graph.retain(draw);
+    let narrow_rows = graph.sample(
+        graph.input(Shape::matrix(4096, 16), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+    );
+    let wide_rows = graph.sample(
+        graph.input(Shape::matrix(4, 4096), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+        graph.input(Shape::scalar(), Element::Single),
+    );
+    graph.retain(narrow_rows);
+    graph.retain(wide_rows);
     for profile in [narrow(), wide()] {
         let plan = plan_with(&graph, profile);
-        let tasks = tasks_of(&plan, draw);
-        assert!(
-            !tasks.is_empty(),
-            "a sample of a thousand rows holds a task"
-        );
-        let mut cursor = 0;
-        for task in &tasks {
-            assert_eq!(Kind::of(task.kind), Kind::Sample);
-            assert_eq!(
-                task.geometry,
+        for (value, rows, geometry, label) in [
+            (
+                narrow_rows,
+                4096u32,
+                strategy::THREAD_ROW,
+                "4096 rows of 16 columns",
+            ),
+            (
+                wide_rows,
+                4,
                 strategy::WORKGROUP_ROW,
-                "a sample folds its rows through the workgroup of {profile:?}",
-            );
-            assert_eq!(task.a, logits.id());
-            assert_eq!(task.b, seed.id());
-            assert_eq!(task.c, keep.id());
-            assert_eq!(task.d, cumulative.id());
-            assert_eq!(
-                task.first, cursor,
-                "a block of rows begins where no block before it ended",
-            );
-            cursor += task.count;
+                "4 rows of 4096 columns",
+            ),
+        ] {
+            let tasks = tasks_of(&plan, value);
+            let mut cursor = 0;
+            for task in &tasks {
+                assert_eq!(Kind::of(task.kind), Kind::Sample);
+                assert_eq!(
+                    task.geometry, geometry,
+                    "{label} draw through {geometry} on {profile:?}",
+                );
+                assert_eq!(
+                    task.first, cursor,
+                    "a block of rows begins where no block before it ended",
+                );
+                cursor += task.count;
+            }
+            assert_eq!(cursor, rows, "{label} cover every row once");
         }
-        assert_eq!(cursor, rows);
-        assert_eq!(plan.span(draw, PLACEMENT).elements, rows);
     }
 }
 
 #[test]
-fn a_top_k_folds_every_row_through_its_workgroup() {
+fn a_top_k_walks_the_body_its_rounds_ask_for() {
+    let graph = Graph::new();
+    let value = graph.input(Shape::matrix(4096, 16), Element::Single);
+    let (narrow_values, narrow_indices) = graph.top_k(value, 4);
+    let wide_rows = graph.input(Shape::matrix(4, 4096), Element::Single);
+    let (wide_values, wide_indices) = graph.top_k(wide_rows, 4);
+    graph.retain(narrow_values);
+    graph.retain(narrow_indices);
+    graph.retain(wide_values);
+    graph.retain(wide_indices);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        for (kept, indices, rows, geometry, label) in [
+            (
+                narrow_values,
+                narrow_indices,
+                4096u32,
+                strategy::THREAD_ROW,
+                "4096 rows of 16 columns",
+            ),
+            (
+                wide_values,
+                wide_indices,
+                4,
+                strategy::WORKGROUP_ROW,
+                "4 rows of 4096 columns",
+            ),
+        ] {
+            let tasks = tasks_of(&plan, kept);
+            let mut cursor = 0;
+            for task in &tasks {
+                assert_eq!(Kind::of(task.kind), Kind::TopK);
+                assert_eq!(
+                    task.geometry, geometry,
+                    "{label} rank through {geometry} on {profile:?}",
+                );
+                assert_eq!(task.out, kept.id());
+                assert_eq!(task.extra, indices.id());
+                assert_eq!(task.keep, 4);
+                assert_eq!(
+                    task.first, cursor,
+                    "a block of rows begins where no block before it ended",
+                );
+                cursor += task.count;
+            }
+            assert_eq!(cursor, rows, "{label} cover every row once");
+        }
+        assert_eq!(plan.span(narrow_values, PLACEMENT).elements, 4096 * 4);
+        assert_eq!(plan.span(narrow_indices, PLACEMENT).elements, 4096 * 4);
+    }
+}
+
+#[test]
+fn a_top_k_of_a_thousand_rows_holds_a_task() {
     let rows = 1000u32;
     let graph = Graph::new();
     let value = graph.input(Shape::matrix(rows, 16), Element::Single);
@@ -1033,11 +1098,6 @@ fn a_top_k_folds_every_row_through_its_workgroup() {
         let mut cursor = 0;
         for task in &tasks {
             assert_eq!(Kind::of(task.kind), Kind::TopK);
-            assert_eq!(
-                task.geometry,
-                strategy::WORKGROUP_ROW,
-                "a top k folds its rows through the workgroup of {profile:?}",
-            );
             assert_eq!(task.a, value.id());
             assert_eq!(task.out, kept_values.id());
             assert_eq!(task.extra, kept_indices.id());
