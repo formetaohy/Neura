@@ -33,4 +33,5 @@ pub const NO_SLOT: u32 = u8::MAX as u32;
 pub const WORD_BYTES: u64 = 4;
 pub const CANDIDATES: u32 = 64;
 pub const CHOICE_SECTIONS: u32 = 32;
+pub const CHOICE_STREAM: u32 = 4;
 pub const CHOICE_MERGE_WORDS: u32 = 5 * CHOICE_SECTIONS + 3 * CANDIDATES;

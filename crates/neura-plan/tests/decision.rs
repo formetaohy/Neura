@@ -51,10 +51,11 @@ fn values_of(plan: &Plan) -> Vec<ValueRecord> {
 }
 
 #[test]
-fn a_row_folds_in_the_strategy_its_length_asks_for() {
+fn a_row_walks_the_strategy_its_rounds_ask_for() {
+    let rows = 1024u32;
     let graph = Graph::new();
     let short = graph.argmax(graph.input(Shape::matrix(4, 8), Element::Single));
-    let middle = graph.argmax(graph.input(Shape::matrix(333, 200), Element::Single));
+    let middle = graph.argmax(graph.input(Shape::matrix(rows, 64), Element::Single));
     let long = graph.argmax(graph.input(Shape::matrix(2, 4096), Element::Single));
     graph.retain(short);
     graph.retain(middle);
@@ -66,10 +67,10 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
         let plan = plan_with(&graph, profile);
         assert_eq!(tasks_of(&plan, short).len(), 4);
         let folds = tasks_of(&plan, middle);
-        let rows_per_task = 333u32.div_ceil(profile.workgroups());
+        let rows_per_task = rows.div_ceil(profile.workgroups());
         assert_eq!(
             folds.len(),
-            333usize.div_ceil(rows_per_task as usize),
+            rows as usize / rows_per_task as usize,
             "a row fold hands the device the tasks its device width asks for",
         );
         assert_eq!(tasks_of(&plan, long).len(), 2);
@@ -83,12 +84,12 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
         for task in tasks_of(&plan, middle) {
             assert_eq!(
                 task.geometry, middle_geometry,
-                "a row of 200 elements folds through {middle_geometry} on {profile:?}",
+                "a block of {rows} rows and 64 columns folds through {middle_geometry} on {profile:?}",
             );
-            assert!(task.count > 0 && task.count <= 333);
+            assert!(task.count > 0 && task.count <= rows);
             covered += task.count;
         }
-        assert_eq!(covered, 333);
+        assert_eq!(covered, rows);
         for (index, task) in tasks_of(&plan, long).into_iter().enumerate() {
             assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
             assert_eq!(task.first, index as u32);

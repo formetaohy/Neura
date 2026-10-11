@@ -15,6 +15,7 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("CHOICE_LEVELS", layout.levels());
     compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
     compiler.constant("CHOICE_SECTIONS", neura_abi::CHOICE_SECTIONS);
+    compiler.constant("CHOICE_STREAM", neura_abi::CHOICE_STREAM);
     let merge =
         2u32 * geometry.workgroup() + 2u32 * neura_abi::CANDIDATES + 2u32 * layout.entries();
     compiler.constant("SCRATCH_MERGE_VALUE", merge);
@@ -145,7 +146,30 @@ mod device {
     ) -> u32 {
         let mut local = max_identity();
         let mut local_index = 0u32;
-        for column in stride(first, last, 1u32) {
+        let streamed = first + (last - first) / CHOICE_STREAM * CHOICE_STREAM;
+        for base in stride(first, streamed, CHOICE_STREAM) {
+            let mut held = scalar_array(0.0, CHOICE_STREAM);
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                held[at] = choice_weight(
+                    read_flat(task, source, row * columns + column),
+                    seed,
+                    noised,
+                    source,
+                    row,
+                    column,
+                );
+            }
+            for at in unroll(0u32, CHOICE_STREAM, 1u32) {
+                let column = base + at;
+                let weight = held[at];
+                if weight > local {
+                    local = weight;
+                    local_index = column;
+                }
+            }
+        }
+        for column in stride(streamed, last, 1u32) {
             let weight = choice_weight(
                 read_flat(task, source, row * columns + column),
                 seed,

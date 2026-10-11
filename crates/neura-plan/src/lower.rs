@@ -2,7 +2,8 @@ use crate::access::Reads;
 use crate::product::{PARTIALS_CEILING, Product, SPLITS_CEILING};
 use crate::span::{self, Measure, Split};
 use neura_abi::{
-    CANDIDATES, Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord, strategy,
+    CANDIDATES, CHOICE_STREAM, Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord,
+    strategy,
 };
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
@@ -22,6 +23,7 @@ const ATTENTION_ENOUGH_TASKS: u64 = 16;
 const ATTENTION_WANTED_TASKS: u64 = 32;
 const CHOICE_SECTION_COLUMNS: u32 = 1024;
 const CHOICE_SECTION_FLOOR: u32 = 8192;
+const CHOICE_THREAD_ROUND_WEIGHT: u64 = 2;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -1030,17 +1032,32 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
         choice_sectioned(plan, unit, rows, columns, sections, profile);
         return;
     }
-    let geometry = if columns <= profile.workgroup() {
-        strategy::THREAD_ROW
-    } else {
-        strategy::WORKGROUP_ROW
-    };
+    let geometry = choice_body(rows, columns, profile, unit.kind == Kind::Categorical);
     let measure = measured(plan, unit.out, Measure::Rows);
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
         task.geometry = geometry;
         task.split = split;
         plan.tasks.push(task);
+    }
+}
+
+fn choice_body(rows: u32, columns: u32, profile: Profile, noised: bool) -> u32 {
+    let workgroup = u64::from(profile.workgroup());
+    let workgroups = u64::from(profile.workgroups());
+    let stream = u64::from(CHOICE_STREAM);
+    let element = u64::from(noised);
+    let rounds = u64::from(columns).div_ceil(stream);
+    let threaded = u64::from(rows).div_ceil(workgroup * workgroups)
+        * rounds
+        * (CHOICE_THREAD_ROUND_WEIGHT + stream * element);
+    let folded = u64::from(rows).div_ceil(workgroups)
+        * (1 + u64::from(columns).div_ceil(workgroup) * element
+            + u64::from(workgroup.trailing_zeros()));
+    if threaded < folded {
+        strategy::THREAD_ROW
+    } else {
+        strategy::WORKGROUP_ROW
     }
 }
 

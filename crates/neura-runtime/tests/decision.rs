@@ -157,6 +157,42 @@ fn a_row_whose_largest_number_is_its_identity_picks_that_number() {
 }
 
 #[test]
+fn a_row_that_walks_in_streams_keeps_the_first_of_its_maxima() {
+    let runtime = open();
+    let rows = 1024;
+    let classes = 64;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    let weights = runtime.weights(&graph);
+    let mut data = vec![0.0f32; (rows * classes) as usize];
+    let mut expected = Vec::with_capacity(rows as usize);
+    for row in 0..rows as usize {
+        let base = row * classes as usize;
+        if row % 2 == 0 {
+            data[base + 7] = 3.0;
+            data[base + 8] = 3.0;
+            expected.push(7.0);
+        } else {
+            data[base + 63] = 3.0;
+            expected.push(63.0);
+        }
+    }
+    assert_eq!(argmax_reference(&data, rows, classes), expected);
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&graph, &weights, profile);
+        runtime.write(&program, logits, &data);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, action),
+            expected,
+            "the {profile:?} walk keeps another maximum of a streamed row",
+        );
+    }
+}
+
+#[test]
 fn a_row_of_one_class_picks_that_class() {
     let runtime = open();
     let graph = Graph::new();
