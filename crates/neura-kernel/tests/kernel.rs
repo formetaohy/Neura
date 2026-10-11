@@ -893,6 +893,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
         profile.scratch_bytes(),
         profile.workgroup(),
         8,
+        1,
     )];
     let geometry = Geometry::of(
         profile.workgroup(),
@@ -936,8 +937,8 @@ fn the_same_rust_specialization_produces_the_same_device_program() {
 fn attention_specialization_contains_every_tile_of_its_geometry() {
     let profile = *profiles().last().expect("a profile");
     let attention = [
-        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 8),
-        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 16),
+        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 8, 1),
+        AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), 16, 1),
     ];
     let kernel = Kernel::assemble(
         &[

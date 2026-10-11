@@ -13,6 +13,8 @@ const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
 const FOLD_DEPTH: u32 = 16;
 const FOLD_TASKS: u32 = 1 << 15;
+const ATTENTION_ENOUGH_TASKS: u64 = 16;
+const ATTENTION_WANTED_TASKS: u64 = 32;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -381,9 +383,10 @@ fn schedule_unit(
         Kind::Attention | Kind::AttentionQueryGrad => {
             let rows = plan.shape(unit.out).dims();
             let tokens = rows[2];
-            let geometry = attention_geometry(plan, profile, rows[3]);
+            let wanted = attention_rows(tokens, rows[0] * rows[1], profile.workgroup());
+            let geometry = attention_geometry(plan, profile, rows[3], wanted);
             let tile = plan.attention[geometry as usize];
-            let per_task = profile.workgroup() / tile.slices();
+            let per_task = profile.workgroup() / (tile.groups() * tile.slices());
             let grid = if unit.queries != NO_VALUE {
                 unit.queries
             } else {
@@ -416,9 +419,10 @@ fn schedule_unit(
         }
         Kind::AttentionKeyGrad | Kind::AttentionValueGrad => {
             let keys = plan.shape(unit.inputs[1]).dims();
-            let geometry = attention_geometry(plan, profile, keys[3]);
+            let wanted = attention_rows(keys[2], keys[0] * keys[1], profile.workgroup());
+            let geometry = attention_geometry(plan, profile, keys[3], wanted);
             let tile = plan.attention[geometry as usize];
-            let per_task = profile.workgroup() / tile.slices();
+            let per_task = profile.workgroup() / (tile.groups() * tile.slices());
             let measure = measured(plan, unit.inputs[1], Measure::Tokens);
             let segmented = unit.segments != NO_VALUE;
             let spans = if segmented {
@@ -715,18 +719,33 @@ fn spans_of(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
 fn attention_work(count: u32, tokens: u32, tile: AttentionTile) -> u64 {
     let keys = tile.keys();
     let blocks = tokens.div_ceil(keys).max(1);
-    u64::from(count) * u64::from(keys) * u64::from(tile.width()) * u64::from(blocks)
+    let walked = u64::from(count) * u64::from(keys) * u64::from(tile.width()) * u64::from(blocks);
+    let rows = u64::from(count) * u64::from(tile.width());
+    let combined = match tile.groups() {
+        1 => 0,
+        groups => rows * u64::from(groups),
+    };
+    walked + combined
 }
 
-fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32) -> u32 {
-    if let Some(index) = plan.attention.iter().position(|tile| tile.width() == width) {
+fn attention_rows(units: u32, planes: u32, workgroup: u32) -> u32 {
+    let walked = u64::from(units) * u64::from(planes);
+    if walked.div_ceil(u64::from(workgroup)) >= ATTENTION_ENOUGH_TASKS {
+        return workgroup;
+    }
+    u32::try_from(walked.div_ceil(ATTENTION_WANTED_TASKS).max(1)).unwrap_or(u32::MAX)
+}
+
+fn attention_geometry(plan: &mut Plan, profile: Profile, width: u32, rows: u32) -> u32 {
+    let tile = AttentionTile::fit(profile.scratch_bytes(), profile.workgroup(), width, rows);
+    if let Some(index) = plan
+        .attention
+        .iter()
+        .position(|candidate| *candidate == tile)
+    {
         return index as u32;
     }
-    plan.attention.push(AttentionTile::fit(
-        profile.scratch_bytes(),
-        profile.workgroup(),
-        width,
-    ));
+    plan.attention.push(tile);
     (plan.attention.len() - 1) as u32
 }
 

@@ -460,6 +460,7 @@ fn a_fused_attention_holds_no_score_matrix_of_its_own() {
     let runtime = open();
     let tokens = [64u32, 128, 256];
     let mut held = Vec::new();
+    let mut walked = Vec::new();
     for tokens in tokens {
         let shapes = Shapes {
             heads: 4,
@@ -481,13 +482,13 @@ fn a_fused_attention_holds_no_score_matrix_of_its_own() {
         graph.retain(gradients.of(values));
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        assert!(
-            program.task_count() < 64,
-            "an attention of {tokens} tokens rides {} tasks",
-            program.task_count(),
-        );
+        walked.push(program.task_count());
         held.push(program.tensor_bytes());
     }
+    assert!(
+        walked[1] <= 2 * walked[0] + 16 && walked[2] <= 2 * walked[1] + 16,
+        "an attention of twice the tokens walks more than twice the tasks: {walked:?}",
+    );
     assert!(
         held[1] < 4 * held[0] && held[2] < 4 * held[1],
         "an attention of twice the tokens quadruples its arena: {held:?}",
@@ -1081,4 +1082,35 @@ fn a_device_task_steers_the_scale_of_an_attention_it_feeds() {
         );
         assert_close(&produced, &expected, 1e-5);
     }
+}
+
+#[test]
+fn a_starved_attention_weighs_the_keys_of_every_key_group() {
+    let shapes = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 512,
+        keys: 512,
+        width: 32,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: 1.0 / 32.0f32.sqrt(),
+    };
+    let runtime = open();
+    let (graph, _, _, _, out) = graph_of(shapes);
+    let loss = graph.sum(out);
+    let _ = graph.backward(loss);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    assert!(
+        program.task_count() > 2,
+        "one plane of {} rows parts itself into {} tasks where a whole workgroup walks one",
+        shapes.queries,
+        program.task_count(),
+    );
+    run_forward_on(&runtime, shapes, 1e-5);
+    run_backward_on(&runtime, shapes, 1e-5, None);
 }

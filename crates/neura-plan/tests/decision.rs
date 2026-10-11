@@ -529,12 +529,21 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             tiles[0].shared_bytes(profile.workgroup()) <= profile.shared_bytes(),
             "an attention stages more than the pool its profile offers",
         );
+        let per_task = profile.workgroup() / (tiles[0].groups() * tiles[0].slices());
         let tasks = tasks_of(&plan, out);
-        let blocks = tokens.div_ceil(profile.workgroup());
+        let blocks = tokens.div_ceil(per_task);
         assert_eq!(
             tasks.len() as u32,
             heads * batch * blocks,
             "an attention hands the device one task per row block of every plane",
+        );
+        assert!(
+            tiles[0].groups() > 1,
+            "{} rows over {} planes leave a {}-workgroup device idle, and an attention of width {width} walks no key group beside the {} its tile names",
+            tokens,
+            heads * batch,
+            profile.workgroup(),
+            tiles[0].groups(),
         );
         let mut plane = 0u32;
         let mut block = 0u32;
@@ -542,8 +551,8 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             assert_eq!(Kind::of(task.kind), Kind::Attention);
             assert_eq!(task.geometry, 0);
             assert_ne!(task.extra, neura_abi::NO_VALUE);
-            assert!(task.count > 0 && task.count <= profile.workgroup());
-            assert_eq!(task.first, plane * tokens + block * profile.workgroup());
+            assert!(task.count > 0 && task.count <= per_task);
+            assert_eq!(task.first, plane * tokens + block * per_task);
             assert!(task.knob != neura_abi::NO_VALUE && task.slot == 1);
             block += 1;
             if block == blocks {
@@ -552,6 +561,51 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
             }
         }
     }
+}
+
+#[test]
+fn an_attention_that_already_fills_the_device_walks_whole_rows() {
+    let heads = 16u32;
+    let tokens = 512u32;
+    let width = 64u32;
+    let graph = Graph::new();
+    let tensor = |tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, 1, tokens, width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let queries = tensor(tokens);
+    let keys = tensor(tokens);
+    let out = graph.attention(
+        queries,
+        keys,
+        keys,
+        neura_graph::AttentionOptions {
+            scale: Some(graph.knob(0.5)),
+            causal: false,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    let profile = narrow();
+    let plan = plan_with(&graph, profile);
+    let tile = plan.attention()[0];
+    assert_eq!(
+        tile.groups(),
+        1,
+        "{heads} planes of {tokens} rows fill the device without parting their keys",
+    );
+    let per_task = profile.workgroup() / (tile.groups() * tile.slices());
+    assert_eq!(
+        tasks_of(&plan, out).len() as u32,
+        heads * tokens.div_ceil(per_task),
+        "an attention of {heads} planes hands the device one task per whole row block",
+    );
 }
 
 #[test]
@@ -583,12 +637,14 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
     graph.retain(out);
     let profile = wide();
     let plan = plan_with(&graph, profile);
+    let rows = (tokens as u64).div_ceil(profile.workgroups() as u64).max(1) as u32;
     assert_eq!(
         plan.attention(),
         [AttentionTile::fit(
             profile.scratch_bytes(),
             profile.workgroup(),
-            width
+            width,
+            rows,
         )],
         "an attention keys as deep as the pool its profile offers, while the products beside it stage from that same pool",
     );
@@ -626,7 +682,7 @@ fn a_head_wider_than_a_thread_carries_splits_every_row_block_across_its_threads(
         2,
         "a row of {width} numbers spreads over two threads",
     );
-    let per_task = profile.workgroup() / tile.slices();
+    let per_task = profile.workgroup() / (tile.groups() * tile.slices());
     let tasks = tasks_of(&plan, out);
     assert_eq!(
         tasks.len() as u32,

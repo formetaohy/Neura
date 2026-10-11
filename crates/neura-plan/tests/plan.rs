@@ -37,6 +37,20 @@ fn plan_with(graph: &Graph, profile: Profile) -> Plan {
     Plan::of(graph, ALIGNMENT, profile, DEFAULT_ENCODING_BYTES)
 }
 
+fn attention_rows(plan: &Plan) -> u32 {
+    let tile = plan
+        .attention()
+        .first()
+        .expect("a plan of attention tasks carries the tile it divides its rows by");
+    narrow().workgroup() / (tile.groups() * tile.slices())
+}
+
+fn attention_chunks(plan: &Plan, task: &TaskRecord, bound: u32) -> u32 {
+    let tile = plan.attention()[task.geometry as usize];
+    let per_task = narrow().workgroup() / (tile.groups() * tile.slices());
+    bound.div_ceil(per_task)
+}
+
 fn records<T: bytemuck::AnyBitPattern>(bytes: &[u8], width: usize) -> Vec<T> {
     bytes
         .chunks_exact(width)
@@ -2982,7 +2996,7 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
     }
     let mut planes = Vec::new();
     let mut chunks = Vec::new();
-    let group = bound.div_ceil(narrow().workgroup());
+    let group = bound.div_ceil(attention_rows(&plan));
     assert!(
         group > 1,
         "a bound of {bound} rows spans one chunk per workgroup"
@@ -3000,27 +3014,36 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
                 (0, 0),
                 "task {index} takes the rows its segment holds at run time",
             );
+            let parts = attention_chunks(&plan, task, bound);
             assert_eq!(
-                task.group, group,
-                "task {index} walks one of the {group} chunks a plane of {bound} rows holds",
+                task.group, parts,
+                "task {index} walks one of the {parts} chunks a plane of {bound} rows holds",
             );
             assert!(
-                task.index < group,
-                "task {index} walks chunk {} of {group} chunks",
+                task.index < parts,
+                "task {index} walks chunk {} of {parts} chunks",
                 task.index,
             );
             planes.push(task.plane);
-            chunks.push((task.plane, task.index));
+            chunks.push((task.plane, task.index, parts));
         }
     }
     planes.sort_unstable();
     planes.dedup();
     assert_eq!(planes, [0, 1, 2, 3]);
-    chunks.sort_unstable();
-    chunks.dedup();
+    let parts = chunks
+        .first()
+        .map(|(_, _, parts)| *parts)
+        .expect("a gradient walks the keys of a segment");
+    let mut walked = chunks
+        .iter()
+        .map(|(plane, index, _)| (*plane, *index))
+        .collect::<Vec<_>>();
+    walked.sort_unstable();
+    walked.dedup();
     assert_eq!(
-        chunks.len(),
-        4 * group as usize,
+        walked.len(),
+        4 * parts as usize,
         "every plane walks every chunk of the rows its bound holds, and one task covers one chunk",
     );
 }
@@ -3064,7 +3087,7 @@ fn a_packed_query_walks_the_rows_its_offsets_close() {
     let patched = plan.patch_list()
         [patch.tasks as usize..(patch.tasks + patch.tasks_count) as usize]
         .to_vec();
-    let group = bound.div_ceil(narrow().workgroup());
+    let group = bound.div_ceil(attention_rows(&plan));
     assert!(
         group > 1,
         "a bound of {bound} rows spans one chunk per workgroup"
@@ -3165,13 +3188,12 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
     }
     let plan = plan(&graph);
     let records = tasks(&plan);
-    let group = bound.div_ceil(narrow().workgroup());
     assert!(
-        group > 1,
+        bound > attention_rows(&plan),
         "a bound of {bound} rows outruns the {} rows one workgroup walks",
-        narrow().workgroup(),
+        attention_rows(&plan),
     );
-    let mut grids = std::collections::BTreeMap::<(u32, u32), Vec<u32>>::new();
+    let mut grids = std::collections::BTreeMap::<(u32, u32), Vec<(u32, u32)>>::new();
     let mut row_map = Vec::new();
     for task in records
         .iter()
@@ -3191,14 +3213,15 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
             );
             continue;
         }
+        let chunks = attention_chunks(&plan, task, bound);
         assert_eq!(
-            task.group, group,
-            "a gradient cuts a plane into the {group} chunks one workgroup walks",
+            task.group, chunks,
+            "a gradient cuts a plane into the {chunks} chunks one workgroup walks",
         );
         grids
             .entry((task.out, task.plane))
             .or_default()
-            .push(task.index);
+            .push((task.index, chunks));
     }
     row_map.sort_unstable();
     assert_eq!(
@@ -3211,11 +3234,13 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
         8,
         "the two gradient families of a packed attention part every plane",
     );
-    for ((out, plane), mut chunks) in grids {
+    for ((out, plane), held) in grids {
+        let parts = held[0].1;
+        let mut chunks = held.iter().map(|(index, _)| *index).collect::<Vec<u32>>();
         chunks.sort_unstable();
         assert_eq!(
             chunks,
-            (0..group).collect::<Vec<u32>>(),
+            (0..parts).collect::<Vec<u32>>(),
             "plane {plane} of value {out} walks the chunks {chunks:?}",
         );
     }
@@ -3271,7 +3296,11 @@ fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
         grids.push((task.segment, task.out, task.plane, task.index));
     }
     for (bound, offsets, key) in axes {
-        let group = bound.div_ceil(narrow().workgroup());
+        let group = tasks(&plan)
+            .iter()
+            .find(|task| task.out == key.id())
+            .map(|task| attention_chunks(&plan, task, bound))
+            .expect("a key gradient walks the keys of an axis");
         for plane in 0..4 {
             let mut chunks = grids
                 .iter()
@@ -3529,7 +3558,6 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
     };
     let query_author = author(query_patch);
     let key_author = author(key_patch);
-    let group = |bound: u32| bound.div_ceil(narrow().workgroup());
     let mut forward = Vec::new();
     let mut key_grads = Vec::new();
     for (index, task) in records.iter().enumerate() {
@@ -3572,14 +3600,13 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
         } else {
             (key_bound, key_bound)
         };
+        let chunks = attention_chunks(&plan, task, bound);
         assert_eq!(
-            task.group,
-            group(bound),
-            "task {index} of {kind:?} walks one of the {} chunks a plane of {held} rows holds",
-            group(bound),
+            task.group, chunks,
+            "task {index} of {kind:?} walks one of the {chunks} chunks a plane of {held} rows holds",
         );
         assert!(
-            task.index < group(bound) && task.plane < 4,
+            task.index < chunks && task.plane < 4,
             "task {index} of {kind:?} walks chunk {} of plane {}",
             task.index,
             task.plane,
@@ -3601,21 +3628,25 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
             "task {index} of {kind:?} weighs the keys the closing task of the keys authors",
         );
         if packed {
-            forward.push((task.plane, task.index));
+            forward.push((task.plane, task.index, chunks));
         } else {
-            key_grads.push((task.plane, task.index));
+            key_grads.push((task.plane, task.index, chunks));
         }
     }
-    for (walked, chunks, name) in [
-        (forward, group(query_bound), "attention"),
-        (key_grads, group(key_bound), "key gradient"),
-    ] {
-        let mut walked = walked;
+    for (walked, name) in [(forward, "attention"), (key_grads, "key gradient")] {
+        let parts = walked
+            .first()
+            .map(|(_, _, parts)| *parts)
+            .expect("a packed task walks the rows an axis packs");
+        let mut walked = walked
+            .iter()
+            .map(|(plane, index, _)| (*plane, *index))
+            .collect::<Vec<_>>();
         walked.sort_unstable();
         walked.dedup();
         assert_eq!(
             walked.len(),
-            4 * chunks as usize,
+            4 * parts as usize,
             "every plane of the {name} walks every chunk of the rows its bound holds, and one task covers one chunk",
         );
     }

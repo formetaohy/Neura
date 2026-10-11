@@ -266,7 +266,7 @@ fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
             profile.workgroup(),
             profile.shared_bytes(),
             &walked(profile)[..],
-            &[AttentionTile::new(4, 8)],
+            &[AttentionTile::new(4, 8, 1)],
         );
         let bodies = [Kind::Matmul, Kind::Attention, Kind::SumAxis, Kind::Argmax];
         let demands = bodies.map(|kind| geometry.scratch_bytes(&[kind]));

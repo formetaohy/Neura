@@ -14,8 +14,34 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
             ("ATTN_WIDTH", tile.width()),
             ("ATTN_SLICES", tile.slices()),
             ("ATTN_SLICE", tile.slice_width()),
+            ("ATTN_GROUPS", tile.groups()),
+            ("ATTN_KEY_GROUP", tile.key_group()),
+            ("ATTN_ROWS", tile.rows(geometry.workgroup())),
+            ("ATTN_COMBINE_ROWS", tile.combine_rows(geometry.workgroup())),
+            ("ATTN_STRIDE", tile.stride()),
             ("SCRATCH_ATTENTION_RIGHT", tile.stage_words()),
             ("SCRATCH_ATTENTION_REDUCE", 2 * tile.stage_words()),
+            (
+                "SCRATCH_ATTENTION_ROW",
+                2 * tile.stage_words() + tile.reduction_words(geometry.workgroup()),
+            ),
+            (
+                "SCRATCH_ATTENTION_ML",
+                2 * tile.stage_words()
+                    + tile.reduction_words(geometry.workgroup())
+                    + tile.row_dot_words(geometry.workgroup()),
+            ),
+            (
+                "SCRATCH_ATTENTION_OUT",
+                2 * tile.stage_words()
+                    + tile.reduction_words(geometry.workgroup())
+                    + tile.row_dot_words(geometry.workgroup())
+                    + if tile.groups() > 1 {
+                        tile.rows(geometry.workgroup()) * tile.groups() * 2
+                    } else {
+                        0
+                    },
+            ),
         ];
         compiler.specialize(
             "template_stage_attention",
@@ -164,7 +190,7 @@ mod device {
                 left_plane + at * left.strides.z + depth * left.strides.w,
                 inside,
             );
-            scratch[unit] = select(0.0, fetch(left, address), inside);
+            scratch[column * ATTN_STRIDE + depth] = select(0.0, fetch(left, address), inside);
         }
         for unit in stride(lid, ATTN_KEYS * ATTN_WIDTH, WORKGROUP_SIZE) {
             let column = unit / ATTN_WIDTH;
@@ -176,7 +202,8 @@ mod device {
                 right_plane + at * right.strides.z + depth * right.strides.w,
                 inside,
             );
-            scratch[SCRATCH_ATTENTION_RIGHT + unit] = select(0.0, fetch(right, address), inside);
+            scratch[SCRATCH_ATTENTION_RIGHT + column * ATTN_STRIDE + depth] =
+                select(0.0, fetch(right, address), inside);
         }
     }
 
@@ -235,7 +262,9 @@ mod device {
             }
         }
         let slice = lid % ATTN_SLICES;
-        let unit = lid / ATTN_SLICES;
+        let rest = lid / ATTN_SLICES;
+        let group = rest % ATTN_GROUPS;
+        let unit = rest / ATTN_GROUPS;
         let row = plane.z + unit;
         let inside = unit < task.count;
         let causal = task.slot == 1u32;
@@ -260,10 +289,11 @@ mod device {
             task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
+        let first_key = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut queries = scalar_array(0.0, ATTN_SLICE);
         let mut accumulated = scalar_array(0.0, ATTN_SLICE);
-        let mut weights = scalar_array(0.0, ATTN_KEYS);
+        let mut weights = scalar_array(0.0, ATTN_KEY_GROUP);
         let mut largest = max_identity();
         let mut total = 0.0;
         if inside {
@@ -289,30 +319,33 @@ mod device {
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
             if inside {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut score = 0.0;
-                    for at in unroll(0u32, ATTN_SLICE, 1u32) {
-                        let depth = start_depth + at;
+                    for depth in unroll(0u32, ATTN_SLICE, 1u32) {
+                        let walked = start_depth + depth;
                         score = score
                             + select(
                                 0.0,
-                                queries[at]
+                                queries[depth]
                                     * scratch
-                                        [(column * ATTN_WIDTH + min(depth, ATTN_WIDTH - 1u32))],
-                                depth < ATTN_WIDTH,
+                                        [(column * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))],
+                                walked < ATTN_WIDTH,
                             );
                     }
-                    weights[column] = score;
+                    weights[at] = score;
                 }
             }
             if ATTN_SLICES > 1u32 {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     scratch[(SCRATCH_ATTENTION_REDUCE
                         + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES)
-                        + slice] = weights[column];
+                        + slice] = weights[at];
                 }
                 workgroup_barrier();
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut sum = 0.0;
                     for other in unroll(0u32, ATTN_SLICES, 1u32) {
                         sum = sum
@@ -320,18 +353,18 @@ mod device {
                                 + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES
                                 + other];
                     }
-                    weights[column] = sum;
+                    weights[at] = sum;
                 }
             }
             if inside {
                 let mut block_largest = max_identity();
                 let mut block_keys = 0u32;
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let at = block * ATTN_KEYS + column;
-                    let seen = visible(at, keys, written, position, task.reach, causal);
+                for slot in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let key_at = block * ATTN_KEYS + first_key + slot;
+                    let seen = visible(key_at, keys, written, position, task.reach, causal);
                     block_keys = block_keys + select(0u32, 1u32, seen);
-                    let weight = select(max_identity(), weights[column] * scale, seen);
-                    weights[column] = weight;
+                    let weight = select(max_identity(), weights[slot] * scale, seen);
+                    weights[slot] = weight;
                     block_largest = max(block_largest, weight);
                 }
                 let next = max(largest, block_largest);
@@ -341,30 +374,105 @@ mod device {
                 for at in unroll(0u32, ATTN_SLICE, 1u32) {
                     accumulated[at] = accumulated[at] * rescale;
                 }
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let weight = select(
-                        0.0,
-                        softmax_exp(weights[column] - largest),
-                        block_keys > 0u32,
-                    );
+                for slot in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + slot;
+                    let weight =
+                        select(0.0, softmax_exp(weights[slot] - largest), block_keys > 0u32);
                     total = total + weight;
-                    for at in unroll(0u32, ATTN_SLICE, 1u32) {
-                        let depth = start_depth + at;
-                        accumulated[at] = accumulated[at]
+                    for depth in unroll(0u32, ATTN_SLICE, 1u32) {
+                        let walked = start_depth + depth;
+                        accumulated[depth] = accumulated[depth]
                             + select(
                                 0.0,
                                 weight
                                     * scratch[SCRATCH_ATTENTION_RIGHT
-                                        + (column * ATTN_WIDTH + min(depth, ATTN_WIDTH - 1u32))],
-                                depth < ATTN_WIDTH,
+                                        + (column * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))],
+                                walked < ATTN_WIDTH,
                             );
                     }
                 }
             }
         }
-        if inside {
-            let carries_keys = total > 0.0;
-            let normalized = select(0.0, 1.0 / total, carries_keys);
+        let mut row_largest = largest;
+        let mut row_total = total;
+        if ATTN_GROUPS > 1u32 {
+            if inside {
+                scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + group) * 2u32] = largest;
+                scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + group) * 2u32 + 1u32] = total;
+            }
+            workgroup_barrier();
+            if inside {
+                row_largest = max_identity();
+                for other in stride(0u32, ATTN_GROUPS, 1u32) {
+                    row_largest = max(
+                        row_largest,
+                        scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + other) * 2u32],
+                    );
+                }
+                row_total = 0.0;
+                for other in stride(0u32, ATTN_GROUPS, 1u32) {
+                    let value = scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + other) * 2u32];
+                    let mass =
+                        scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + other) * 2u32 + 1u32];
+                    row_total = row_total
+                        + mass
+                            * select(
+                                0.0,
+                                softmax_exp(value - row_largest),
+                                row_largest != max_identity(),
+                            );
+                }
+                if group == 0u32 {
+                    let own = select(
+                        0.0,
+                        softmax_exp(largest - row_largest),
+                        row_largest != max_identity(),
+                    );
+                    for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                        accumulated[at] = accumulated[at] * own;
+                    }
+                }
+            }
+            for chunk in stride(0u32, ATTN_ROWS, ATTN_COMBINE_ROWS) {
+                let mine = inside && unit >= chunk && unit < chunk + ATTN_COMBINE_ROWS;
+                for other in stride(1u32, ATTN_GROUPS, 1u32) {
+                    workgroup_barrier();
+                    if mine && group == other {
+                        let weight = select(
+                            0.0,
+                            softmax_exp(
+                                scratch[SCRATCH_ATTENTION_ML + (unit * ATTN_GROUPS + other) * 2u32]
+                                    - row_largest,
+                            ),
+                            row_largest != max_identity(),
+                        );
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                scratch[SCRATCH_ATTENTION_OUT
+                                    + (unit - chunk) * ATTN_STRIDE
+                                    + walked] = accumulated[at] * weight;
+                            }
+                        }
+                    }
+                    workgroup_barrier();
+                    if mine && group == 0u32 {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                accumulated[at] = accumulated[at]
+                                    + scratch[SCRATCH_ATTENTION_OUT
+                                        + (unit - chunk) * ATTN_STRIDE
+                                        + walked];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if inside && group == 0u32 {
+            let carries_keys = row_total > 0.0;
+            let normalized = select(0.0, 1.0 / row_total, carries_keys);
             let at = uvec4(
                 plane.x,
                 plane.y,
@@ -385,11 +493,13 @@ mod device {
                     );
                 }
             }
-            publish(
-                statistic,
-                statistic_plane + row * statistic.strides.z,
-                select(0.0, largest + positive_log(total), carries_keys),
-            );
+            if slice == 0u32 {
+                publish(
+                    statistic,
+                    statistic_plane + row * statistic.strides.z,
+                    select(0.0, row_largest + positive_log(row_total), carries_keys),
+                );
+            }
         }
     }
 
@@ -469,7 +579,9 @@ mod device {
             }
         }
         let slice = lid % ATTN_SLICES;
-        let unit = lid / ATTN_SLICES;
+        let rest = lid / ATTN_SLICES;
+        let group = rest % ATTN_GROUPS;
+        let unit = rest / ATTN_GROUPS;
         let row = plane.z + unit;
         let inside = unit < task.count;
         let causal = task.slot == 1u32;
@@ -494,12 +606,13 @@ mod device {
             task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
         let first_block = window / ATTN_KEYS;
+        let first_key = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut queries = scalar_array(0.0, ATTN_SLICE);
         let mut gradients = scalar_array(0.0, ATTN_SLICE);
         let mut accumulated = scalar_array(0.0, ATTN_SLICE);
-        let mut weights = scalar_array(0.0, ATTN_KEYS);
-        let mut partial = scalar_array(0.0, ATTN_KEYS);
+        let mut weights = scalar_array(0.0, ATTN_KEY_GROUP);
+        let mut partial = scalar_array(0.0, ATTN_KEY_GROUP);
         let mut row_dot = 0.0;
         let mut normalizer = 0.0;
         if inside {
@@ -550,15 +663,14 @@ mod device {
             normalizer = fetch(statistic, statistic_plane + row * statistic.strides.z);
         }
         if ATTN_SLICES > 1u32 {
-            scratch[(SCRATCH_ATTENTION_REDUCE
-                + (unit * ATTN_KEYS + 0u32) * ATTN_REDUCTIONS * ATTN_SLICES)
-                + slice] = row_dot;
+            scratch[SCRATCH_ATTENTION_ROW + (unit * ATTN_GROUPS + group) * ATTN_SLICES + slice] =
+                row_dot;
             workgroup_barrier();
             let mut sum = 0.0;
             for other in unroll(0u32, ATTN_SLICES, 1u32) {
                 sum = sum
-                    + scratch[(SCRATCH_ATTENTION_REDUCE
-                        + (unit * ATTN_KEYS + 0u32) * ATTN_REDUCTIONS * ATTN_SLICES)
+                    + scratch[SCRATCH_ATTENTION_ROW
+                        + (unit * ATTN_GROUPS + group) * ATTN_SLICES
                         + other];
             }
             row_dot = sum;
@@ -568,7 +680,8 @@ mod device {
             template_stage_attention(lid, block, key_plane, value_plane, key, value, keys, keys);
             workgroup_barrier();
             if inside {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut weighted = 0.0;
                     for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                         let walked = start_depth + depth;
@@ -577,21 +690,23 @@ mod device {
                                 0.0,
                                 gradients[depth]
                                     * scratch[SCRATCH_ATTENTION_RIGHT
-                                        + (column * ATTN_WIDTH + min(walked, ATTN_WIDTH - 1u32))],
+                                        + (column * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))],
                                 walked < ATTN_WIDTH,
                             );
                     }
-                    partial[column] = weighted;
+                    partial[at] = weighted;
                 }
             }
             if ATTN_SLICES > 1u32 {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     scratch[(SCRATCH_ATTENTION_REDUCE
                         + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES)
-                        + slice] = partial[column];
+                        + slice] = partial[at];
                 }
                 workgroup_barrier();
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut sum = 0.0;
                     for other in unroll(0u32, ATTN_SLICES, 1u32) {
                         sum = sum
@@ -599,11 +714,12 @@ mod device {
                                 + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES
                                 + other];
                     }
-                    partial[column] = sum;
+                    partial[at] = sum;
                 }
             }
             if inside {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut score = 0.0;
                     for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                         let walked = start_depth + depth;
@@ -612,21 +728,23 @@ mod device {
                                 0.0,
                                 queries[depth]
                                     * scratch
-                                        [(column * ATTN_WIDTH + min(walked, ATTN_WIDTH - 1u32))],
+                                        [(column * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))],
                                 walked < ATTN_WIDTH,
                             );
                     }
-                    weights[column] = score;
+                    weights[at] = score;
                 }
             }
             if ATTN_SLICES > 1u32 {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     scratch[(SCRATCH_ATTENTION_REDUCE
                         + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES)
-                        + slice] = weights[column];
+                        + slice] = weights[at];
                 }
                 workgroup_barrier();
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
+                for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + at;
                     let mut sum = 0.0;
                     for other in unroll(0u32, ATTN_SLICES, 1u32) {
                         sum = sum
@@ -634,33 +752,64 @@ mod device {
                                 + (unit * ATTN_KEYS + column) * ATTN_REDUCTIONS * ATTN_SLICES
                                 + other];
                     }
-                    weights[column] = sum;
+                    weights[at] = sum;
                 }
             }
             if inside {
-                for column in unroll(0u32, ATTN_KEYS, 1u32) {
-                    let at = block * ATTN_KEYS + column;
+                for slot in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                    let column = first_key + slot;
+                    let key_at = block * ATTN_KEYS + column;
                     let weight = select(
                         0.0,
-                        softmax_exp(weights[column] * scale - normalizer),
-                        visible(at, keys, written, position, task.reach, causal),
+                        softmax_exp(weights[slot] * scale - normalizer),
+                        visible(key_at, keys, written, position, task.reach, causal),
                     );
-                    let scored = weight * (partial[column] - row_dot) * scale;
-                    for at in unroll(0u32, ATTN_SLICE, 1u32) {
-                        let depth = start_depth + at;
-                        accumulated[at] = accumulated[at]
+                    let scored = weight * (partial[slot] - row_dot) * scale;
+                    for depth in unroll(0u32, ATTN_SLICE, 1u32) {
+                        let walked = start_depth + depth;
+                        accumulated[depth] = accumulated[depth]
                             + select(
                                 0.0,
                                 scored
                                     * scratch
-                                        [(column * ATTN_WIDTH + min(depth, ATTN_WIDTH - 1u32))],
-                                depth < ATTN_WIDTH,
+                                        [(column * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))],
+                                walked < ATTN_WIDTH,
                             );
                     }
                 }
             }
         }
-        if inside {
+        if ATTN_GROUPS > 1u32 {
+            for chunk in stride(0u32, ATTN_ROWS, ATTN_COMBINE_ROWS) {
+                let mine = inside && unit >= chunk && unit < chunk + ATTN_COMBINE_ROWS;
+                for other in stride(1u32, ATTN_GROUPS, 1u32) {
+                    workgroup_barrier();
+                    if mine && group == other {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                scratch[SCRATCH_ATTENTION_OUT
+                                    + (unit - chunk) * ATTN_STRIDE
+                                    + walked] = accumulated[at];
+                            }
+                        }
+                    }
+                    workgroup_barrier();
+                    if mine && group == 0u32 {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                accumulated[at] = accumulated[at]
+                                    + scratch[SCRATCH_ATTENTION_OUT
+                                        + (unit - chunk) * ATTN_STRIDE
+                                        + walked];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if inside && group == 0u32 {
             let at = uvec4(
                 plane.x,
                 plane.y,
@@ -749,7 +898,9 @@ mod device {
             }
         }
         let slice = lid % ATTN_SLICES;
-        let unit = lid / ATTN_SLICES;
+        let rest = lid / ATTN_SLICES;
+        let group = rest % ATTN_GROUPS;
+        let unit = rest / ATTN_GROUPS;
         let column = plane.z + unit;
         let inside = unit < task.count;
         let causal = task.slot == 1u32;
@@ -764,12 +915,13 @@ mod device {
             plane.z / ATTN_KEYS,
             causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
+        let first_step = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut keys_row = scalar_array(0.0, ATTN_SLICE);
         let mut values_row = scalar_array(0.0, ATTN_SLICE);
         let mut accumulated = scalar_array(0.0, ATTN_SLICE);
-        let mut weights = scalar_array(0.0, ATTN_KEYS);
-        let mut partial = scalar_array(0.0, ATTN_KEYS);
+        let mut weights = scalar_array(0.0, ATTN_KEY_GROUP);
+        let mut partial = scalar_array(0.0, ATTN_KEY_GROUP);
         if inside {
             for at in unroll(0u32, ATTN_SLICE, 1u32) {
                 let depth = start_depth + at;
@@ -800,8 +952,8 @@ mod device {
                 );
             }
         }
-        for group in stride(0u32, heads, 1u32) {
-            let plane_head = select(plane.x * groups + group, head, segmented);
+        for group_head in stride(0u32, heads, 1u32) {
+            let plane_head = select(plane.x * groups + group_head, head, segmented);
             let plane_batch = select(plane.y, batch, segmented);
             let query_plane = select(
                 plane_head * query.strides.x + plane_batch * query.strides.y,
@@ -837,9 +989,10 @@ mod device {
                 );
                 workgroup_barrier();
                 if inside {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut difference = 0.0;
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
@@ -849,7 +1002,7 @@ mod device {
                                     select(
                                         0u32,
                                         output_grad_plane
-                                            + at * output_grad.strides.z
+                                            + at_row * output_grad.strides.z
                                             + walked * output_grad.strides.w,
                                         held,
                                     ),
@@ -858,28 +1011,31 @@ mod device {
                                     + select(
                                         0.0,
                                         scratch[SCRATCH_ATTENTION_RIGHT
-                                            + (step * ATTN_WIDTH + min(walked, ATTN_WIDTH - 1u32))]
+                                            + (step * ATTN_STRIDE
+                                                + min(walked, ATTN_WIDTH - 1u32))]
                                             * (values_row[depth] - forward),
                                         held,
                                     );
                             }
-                            partial[step] = difference;
+                            partial[at] = difference;
                         }
                     }
                 }
                 if ATTN_SLICES > 1u32 {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             scratch[(SCRATCH_ATTENTION_REDUCE
                                 + (unit * ATTN_KEYS + step) * ATTN_REDUCTIONS * ATTN_SLICES)
-                                + slice] = partial[step];
+                                + slice] = partial[at];
                         }
                     }
                     workgroup_barrier();
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut sum = 0.0;
                             for other in unroll(0u32, ATTN_SLICES, 1u32) {
                                 sum = sum
@@ -889,14 +1045,15 @@ mod device {
                                             * ATTN_SLICES
                                         + other];
                             }
-                            partial[step] = sum;
+                            partial[at] = sum;
                         }
                     }
                 }
                 if inside {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut score = 0.0;
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
@@ -904,28 +1061,30 @@ mod device {
                                     + select(
                                         0.0,
                                         scratch
-                                            [(step * ATTN_WIDTH + min(walked, ATTN_WIDTH - 1u32))]
+                                            [(step * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))]
                                             * keys_row[depth],
                                         walked < ATTN_WIDTH,
                                     );
                             }
-                            weights[step] = score;
+                            weights[at] = score;
                         }
                     }
                 }
                 if ATTN_SLICES > 1u32 {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             scratch[(SCRATCH_ATTENTION_REDUCE
                                 + (unit * ATTN_KEYS + step) * ATTN_REDUCTIONS * ATTN_SLICES)
-                                + slice] = weights[step];
+                                + slice] = weights[at];
                         }
                     }
                     workgroup_barrier();
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut sum = 0.0;
                             for other in unroll(0u32, ATTN_SLICES, 1u32) {
                                 sum = sum
@@ -935,33 +1094,34 @@ mod device {
                                             * ATTN_SLICES
                                         + other];
                             }
-                            weights[step] = sum;
+                            weights[at] = sum;
                         }
                     }
                 }
                 if inside {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let weight = select(
                                 0.0,
                                 softmax_exp(
-                                    weights[step] * scale
+                                    weights[at] * scale
                                         - fetch(
                                             statistic,
-                                            statistic_plane + at * statistic.strides.z,
+                                            statistic_plane + at_row * statistic.strides.z,
                                         ),
                                 ),
-                                attended(at, tokens, keys, column, origin, task.reach, causal),
+                                attended(at_row, tokens, keys, column, origin, task.reach, causal),
                             );
-                            let scored = weight * partial[step] * scale;
+                            let scored = weight * partial[at] * scale;
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
                                 accumulated[depth] = accumulated[depth]
                                     + select(
                                         0.0,
                                         scored
-                                            * scratch[(step * ATTN_WIDTH
+                                            * scratch[(step * ATTN_STRIDE
                                                 + min(walked, ATTN_WIDTH - 1u32))],
                                         walked < ATTN_WIDTH,
                                     );
@@ -971,7 +1131,37 @@ mod device {
                 }
             }
         }
-        if inside {
+        if ATTN_GROUPS > 1u32 {
+            for chunk in stride(0u32, ATTN_ROWS, ATTN_COMBINE_ROWS) {
+                let mine = inside && unit >= chunk && unit < chunk + ATTN_COMBINE_ROWS;
+                for other in stride(1u32, ATTN_GROUPS, 1u32) {
+                    workgroup_barrier();
+                    if mine && group == other {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                scratch[SCRATCH_ATTENTION_OUT
+                                    + (unit - chunk) * ATTN_STRIDE
+                                    + walked] = accumulated[at];
+                            }
+                        }
+                    }
+                    workgroup_barrier();
+                    if mine && group == 0u32 {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                accumulated[at] = accumulated[at]
+                                    + scratch[SCRATCH_ATTENTION_OUT
+                                        + (unit - chunk) * ATTN_STRIDE
+                                        + walked];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if inside && group == 0u32 {
             let at = uvec4(
                 select(plane.x, 0u32, segmented),
                 select(plane.y, 0u32, segmented),
@@ -1056,7 +1246,9 @@ mod device {
             }
         }
         let slice = lid % ATTN_SLICES;
-        let unit = lid / ATTN_SLICES;
+        let rest = lid / ATTN_SLICES;
+        let group = rest % ATTN_GROUPS;
+        let unit = rest / ATTN_GROUPS;
         let column = plane.z + unit;
         let inside = unit < task.count;
         let causal = task.slot == 1u32;
@@ -1071,10 +1263,11 @@ mod device {
             plane.z / ATTN_KEYS,
             causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
         );
+        let first_step = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
         let mut keys_row = scalar_array(0.0, ATTN_SLICE);
         let mut accumulated = scalar_array(0.0, ATTN_SLICE);
-        let mut weights = scalar_array(0.0, ATTN_KEYS);
+        let mut weights = scalar_array(0.0, ATTN_KEY_GROUP);
         if inside {
             for at in unroll(0u32, ATTN_SLICE, 1u32) {
                 let depth = start_depth + at;
@@ -1093,8 +1286,8 @@ mod device {
                 );
             }
         }
-        for group in stride(0u32, heads, 1u32) {
-            let plane_head = select(plane.x * groups + group, head, segmented);
+        for group_head in stride(0u32, heads, 1u32) {
+            let plane_head = select(plane.x * groups + group_head, head, segmented);
             let plane_batch = select(plane.y, batch, segmented);
             let query_plane = select(
                 plane_head * query.strides.x + plane_batch * query.strides.y,
@@ -1125,9 +1318,10 @@ mod device {
                 );
                 workgroup_barrier();
                 if inside {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut score = 0.0;
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
@@ -1135,28 +1329,30 @@ mod device {
                                     + select(
                                         0.0,
                                         scratch
-                                            [(step * ATTN_WIDTH + min(walked, ATTN_WIDTH - 1u32))]
+                                            [(step * ATTN_STRIDE + min(walked, ATTN_WIDTH - 1u32))]
                                             * keys_row[depth],
                                         walked < ATTN_WIDTH,
                                     );
                             }
-                            weights[step] = score;
+                            weights[at] = score;
                         }
                     }
                 }
                 if ATTN_SLICES > 1u32 {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             scratch[(SCRATCH_ATTENTION_REDUCE
                                 + (unit * ATTN_KEYS + step) * ATTN_REDUCTIONS * ATTN_SLICES)
-                                + slice] = weights[step];
+                                + slice] = weights[at];
                         }
                     }
                     workgroup_barrier();
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let mut sum = 0.0;
                             for other in unroll(0u32, ATTN_SLICES, 1u32) {
                                 sum = sum
@@ -1166,24 +1362,25 @@ mod device {
                                             * ATTN_SLICES
                                         + other];
                             }
-                            weights[step] = sum;
+                            weights[at] = sum;
                         }
                     }
                 }
                 if inside {
-                    for step in unroll(0u32, ATTN_KEYS, 1u32) {
-                        let at = block * ATTN_KEYS + step;
-                        if at < tokens {
+                    for at in unroll(0u32, ATTN_KEY_GROUP, 1u32) {
+                        let step = first_step + at;
+                        let at_row = block * ATTN_KEYS + step;
+                        if at_row < tokens {
                             let weight = select(
                                 0.0,
                                 softmax_exp(
-                                    weights[step] * scale
+                                    weights[at] * scale
                                         - fetch(
                                             statistic,
-                                            statistic_plane + at * statistic.strides.z,
+                                            statistic_plane + at_row * statistic.strides.z,
                                         ),
                                 ),
-                                attended(at, tokens, keys, column, origin, task.reach, causal),
+                                attended(at_row, tokens, keys, column, origin, task.reach, causal),
                             );
                             for depth in unroll(0u32, ATTN_SLICE, 1u32) {
                                 let walked = start_depth + depth;
@@ -1192,7 +1389,7 @@ mod device {
                                         0.0,
                                         weight
                                             * scratch[SCRATCH_ATTENTION_RIGHT
-                                                + (step * ATTN_WIDTH
+                                                + (step * ATTN_STRIDE
                                                     + min(walked, ATTN_WIDTH - 1u32))],
                                         walked < ATTN_WIDTH,
                                     );
@@ -1202,7 +1399,37 @@ mod device {
                 }
             }
         }
-        if inside {
+        if ATTN_GROUPS > 1u32 {
+            for chunk in stride(0u32, ATTN_ROWS, ATTN_COMBINE_ROWS) {
+                let mine = inside && unit >= chunk && unit < chunk + ATTN_COMBINE_ROWS;
+                for other in stride(1u32, ATTN_GROUPS, 1u32) {
+                    workgroup_barrier();
+                    if mine && group == other {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                scratch[SCRATCH_ATTENTION_OUT
+                                    + (unit - chunk) * ATTN_STRIDE
+                                    + walked] = accumulated[at];
+                            }
+                        }
+                    }
+                    workgroup_barrier();
+                    if mine && group == 0u32 {
+                        for at in unroll(0u32, ATTN_SLICE, 1u32) {
+                            let walked = slice * ATTN_SLICE + at;
+                            if walked < ATTN_WIDTH {
+                                accumulated[at] = accumulated[at]
+                                    + scratch[SCRATCH_ATTENTION_OUT
+                                        + (unit - chunk) * ATTN_STRIDE
+                                        + walked];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if inside && group == 0u32 {
             let at = uvec4(
                 select(plane.x, 0u32, segmented),
                 select(plane.y, 0u32, segmented),
