@@ -964,3 +964,112 @@ fn a_top_k_folds_every_row_through_its_workgroup() {
         assert_eq!(plan.span(kept_indices, PLACEMENT).elements, rows * 4);
     }
 }
+
+#[test]
+fn a_starved_top_k_parts_its_columns_between_the_tasks_of_its_row() {
+    let graph = Graph::new();
+    let value = graph.input(Shape::matrix(1, 8192), Element::Single);
+    let (kept_values, kept_indices) = graph.top_k(value, 40);
+    graph.retain(kept_values);
+    graph.retain(kept_indices);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::TopK)
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::TopKFold)
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() > 1,
+            "one row of 8192 numbers starves the column sections of one task",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its candidates once");
+        assert_eq!(folds[0].out, kept_values.id());
+        assert_eq!(folds[0].extra, kept_indices.id());
+        assert_eq!(folds[0].splits as usize, chunks.len());
+        assert_eq!(folds[0].first, 0);
+        assert_eq!(folds[0].count, 1);
+        let mut sections = chunks.iter().map(|task| task.section).collect::<Vec<_>>();
+        sections.sort_unstable();
+        sections.dedup();
+        assert_eq!(
+            sections.len(),
+            chunks.len(),
+            "every column section walks a share of its own",
+        );
+        for task in &chunks {
+            assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
+            assert_eq!(task.a, value.id());
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+            assert_eq!(task.keep, 40);
+            assert_eq!(task.splits as usize, chunks.len());
+        }
+    }
+}
+
+#[test]
+fn a_starved_sample_parts_its_classes_between_the_tasks_of_its_row() {
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(1, 8192), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let keep = graph.parameter(Shape::scalar(), Init::Constant(4.0), Element::Single);
+    let cumulative = graph.parameter(Shape::scalar(), Init::Constant(0.9), Element::Single);
+    let draw = graph.sample(logits, seed, keep, cumulative);
+    graph.retain(draw);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Sample)
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::SampleFold)
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() > 1,
+            "one row of 8192 classes starves the column sections of one task",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its candidates once");
+        assert_eq!(folds[0].out, draw.id());
+        assert_eq!(folds[0].splits as usize, chunks.len());
+        for task in &chunks {
+            assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.b, seed.id());
+            assert_eq!(task.c, keep.id());
+            assert_eq!(task.d, cumulative.id());
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+            assert_eq!(task.splits as usize, chunks.len());
+        }
+    }
+}
+
+#[test]
+fn a_choice_that_already_fills_the_device_walks_whole_rows() {
+    let graph = Graph::new();
+    let value = graph.input(Shape::matrix(64, 8192), Element::Single);
+    let (kept_values, _) = graph.top_k(value, 40);
+    graph.retain(kept_values);
+    let logits = graph.input(Shape::matrix(64, 8192), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let keep = graph.parameter(Shape::scalar(), Init::Constant(40.0), Element::Single);
+    let cumulative = graph.parameter(Shape::scalar(), Init::Constant(0.9), Element::Single);
+    let draw = graph.sample(logits, seed, keep, cumulative);
+    graph.retain(draw);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        assert!(
+            !plan.kinds().contains(&Kind::TopKFold),
+            "sixty four rows already fill the device",
+        );
+        assert!(!plan.kinds().contains(&Kind::SampleFold));
+    }
+}

@@ -1,7 +1,7 @@
 use crate::access::Reads;
 use crate::lower::Task;
 use crate::span::{Extents, Split};
-use neura_abi::{Element, Kind, NO_VALUE};
+use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE};
 use neura_graph::{Shape, ValueInfo};
 use neura_profile::MatmulTile;
 
@@ -537,6 +537,10 @@ fn narrow<W: Walk, V: Values>(
         Kind::AttentionFold | Kind::AttentionQueryGradFold => {
             attention_fold(values, task, first, count, &mut narrowed)
         }
+        Kind::TopK | Kind::Sample if task.splits() > 1 => {
+            choice_chunk(values, task, first, count, &mut narrowed)
+        }
+        Kind::TopKFold | Kind::SampleFold => choice_fold(values, task, first, count, &mut narrowed),
         Kind::Attention
         | Kind::AttentionQueryGrad
         | Kind::AttentionKeyGrad
@@ -569,6 +573,91 @@ fn narrow<W: Walk, V: Values>(
     }
     for count in task.depends() {
         narrowed.read_whole(count);
+    }
+}
+
+fn choice_chunk<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3].max(1));
+    let dims = values.dims(task.out());
+    let rows = u64::from(dims[2].max(1));
+    let sections = u64::from(task.splits().max(1));
+    let section = u64::from(task.section());
+    let first = u64::from(first);
+    let count = u64::from(count);
+    let first_column = columns * section / sections;
+    let last_column = columns * (section + 1u64) / sections;
+    narrowed.read(
+        source,
+        if values.dense(source) {
+            Region::band(
+                first * columns + first_column,
+                last_column - first_column,
+                columns,
+                count,
+            )
+        } else {
+            Region::Whole
+        },
+    );
+    let block = u64::from(CANDIDATES);
+    narrowed.write(
+        task.out(),
+        Region::run((section * rows + first) * block, count * block),
+    );
+    let carried = task.extra();
+    let span = match task.kind() {
+        Kind::TopK => block + 4,
+        _ => 2 * block + 4,
+    };
+    narrowed.write(
+        carried,
+        Region::run((section * rows + first) * span, count * span),
+    );
+}
+
+fn choice_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let out = task.out();
+    let dims = values.dims(out);
+    let columns = u64::from(dims[3].max(1));
+    let rows = u64::from(dims[0].max(1)) * u64::from(dims[1].max(1)) * u64::from(dims[2].max(1));
+    let sections = u64::from(task.splits().max(1));
+    let first = u64::from(first);
+    let count = u64::from(count);
+    let block = u64::from(CANDIDATES);
+    narrowed.read(
+        task.input(0),
+        Region::band(first * block, count * block, rows * block, sections),
+    );
+    let (carried, span) = match task.kind() {
+        Kind::TopKFold => (task.input(1), block + 4),
+        _ => (task.input(4), 2 * block + 4),
+    };
+    narrowed.read(
+        carried,
+        Region::band(first * span, count * span, rows * span, sections),
+    );
+    narrowed.write(out, Region::run(first * columns, count * columns));
+    if task.kind() == Kind::TopKFold {
+        narrowed.write(task.extra(), Region::run(first * columns, count * columns));
     }
 }
 

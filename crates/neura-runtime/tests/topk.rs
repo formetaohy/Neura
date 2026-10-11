@@ -1,5 +1,6 @@
-use neura_abi::Element;
+use neura_abi::{Element, Kind};
 use neura_graph::{Graph, Shape, Value};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::Runtime;
 
 #[path = "support/backend.rs"]
@@ -179,6 +180,90 @@ fn a_top_k_of_one_is_the_largest_number_of_every_row() {
     assert_eq!(
         produced[1], produced[2],
         "a top k of one keeps the class an argmax names",
+    );
+}
+
+#[test]
+fn a_starved_top_k_parts_the_numbers_of_a_row_between_its_column_sections() {
+    let runtime = open();
+    let (rows, columns, keep) = (1u32, 8192u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::TopKFold),
+        "one row of {columns} numbers starves the column sections of one task",
+    );
+    assert!(
+        program.tensor_bytes() < 1 << 20,
+        "a split top k of {columns} numbers holds {} bytes",
+        program.tensor_bytes(),
+    );
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let mut expected = Vec::new();
+    for rank in 0..keep as usize {
+        let column = rank * 200 + 5;
+        data[column] = 100.0 + rank as f32;
+        expected.push(column as f32);
+    }
+    expected.reverse();
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        indices, expected,
+        "every column section hands the fold the numbers it holds",
+    );
+    let largest = (0..keep)
+        .map(|rank| 100.0 + rank as f32)
+        .rev()
+        .collect::<Vec<_>>();
+    assert_close(&values, &largest, 1e-6);
+}
+
+#[test]
+fn a_starved_top_k_keeps_the_candidates_a_row_holds_in_one_column_section() {
+    let runtime = open();
+    let (rows, columns, keep) = (1u32, 8192u32, 8u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let held = 40usize;
+    for rank in 0..keep as usize {
+        data[held + rank * 3] = 100.0 + rank as f32;
+    }
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        &indices[..keep as usize],
+        &[61.0, 58.0, 55.0, 52.0, 49.0, 46.0, 43.0, 40.0],
+        "the candidates of one section stand in the order a fold merges them",
+    );
+    assert_close(
+        &values[..keep as usize],
+        &[107.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_top_k_that_already_fills_the_device_walks_whole_rows() {
+    let runtime = open();
+    let (rows, columns, keep) = (64u32, 8192u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        !plan.kinds().contains(&Kind::TopKFold),
+        "{rows} rows already fill the device, and a top k of them holds no fold",
     );
 }
 

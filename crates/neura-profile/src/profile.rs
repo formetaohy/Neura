@@ -24,7 +24,10 @@ impl ChoiceLayout {
     }
 
     pub const fn words(self, workgroup: u32) -> u32 {
-        2 * workgroup + 2 * neura_abi::CANDIDATES + 2 * self.entries()
+        2 * workgroup
+            + 2 * neura_abi::CANDIDATES
+            + 2 * self.entries()
+            + neura_abi::CHOICE_MERGE_WORDS
     }
 
     pub const fn levels(self) -> u32 {
@@ -1263,7 +1266,10 @@ impl Geometry {
     pub fn choice_layout(&self) -> ChoiceLayout {
         let owners = self.workgroup.min(CHOICE_CAP);
         let room = (self.budget / WORD_BYTES) as u32;
-        let fixed = 2 * self.workgroup + 2 * neura_abi::CANDIDATES + CLAIM_WORDS;
+        let fixed = 2 * self.workgroup
+            + 2 * neura_abi::CANDIDATES
+            + neura_abi::CHOICE_MERGE_WORDS
+            + CLAIM_WORDS;
         let mut local = 1;
         while local < CHOICE_LOCAL_CEILING && fixed + 2 * owners * (local + 1) <= room {
             local += 1;

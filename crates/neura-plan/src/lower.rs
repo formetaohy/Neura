@@ -1,7 +1,9 @@
 use crate::access::Reads;
 use crate::product::{PARTIALS_CEILING, Product, SPLITS_CEILING};
 use crate::span::{self, Measure, Split};
-use neura_abi::{Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord, strategy};
+use neura_abi::{
+    CANDIDATES, Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord, strategy,
+};
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
 use neura_profile::{AttentionTile, MatmulTile, Profile};
@@ -15,6 +17,8 @@ const FOLD_DEPTH: u32 = 16;
 const FOLD_TASKS: u32 = 1 << 15;
 const ATTENTION_ENOUGH_TASKS: u64 = 16;
 const ATTENTION_WANTED_TASKS: u64 = 32;
+const CHOICE_ENOUGH_TASKS: u64 = 16;
+const CHOICE_SECTION_COLUMNS: u32 = 1024;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -511,8 +515,8 @@ fn schedule_unit(
             );
         }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
-        Kind::Sample => sample(plan, unit, target),
-        Kind::TopK => top_k(plan, unit, target),
+        Kind::Sample => sample(plan, unit, profile),
+        Kind::TopK => top_k(plan, unit, profile),
         Kind::SumChunk => reduce(plan, unit, target),
         Kind::SumAxis => fold(plan, unit, profile),
         Kind::SegmentSum => segment_sum(plan, unit),
@@ -569,6 +573,9 @@ fn schedule_unit(
         }
         Kind::AttentionFold | Kind::AttentionQueryGradFold => {
             panic!("a fold of attention partials comes from the attention whose key split")
+        }
+        Kind::TopKFold | Kind::SampleFold => {
+            panic!("a fold of candidate partials comes from the choice whose columns are split")
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
@@ -907,10 +914,16 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     }
 }
 
-fn top_k(plan: &mut Plan, unit: &TaskInfo, target: u32) {
+fn top_k(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
+    let sections = choice_sections(plan, unit, rows, columns, profile);
+    if sections > 1 {
+        top_k_sections(plan, unit, rows, columns, sections, profile);
+        return;
+    }
+    let target = device_workgroups(profile);
     let measure = measured(plan, unit.out, Measure::Rows);
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(
@@ -925,22 +938,170 @@ fn top_k(plan: &mut Plan, unit: &TaskInfo, target: u32) {
     }
 }
 
-fn sample(plan: &mut Plan, unit: &TaskInfo, target: u32) {
+fn top_k_sections(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let keep = unit.keep;
+    let values = plan.publish(Shape::of([sections, 1, rows, CANDIDATES]));
+    let carried = plan.publish(Shape::of([sections, 1, rows, CANDIDATES + 4]));
+    for section in 0..sections {
+        for (first, count, split) in span::chunks(
+            rows,
+            choice_rows_per_task(rows, device_workgroups(profile)),
+            None,
+        ) {
+            let mut task = Task::span(
+                unit,
+                first,
+                count,
+                u64::from(count) * u64::from(columns.div_ceil(sections)) * u64::from(keep + 1),
+            );
+            task.geometry = strategy::WORKGROUP_ROW;
+            task.out = values;
+            task.extra = carried;
+            task.splits = sections;
+            task.section = section;
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in span::chunks(rows, 1, None) {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(keep) * u64::from(sections),
+        );
+        task.kind = Kind::TopKFold;
+        task.geometry = 0;
+        task.inputs = [values, carried, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.out = unit.out;
+        task.extra = unit.extra;
+        task.origin = NO_VALUE;
+        task.splits = sections;
+        task.section = 0;
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn sample(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
+    let sections = choice_sections(plan, unit, rows, columns, profile);
+    if sections > 1 {
+        sample_sections(plan, unit, rows, columns, sections, profile);
+        return;
+    }
+    let target = device_workgroups(profile);
     let measure = measured(plan, unit.out, Measure::Rows);
     for (first, count, split) in span::chunks(rows, choice_rows_per_task(rows, target), measure) {
         let mut task = Task::span(
             unit,
             first,
             count,
-            u64::from(count) * u64::from(columns) * u64::from(neura_abi::CANDIDATES + 1),
+            u64::from(count) * u64::from(columns) * u64::from(CANDIDATES + 1),
         );
         task.geometry = strategy::WORKGROUP_ROW;
         task.split = split;
         plan.tasks.push(task);
     }
+}
+
+fn sample_sections(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let values = plan.publish(Shape::of([sections, 1, rows, CANDIDATES]));
+    let carried = plan.publish(Shape::of([sections, 1, rows, 2 * CANDIDATES + 4]));
+    for section in 0..sections {
+        for (first, count, split) in span::chunks(
+            rows,
+            choice_rows_per_task(rows, device_workgroups(profile)),
+            None,
+        ) {
+            let mut task = Task::span(
+                unit,
+                first,
+                count,
+                u64::from(count)
+                    * u64::from(columns.div_ceil(sections))
+                    * u64::from(CANDIDATES + 1),
+            );
+            task.geometry = strategy::WORKGROUP_ROW;
+            task.out = values;
+            task.extra = carried;
+            task.splits = sections;
+            task.section = section;
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in span::chunks(rows, 1, None) {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(CANDIDATES) * u64::from(sections),
+        );
+        task.kind = Kind::SampleFold;
+        task.geometry = 0;
+        task.inputs[0] = values;
+        task.inputs[4] = carried;
+        task.out = unit.out;
+        task.origin = NO_VALUE;
+        task.splits = sections;
+        task.section = 0;
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn choice_sections(plan: &Plan, unit: &TaskInfo, rows: u32, columns: u32, profile: Profile) -> u32 {
+    if rows == 0 || columns < 2 * CHOICE_SECTION_COLUMNS || !choice_sealed(plan, unit) {
+        return 1;
+    }
+    let row_tasks = u64::from(rows).div_ceil(u64::from(choice_rows_per_task(
+        rows,
+        device_workgroups(profile),
+    )));
+    if row_tasks >= CHOICE_ENOUGH_TASKS {
+        return 1;
+    }
+    let words = u64::from(rows) * u64::from(4 + 3 * CANDIDATES);
+    let sections = u64::from(profile.workgroups())
+        .div_ceil(row_tasks.max(1))
+        .min(u64::from(columns / choice_section_columns(unit)))
+        .min(PARTIALS_CEILING / words.max(1))
+        .min(u64::from(SPLITS_CEILING))
+        .min(u64::from(neura_abi::CHOICE_SECTIONS))
+        .max(1);
+    u32::try_from(sections).unwrap_or(u32::MAX)
+}
+
+fn choice_section_columns(unit: &TaskInfo) -> u32 {
+    match unit.kind {
+        Kind::TopK if unit.keep >= 32 => 2 * CHOICE_SECTION_COLUMNS,
+        _ => CHOICE_SECTION_COLUMNS,
+    }
+}
+
+fn choice_sealed(plan: &Plan, unit: &TaskInfo) -> bool {
+    [unit.out, unit.extra]
+        .into_iter()
+        .chain(unit.inputs)
+        .filter(|value| *value != NO_VALUE)
+        .all(|value| !plan.shape(value).dynamic())
 }
 
 fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product, MatmulTile)]) {

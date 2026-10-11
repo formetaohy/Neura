@@ -831,6 +831,8 @@ impl<'g> Graph<'g> {
             | Kind::MatmulFold
             | Kind::AttentionFold
             | Kind::AttentionQueryGradFold
+            | Kind::TopKFold
+            | Kind::SampleFold
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite

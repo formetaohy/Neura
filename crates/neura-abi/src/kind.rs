@@ -589,4 +589,20 @@ kinds! {
         chain: true,
         origin: false,
     };
+    TopKFold TOP_K_FOLD = "top_k_fold" {
+        entry: "run_top_k_fold",
+        modules: [Choice],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    SampleFold SAMPLE_FOLD = "sample_fold" {
+        entry: "run_sample_fold",
+        modules: [Choice],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

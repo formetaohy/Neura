@@ -1,6 +1,7 @@
-use neura_abi::Element;
+use neura_abi::{Element, Kind};
 use neura_gpu::PREFERENCE;
 use neura_graph::{Graph, Init, Shape, Value};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
 use neura_runtime::{Program, Runtime};
 
 #[path = "support/backend.rs"]
@@ -793,6 +794,51 @@ fn a_sample_of_every_candidate_at_full_mass_draws_the_categorical() {
             runtime.read(&program, sampled),
             runtime.read(&program, drawn),
             "seed {raw} draws the same action a categorical draw makes",
+        );
+    }
+}
+
+#[test]
+fn a_starved_sample_draws_the_nucleus_of_every_column_section() {
+    let runtime = open();
+    let rows = 1u32;
+    let classes = 8192u32;
+    let model = Sampling::of(rows, classes);
+    let program = model.compile(&runtime);
+    let plan = Plan::of(
+        &model.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::SampleFold),
+        "one row of {classes} classes starves the column sections of one task",
+    );
+    let mut logits = vec![-30.0f32; (rows * classes) as usize];
+    for rank in 0..24usize {
+        let column = 100 + rank * 300;
+        logits[column] = 10.0 - rank as f32 * 0.1;
+    }
+    runtime.write(&program, model.logits, &logits);
+    runtime.write(&program, model.keep, &[40.0]);
+    runtime.write(&program, model.cumulative, &[0.9]);
+    for raw in [0u32, 7, 0xbeef] {
+        runtime.write(&program, model.seed, &[f32::from_bits(raw)]);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, model.draw),
+            sample_reference(
+                &logits,
+                rows,
+                classes,
+                raw,
+                &Sample {
+                    keep: 40,
+                    cumulative: 0.9,
+                },
+            ),
+            "seed {raw} draws the nucleus the sections hold",
         );
     }
 }

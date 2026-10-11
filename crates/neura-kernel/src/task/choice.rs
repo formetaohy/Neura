@@ -14,6 +14,27 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("CHOICE_ENTRIES", layout.entries());
     compiler.constant("CHOICE_LEVELS", layout.levels());
     compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
+    compiler.constant("CHOICE_SECTIONS", neura_abi::CHOICE_SECTIONS);
+    let merge =
+        2u32 * geometry.workgroup() + 2u32 * neura_abi::CANDIDATES + 2u32 * layout.entries();
+    compiler.constant("SCRATCH_MERGE_VALUE", merge);
+    compiler.constant("SCRATCH_MERGE_INDEX", merge + neura_abi::CHOICE_SECTIONS);
+    compiler.constant(
+        "SCRATCH_MERGE_WEIGHT",
+        merge + 2u32 * neura_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_CURSOR",
+        merge + 3u32 * neura_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_COUNT",
+        merge + 4u32 * neura_abi::CHOICE_SECTIONS,
+    );
+    compiler.constant(
+        "SCRATCH_MERGE_OUT",
+        merge + 5u32 * neura_abi::CHOICE_SECTIONS,
+    );
     device::define(compiler);
 }
 
@@ -208,10 +229,20 @@ mod device {
         return value == other_value && index < other_index;
     }
 
-    fn rank_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) -> u32 {
+    fn rank_row(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
         let mut count = 0u32;
         let mut previous_value = max_identity();
         let mut previous_index = NO_VALUE;
+        let span = last - first;
         loop {
             if count >= keep {
                 break;
@@ -219,20 +250,20 @@ mod device {
             let mut local_value = scalar_array(max_identity(), CHOICE_LOCAL);
             let mut local_index = scalar_array(NO_VALUE, CHOICE_LOCAL);
             if lid < CHOICE_OWNERS {
-                for base in stride(lid, columns, CHOICE_OWNERS * 4u32) {
+                for base in stride(lid, span, CHOICE_OWNERS * 4u32) {
                     let mut held = scalar_array(max_identity(), 4u32);
                     for at in unroll(0u32, 4u32, 1u32) {
-                        let column = base + at * CHOICE_OWNERS;
+                        let column = first + base + at * CHOICE_OWNERS;
                         held[at] = select(
                             max_identity(),
                             read_flat(task, source, row * columns + min(column, columns - 1u32)),
-                            column < columns,
+                            column < last,
                         );
                     }
                     for at in unroll(0u32, 4u32, 1u32) {
-                        let column = base + at * CHOICE_OWNERS;
+                        let column = first + base + at * CHOICE_OWNERS;
                         let value = held[at];
-                        if column < columns
+                        if column < last
                             && sample_after(value, column, previous_value, previous_index)
                             && better(
                                 value,
@@ -365,32 +396,31 @@ mod device {
         return scratch[SCRATCH_CHOICE];
     }
 
-    fn sample_row(
+    fn row_mass(
         task: Task,
         lid: u32,
         source: Value,
         row: u32,
         columns: u32,
-        keep: u32,
-        cumulative: f32,
-        seed: u32,
-    ) -> u32 {
+        first: u32,
+        last: u32,
+    ) -> f32 {
         let mut local_max = max_identity();
         let mut local_total = 0.0;
-        for base in stride(lid, columns, WORKGROUP_SIZE * 4u32) {
+        for base in stride(lid, last - first, WORKGROUP_SIZE * 4u32) {
             let mut held = scalar_array(max_identity(), 4u32);
             for at in unroll(0u32, 4u32, 1u32) {
-                let column = base + at * WORKGROUP_SIZE;
+                let column = first + base + at * WORKGROUP_SIZE;
                 held[at] = select(
                     max_identity(),
                     read_flat(task, source, row * columns + min(column, columns - 1u32)),
-                    column < columns,
+                    column < last,
                 );
             }
             for at in unroll(0u32, 4u32, 1u32) {
-                let column = base + at * WORKGROUP_SIZE;
+                let column = first + base + at * WORKGROUP_SIZE;
                 let value = held[at];
-                if column < columns {
+                if column < last {
                     if local_max == max_identity() {
                         local_max = value;
                         local_total = select(0.0, 1.0, value > max_identity());
@@ -405,10 +435,23 @@ mod device {
                 }
             }
         }
-        let total = sample_mass(lid, local_max, local_total);
+        return sample_mass(lid, local_max, local_total);
+    }
+
+    fn sample_row(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        keep: u32,
+        cumulative: f32,
+        seed: u32,
+    ) -> u32 {
+        let total = row_mass(task, lid, source, row, columns, 0u32, columns);
         let row_max = scratch[0u32];
         workgroup_barrier();
-        let count = rank_row(task, lid, source, row, columns, keep);
+        let count = rank_row(task, lid, source, row, columns, 0u32, columns, keep);
         workgroup_barrier();
         let mut chosen = NO_VALUE;
         if lid == 0u32 {
@@ -448,6 +491,49 @@ mod device {
         return chosen;
     }
 
+    fn sample_chunk(task: Task, lid: u32, source: Value, seed: u32, keep: u32, cumulative: f32) {
+        let kept_values = values[task.out];
+        let carried = values[task.extra];
+        let columns = source.dims.w;
+        let rows = kept_values.dims.z;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let total = row_mass(task, lid, source, row, columns, first, last);
+            let row_max = scratch[0u32];
+            workgroup_barrier();
+            let count = rank_row(task, lid, source, row, columns, first, last, keep);
+            let base = (task.section * rows + row) * (2u32 * CANDIDATES + 4u32);
+            if lid == 0u32 {
+                publish(carried, base + 2u32 * CANDIDATES, f32(count));
+                publish(carried, base + 2u32 * CANDIDATES + 1u32, row_max);
+                publish(carried, base + 2u32 * CANDIDATES + 2u32, total);
+            }
+            for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+                let index = bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]);
+                let inside = candidate < count;
+                let value = scratch[SCRATCH_SAMPLE + candidate];
+                let column = min(index, columns - 1u32);
+                publish(
+                    kept_values,
+                    (task.section * rows + row) * CANDIDATES + candidate,
+                    select(max_identity(), value, inside),
+                );
+                publish(
+                    carried,
+                    base + 2u32 * candidate,
+                    f32(select(NO_VALUE, index, inside)),
+                );
+                publish(
+                    carried,
+                    base + 2u32 * candidate + 1u32,
+                    value + gumbel_noise(seed, coordinates(row * columns + column, source.dims)),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
     fn sample_rows(task: Task, lid: u32, source: Value, seed: u32, keep: u32, cumulative: f32) {
         let output = values[task.out];
         let columns = source.dims.w;
@@ -485,15 +571,257 @@ mod device {
         }
         let keep = u32(declared);
         match task.geometry {
-            strategy::WORKGROUP_ROW => sample_rows(task, lid, source, seed, keep, cumulative),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    sample_chunk(task, lid, source, seed, keep, cumulative);
+                } else {
+                    sample_rows(task, lid, source, seed, keep, cumulative);
+                }
+            }
             _ => refuse(kind::SAMPLE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn merge_row(
+        lid: u32,
+        values_in: Value,
+        carriers: Value,
+        pair_stride: u32,
+        weight_offset: u32,
+        block: u32,
+        rows: u32,
+        sections: u32,
+        keep: u32,
+        row: u32,
+    ) -> u32 {
+        if lid != 0u32 {
+            return 0u32;
+        }
+        for section in stride(0u32, sections, 1u32) {
+            let base = (section * rows + row) * block;
+            let count = u32(fetch(carriers, base + block - 4u32));
+            let inside = count > 0u32;
+            scratch[SCRATCH_MERGE_VALUE + section] = select(
+                max_identity(),
+                fetch(values_in, (section * rows + row) * CANDIDATES),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_WEIGHT + section] = select(
+                max_identity(),
+                fetch(carriers, base + weight_offset),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_INDEX + section] =
+                bitcast_f32(select(NO_VALUE, u32(fetch(carriers, base)), inside));
+            scratch[SCRATCH_MERGE_CURSOR + section] = bitcast_f32(0u32);
+            scratch[SCRATCH_MERGE_COUNT + section] = bitcast_f32(count);
+        }
+        let mut count = 0u32;
+        let mut slot = 0u32;
+        loop {
+            if slot >= keep {
+                break;
+            }
+            let mut best_value = max_identity();
+            let mut best_index = NO_VALUE;
+            let mut best_section = NO_VALUE;
+            let mut base_section = 0u32;
+            loop {
+                if base_section >= sections {
+                    break;
+                }
+                let mut held_value = scalar_array(max_identity(), 4u32);
+                let mut held_index = scalar_array(NO_VALUE, 4u32);
+                let mut held_section = scalar_array(0u32, 4u32);
+                for at in unroll(0u32, 4u32, 1u32) {
+                    let probe = base_section + at;
+                    if probe < sections {
+                        held_index[at] = bitcast_u32(scratch[SCRATCH_MERGE_INDEX + probe]);
+                        held_value[at] = scratch[SCRATCH_MERGE_VALUE + probe];
+                        held_section[at] = probe;
+                    }
+                }
+                for at in unroll(0u32, 4u32, 1u32) {
+                    if held_index[at] != NO_VALUE
+                        && better(held_value[at], held_index[at], best_value, best_index)
+                    {
+                        best_value = held_value[at];
+                        best_index = held_index[at];
+                        best_section = held_section[at];
+                    }
+                }
+                base_section = base_section + 4u32;
+            }
+            if best_index == NO_VALUE {
+                break;
+            }
+            scratch[SCRATCH_MERGE_OUT + slot] = best_value;
+            scratch[SCRATCH_MERGE_OUT + CANDIDATES + slot] = bitcast_f32(best_index);
+            scratch[SCRATCH_MERGE_OUT + 2u32 * CANDIDATES + slot] =
+                scratch[SCRATCH_MERGE_WEIGHT + best_section];
+            slot = slot + 1u32;
+            count = count + 1u32;
+            let position = bitcast_u32(scratch[SCRATCH_MERGE_CURSOR + best_section]);
+            let limit = bitcast_u32(scratch[SCRATCH_MERGE_COUNT + best_section]);
+            let held = min(position + 1u32, CANDIDATES - 1u32);
+            let inside = position + 1u32 < limit;
+            let base = (best_section * rows + row) * block;
+            let head = (best_section * rows + row) * CANDIDATES;
+            scratch[SCRATCH_MERGE_VALUE + best_section] =
+                select(max_identity(), fetch(values_in, head + held), inside);
+            scratch[SCRATCH_MERGE_WEIGHT + best_section] = select(
+                max_identity(),
+                fetch(carriers, base + held * pair_stride + weight_offset),
+                inside,
+            );
+            scratch[SCRATCH_MERGE_INDEX + best_section] = bitcast_f32(select(
+                NO_VALUE,
+                u32(fetch(carriers, base + held * pair_stride)),
+                inside,
+            ));
+            scratch[SCRATCH_MERGE_CURSOR + best_section] = bitcast_f32(position + 1u32);
+        }
+        return count;
+    }
+
+    fn run_top_k_fold(task: Task, lid: u32) {
+        let values_in = values[task.a];
+        let carried = values[task.b];
+        let out_values = values[task.out];
+        let out_indices = values[task.extra];
+        let keep = task.keep;
+        let sections = task.splits;
+        let rows = out_values.dims.z;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = merge_row(
+                lid,
+                values_in,
+                carried,
+                1u32,
+                0u32,
+                CANDIDATES + 4u32,
+                rows,
+                sections,
+                keep,
+                row,
+            );
+            if lid == 0u32 {
+                for slot in stride(0u32, keep, 1u32) {
+                    let inside = slot < count;
+                    publish(
+                        out_values,
+                        row * keep + slot,
+                        select(max_identity(), scratch[SCRATCH_MERGE_OUT + slot], inside),
+                    );
+                    publish(
+                        out_indices,
+                        row * keep + slot,
+                        select(
+                            -1.0,
+                            f32(bitcast_u32(scratch[SCRATCH_MERGE_OUT + CANDIDATES + slot])),
+                            inside,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    fn run_sample_fold(task: Task, lid: u32) {
+        let values_in = values[task.a];
+        let seed = bitcast_u32(fetch(values[task.b], 0u32));
+        let declared = fetch(values[task.c], 0u32);
+        let cumulative = fetch(values[task.d], 0u32);
+        let candidates = values[task.e];
+        let output = values[task.out];
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE_FOLD, refusal::SAMPLE, 0u32);
+            return;
+        }
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE_FOLD, refusal::SAMPLE, 1u32);
+            return;
+        }
+        let keep = u32(declared);
+        let sections = task.splits;
+        let rows = output.dims.z;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = merge_row(
+                lid,
+                values_in,
+                candidates,
+                2u32,
+                1u32,
+                2u32 * CANDIDATES + 4u32,
+                rows,
+                sections,
+                keep,
+                row,
+            );
+            if lid == 0u32 {
+                let mut row_max = max_identity();
+                for section in stride(0u32, sections, 1u32) {
+                    row_max = max(
+                        row_max,
+                        fetch(
+                            candidates,
+                            (section * rows + row) * (2u32 * CANDIDATES + 4u32)
+                                + 2u32 * CANDIDATES
+                                + 1u32,
+                        ),
+                    );
+                }
+                let mut total = 0.0;
+                for section in stride(0u32, sections, 1u32) {
+                    let base =
+                        (section * rows + row) * (2u32 * CANDIDATES + 4u32) + 2u32 * CANDIDATES;
+                    let section_max = fetch(candidates, base + 1u32);
+                    let section_total = fetch(candidates, base + 2u32);
+                    total = total + section_total * softmax_exp(section_max - row_max);
+                }
+                let mut mass = 0.0;
+                for candidate in stride(0u32, count, 1u32) {
+                    mass = mass + softmax_exp(scratch[SCRATCH_MERGE_OUT + candidate] - row_max);
+                }
+                let tail = total - mass;
+                let threshold = cumulative * total;
+                let mut boundary = count;
+                let mut running = 0.0;
+                for candidate in stride(0u32, count, 1u32) {
+                    running =
+                        running + softmax_exp(scratch[SCRATCH_MERGE_OUT + candidate] - row_max);
+                    if running + tail >= threshold && candidate + 1u32 < boundary {
+                        boundary = candidate + 1u32;
+                    }
+                }
+                let mut best = max_identity();
+                let mut chosen = NO_VALUE;
+                for candidate in stride(0u32, boundary, 1u32) {
+                    let weight = scratch[SCRATCH_MERGE_OUT + 2u32 * CANDIDATES + candidate];
+                    let column = bitcast_u32(scratch[SCRATCH_MERGE_OUT + CANDIDATES + candidate]);
+                    if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
+                        best = weight;
+                        chosen = column;
+                    }
+                }
+                if chosen == NO_VALUE {
+                    chosen = 0u32;
+                }
+                publish(
+                    output,
+                    row,
+                    chained(task, coordinates(row, output.dims), f32(chosen)),
+                );
+            }
         }
     }
 
     fn top_k_row(task: Task, lid: u32, source: Value, row: u32, columns: u32, keep: u32) {
         let kept_values = values[task.out];
         let kept_indices = values[task.extra];
-        rank_row(task, lid, source, row, columns, keep);
+        rank_row(task, lid, source, row, columns, 0u32, columns, keep);
         for candidate in stride(lid, keep, WORKGROUP_SIZE) {
             publish(
                 kept_values,
@@ -510,15 +838,52 @@ mod device {
         }
     }
 
+    fn top_k_chunk(task: Task, lid: u32) {
+        let source = values[task.a];
+        let kept_values = values[task.out];
+        let carried = values[task.extra];
+        let keep = task.keep;
+        let columns = source.dims.w;
+        let rows = kept_values.dims.z;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let count = rank_row(task, lid, source, row, columns, first, last, keep);
+            let base = (task.section * rows + row) * (CANDIDATES + 4u32);
+            if lid == 0u32 {
+                publish(carried, base + CANDIDATES, f32(count));
+            }
+            for candidate in stride(lid, keep, WORKGROUP_SIZE) {
+                publish(
+                    kept_values,
+                    (task.section * rows + row) * CANDIDATES + candidate,
+                    scratch[SCRATCH_SAMPLE + candidate],
+                );
+                publish(
+                    carried,
+                    base + candidate,
+                    f32(bitcast_u32(
+                        scratch[SCRATCH_SAMPLE + CANDIDATES + candidate],
+                    )),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
     fn run_top_k(task: Task, lid: u32) {
         let source = values[task.a];
         let keep = task.keep;
         let columns = source.dims.w;
         match task.geometry {
             strategy::WORKGROUP_ROW => {
-                for row in stride(task.first, task.first + task.count, 1u32) {
-                    top_k_row(task, lid, source, row, columns, keep);
-                    workgroup_barrier();
+                if task.splits > 1u32 {
+                    top_k_chunk(task, lid);
+                } else {
+                    for row in stride(task.first, task.first + task.count, 1u32) {
+                        top_k_row(task, lid, source, row, columns, keep);
+                        workgroup_barrier();
+                    }
                 }
             }
             _ => refuse(kind::TOP_K, refusal::GEOMETRY, task.geometry),

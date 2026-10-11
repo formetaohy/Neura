@@ -1932,6 +1932,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Categorical
             | Kind::Sample
             | Kind::TopK
+            | Kind::TopKFold
+            | Kind::SampleFold
             | Kind::OneHot
             | Kind::Gather
             | Kind::Scatter
