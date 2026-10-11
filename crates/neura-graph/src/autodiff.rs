@@ -840,6 +840,7 @@ impl<'g> Graph<'g> {
             | Kind::ScatterWrite
             | Kind::MatmulWeightGrad
             | Kind::Rows
+            | Kind::ChoiceFold
             | Kind::Length => {}
             Kind::Argmax | Kind::Categorical | Kind::Sample | Kind::OneHot => {
                 panic!(

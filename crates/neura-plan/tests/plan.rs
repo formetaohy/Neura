@@ -1364,14 +1364,27 @@ fn a_product_two_reductions_read_keeps_the_task_that_writes_it() {
 fn an_opened_reduction_hands_its_arena_back_to_the_product() {
     let graph = Graph::new();
     let data = graph.input(Shape::matrix(4, 256), Element::Single);
-    graph.retain(graph.sum_rows(graph.mul(data, data)));
+    let rows = graph.sum_rows(graph.mul(data, data));
+    graph.retain(rows);
     let opened = plan(&graph);
     let pinned = Graph::new();
-    let data = pinned.input(Shape::matrix(4, 256), Element::Single);
-    let squared = pinned.mul(data, data);
+    let shared = pinned.input(Shape::matrix(4, 256), Element::Single);
+    let squared = pinned.mul(shared, shared);
     pinned.retain(squared);
     pinned.retain(pinned.sum_rows(squared));
-    assert_eq!(opened.task_count(), 4);
+    let opened_tasks = tasks(&opened);
+    let readers = opened_tasks
+        .iter()
+        .filter(|task| task.a == data.id())
+        .collect::<Vec<_>>();
+    assert!(
+        !readers.is_empty(),
+        "the reduction reads the product it folds",
+    );
+    assert!(
+        readers.iter().all(|task| task.prelude_steps > 0),
+        "every reader of the product opens it instead of reading a tensor of its own",
+    );
     assert!(
         opened.arena_bytes() < plan(&pinned).arena_bytes(),
         "the product a reduction opens holds no tensor of its own",

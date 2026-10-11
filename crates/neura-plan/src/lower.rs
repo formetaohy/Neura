@@ -16,11 +16,12 @@ const SOFTMAX_ROW_CEILING: u32 = 8;
 const SOFTMAX_SECTION_COLUMNS: u32 = 1024;
 const SOFTMAX_SECTION_FLOOR: u32 = 4096;
 const FOLD_DEPTH: u32 = 16;
+const FOLD_SPLIT_ROUNDS: u32 = 16;
 const FOLD_TASKS: u32 = 1 << 15;
 const ATTENTION_ENOUGH_TASKS: u64 = 16;
 const ATTENTION_WANTED_TASKS: u64 = 32;
-const CHOICE_ENOUGH_TASKS: u64 = 16;
 const CHOICE_SECTION_COLUMNS: u32 = 1024;
+const CHOICE_SECTION_FLOOR: u32 = 8192;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -562,6 +563,9 @@ fn schedule_unit(
         Kind::MatmulFold => {
             panic!("a fold of depth partials comes from the product whose depth split")
         }
+        Kind::ChoiceFold => {
+            panic!("a folded choice comes from the row whose column sections the split publishes")
+        }
         Kind::AttentionFold | Kind::AttentionQueryGradFold => {
             panic!("a fold of attention partials comes from the attention whose key split")
         }
@@ -969,6 +973,7 @@ fn softmax_sectioned(
             task.inputs[2] = folded;
             task.splits = sections;
             task.section = section;
+            task.chain.clear();
             task.split = split;
             plan.tasks.push(task);
         }
@@ -1020,6 +1025,11 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
+    let sections = choice_sections(plan, unit, rows, columns, profile, 2);
+    if sections > 1 {
+        choice_sectioned(plan, unit, rows, columns, sections, profile);
+        return;
+    }
     let geometry = if columns <= profile.workgroup() {
         strategy::THREAD_ROW
     } else {
@@ -1034,11 +1044,66 @@ fn choice(plan: &mut Plan, unit: &TaskInfo, profile: Profile, target: u32) {
     }
 }
 
+fn choice_sectioned(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let carried = plan.publish(Shape::of([sections, 1, rows, 2]));
+    let measure = measured(plan, unit.out, Measure::Rows);
+    let spans = span::chunks(
+        rows,
+        choice_rows_per_task(rows, device_workgroups(profile)),
+        measure,
+    );
+    let band = columns.div_ceil(sections);
+    for (first, count, split) in spans.iter().copied() {
+        for section in 0..sections {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(band));
+            task.geometry = strategy::WORKGROUP_ROW;
+            task.out = carried;
+            task.extra = NO_VALUE;
+            task.splits = sections;
+            task.section = section;
+            task.chain.clear();
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in spans {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(sections));
+        task.kind = Kind::ChoiceFold;
+        task.geometry = 0;
+        task.inputs = [carried, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        task.out = unit.out;
+        task.extra = unit.extra;
+        task.origin = NO_VALUE;
+        task.segments = NO_VALUE;
+        task.queries = NO_VALUE;
+        task.knob = NO_VALUE;
+        task.splits = sections;
+        task.section = 0;
+        task.prelude.clear();
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
 fn top_k(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
-    let sections = choice_sections(plan, unit, rows, columns, profile);
+    let sections = choice_sections(
+        plan,
+        unit,
+        rows,
+        columns,
+        profile,
+        4 + 3 * u64::from(CANDIDATES),
+    );
     if sections > 1 {
         top_k_sections(plan, unit, rows, columns, sections, profile);
         return;
@@ -1086,6 +1151,7 @@ fn top_k_sections(
             task.extra = carried;
             task.splits = sections;
             task.section = section;
+            task.chain.clear();
             task.split = split;
             plan.tasks.push(task);
         }
@@ -1114,7 +1180,14 @@ fn sample(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let out = plan.shape(unit.out);
     let columns = plan.shape(unit.inputs[0]).columns();
     let rows = out.rows();
-    let sections = choice_sections(plan, unit, rows, columns, profile);
+    let sections = choice_sections(
+        plan,
+        unit,
+        rows,
+        columns,
+        profile,
+        4 + 3 * u64::from(CANDIDATES),
+    );
     if sections > 1 {
         sample_sections(plan, unit, rows, columns, sections, profile);
         return;
@@ -1163,6 +1236,7 @@ fn sample_sections(
             task.extra = carried;
             task.splits = sections;
             task.section = section;
+            task.chain.clear();
             task.split = split;
             plan.tasks.push(task);
         }
@@ -1187,18 +1261,25 @@ fn sample_sections(
     }
 }
 
-fn choice_sections(plan: &Plan, unit: &TaskInfo, rows: u32, columns: u32, profile: Profile) -> u32 {
-    if rows == 0 || columns < 2 * CHOICE_SECTION_COLUMNS || !choice_sealed(plan, unit) {
+fn choice_sections(
+    plan: &Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    profile: Profile,
+    carried: u64,
+) -> u32 {
+    if rows == 0 || columns < CHOICE_SECTION_FLOOR || !choice_sealed(plan, unit) {
         return 1;
     }
     let row_tasks = u64::from(rows).div_ceil(u64::from(choice_rows_per_task(
         rows,
         device_workgroups(profile),
     )));
-    if row_tasks >= CHOICE_ENOUGH_TASKS {
+    if row_tasks * 2 > u64::from(profile.workgroups()) {
         return 1;
     }
-    let words = u64::from(rows) * u64::from(4 + 3 * CANDIDATES);
+    let words = u64::from(rows) * carried;
     let sections = u64::from(profile.workgroups())
         .div_ceil(row_tasks.max(1))
         .min(u64::from(columns / choice_section_columns(unit)))
@@ -1685,15 +1766,27 @@ fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
 }
 
 fn fold_pieces(body: FoldBody, folds: u32, rows: u32, profile: Profile) -> u32 {
-    if folds <= FOLD_DEPTH || rows * folds <= profile.workgroup() * profile.workgroups() {
+    if folds <= FOLD_DEPTH {
         return 1;
     }
     match body {
-        FoldBody::Element => folds.div_ceil(FOLD_DEPTH),
-        FoldBody::Workgroup => profile
-            .workgroups()
-            .div_ceil(rows)
-            .clamp(1, (folds / profile.workgroup()).max(1)),
+        FoldBody::Element => {
+            let lanes = u64::from(profile.workgroup()) * u64::from(profile.workgroups());
+            if u64::from(rows) * u64::from(folds) <= lanes {
+                1
+            } else {
+                folds.div_ceil(FOLD_DEPTH)
+            }
+        }
+        FoldBody::Workgroup => {
+            if folds <= FOLD_SPLIT_ROUNDS * profile.workgroup() {
+                return 1;
+            }
+            profile
+                .workgroups()
+                .div_ceil(rows.max(1))
+                .clamp(1, (folds / profile.workgroup()).max(1))
+        }
     }
 }
 

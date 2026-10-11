@@ -605,6 +605,14 @@ kinds! {
         chain: false,
         origin: false,
     };
+    ChoiceFold CHOICE_FOLD = "choice_fold" {
+        entry: "run_choice_fold",
+        modules: [Choice],
+        geometry: None,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
     SoftmaxFold SOFTMAX_FOLD = "softmax_fold" {
         entry: "run_softmax_fold",
         modules: [Reduce],

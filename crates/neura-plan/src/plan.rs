@@ -450,6 +450,12 @@ impl Plan {
                 "an attention split across the keys hands its chain to the fold",
             );
             assert!(
+                !matches!(task.kind, Kind::Argmax | Kind::Categorical)
+                    || task.splits == 1
+                    || task.chain.is_empty(),
+                "a row split across its columns hands its chain to the fold",
+            );
+            assert!(
                 task.origin == NO_VALUE || task.kind.reads_origin(),
                 "a {} task carries a cursor no device body of it reads",
                 task.kind.name(),
@@ -1940,6 +1946,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Rows
             | Kind::MatmulWeightGrad
             | Kind::Select
+            | Kind::ChoiceFold
             | Kind::Length => {}
         }
     }

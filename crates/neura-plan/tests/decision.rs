@@ -98,6 +98,46 @@ fn a_row_folds_in_the_strategy_its_length_asks_for() {
 }
 
 #[test]
+fn a_starved_row_folds_out_of_the_partials_its_workgroups_fill() {
+    let columns = 32000u32;
+    let graph = Graph::new();
+    let input = graph.input(Shape::matrix(1, columns), Element::Single);
+    let summed = graph.sum_rows(input);
+    graph.retain(summed);
+    let plan = plan_with(&graph, wide());
+    let records = values_of(&plan);
+    let folds = tasks_of(&plan, summed);
+    assert_eq!(
+        folds.len() as u32,
+        1,
+        "one row folds its column sections once"
+    );
+    assert_eq!(folds.iter().map(|task| task.count).sum::<u32>(), 1);
+    let partials = folds[0].a;
+    let pieces = records[partials as usize].dims[3];
+    assert!(
+        pieces < columns,
+        "one row of {columns} numbers folds out of {pieces} partials of its own",
+    );
+    let chunks = tasks(&plan)
+        .into_iter()
+        .filter(|task| task.out == partials)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        chunks.len() as u32,
+        pieces,
+        "the row parts its columns between the workgroups the device leaves idle",
+    );
+    assert!(
+        chunks
+            .iter()
+            .all(|task| task.geometry == strategy::WORKGROUP_ROW),
+        "a column section folds the lane its workgroup walks",
+    );
+    assert_eq!(chunks.iter().map(|task| task.count).sum::<u32>(), pieces);
+}
+
+#[test]
 fn a_fold_walks_a_long_axis_in_stages_instead_of_one_lane() {
     let graph = Graph::new();
     let short_input = graph.input(Shape::matrix(512, 8), Element::Single);
@@ -1053,24 +1093,149 @@ fn a_starved_sample_parts_its_classes_between_the_tasks_of_its_row() {
 }
 
 #[test]
+fn a_starved_argmax_parts_its_columns_between_the_tasks_of_its_row() {
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(1, 8192), Element::Single);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Argmax)
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::ChoiceFold)
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() > 1,
+            "one row of 8192 numbers starves the column sections of one task",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its candidates once");
+        assert_eq!(folds[0].out, action.id());
+        assert_eq!(folds[0].a, chunks[0].out);
+        assert_eq!(folds[0].splits as usize, chunks.len());
+        assert_eq!(folds[0].first, 0);
+        assert_eq!(folds[0].count, 1);
+        let mut sections = chunks.iter().map(|task| task.section).collect::<Vec<_>>();
+        sections.sort_unstable();
+        sections.dedup();
+        assert_eq!(
+            sections.len(),
+            chunks.len(),
+            "every column section walks a share of its own",
+        );
+        for task in &chunks {
+            assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.out, chunks[0].out);
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+            assert_eq!(task.splits as usize, chunks.len());
+            assert_eq!(
+                task.steps, 0,
+                "a column section hands its chain to the fold"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_starved_categorical_parts_its_classes_between_the_tasks_of_its_row() {
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(1, 8192), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let draw = graph.categorical(logits, seed);
+    graph.retain(draw);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Categorical)
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::ChoiceFold)
+            .collect::<Vec<_>>();
+        assert!(
+            chunks.len() > 1,
+            "one row of 8192 classes starves the column sections of one task",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its candidates once");
+        assert_eq!(folds[0].out, draw.id());
+        assert_eq!(folds[0].a, chunks[0].out);
+        assert_eq!(folds[0].splits as usize, chunks.len());
+        for task in &chunks {
+            assert_eq!(task.geometry, strategy::WORKGROUP_ROW);
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.b, seed.id());
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+            assert_eq!(task.splits as usize, chunks.len());
+        }
+    }
+}
+
+#[test]
+fn a_wide_row_the_rows_leave_workgroups_idle_parts_its_columns() {
+    let rows = 16u32;
+    let columns = 32000u32;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, columns), Element::Single);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    let plan = plan_with(&graph, wide());
+    let all = tasks(&plan);
+    let chunks = all
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Argmax)
+        .collect::<Vec<_>>();
+    let folds = all
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::ChoiceFold)
+        .collect::<Vec<_>>();
+    assert!(
+        chunks.len() > rows as usize,
+        "sixteen rows of {columns} numbers leave workgroups of the device idle",
+    );
+    assert_eq!(folds.len() as u32, rows);
+    let sections = chunks.len() as u32 / rows;
+    assert!(sections > 1);
+    assert_eq!(folds[0].splits, sections);
+    for task in &chunks {
+        assert_eq!(task.splits, sections);
+        assert_eq!(task.count, 1);
+    }
+}
+
+#[test]
 fn a_choice_that_already_fills_the_device_walks_whole_rows() {
     let graph = Graph::new();
-    let value = graph.input(Shape::matrix(64, 8192), Element::Single);
+    let rows = 512u32;
+    let value = graph.input(Shape::matrix(rows, 8192), Element::Single);
     let (kept_values, _) = graph.top_k(value, 40);
     graph.retain(kept_values);
-    let logits = graph.input(Shape::matrix(64, 8192), Element::Single);
+    let logits = graph.input(Shape::matrix(rows, 8192), Element::Single);
     let seed = graph.input(Shape::scalar(), Element::Single);
     let keep = graph.parameter(Shape::scalar(), Init::Constant(40.0), Element::Single);
     let cumulative = graph.parameter(Shape::scalar(), Init::Constant(0.9), Element::Single);
     let draw = graph.sample(logits, seed, keep, cumulative);
     graph.retain(draw);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    let drawn = graph.categorical(logits, seed);
+    graph.retain(drawn);
     for profile in [narrow(), wide()] {
         let plan = plan_with(&graph, profile);
         assert!(
             !plan.kinds().contains(&Kind::TopKFold),
-            "sixty four rows already fill the device",
+            "{rows} rows already fill the device",
         );
         assert!(!plan.kinds().contains(&Kind::SampleFold));
+        assert!(!plan.kinds().contains(&Kind::ChoiceFold));
     }
 }
 

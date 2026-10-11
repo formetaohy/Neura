@@ -251,7 +251,7 @@ fn a_starved_top_k_keeps_the_candidates_a_row_holds_in_one_column_section() {
 #[test]
 fn a_top_k_that_already_fills_the_device_walks_whole_rows() {
     let runtime = open();
-    let (rows, columns, keep) = (64u32, 8192u32, 40u32);
+    let (rows, columns, keep) = (256u32, 8192u32, 40u32);
     let selecting = Selecting::of(rows, columns, keep, Element::Single);
     let weights = runtime.weights(&selecting.graph);
     let program = runtime.compile(&selecting.graph, &weights);

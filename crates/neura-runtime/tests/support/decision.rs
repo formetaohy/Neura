@@ -134,6 +134,25 @@ pub fn sample_reference(
         .collect()
 }
 
+pub fn categorical_reference(logits: &[f32], rows: u32, columns: u32, seed: u32) -> Vec<f32> {
+    let dims = [1, 1, rows, columns];
+    (0..rows)
+        .map(|row| {
+            let mut best = f32::NEG_INFINITY;
+            let mut chosen = 0u32;
+            for column in 0..columns {
+                let weight = logits[(row * columns + column) as usize]
+                    + gumbel_reference(seed, coordinates(row * columns + column, dims));
+                if weight > best {
+                    best = weight;
+                    chosen = column;
+                }
+            }
+            chosen as f32
+        })
+        .collect()
+}
+
 pub fn gumbel_reference(seed: u32, at: [u32; 4]) -> f32 {
     let mut hash = seed ^ element_key(at).wrapping_mul(0x9e37_79b9);
     hash ^= hash >> 16;

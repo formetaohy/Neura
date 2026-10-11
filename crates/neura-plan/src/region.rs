@@ -553,7 +553,11 @@ fn narrow<W: Walk, V: Values>(
         Kind::TopK | Kind::Sample if task.splits() > 1 => {
             choice_chunk(values, task, first, count, &mut narrowed)
         }
+        Kind::Argmax | Kind::Categorical if task.splits() > 1 => {
+            row_choice_section(values, task, first, count, &mut narrowed)
+        }
         Kind::TopKFold | Kind::SampleFold => choice_fold(values, task, first, count, &mut narrowed),
+        Kind::ChoiceFold => row_choice_fold(values, task, first, count, &mut narrowed),
         Kind::Attention
         | Kind::AttentionQueryGrad
         | Kind::AttentionKeyGrad
@@ -636,6 +640,70 @@ fn choice_chunk<W: Walk, V: Values>(
         carried,
         Region::run((section * rows + first) * span, count * span),
     );
+}
+
+fn row_choice_section<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3].max(1));
+    let dims = values.dims(task.out());
+    let rows = u64::from(dims[2].max(1));
+    let sections = u64::from(task.splits().max(1));
+    let section = u64::from(task.section());
+    let first_column = columns * section / sections;
+    let last_column = columns * (section + 1u64) / sections;
+    let first = u64::from(first);
+    let count = u64::from(count);
+    narrowed.read(
+        source,
+        if values.dense(source) {
+            Region::band(
+                first * columns + first_column,
+                last_column - first_column,
+                columns,
+                count,
+            )
+        } else {
+            Region::Whole
+        },
+    );
+    narrowed.write(
+        task.out(),
+        Region::run((section * rows + first) * 2u64, count * 2u64),
+    );
+}
+
+fn row_choice_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed,
+) {
+    if count == 0 {
+        return;
+    }
+    let out = task.out();
+    let dims = values.dims(out);
+    let columns = u64::from(dims[3].max(1));
+    let carried = values.dims(task.input(0));
+    let rows = u64::from(carried[2].max(1));
+    let sections = u64::from(task.splits().max(1));
+    let first = u64::from(first);
+    let count = u64::from(count);
+    narrowed.read(
+        task.input(0),
+        Region::band(first * 2u64, count * 2u64, rows * 2u64, sections),
+    );
+    narrowed.write(out, Region::run(first * columns, count * columns));
 }
 
 fn choice_fold<W: Walk, V: Values>(

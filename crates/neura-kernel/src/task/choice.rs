@@ -109,12 +109,14 @@ mod device {
         source: Value,
         row: u32,
         columns: u32,
+        first: u32,
+        last: u32,
         seed: u32,
         noised: bool,
     ) -> u32 {
         let mut local = max_identity();
         let mut local_index = 0u32;
-        for column in stride(lid, columns, WORKGROUP_SIZE) {
+        for column in stride(first + lid, last, WORKGROUP_SIZE) {
             let weight = choice_weight(
                 read_flat(task, source, row * columns + column),
                 seed,
@@ -136,12 +138,14 @@ mod device {
         source: Value,
         row: u32,
         columns: u32,
+        first: u32,
+        last: u32,
         seed: u32,
         noised: bool,
     ) -> u32 {
         let mut local = max_identity();
         let mut local_index = 0u32;
-        for column in stride(0u32, columns, 1u32) {
+        for column in stride(first, last, 1u32) {
             let weight = choice_weight(
                 read_flat(task, source, row * columns + column),
                 seed,
@@ -162,7 +166,8 @@ mod device {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first, task.first + task.count, 1u32) {
-            let chosen = fold_row_by_workgroup(task, lid, source, row, columns, seed, noised);
+            let chosen =
+                fold_row_by_workgroup(task, lid, source, row, columns, 0u32, columns, seed, noised);
             if lid == 0u32 {
                 publish(
                     output,
@@ -184,8 +189,81 @@ mod device {
                 chained(
                     task,
                     coordinates(row, output.dims),
-                    f32(fold_row_by_thread(task, source, row, columns, seed, noised)),
+                    f32(fold_row_by_thread(
+                        task, source, row, columns, 0u32, columns, seed, noised,
+                    )),
                 ),
+            );
+        }
+    }
+
+    fn fold_section_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        seed: u32,
+        noised: bool,
+    ) {
+        let carried = values[task.out];
+        let rows = carried.dims.z;
+        let mut local = max_identity();
+        let mut local_index = 0u32;
+        for column in stride(first + lid, last, WORKGROUP_SIZE) {
+            let weight = choice_weight(
+                read_flat(task, source, row * columns + column),
+                seed,
+                noised,
+                source,
+                row,
+                column,
+            );
+            if weight > local {
+                local = weight;
+                local_index = column;
+            }
+        }
+        let chosen = workgroup_choice(lid, local, local_index);
+        if lid == 0u32 {
+            let base = (task.section * rows + row) * 2u32;
+            publish(carried, base, scratch[0u32]);
+            publish(carried, base + 1u32, f32(chosen));
+        }
+        workgroup_barrier();
+    }
+
+    fn fold_sections_by_workgroup(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
+        let columns = source.dims.w;
+        let first = columns * task.section / task.splits;
+        let last = columns * (task.section + 1u32) / task.splits;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            fold_section_by_workgroup(task, lid, source, row, columns, first, last, seed, noised);
+        }
+    }
+
+    fn run_choice_fold(task: Task, lid: u32) {
+        let carried = values[task.a];
+        let output = values[task.out];
+        let sections = task.splits;
+        let rows = carried.dims.z;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut best = max_identity();
+            let mut chosen = NO_VALUE;
+            for section in stride(0u32, sections, 1u32) {
+                let value = fetch(carried, (section * rows + row) * 2u32);
+                let index = u32(fetch(carried, (section * rows + row) * 2u32 + 1u32));
+                if better(value, index, best, chosen) {
+                    best = value;
+                    chosen = index;
+                }
+            }
+            publish(
+                output,
+                row,
+                chained(task, coordinates(row, output.dims), f32(chosen)),
             );
         }
     }
@@ -194,7 +272,13 @@ mod device {
         let source = values[task.a];
         match task.geometry {
             strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, false),
-            strategy::WORKGROUP_ROW => fold_rows_by_workgroup(task, lid, source, 0u32, false),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    fold_sections_by_workgroup(task, lid, source, 0u32, false);
+                } else {
+                    fold_rows_by_workgroup(task, lid, source, 0u32, false);
+                }
+            }
             _ => refuse(kind::ARGMAX, refusal::GEOMETRY, task.geometry),
         }
     }
@@ -204,7 +288,13 @@ mod device {
         let seed = bitcast_u32(fetch(values[task.b], 0u32));
         match task.geometry {
             strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, seed, true),
-            strategy::WORKGROUP_ROW => fold_rows_by_workgroup(task, lid, source, seed, true),
+            strategy::WORKGROUP_ROW => {
+                if task.splits > 1u32 {
+                    fold_sections_by_workgroup(task, lid, source, seed, true);
+                } else {
+                    fold_rows_by_workgroup(task, lid, source, seed, true);
+                }
+            }
             _ => refuse(kind::CATEGORICAL, refusal::GEOMETRY, task.geometry),
         }
     }

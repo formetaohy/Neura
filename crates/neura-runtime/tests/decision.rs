@@ -17,8 +17,8 @@ mod support;
 
 use backend::open_with;
 use decision::{
-    Sample, argmax_reference, counts, gather_reference, gumbel_reference, one_hot_reference,
-    sample_reference, scatter_reference, write_reference,
+    Sample, argmax_reference, categorical_reference, counts, gather_reference, gumbel_reference,
+    one_hot_reference, sample_reference, scatter_reference, write_reference,
 };
 use input::random;
 use reference::matmul_reference;
@@ -839,6 +839,145 @@ fn a_starved_sample_draws_the_nucleus_of_every_column_section() {
                 },
             ),
             "seed {raw} draws the nucleus the sections hold",
+        );
+    }
+}
+
+#[test]
+fn a_starved_argmax_keeps_the_candidate_of_every_column_section() {
+    let runtime = open();
+    let rows = 1u32;
+    let classes = 8192u32;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let action = graph.argmax(logits);
+    graph.retain(action);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::ChoiceFold),
+        "one row of {classes} classes starves the column sections of one task",
+    );
+    let band = classes / 8;
+    let mut data = vec![-30.0f32; (rows * classes) as usize];
+    for section in 0..8u32 {
+        data[(section * band + 3 * section + 11) as usize] = section as f32;
+    }
+    data[(7 * band + 11) as usize] = 90.0;
+    data[5] = 90.0;
+    runtime.write(&program, logits, &data);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, action),
+        argmax_reference(&data, rows, classes),
+        "a tie between the first and the last column section keeps the smaller class",
+    );
+    data[5] = 50.0;
+    runtime.write(&program, logits, &data);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, action),
+        argmax_reference(&data, rows, classes),
+        "the largest number of the last column section wins its row",
+    );
+}
+
+#[test]
+fn a_starved_argmax_hands_its_chain_to_the_fold() {
+    let runtime = open();
+    let classes = 8192u32;
+    let picked = 4096.0f32;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(1, classes), Element::Single);
+    let action = graph.argmax(logits);
+    let names = graph.equal(action, graph.fill(Shape::scalar(), picked));
+    graph.retain(names);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::ChoiceFold),
+        "one row of {classes} classes starves the column sections of one task",
+    );
+    let tasks = plan.tasks();
+    let records = tasks.as_chunks::<{ std::mem::size_of::<neura_abi::TaskRecord>() }>();
+    let mut sections = 0u32;
+    let mut folds = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<neura_abi::TaskRecord>(record);
+        match neura_abi::Kind::of(task.kind) {
+            Kind::Argmax => sections += task.steps,
+            Kind::ChoiceFold => folds += task.steps,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        sections, 0,
+        "a column section of the row hands the chain it carries to the fold",
+    );
+    assert!(folds > 0);
+    let mut data = vec![-30.0f32; classes as usize];
+    data[picked as usize] = 5.0;
+    runtime.write(&program, logits, &data);
+    runtime.run(&program);
+    assert_eq!(
+        runtime.read(&program, names),
+        vec![1.0],
+        "the chain reads the class the fold kept",
+    );
+    data[picked as usize] = -30.0;
+    data[3] = 5.0;
+    runtime.write(&program, logits, &data);
+    runtime.run(&program);
+    assert_eq!(runtime.read(&program, names), vec![0.0]);
+}
+
+#[test]
+fn a_starved_categorical_draws_the_noise_of_every_column_section() {
+    let runtime = open();
+    let rows = 1u32;
+    let classes = 8192u32;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::matrix(rows, classes), Element::Single);
+    let seed = graph.input(Shape::scalar(), Element::Single);
+    let draw = graph.categorical(logits, seed);
+    graph.retain(draw);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::ChoiceFold),
+        "one row of {classes} classes starves the column sections of one task",
+    );
+    let band = classes / 8;
+    let mut data = vec![-30.0f32; (rows * classes) as usize];
+    for section in 0..8u32 {
+        data[(section * band + 7 * section + 3) as usize] = 4.0;
+    }
+    runtime.write(&program, logits, &data);
+    for raw in [0u32, 3, 0x5bf0, 0xbeef] {
+        runtime.write(&program, seed, &[f32::from_bits(raw)]);
+        runtime.run(&program);
+        assert_eq!(
+            runtime.read(&program, draw),
+            categorical_reference(&data, rows, classes, raw),
+            "seed {raw} draws the largest noised logit of every column section",
         );
     }
 }

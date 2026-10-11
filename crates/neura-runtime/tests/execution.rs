@@ -264,6 +264,32 @@ fn a_row_fold_sums_every_row_of_every_plane() {
 }
 
 #[test]
+fn a_starved_row_folds_every_column_the_device_hands_it() {
+    let runtime = open();
+    let columns = 20000u32;
+    let graph = Graph::new();
+    let data = graph.parameter(Shape::matrix(1, columns), Init::Zero, Element::Single);
+    let sums = graph.sum_rows(data);
+    let mean = graph.mean_axis(data, 3);
+    graph.retain(sums);
+    graph.retain(mean);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = (0..columns)
+        .map(|index| (index % 64) as f32)
+        .collect::<Vec<_>>();
+    runtime.write(&program, data, &values);
+    runtime.run(&program);
+    let total = values.iter().sum::<f32>();
+    assert_close(&runtime.read(&program, sums), &[total], 0.0);
+    assert_close(
+        &runtime.read(&program, mean),
+        &[total / columns as f32],
+        1e-6,
+    );
+}
+
+#[test]
 fn every_backend_a_machine_offers_folds_a_row_the_same_way() {
     let rows = 9u32;
     let columns = 401u32;
