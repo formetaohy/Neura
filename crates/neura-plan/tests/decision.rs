@@ -683,7 +683,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
 }
 
 #[test]
-fn an_attention_that_already_fills_the_device_walks_whole_rows() {
+fn a_key_chain_longer_than_the_device_width_walks_half_a_workgroup_of_rows() {
     let heads = 16u32;
     let tokens = 512u32;
     let width = 64u32;
@@ -714,16 +714,133 @@ fn an_attention_that_already_fills_the_device_walks_whole_rows() {
     let profile = narrow();
     let plan = plan_with(&graph, profile);
     let tile = plan.attention()[0];
+    let blocks = tokens.div_ceil(tile.keys());
+    assert!(
+        blocks >= 64,
+        "{heads} planes of {tokens} rows walk {blocks} key blocks of {} keys, a chain short enough to keep whole rows",
+        tile.keys(),
+    );
     assert_eq!(
         tile.groups(),
-        1,
-        "{heads} planes of {tokens} rows fill the device without parting their keys",
+        2,
+        "a key chain of {blocks} blocks parts the rows of a {}-workgroup in half so the keys of one block stay together",
+        profile.workgroup(),
+    );
+    let per_task = profile.workgroup() / (tile.groups() * tile.slices());
+    assert_eq!(per_task * 2, profile.workgroup());
+    assert_eq!(
+        tasks_of(&plan, out).len() as u32,
+        heads * tokens.div_ceil(per_task),
+        "an attention of {heads} planes hands the device one task per half-workgroup row block",
+    );
+}
+
+#[test]
+fn a_key_chain_shorter_than_the_device_width_walks_the_rows_the_plan_asks_for() {
+    let heads = 4u32;
+    let tokens = 256u32;
+    let width = 32u32;
+    let graph = Graph::new();
+    let tensor = |tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, 1, tokens, width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let out = graph.attention(
+        tensor(tokens),
+        tensor(tokens),
+        tensor(tokens),
+        neura_graph::AttentionOptions {
+            scale: Some(graph.knob(0.5)),
+            causal: false,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    let profile = wide();
+    let plan = plan_with(&graph, profile);
+    let tile = plan.attention()[0];
+    let blocks = tokens.div_ceil(tile.keys());
+    assert!(
+        blocks < 64,
+        "{heads} planes of {tokens} rows walk {blocks} key blocks of {} keys, a chain long enough to part their keys",
+        tile.keys(),
+    );
+    assert!(
+        tile.groups() > 1,
+        "{} rows over {heads} planes leave a {}-workgroup device idle, and the attention walks no key group beside the {} its tile names",
+        tokens,
+        profile.workgroup(),
+        tile.groups(),
+    );
+    assert!(
+        !tasks(&plan)
+            .iter()
+            .any(|task| Kind::of(task.kind) == Kind::AttentionFold),
+        "a key chain short enough to walk whole rows parts no keys it must fold",
     );
     let per_task = profile.workgroup() / (tile.groups() * tile.slices());
     assert_eq!(
         tasks_of(&plan, out).len() as u32,
         heads * tokens.div_ceil(per_task),
-        "an attention of {heads} planes hands the device one task per whole row block",
+        "a short key chain hands the device one task per row block of every plane",
+    );
+}
+
+#[test]
+fn an_attention_parts_its_keys_beside_the_rows_the_device_already_walks() {
+    let heads = 8u32;
+    let tokens = 512u32;
+    let width = 64u32;
+    let graph = Graph::new();
+    let tensor = |tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, 1, tokens, width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let out = graph.attention(
+        tensor(tokens),
+        tensor(tokens),
+        tensor(tokens),
+        neura_graph::AttentionOptions {
+            scale: Some(graph.knob(0.5)),
+            causal: false,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    let profile = wide();
+    let plan = plan_with(&graph, profile);
+    let tile = plan.attention()[0];
+    let per_task = profile.workgroup() / (tile.groups() * tile.slices());
+    let row_tasks = heads * tokens.div_ceil(per_task);
+    let sections = tasks(&plan)
+        .iter()
+        .filter(|task| Kind::of(task.kind) == Kind::Attention)
+        .map(|task| task.splits)
+        .max()
+        .unwrap_or(1);
+    assert_eq!(
+        sections, 2,
+        "{heads} planes of {tokens} rows walk {row_tasks} row blocks of {per_task} rows, and the two key sections their chain balances fit beside them",
+    );
+    assert_eq!(
+        tasks(&plan)
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::Attention)
+            .count() as u32,
+        row_tasks * sections,
+        "every row block of every plane walks every key section once",
     );
 }
 

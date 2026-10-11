@@ -291,6 +291,34 @@ fn a_pool_is_as_wide_as_the_widest_body_that_stages_from_it() {
 }
 
 #[test]
+fn a_fallible_tile_fit_answers_where_the_fit_refuses() {
+    let pool = 48 << 10;
+    let workgroup = 256u32;
+    let width = 64u32;
+    let rows = 128u32;
+    let tile = AttentionTile::fit(pool, workgroup, width, rows, AttentionTile::PANELS);
+    assert_eq!(
+        AttentionTile::try_fit(pool, workgroup, width, rows, AttentionTile::PANELS),
+        Some(tile),
+        "a pool that stages a key answers with the tile the fit walks",
+    );
+    assert!(
+        AttentionTile::try_fit(0, workgroup, width, rows, AttentionTile::PANELS).is_none(),
+        "a pool that stages no key of a {width} wide attention fits no tile",
+    );
+    assert!(
+        AttentionTile::try_fit(pool, workgroup, width, 0, AttentionTile::PANELS).is_none(),
+        "an attention tile serves at least one row",
+    );
+    assert!(
+        refuses(|| {
+            let _ = AttentionTile::fit(0, workgroup, width, rows, AttentionTile::PANELS);
+        }),
+        "a fit of no tile is refused where the fallible fit answers",
+    );
+}
+
+#[test]
 fn a_key_gradient_stages_the_forward_output_beside_its_query() {
     let workgroup = 1024u32;
     let width = 256u32;

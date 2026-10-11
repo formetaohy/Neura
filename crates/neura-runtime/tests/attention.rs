@@ -1086,6 +1086,101 @@ fn a_device_task_steers_the_scale_of_an_attention_it_feeds() {
 }
 
 #[test]
+fn a_key_chain_longer_than_the_device_width_parts_its_keys() {
+    let shapes = Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 512,
+        keys: 512,
+        width: 64,
+        causal: false,
+        origin: 0,
+        reach: 0,
+        scale: 1.0 / 64.0f32.sqrt(),
+    };
+    let runtime = open();
+    let (graph, queries, keys, values, out) = graph_of(shapes);
+    let loss = graph.sum(out);
+    let gradients = graph.backward(loss);
+    let query_grad = gradients.of(queries);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(out);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let plan = Plan::of(
+        &graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let tile = plan
+        .attention()
+        .iter()
+        .max_by_key(|tile| tile.keys())
+        .expect("an attention plan carries the tile it walks");
+    let sections = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<neura_abi::TaskRecord>() }>()
+        .0
+        .iter()
+        .map(|task| bytemuck::pod_read_unaligned::<neura_abi::TaskRecord>(task))
+        .filter(|task| Kind::of(task.kind) == Kind::Attention)
+        .map(|task| task.splits)
+        .max()
+        .unwrap_or(1);
+    assert!(
+        sections > 1,
+        "a key chain of {} blocks of {} keys walks one key section where the device offers {}",
+        shapes.keys.div_ceil(tile.keys()),
+        tile.keys(),
+        runtime.default_profile().workgroups(),
+    );
+    assert!(
+        plan.kinds().contains(&Kind::AttentionFold),
+        "the key sections of {} keys come back together in a fold",
+        shapes.keys,
+    );
+    let queries_data = data(
+        shapes.heads * shapes.batch * shapes.queries * shapes.width,
+        17,
+    );
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    let (expected, stats) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+    assert_close(&produced, &expected, 1e-5);
+    let gradient = vec![1.0f32; expected.len()];
+    let (expected_query, expected_key, expected_value) = attention_backward(
+        shapes,
+        &queries_data,
+        &keys_data,
+        &values_data,
+        &expected,
+        &stats,
+        &gradient,
+    );
+    let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+    assert_close(&produced[0], &expected_query, 1e-5);
+    assert_close(&produced[1], &expected_key, 1e-5);
+    assert_close(&produced[2], &expected_value, 1e-5);
+}
+
+#[test]
 fn a_starved_attention_weighs_the_keys_of_every_key_group() {
     let shapes = Shapes {
         heads: 1,

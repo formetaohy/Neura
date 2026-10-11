@@ -108,18 +108,25 @@ impl AttentionTile {
 
     pub fn fit(pool: u64, workgroup: u32, width: u32, rows: u32, panels: u32) -> Self {
         assert!(rows > 0, "an attention tile serves no row per task");
+        Self::try_fit(pool, workgroup, width, rows, panels).unwrap_or_else(|| {
+            panic!(
+                "an attention of width {width} fits no key of {workgroup} threads beside the {pool} bytes of workgroup scratch its profile offers",
+            )
+        })
+    }
+
+    pub fn try_fit(pool: u64, workgroup: u32, width: u32, rows: u32, panels: u32) -> Option<Self> {
+        if rows == 0 {
+            return None;
+        }
         let slices = Self::slices_of(width);
-        assert!(
-            slices <= workgroup,
-            "an attention of width {width} spreads one query row over {slices} threads, and a workgroup of {workgroup} threads holds no whole row",
-        );
+        if slices > workgroup {
+            return None;
+        }
         let slice_width = width.div_ceil(slices);
-        assert!(
-            3 * slice_width < Self::REGISTER_CEILING,
-            "an attention of width {width} spreads one query row over {slices} threads of {slice_width} numbers, and the {} numbers of that row and its gradients still outrun the {} a device thread holds",
-            3 * slice_width,
-            Self::REGISTER_CEILING,
-        );
+        if 3 * slice_width >= Self::REGISTER_CEILING {
+            return None;
+        }
         let wanted = workgroup
             .div_ceil(rows.saturating_mul(slices))
             .next_power_of_two()
@@ -129,7 +136,7 @@ impl AttentionTile {
             let mut groups = wanted;
             loop {
                 if let Some(tile) = Self::holding(pool, workgroup, width, slices, groups, panels) {
-                    return tile;
+                    return Some(tile);
                 }
                 if groups == 1 {
                     break;
@@ -137,9 +144,7 @@ impl AttentionTile {
                 groups /= 2;
             }
             if panels == Self::PANELS {
-                panic!(
-                    "an attention of width {width} fits no key of {workgroup} threads beside the {pool} bytes of workgroup scratch its profile offers",
-                );
+                return None;
             }
             panels = Self::PANELS;
         }
