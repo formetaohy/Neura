@@ -12,12 +12,15 @@ mod device {
         let mut best = max_identity();
         let mut chosen = NO_VALUE;
         for reach_row in stride(0u32, task.reach_rows, 1u32) {
-            let row = i32(window.z) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
+            let row = i32(window.z) * i32(task.stride_rows)
+                + i32(reach_row) * i32(task.dilation_rows)
+                - i32(task.pad_rows);
             if row < 0i32 || row >= rows {
                 continue;
             }
             for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                let column = i32(window.w) * i32(task.stride_columns) + i32(reach_column)
+                let column = i32(window.w) * i32(task.stride_columns)
+                    + i32(reach_column) * i32(task.dilation_columns)
                     - i32(task.pad_columns);
                 if column < 0i32 || column >= columns {
                     continue;
@@ -60,12 +63,15 @@ mod device {
             let at = coordinates(index, output.dims);
             let mut total = 0.0;
             for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                let row = i32(at.z) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
+                let row = i32(at.z) * i32(task.stride_rows)
+                    + i32(reach_row) * i32(task.dilation_rows)
+                    - i32(task.pad_rows);
                 if row < 0i32 || row >= rows {
                     continue;
                 }
                 for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                    let column = i32(at.w) * i32(task.stride_columns) + i32(reach_column)
+                    let column = i32(at.w) * i32(task.stride_columns)
+                        + i32(reach_column) * i32(task.dilation_columns)
                         - i32(task.pad_columns);
                     if column < 0i32 || column >= columns {
                         continue;
@@ -92,7 +98,8 @@ mod device {
             let own = read_address(at, source.strides);
             let mut total = 0.0;
             for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                let shifted_row = i32(at.z) + i32(task.pad_rows) - i32(reach_row);
+                let shifted_row =
+                    i32(at.z) + i32(task.pad_rows) - i32(reach_row) * i32(task.dilation_rows);
                 if shifted_row < 0i32 || shifted_row % i32(task.stride_rows) != 0i32 {
                     continue;
                 }
@@ -101,7 +108,8 @@ mod device {
                     continue;
                 }
                 for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                    let shifted_column = i32(at.w) + i32(task.pad_columns) - i32(reach_column);
+                    let shifted_column = i32(at.w) + i32(task.pad_columns)
+                        - i32(reach_column) * i32(task.dilation_columns);
                     if shifted_column < 0i32 || shifted_column % i32(task.stride_columns) != 0i32 {
                         continue;
                     }
@@ -129,7 +137,8 @@ mod device {
             let at = coordinates(index, output.dims);
             let mut total = 0.0;
             for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                let shifted_row = i32(at.z) + i32(task.pad_rows) - i32(reach_row);
+                let shifted_row =
+                    i32(at.z) + i32(task.pad_rows) - i32(reach_row) * i32(task.dilation_rows);
                 if shifted_row < 0i32 || shifted_row % i32(task.stride_rows) != 0i32 {
                     continue;
                 }
@@ -138,7 +147,8 @@ mod device {
                     continue;
                 }
                 for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                    let shifted_column = i32(at.w) + i32(task.pad_columns) - i32(reach_column);
+                    let shifted_column = i32(at.w) + i32(task.pad_columns)
+                        - i32(reach_column) * i32(task.dilation_columns);
                     if shifted_column < 0i32 || shifted_column % i32(task.stride_columns) != 0i32 {
                         continue;
                     }

@@ -11,7 +11,7 @@ fn a_transposed_convolution_writes_the_channels_and_size_its_filter_undoes() {
     let graph: Graph<'static> = Graph::new();
     let input = graph.input(Shape::of([2, 4, 5, 5]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let scattered = graph.conv2d_transpose(input, filter, window, 2);
     assert_eq!(
         graph.shape(scattered),
@@ -36,7 +36,12 @@ fn a_free_batch_of_a_transposed_convolution_walks_the_extent_of_its_input() {
         Element::Single,
     );
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
-    let scattered = graph.conv2d_transpose(input, filter, Window::new([3, 3], [1, 1], [1, 1]), 1);
+    let scattered = graph.conv2d_transpose(
+        input,
+        filter,
+        Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        1,
+    );
     assert_eq!(graph.shape(scattered).free(0), Some(batch.slot()));
     assert_eq!(graph.shape(scattered).dims(), [2, 3, 5, 5]);
 }
@@ -72,7 +77,7 @@ fn a_transposed_convolution_refuses_the_shapes_it_cannot_scatter() {
         }),
         "a transposed convolution walks the taps of the window it is handed",
     );
-    let padded = Window::new([3, 3], [1, 1], [2, 2]);
+    let padded = Window::new([3, 3], [1, 1], [2, 2], [1, 1]);
     let narrow = graph.input(Shape::of([1, 4, 1, 1]), Element::Single);
     assert!(
         refuses(|| {

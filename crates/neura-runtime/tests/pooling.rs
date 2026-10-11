@@ -23,7 +23,7 @@ fn a_max_pool_takes_the_maximum_of_the_window_it_walks() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
-    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let window = Window::new([2, 2], [2, 2], [0, 0], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     assert_eq!(pooled.shape(), Shape::of([2, 3, 3, 3]));
     graph.retain(pooled);
@@ -41,7 +41,7 @@ fn a_mean_pool_averages_the_window_it_pads() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 7, 7]), Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Mean);
     assert_eq!(pooled.shape(), Shape::of([2, 3, 4, 4]));
     graph.retain(pooled);
@@ -59,8 +59,8 @@ fn both_pools_ride_one_tape() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 8, 8]), Element::Single);
-    let coarse = Window::new([2, 2], [2, 2], [0, 0]);
-    let wide = Window::new([3, 3], [2, 2], [1, 1]);
+    let coarse = Window::new([2, 2], [2, 2], [0, 0], [1, 1]);
+    let wide = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let taken = graph.pool2d(input, coarse, Pool::Max);
     let averaged = graph.pool2d(input, wide, Pool::Mean);
     assert_eq!(taken.shape(), Shape::of([2, 3, 4, 4]));
@@ -86,16 +86,16 @@ fn a_mean_pooled_gradient_matches_finite_differences() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.parameter(
-        Shape::of([1, 3, 6, 6]),
+        Shape::of([1, 3, 8, 8]),
         Init::Uniform {
             low: -0.5,
             high: 0.5,
         },
         Element::Single,
     );
-    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let window = Window::new([2, 2], [2, 2], [1, 1], [2, 2]);
     let pooled = graph.pool2d(input, window, Pool::Mean);
-    let scale = graph.input(Shape::of([1, 3, 3, 3]), Element::Single);
+    let scale = graph.input(Shape::of([1, 3, 4, 4]), Element::Single);
     let loss = graph.sum(graph.mul(pooled, scale));
     let gradients = graph.backward(loss);
     let slope = gradients.of(input);
@@ -105,14 +105,14 @@ fn a_mean_pooled_gradient_matches_finite_differences() {
     runtime.write(
         &program,
         scale,
-        &(0..27)
+        &(0..48)
             .map(|index| (index as f32 * 0.037).sin() * 0.5)
             .collect::<Vec<_>>(),
     );
     runtime.run(&program);
     let values = runtime.read(&program, input);
     let analytic = runtime.read(&program, slope);
-    for element in (0..values.len()).step_by(values.len() / 4) {
+    for element in (0..values.len()).step_by(values.len() / 6) {
         let step = 0.01 * values[element].abs().max(0.1);
         let mut probe = values.clone();
         probe[element] += step;
@@ -145,7 +145,7 @@ fn a_max_pooled_gradient_routes_through_the_number_the_window_took() {
         },
         Element::Single,
     );
-    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let window = Window::new([2, 2], [2, 2], [0, 0], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     let scale = graph.input(Shape::of([2, 3, 3, 3]), Element::Single);
     let loss = graph.sum(graph.mul(pooled, scale));
@@ -170,7 +170,7 @@ fn a_max_pool_of_a_window_that_holds_no_number_takes_the_identity_of_the_maximum
     let runtime = open();
     let graph = Graph::new();
     let input = graph.input(Shape::of([1, 1, 2, 2]), Element::Single);
-    let window = Window::new([3, 3], [1, 1], [3, 3]);
+    let window = Window::new([3, 3], [1, 1], [3, 3], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     assert_eq!(pooled.shape(), Shape::of([1, 1, 6, 6]));
     graph.retain(pooled);
@@ -195,7 +195,7 @@ fn a_max_pooled_gradient_of_a_window_that_holds_no_number_lands_on_no_element() 
         },
         Element::Single,
     );
-    let window = Window::new([3, 3], [1, 1], [3, 3]);
+    let window = Window::new([3, 3], [1, 1], [3, 3], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     let scale = graph.input(Shape::of([1, 1, 6, 6]), Element::Single);
     let loss = graph.sum(graph.mul(pooled, scale));
@@ -220,7 +220,7 @@ fn a_max_pool_that_walks_the_smallest_number_takes_that_number() {
     let runtime = open();
     let graph = Graph::new();
     let input = graph.parameter(Shape::of([1, 1, 2, 2]), Init::Zero, Element::Single);
-    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let window = Window::new([2, 2], [2, 2], [0, 0], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     let scale = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
     let loss = graph.sum(graph.mul(pooled, scale));
@@ -249,7 +249,7 @@ fn a_max_pool_of_a_window_of_negative_infinities_takes_the_identity_of_the_maxim
     let runtime = open();
     let graph = Graph::new();
     let input = graph.parameter(Shape::of([1, 1, 2, 2]), Init::Zero, Element::Single);
-    let window = Window::new([2, 2], [2, 2], [0, 0]);
+    let window = Window::new([2, 2], [2, 2], [0, 0], [1, 1]);
     let pooled = graph.pool2d(input, window, Pool::Max);
     let scale = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
     let loss = graph.sum(graph.mul(pooled, scale));
@@ -266,4 +266,65 @@ fn a_max_pool_of_a_window_of_negative_infinities_takes_the_identity_of_the_maxim
     assert_close(&runtime.read(&program, pooled), &[f32::NEG_INFINITY], 0.0);
     let expected = max_pool2d_gradient(&values, &[1.0], [1, 1, 2, 2], window);
     assert_close(&runtime.read(&program, slope), &expected, 0.0);
+}
+
+#[test]
+fn a_dilated_pool_reads_the_taps_its_span_places() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 9, 9]), Element::Single);
+    let window = Window::new([2, 3], [2, 1], [1, 2], [3, 2]);
+    let taken = graph.pool2d(input, window, Pool::Max);
+    let averaged = graph.pool2d(input, window, Pool::Mean);
+    assert_eq!(taken.shape(), Shape::of([2, 3, 4, 9]));
+    assert_eq!(averaged.shape(), taken.shape());
+    graph.retain(taken);
+    graph.retain(averaged);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = samples(486, 79);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, taken),
+        &pool2d_reference(&values, [2, 3, 9, 9], window, true),
+        1e-4,
+    );
+    assert_close(
+        &runtime.read(&program, averaged),
+        &pool2d_reference(&values, [2, 3, 9, 9], window, false),
+        1e-4,
+    );
+}
+
+#[test]
+fn a_dilated_max_pooled_gradient_routes_through_the_tap_it_took() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.parameter(
+        Shape::of([2, 2, 7, 7]),
+        Init::Uniform {
+            low: -1.0,
+            high: 1.0,
+        },
+        Element::Single,
+    );
+    let window = Window::new([3, 2], [1, 2], [2, 1], [2, 3]);
+    let pooled = graph.pool2d(input, window, Pool::Max);
+    let scale = graph.input(pooled.shape(), Element::Single);
+    let loss = graph.sum(graph.mul(pooled, scale));
+    let gradients = graph.backward(loss);
+    let slope = gradients.of(input);
+    graph.retain(slope);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = samples(196, 83);
+    let scale_values = (0..pooled.shape().elements())
+        .map(|index| (index as f32 * 0.071).cos() * 0.5)
+        .collect::<Vec<_>>();
+    runtime.write(&program, input, &values);
+    runtime.write(&program, scale, &scale_values);
+    runtime.run(&program);
+    let expected = max_pool2d_gradient(&values, &scale_values, [2, 2, 7, 7], window);
+    assert_close(&runtime.read(&program, slope), &expected, 1e-5);
 }

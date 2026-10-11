@@ -318,10 +318,12 @@ impl Shape {
             "a window walks the rows and columns of {:?}, and a free extent of either hands every length the taps reach",
             self.dims,
         );
+        let span_rows = window.row_span();
+        let span_columns = window.column_span();
         let padded_rows = self.dims[2] + 2 * window.pad_rows();
         let padded_columns = self.dims[3] + 2 * window.pad_columns();
         assert!(
-            padded_rows >= window.reach_rows() && padded_columns >= window.reach_columns(),
+            padded_rows >= span_rows && padded_columns >= span_columns,
             "a window of {} by {} taps over {:?} padded by {} by {} reaches no position",
             window.reach_rows(),
             window.reach_columns(),
@@ -330,8 +332,8 @@ impl Shape {
             window.pad_columns(),
         );
         [
-            (padded_rows - window.reach_rows()) / window.stride_rows() + 1,
-            (padded_columns - window.reach_columns()) / window.stride_columns() + 1,
+            (padded_rows - span_rows) / window.stride_rows() + 1,
+            (padded_columns - span_columns) / window.stride_columns() + 1,
         ]
     }
 
@@ -342,10 +344,10 @@ impl Shape {
             self.dims,
         );
         let rows = (i64::from(self.dims[2]) - 1) * i64::from(window.stride_rows())
-            + i64::from(window.reach_rows())
+            + i64::from(window.row_span())
             - 2 * i64::from(window.pad_rows());
         let columns = (i64::from(self.dims[3]) - 1) * i64::from(window.stride_columns())
-            + i64::from(window.reach_columns())
+            + i64::from(window.column_span())
             - 2 * i64::from(window.pad_columns());
         assert!(
             rows > 0 && columns > 0,

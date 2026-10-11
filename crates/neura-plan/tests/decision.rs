@@ -302,7 +302,7 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 64, 64]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 32, 32]));
     graph.retain(convolved);
@@ -320,6 +320,8 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
         assert_eq!(task.stride_columns, 2);
         assert_eq!(task.pad_rows, 1);
         assert_eq!(task.pad_columns, 1);
+        assert_eq!(task.dilation_rows, 1);
+        assert_eq!(task.dilation_columns, 1);
         cursor += task.count;
     }
     assert_eq!(cursor, 8192);
@@ -332,11 +334,39 @@ fn a_convolution_hands_the_device_the_window_it_walks() {
 }
 
 #[test]
+fn a_dilated_convolution_hands_the_device_the_span_it_walks() {
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 64, 64]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [4, 3]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([2, 4, 29, 30]));
+    graph.retain(convolved);
+    let plan = plan_with(&graph, wide());
+    let tasks = tasks_of(&plan, convolved);
+    assert_eq!(tasks.len(), 4);
+    let mut cursor = 0;
+    for task in tasks {
+        assert_eq!(Kind::of(task.kind), Kind::Conv2d);
+        assert_eq!(task.dilation_rows, 4);
+        assert_eq!(task.dilation_columns, 3);
+        assert_eq!(task.first, cursor);
+        cursor += task.count;
+    }
+    assert_eq!(cursor, 6960);
+    assert_eq!(
+        plan.work(),
+        6960 * 27,
+        "a dilation changes the numbers a tap reads, not the taps a convolution accounts",
+    );
+}
+
+#[test]
 fn a_convolution_weight_gradient_chunks_its_positions_and_folds_them() {
     let graph = Graph::new();
     let input = graph.parameter(Shape::of([1, 16, 8, 8]), Init::Zero, Element::Single);
     let filter = graph.parameter(Shape::of([16, 16, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [1, 1], [1, 1]);
+    let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     let gradients = graph.backward(graph.sum(convolved));
     let output_grad = gradients.of(convolved);
@@ -397,7 +427,7 @@ fn a_convolution_stops_the_graph_it_cannot_walk() {
         let _ = graph.conv2d(
             graph.input(Shape::of([2, 3, 2, 2]), Element::Single),
             graph.parameter(Shape::of([4, 3, 5, 5]), Init::Zero, Element::Single),
-            Window::new([5, 5], [1, 1], [1, 1]),
+            Window::new([5, 5], [1, 1], [1, 1], [1, 1]),
         );
     }));
 }

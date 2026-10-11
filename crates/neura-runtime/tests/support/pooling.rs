@@ -7,9 +7,9 @@ pub fn pool2d_reference(
     let [batch, channels, rows, columns] = input_shape;
     let reach_rows = window.reach_rows();
     let reach_columns = window.reach_columns();
-    let output_rows = (rows + 2 * window.pad_rows() - reach_rows) / window.stride_rows() + 1;
+    let output_rows = (rows + 2 * window.pad_rows() - window.row_span()) / window.stride_rows() + 1;
     let output_columns =
-        (columns + 2 * window.pad_columns() - reach_columns) / window.stride_columns() + 1;
+        (columns + 2 * window.pad_columns() - window.column_span()) / window.stride_columns() + 1;
     let mut out = vec![0.0f32; (batch * channels * output_rows * output_columns) as usize];
     for plane in 0..batch {
         for channel in 0..channels {
@@ -18,7 +18,8 @@ pub fn pool2d_reference(
                     let mut total = 0.0f32;
                     let mut best = f32::NEG_INFINITY;
                     for reach_row in 0..reach_rows {
-                        let used_row = row * window.stride_rows() + reach_row;
+                        let used_row =
+                            row * window.stride_rows() + reach_row * window.dilation_rows();
                         if used_row < window.pad_rows() {
                             continue;
                         }
@@ -27,7 +28,8 @@ pub fn pool2d_reference(
                             continue;
                         }
                         for reach_column in 0..reach_columns {
-                            let used_column = column * window.stride_columns() + reach_column;
+                            let used_column = column * window.stride_columns()
+                                + reach_column * window.dilation_columns();
                             if used_column < window.pad_columns() {
                                 continue;
                             }
@@ -67,9 +69,9 @@ pub fn max_pool2d_gradient(
     let [batch, channels, rows, columns] = input_shape;
     let reach_rows = window.reach_rows();
     let reach_columns = window.reach_columns();
-    let output_rows = (rows + 2 * window.pad_rows() - reach_rows) / window.stride_rows() + 1;
+    let output_rows = (rows + 2 * window.pad_rows() - window.row_span()) / window.stride_rows() + 1;
     let output_columns =
-        (columns + 2 * window.pad_columns() - reach_columns) / window.stride_columns() + 1;
+        (columns + 2 * window.pad_columns() - window.column_span()) / window.stride_columns() + 1;
     let mut out = vec![0.0f32; input.len()];
     for plane in 0..batch {
         for channel in 0..channels {
@@ -78,7 +80,8 @@ pub fn max_pool2d_gradient(
                     let mut best = f32::NEG_INFINITY;
                     let mut chosen = None;
                     for reach_row in 0..reach_rows {
-                        let used_row = row * window.stride_rows() + reach_row;
+                        let used_row =
+                            row * window.stride_rows() + reach_row * window.dilation_rows();
                         if used_row < window.pad_rows() {
                             continue;
                         }
@@ -87,7 +90,8 @@ pub fn max_pool2d_gradient(
                             continue;
                         }
                         for reach_column in 0..reach_columns {
-                            let used_column = column * window.stride_columns() + reach_column;
+                            let used_column = column * window.stride_columns()
+                                + reach_column * window.dilation_columns();
                             if used_column < window.pad_columns() {
                                 continue;
                             }

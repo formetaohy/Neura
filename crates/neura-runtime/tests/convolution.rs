@@ -28,7 +28,7 @@ fn a_convolution_walks_the_window_it_is_handed() {
     let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     let bias = graph.parameter(Shape::of([1, 4, 1, 1]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     let (rows, columns, channels) = (3usize, 3usize, 4usize);
     assert_eq!(convolved.shape(), Shape::of([2, 4, 3, 3]));
@@ -57,7 +57,7 @@ fn a_convolution_leaves_the_row_its_window_never_reaches() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([3, 2, 7, 6]), Element::Single);
     let filter = graph.parameter(Shape::of([3, 2, 3, 2]), Init::Zero, Element::Single);
-    let window = Window::new([3, 2], [3, 3], [0, 0]);
+    let window = Window::new([3, 2], [3, 3], [0, 0], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([3, 3, 2, 2]));
     graph.retain(convolved);
@@ -99,7 +99,7 @@ fn a_grouped_convolution_cuts_the_channels_it_reads() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 4, 7, 7]), Element::Single);
     let filter = graph.parameter(Shape::of([6, 2, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let convolved = graph.conv2d(input, filter, window);
     assert_eq!(convolved.shape(), Shape::of([2, 6, 4, 4]));
     graph.retain(convolved);
@@ -122,7 +122,7 @@ fn two_windows_ride_one_tape() {
     let narrow = graph.parameter(Shape::of([2, 3, 3, 3]), Init::Zero, Element::Single);
     let wide = graph.parameter(Shape::of([2, 3, 5, 5]), Init::Zero, Element::Single);
     let sliding = Window::sliding([3, 3]);
-    let padded = Window::new([5, 5], [1, 1], [1, 1]);
+    let padded = Window::new([5, 5], [1, 1], [1, 1], [1, 1]);
     let first = graph.conv2d(input, narrow, sliding);
     let second = graph.conv2d(input, wide, padded);
     assert_eq!(first.shape(), Shape::of([2, 2, 6, 6]));
@@ -153,7 +153,7 @@ fn a_transposed_convolution_scatters_the_window_it_is_handed() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 6, 6]), Element::Single);
     let filter = graph.parameter(Shape::of([3, 4, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let scattered = graph.conv2d_transpose(input, filter, window, 1);
     assert_eq!(scattered.shape(), Shape::of([2, 4, 11, 11]));
     graph.retain(scattered);
@@ -175,7 +175,7 @@ fn a_grouped_transposed_convolution_writes_each_group_its_own_channels() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([1, 4, 5, 5]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let scattered = graph.conv2d_transpose(input, filter, window, 2);
     assert_eq!(scattered.shape(), Shape::of([1, 6, 9, 9]));
     graph.retain(scattered);
@@ -197,7 +197,7 @@ fn a_depthwise_transposed_convolution_writes_one_channel_at_a_time() {
     let graph = Graph::new();
     let input = graph.input(Shape::of([2, 4, 6, 6]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 1, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [1, 1], [1, 1]);
+    let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
     let scattered = graph.conv2d_transpose(input, filter, window, 4);
     assert_eq!(scattered.shape(), Shape::of([2, 4, 6, 6]));
     graph.retain(scattered);
@@ -219,7 +219,7 @@ fn a_transposed_convolution_walks_its_gradient_back_into_the_input_and_filter() 
     let graph = Graph::new();
     let input = graph.gradient_input(Shape::of([1, 3, 4, 4]), Element::Single);
     let filter = graph.parameter(Shape::of([3, 2, 3, 3]), Init::Zero, Element::Single);
-    let window = Window::new([3, 3], [2, 2], [1, 1]);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
     let scattered = graph.conv2d_transpose(input, filter, window, 1);
     assert_eq!(scattered.shape(), Shape::of([1, 2, 7, 7]));
     let upstream = graph.parameter(Shape::of([1, 2, 7, 7]), Init::Zero, Element::Single);
@@ -250,4 +250,97 @@ fn a_transposed_convolution_walks_its_gradient_back_into_the_input_and_filter() 
     );
     assert_close(&runtime.read(&program, input_grad), &expected_input, 1e-4);
     assert_close(&runtime.read(&program, filter_grad), &expected_filter, 1e-4);
+}
+
+#[test]
+fn a_dilated_convolution_reads_the_taps_its_span_places() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 8, 8]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [1, 1], [1, 1], [2, 2]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([2, 4, 6, 6]));
+    let spread = graph.parameter(Shape::of([4, 3, 5, 5]), Init::Zero, Element::Single);
+    let placed = graph.conv2d(input, spread, Window::new([5, 5], [1, 1], [1, 1], [1, 1]));
+    assert_eq!(placed.shape(), convolved.shape());
+    graph.retain(convolved);
+    graph.retain(placed);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(384, 131);
+    let filter_values = samples(108, 137);
+    let mut spread_values = vec![0.0f32; 300];
+    for out_channel in 0..4usize {
+        for in_channel in 0..3usize {
+            for row in 0..3usize {
+                for column in 0..3usize {
+                    let tapped = (out_channel * 3 + in_channel) * 9 + row * 3 + column;
+                    let placed = (out_channel * 3 + in_channel) * 25 + (row * 2) * 5 + column * 2;
+                    spread_values[placed] = filter_values[tapped];
+                }
+            }
+        }
+    }
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.write(&program, spread, &spread_values);
+    runtime.run(&program);
+    let expected = conv2d_reference(&input_values, &filter_values, [2, 3, 8, 8], 4, window);
+    assert_close(&runtime.read(&program, convolved), &expected, 1e-4);
+    assert_eq!(
+        runtime.read(&program, placed),
+        runtime.read(&program, convolved),
+        "a dilated tap reads the number a zero padded tap of its span reads",
+    );
+}
+
+#[test]
+fn a_dilated_transposed_convolution_scatters_the_span_it_covers() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 3, 5, 5]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 2, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [2, 2], [1, 1], [2, 2]);
+    let scattered = graph.conv2d_transpose(input, filter, window, 1);
+    assert_eq!(scattered.shape(), Shape::of([1, 2, 11, 11]));
+    graph.retain(scattered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(75, 139);
+    let filter_values = samples(54, 149);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.run(&program);
+    let expected =
+        conv2d_transpose_reference(&input_values, &filter_values, [1, 3, 5, 5], 1, window);
+    assert_close(&runtime.read(&program, scattered), &expected, 1e-4);
+}
+
+#[test]
+fn a_dilated_convolution_walks_the_span_its_gradient_scatters() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.gradient_input(Shape::of([1, 2, 8, 8]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 2, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [1, 1], [0, 0], [3, 2]);
+    let convolved = graph.conv2d(input, filter, window);
+    assert_eq!(convolved.shape(), Shape::of([1, 3, 2, 4]));
+    let upstream = graph.parameter(Shape::of([1, 3, 2, 4]), Init::Zero, Element::Single);
+    let loss = graph.sum(graph.mul(convolved, upstream));
+    let gradients = graph.backward(loss);
+    let input_grad = gradients.of(input);
+    graph.retain(input_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(128, 151);
+    let filter_values = samples(54, 157);
+    let upstream_values = samples(24, 163);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.write(&program, upstream, &upstream_values);
+    runtime.run(&program);
+    let expected =
+        conv2d_transpose_reference(&upstream_values, &filter_values, [1, 3, 2, 4], 1, window);
+    assert_close(&runtime.read(&program, input_grad), &expected, 1e-4);
 }

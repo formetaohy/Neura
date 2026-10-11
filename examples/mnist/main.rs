@@ -38,7 +38,7 @@ impl<'g> Model<'g> {
             low: -0.25,
             high: 0.25,
         };
-        let window = Window::new(WINDOW, [1, 1], [1, 1]);
+        let window = Window::new(WINDOW, [1, 1], [1, 1], [1, 1]);
         Self {
             conv1: Conv2d::new(
                 graph,
@@ -65,7 +65,7 @@ impl<'g> Model<'g> {
     }
 
     fn logits(&self, graph: &Graph<'g>, images: Value<'g>, batch: Free) -> Value<'g> {
-        let pool = Window::new(POOL, POOL, [0, 0]);
+        let pool = Window::new(POOL, POOL, [0, 0], [1, 1]);
         let first = graph.pool2d(
             graph.relu(self.conv1.forward(graph, images)),
             pool,

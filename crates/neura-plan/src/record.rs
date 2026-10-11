@@ -80,6 +80,7 @@ impl<'a> Recorded<'a> {
             [self.record.reach_rows, self.record.reach_columns],
             [self.record.stride_rows, self.record.stride_columns],
             [self.record.pad_rows, self.record.pad_columns],
+            [self.record.dilation_rows, self.record.dilation_columns],
         )
     }
 

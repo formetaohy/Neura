@@ -575,7 +575,7 @@ fn narrow_stack<'g>(graph: &Graph<'g>, element: Element, data: Shape) -> [Value<
     );
     let pooled = graph.pool2d(
         graph.relu(convolved),
-        Window::new([2, 2], [2, 2], [0, 0]),
+        Window::new([2, 2], [2, 2], [0, 0], [1, 1]),
         Pool::Mean,
     );
     let rows = graph.reshape(pooled, Shape::of([1, 1, 9, 4]));

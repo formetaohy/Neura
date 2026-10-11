@@ -11,9 +11,9 @@ pub fn conv2d_reference(
     let per_group = taps.len() as u32 / (output_channels * reach_rows * reach_columns);
     let groups = channels / per_group;
     let per_group_outputs = output_channels / groups;
-    let output_rows = (rows + 2 * window.pad_rows() - reach_rows) / window.stride_rows() + 1;
+    let output_rows = (rows + 2 * window.pad_rows() - window.row_span()) / window.stride_rows() + 1;
     let output_columns =
-        (columns + 2 * window.pad_columns() - reach_columns) / window.stride_columns() + 1;
+        (columns + 2 * window.pad_columns() - window.column_span()) / window.stride_columns() + 1;
     let mut out = vec![0.0f32; (batch * output_channels * output_rows * output_columns) as usize];
     for plane in 0..batch {
         for channel in 0..output_channels {
@@ -24,7 +24,8 @@ pub fn conv2d_reference(
                     for local in 0..per_group {
                         let source_channel = group * per_group + local;
                         for reach_row in 0..reach_rows {
-                            let used_row = row * window.stride_rows() + reach_row;
+                            let used_row =
+                                row * window.stride_rows() + reach_row * window.dilation_rows();
                             if used_row < window.pad_rows() {
                                 continue;
                             }
@@ -33,7 +34,8 @@ pub fn conv2d_reference(
                                 continue;
                             }
                             for reach_column in 0..reach_columns {
-                                let used_column = column * window.stride_columns() + reach_column;
+                                let used_column = column * window.stride_columns()
+                                    + reach_column * window.dilation_columns();
                                 if used_column < window.pad_columns() {
                                     continue;
                                 }

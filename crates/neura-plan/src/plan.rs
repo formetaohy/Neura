@@ -525,6 +525,8 @@ impl Plan {
                 stride_columns: task.window.stride_columns(),
                 pad_rows: task.window.pad_rows(),
                 pad_columns: task.window.pad_columns(),
+                dilation_rows: task.window.dilation_rows(),
+                dilation_columns: task.window.dilation_columns(),
                 axis: task.axis,
                 offset: task.offset,
                 in_place: u32::from(task.in_place),

@@ -6,10 +6,12 @@ pub struct Window {
     stride_columns: u32,
     pad_rows: u32,
     pad_columns: u32,
+    dilation_rows: u32,
+    dilation_columns: u32,
 }
 
 impl Window {
-    pub fn new(reach: [u32; 2], stride: [u32; 2], padding: [u32; 2]) -> Self {
+    pub fn new(reach: [u32; 2], stride: [u32; 2], padding: [u32; 2], dilation: [u32; 2]) -> Self {
         assert!(
             reach[0] > 0 && reach[1] > 0,
             "a window of {reach:?} taps covers no element",
@@ -18,6 +20,10 @@ impl Window {
             stride[0] > 0 && stride[1] > 0,
             "a window of stride {stride:?} never reaches its next position",
         );
+        assert!(
+            dilation[0] > 0 && dilation[1] > 0,
+            "a window of dilation {dilation:?} reads one tap again and again",
+        );
         Self {
             reach_rows: reach[0],
             reach_columns: reach[1],
@@ -25,11 +31,17 @@ impl Window {
             stride_columns: stride[1],
             pad_rows: padding[0],
             pad_columns: padding[1],
+            dilation_rows: dilation[0],
+            dilation_columns: dilation[1],
         }
     }
 
     pub fn sliding(reach: [u32; 2]) -> Self {
-        Self::new(reach, [1, 1], [0, 0])
+        Self::new(reach, [1, 1], [0, 0], [1, 1])
+    }
+
+    pub fn dilated(reach: [u32; 2], dilation: [u32; 2]) -> Self {
+        Self::new(reach, [1, 1], [0, 0], dilation)
     }
 
     pub const fn reach_rows(self) -> u32 {
@@ -54,5 +66,21 @@ impl Window {
 
     pub const fn pad_columns(self) -> u32 {
         self.pad_columns
+    }
+
+    pub const fn dilation_rows(self) -> u32 {
+        self.dilation_rows
+    }
+
+    pub const fn dilation_columns(self) -> u32 {
+        self.dilation_columns
+    }
+
+    pub const fn row_span(self) -> u32 {
+        (self.reach_rows - 1) * self.dilation_rows + 1
+    }
+
+    pub const fn column_span(self) -> u32 {
+        (self.reach_columns - 1) * self.dilation_columns + 1
     }
 }

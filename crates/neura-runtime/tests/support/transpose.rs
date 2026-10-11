@@ -11,9 +11,9 @@ pub fn conv2d_transpose_reference(
     let local_outputs = taps.len() as u32 / (input_channels * reach_rows * reach_columns);
     let output_channels = groups * local_outputs;
     let inputs_per_group = input_channels / groups;
-    let output_rows = (rows - 1) * window.stride_rows() + reach_rows - 2 * window.pad_rows();
+    let output_rows = (rows - 1) * window.stride_rows() + window.row_span() - 2 * window.pad_rows();
     let output_columns =
-        (columns - 1) * window.stride_columns() + reach_columns - 2 * window.pad_columns();
+        (columns - 1) * window.stride_columns() + window.column_span() - 2 * window.pad_columns();
     let mut out = vec![0.0f32; (batch * output_channels * output_rows * output_columns) as usize];
     for plane in 0..batch {
         for channel in 0..output_channels {
@@ -27,7 +27,7 @@ pub fn conv2d_transpose_reference(
                         for reach_row in 0..reach_rows {
                             let Some(used_row) = scattered(
                                 row,
-                                reach_row,
+                                reach_row * window.dilation_rows(),
                                 window.pad_rows(),
                                 window.stride_rows(),
                                 rows,
@@ -37,7 +37,7 @@ pub fn conv2d_transpose_reference(
                             for reach_column in 0..reach_columns {
                                 let Some(used_column) = scattered(
                                     column,
-                                    reach_column,
+                                    reach_column * window.dilation_columns(),
                                     window.pad_columns(),
                                     window.stride_columns(),
                                     columns,
@@ -109,7 +109,8 @@ pub fn conv2d_transpose_weight_grad_reference(
                     for local in 0..local_outputs {
                         let gradient_channel = group * local_outputs + local;
                         for reach_row in 0..reach_rows {
-                            let used_row = row * window.stride_rows() + reach_row;
+                            let used_row =
+                                row * window.stride_rows() + reach_row * window.dilation_rows();
                             if used_row < window.pad_rows() {
                                 continue;
                             }
@@ -118,7 +119,8 @@ pub fn conv2d_transpose_weight_grad_reference(
                                 continue;
                             }
                             for reach_column in 0..reach_columns {
-                                let used_column = column * window.stride_columns() + reach_column;
+                                let used_column = column * window.stride_columns()
+                                    + reach_column * window.dilation_columns();
                                 if used_column < window.pad_columns() {
                                     continue;
                                 }

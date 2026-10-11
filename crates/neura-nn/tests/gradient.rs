@@ -520,7 +520,7 @@ fn a_convolution_gradient_matches_finite_differences() {
         "conv",
         [16, 16],
         1,
-        Window::new([3, 3], [1, 1], [1, 1]),
+        Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
         Init::Uniform {
             low: -0.5,
             high: 0.5,
@@ -586,7 +586,7 @@ fn a_depthwise_convolution_gradient_matches_finite_differences() {
         "conv",
         [channels, channels],
         channels,
-        Window::new([3, 3], [1, 1], [1, 1]),
+        Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
         Init::Uniform {
             low: -0.5,
             high: 0.5,
@@ -642,6 +642,71 @@ fn a_depthwise_convolution_gradient_matches_finite_differences() {
 }
 
 #[test]
+fn a_dilated_convolution_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let inputs = graph.parameter(
+        Shape::of([1, 8, 9, 9]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let conv = Conv2d::new(
+        &graph,
+        "conv",
+        [8, 8],
+        1,
+        Window::new([3, 3], [2, 1], [2, 1], [3, 2]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let targets = graph.input(Shape::of([1, 8, 4, 7]), Element::Single);
+    let predicted = conv.forward(&graph, inputs);
+    assert_eq!(predicted.shape(), Shape::of([1, 8, 4, 7]));
+    let loss = mse_loss(&graph, predicted, targets);
+    let gradients = graph.backward(loss);
+    let mut parameters = vec![inputs];
+    parameters.extend(conv.parameters());
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        targets,
+        &(0..224)
+            .map(|index| (index as f32 * 0.031).sin() * 0.5)
+            .collect::<Vec<_>>(),
+    );
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert_slope(element, analytic[element], numeric, values.len());
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+
+#[test]
 fn a_transposed_convolution_gradient_matches_finite_differences() {
     let runtime = open();
     let graph = Graph::new();
@@ -658,7 +723,7 @@ fn a_transposed_convolution_gradient_matches_finite_differences() {
         "deconv",
         [16, 16],
         1,
-        Window::new([3, 3], [2, 2], [1, 1]),
+        Window::new([3, 3], [2, 2], [1, 1], [1, 1]),
         Init::Uniform {
             low: -0.5,
             high: 0.5,
@@ -749,6 +814,70 @@ fn a_policy_gradient_matches_finite_differences() {
     );
     runtime.write(&program, action, &[0.0, 2.0, 1.0, 3.0, 0.0]);
     runtime.write(&program, advantage, &[1.0, -0.5, 0.25, -0.75, 2.0]);
+    runtime.run(&program);
+    for parameter in &parameters {
+        let values = runtime.read(&program, *parameter);
+        let analytic = runtime.read(&program, gradients.of(*parameter));
+        for element in sampled(values.len()) {
+            let step = 0.01 * values[element].abs().max(0.1);
+            let mut probe = values.clone();
+            probe[element] += step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let high = runtime.read(&program, loss)[0];
+            probe[element] -= 2.0 * step;
+            runtime.write(&program, *parameter, &probe);
+            runtime.run(&program);
+            let low = runtime.read(&program, loss)[0];
+            let numeric = (high - low) / (2.0 * step);
+            assert_slope(element, analytic[element], numeric, values.len());
+        }
+        runtime.write(&program, *parameter, &values);
+    }
+}
+#[test]
+fn a_dilated_transposed_convolution_gradient_matches_finite_differences() {
+    let runtime = open();
+    let graph = Graph::new();
+    let inputs = graph.parameter(
+        Shape::of([1, 8, 5, 5]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let deconv = ConvTranspose2d::new(
+        &graph,
+        "deconv",
+        [8, 8],
+        1,
+        Window::new([3, 3], [2, 2], [1, 1], [2, 2]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let targets = graph.input(Shape::of([1, 8, 11, 11]), Element::Single);
+    let predicted = deconv.forward(&graph, inputs);
+    assert_eq!(predicted.shape(), Shape::of([1, 8, 11, 11]));
+    let loss = mse_loss(&graph, predicted, targets);
+    let gradients = graph.backward(loss);
+    let mut parameters = vec![inputs];
+    parameters.extend(deconv.parameters());
+    for parameter in &parameters {
+        graph.retain(gradients.of(*parameter));
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        targets,
+        &(0..968)
+            .map(|index| (index as f32 * 0.029).sin() * 0.5)
+            .collect::<Vec<_>>(),
+    );
     runtime.run(&program);
     for parameter in &parameters {
         let values = runtime.read(&program, *parameter);

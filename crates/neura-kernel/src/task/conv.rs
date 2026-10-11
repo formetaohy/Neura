@@ -20,13 +20,15 @@ mod device {
             let mut total = 0.0;
             for channel in stride(0u32, channels, 1u32) {
                 for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                    let row =
-                        i32(at.z) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
+                    let row = i32(at.z) * i32(task.stride_rows)
+                        + i32(reach_row) * i32(task.dilation_rows)
+                        - i32(task.pad_rows);
                     if row < 0i32 || row >= input_rows {
                         continue;
                     }
                     for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                        let column = i32(at.w) * i32(task.stride_columns) + i32(reach_column)
+                        let column = i32(at.w) * i32(task.stride_columns)
+                            + i32(reach_column) * i32(task.dilation_columns)
                             - i32(task.pad_columns);
                         if column < 0i32 || column >= input_columns {
                             continue;
@@ -85,7 +87,8 @@ mod device {
                 1u32,
             ) {
                 for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                    let shifted_row = i32(at.z) + i32(task.pad_rows) - i32(reach_row);
+                    let shifted_row =
+                        i32(at.z) + i32(task.pad_rows) - i32(reach_row) * i32(task.dilation_rows);
                     if shifted_row < 0i32 || shifted_row % i32(task.stride_rows) != 0i32 {
                         continue;
                     }
@@ -94,7 +97,8 @@ mod device {
                         continue;
                     }
                     for reach_column in stride(0u32, task.reach_columns, 1u32) {
-                        let shifted_column = i32(at.w) + i32(task.pad_columns) - i32(reach_column);
+                        let shifted_column = i32(at.w) + i32(task.pad_columns)
+                            - i32(reach_column) * i32(task.dilation_columns);
                         if shifted_column < 0i32
                             || shifted_column % i32(task.stride_columns) != 0i32
                         {
@@ -181,12 +185,14 @@ mod device {
                 let within = position % plane;
                 let row = within / gradient_columns;
                 let column = within % gradient_columns;
-                let used_row =
-                    i32(row) * i32(task.stride_rows) + i32(reach_row) - i32(task.pad_rows);
+                let used_row = i32(row) * i32(task.stride_rows)
+                    + i32(reach_row) * i32(task.dilation_rows)
+                    - i32(task.pad_rows);
                 if used_row < 0i32 || used_row >= input_rows {
                     continue;
                 }
-                let used_column = i32(column) * i32(task.stride_columns) + i32(reach_column)
+                let used_column = i32(column) * i32(task.stride_columns)
+                    + i32(reach_column) * i32(task.dilation_columns)
                     - i32(task.pad_columns);
                 if used_column < 0i32 || used_column >= input_columns {
                     continue;
