@@ -262,7 +262,7 @@ fn a_consumer_opens_a_wave_of_its_own_where_the_device_cannot_fill_the_wave_it_r
 }
 
 #[test]
-fn a_wave_the_device_can_fill_closes_the_producers_it_reads() {
+fn a_consumer_opens_a_wave_of_its_own_beside_the_producers_it_reads() {
     let graph = Graph::new();
     let source = graph.parameter(Shape::vector(64), Init::Zero, Element::Single);
     let producers = (0..34)
@@ -278,20 +278,54 @@ fn a_wave_the_device_can_fill_closes_the_producers_it_reads() {
     let plan = plan_with(&graph, profile);
     assert_eq!(
         plan.wave_count(),
-        1,
-        "a wave that keeps every workgroup busy closes its producers",
+        2,
+        "a consumer waits a wave where the wave it reads hands every workgroup a task of its own",
     );
-    assert_eq!(plan.segments().len(), 33);
-    let consumer = writers(&plan, out.id())[0] as u32;
-    let closes = plan
-        .segments()
-        .iter()
-        .find(|segment| segment.count == 3)
-        .expect("the consumer joins the producers it reads into one chain");
+    assert_eq!(
+        plan.segments().len(),
+        35,
+        "each of the 34 producers rides a workgroup of its own and the consumer rides one more",
+    );
+    let consumer = writers(&plan, out.id())[0];
     assert!(
-        closes.first <= consumer && consumer < closes.first + closes.count,
-        "the consumer walks the chain of its producers",
+        plan.segments().iter().all(|segment| segment.count == 1),
+        "no workgroup welds the tasks of the producers a consumer reads into one chain",
     );
+    assert_eq!(wave_of(&plan, consumer), 1);
+    assert!(follows(
+        &plan,
+        writers(&plan, producers[0].id())[0],
+        consumer
+    ));
+    assert!(follows(
+        &plan,
+        writers(&plan, producers[1].id())[0],
+        consumer
+    ));
+    assert_eq!(out.shape(), Shape::vector(64));
+}
+
+#[test]
+fn a_softmax_backward_pass_hands_every_workgroup_one_task() {
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(128, 32000), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(128, 32000), Init::Zero, Element::Single);
+    let loss = graph.sum(graph.mul(graph.softmax(logits), weight));
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(logits);
+    graph.retain(loss);
+    graph.retain(gradient);
+    let plan = plan(&graph);
+    let mut widest = vec![0u32; plan.wave_count() as usize];
+    for segment in plan.segments() {
+        widest[segment.wave as usize] = widest[segment.wave as usize].max(segment.count);
+    }
+    for (wave, chain) in widest.iter().enumerate() {
+        assert_eq!(
+            *chain, 1,
+            "wave {wave} of a softmax backward pass hands one workgroup {chain} tasks where every task rides a workgroup of its own",
+        );
+    }
 }
 
 #[test]

@@ -4,11 +4,8 @@ use crate::region::{self, Walk};
 use neura_abi::{SegmentFields, SegmentRecord};
 use neura_profile::MatmulTile;
 
-const MERGE_SPREAD: u64 = 16;
-
 pub(crate) trait Scheduled: Walk {
     fn span(&self) -> (u32, u32);
-    fn work(&self) -> u64;
 }
 
 pub(crate) struct Schedule {
@@ -28,15 +25,11 @@ impl Schedule {
         values: &V,
         tiles: &[MatmulTile],
         tasks: &[T],
-        workgroups: u32,
         declared: &[u32],
     ) -> Self {
         let barriers = barriers(values, tasks);
         let depths = depths(values, tiles, tasks, &barriers);
-        let packed = Packer::new(
-            values, tiles, tasks, &barriers, &depths, workgroups, declared,
-        )
-        .pack();
+        let packed = Packer::new(values, tiles, tasks, &barriers, &depths, declared).pack();
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -200,61 +193,18 @@ fn barriers<T: Scheduled, V: region::Values>(values: &V, tasks: &[T]) -> Vec<Vec
     barriers
 }
 
-#[derive(Default)]
-struct Ancestry {
-    parents: Vec<u32>,
-}
-
-impl Ancestry {
-    fn push(&mut self) {
-        let segment = self.parents.len() as u32;
-        self.parents.push(segment);
-    }
-
-    fn root(&self, segment: u32) -> u32 {
-        let mut root = segment;
-        loop {
-            let Some(&parent) = self.parents.get(root as usize) else {
-                return root;
-            };
-            if parent == root {
-                return root;
-            }
-            root = parent;
-        }
-    }
-
-    fn adopt(&mut self, kept: u32, absorbed: u32) {
-        let absorbed = self.root(absorbed);
-        if absorbed != kept {
-            self.parents[absorbed as usize] = kept;
-        }
-    }
-}
-
-enum Placement {
-    Fold { wave: u32, segment: u32 },
-    Merge { wave: u32, segments: Vec<u32> },
-    Open { wave: u32 },
-}
-
 struct Packer<'a, T, V> {
     values: &'a V,
     tiles: &'a [MatmulTile],
     tasks: &'a [T],
     barriers: &'a [Vec<u32>],
-    workgroups: u32,
     declared: &'a [u32],
     lonely: Vec<bool>,
     hazards: Hazards,
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
-    work: Vec<u64>,
-    created: Vec<u32>,
-    rebuilt: Vec<bool>,
     segment_of: Vec<u32>,
     segment_wave: Vec<u32>,
-    ancestry: Ancestry,
     entry: Hazard,
     touches: region::Touches,
     prefix: u32,
@@ -269,7 +219,6 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         tasks: &'a [T],
         barriers: &'a [Vec<u32>],
         depths: &'a [u32],
-        workgroups: u32,
         declared: &'a [u32],
     ) -> Self {
         Self {
@@ -277,18 +226,13 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             tiles,
             tasks,
             barriers,
-            workgroups,
             declared,
             lonely: lonely(depths),
             hazards: Hazards::of(values.len()),
             waves: vec![0u32; tasks.len()],
             segments: Vec::new(),
-            work: Vec::new(),
-            created: Vec::new(),
-            rebuilt: Vec::new(),
             segment_of: vec![0u32; tasks.len()],
             segment_wave: Vec::new(),
-            ancestry: Ancestry::default(),
             entry: Hazard::default(),
             touches: region::Touches::default(),
             prefix: 0,
@@ -332,67 +276,34 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         for dependency in &self.barriers[index as usize] {
             evidence.join(&Hazard::at(
                 self.waves[*dependency as usize],
-                self.ancestry.root(self.segment_of[*dependency as usize]),
+                self.segment_of[*dependency as usize],
             ));
         }
         let earliest = evidence.wave;
         let mut dependencies = std::mem::take(&mut evidence.segments);
-        for reached in dependencies.as_mut_slice() {
-            *reached = self.ancestry.root(*reached);
-        }
         dependencies.settle();
-        let folded = earliest
+        let joined = earliest
             .filter(|earliest| {
-                self.lonely[index as usize]
+                !dependencies.overflowed()
+                    && self.lonely[index as usize]
                     && !recomputed
                     && dependencies.len() == 1
                     && self.segment_wave.get(dependencies.get(0) as usize).copied()
                         == Some(*earliest)
             })
             .map(|earliest| (earliest, dependencies.get(0)));
-        let placement = match dependencies.overflowed() {
-            true => Placement::Open {
-                wave: earliest.expect("a hazard that overflows names a wave") + 1,
-            },
-            false => match folded {
-                Some((wave, segment)) => Placement::Fold { wave, segment },
-                None => {
-                    let declared = self.declared.get(index as usize).copied().unwrap_or(0);
-                    self.close(
-                        task.work(),
-                        dependencies.slice(),
-                        earliest,
-                        recomputed,
-                        declared,
-                    )
-                }
-            },
-        };
-        let (wave, segment) = match placement {
-            Placement::Fold { wave, segment } => (wave, segment),
-            Placement::Merge {
-                wave,
-                segments: merged,
-            } => {
-                let kept = merged[0];
-                for absorbed in &merged[1..] {
-                    let moved = std::mem::take(&mut self.segments[*absorbed as usize]);
-                    self.work[kept as usize] += self.work[*absorbed as usize];
-                    self.work[*absorbed as usize] = 0;
-                    self.segments[kept as usize].extend(moved);
-                    self.ancestry.adopt(kept, *absorbed);
-                }
-                for reached in dependencies.as_mut_slice() {
-                    *reached = self.ancestry.root(*reached);
-                }
-                (wave, kept)
-            }
-            Placement::Open { wave } => {
+        let (wave, segment) = match joined {
+            Some((wave, segment)) => (wave, segment),
+            None => {
+                let wave = match dependencies.overflowed() {
+                    true => earliest.expect("a hazard that overflows names a wave") + 1,
+                    false => earliest.map_or_else(
+                        || self.declared.get(index as usize).copied().unwrap_or(0),
+                        |earliest| earliest + 1,
+                    ),
+                };
                 self.segments.push(Vec::new());
-                self.work.push(0);
-                self.rebuilt.push(false);
                 self.segment_wave.push(wave);
-                self.ancestry.push();
                 (wave, (self.segments.len() - 1) as u32)
             }
         };
@@ -412,64 +323,12 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         self.segment_wave[segment as usize] = self.segment_wave[segment as usize].max(wave);
         self.waves[index as usize] = wave;
         self.segment_of[index as usize] = segment;
-        if self.segments[segment as usize].is_empty() {
-            if self.created.len() <= wave as usize {
-                self.created.resize(wave as usize + 1, 0);
-            }
-            self.created[wave as usize] += 1;
-        }
-        self.work[segment as usize] += task.work();
-        self.rebuilt[segment as usize] |= recomputed;
         self.segments[segment as usize].push(index);
         self.prefix = self.prefix.max(wave);
         self.entry.wave = Some(wave);
         self.entry.segments.clear();
         self.entry.segments.extend_from(&[segment]);
         self.hazards.record(self.values, &self.touches, &self.entry);
-    }
-
-    fn close(
-        &self,
-        work_of_task: u64,
-        dependencies: &[u32],
-        earliest: Option<u32>,
-        recomputed: bool,
-        declared: u32,
-    ) -> Placement {
-        let Some(earliest) = earliest else {
-            return Placement::Open { wave: declared };
-        };
-        let heaviest = dependencies
-            .iter()
-            .map(|segment| self.work[*segment as usize])
-            .max()
-            .unwrap_or(0);
-        let claimed = dependencies
-            .iter()
-            .map(|segment| self.work[*segment as usize])
-            .sum::<u64>();
-        let segments_after_the_merge = self
-            .created
-            .get(earliest as usize)
-            .copied()
-            .unwrap_or(0)
-            .saturating_sub(dependencies.len().saturating_sub(1) as u32);
-        let keeps_every_workgroup_busy = segments_after_the_merge >= self.workgroups;
-        if dependencies.len() > 1
-            && heaviest > 0
-            && keeps_every_workgroup_busy
-            && !recomputed
-            && dependencies
-                .iter()
-                .all(|segment| !self.rebuilt[*segment as usize])
-            && claimed + work_of_task <= MERGE_SPREAD * heaviest
-        {
-            return Placement::Merge {
-                wave: earliest,
-                segments: dependencies.to_vec(),
-            };
-        }
-        Placement::Open { wave: earliest + 1 }
     }
 }
 

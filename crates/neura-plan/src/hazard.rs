@@ -108,10 +108,6 @@ impl Segments {
         self.slice().iter()
     }
 
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [u32] {
-        &mut self.inline[..self.held as usize]
-    }
-
     pub(crate) fn clear(&mut self) {
         self.held = 0;
         self.overflow = false;

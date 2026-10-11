@@ -969,7 +969,6 @@ impl Plan {
             &sized,
             self.profile.tiles(),
             &emitted.walks,
-            self.profile.workgroups(),
             &emitted.declared,
         );
         let order = schedule
@@ -1329,10 +1328,6 @@ impl Walk for Walked<'_, '_> {
 impl schedule::Scheduled for Walked<'_, '_> {
     fn span(&self) -> (u32, u32) {
         self.span
-    }
-
-    fn work(&self) -> u64 {
-        self.work
     }
 }
 
