@@ -3,12 +3,22 @@ use neura_compiler::Compiler;
 const COLUMNS: u32 = 4;
 const SPAN: u32 = 4;
 const WINDOW: u32 = COLUMNS + SPAN - 1;
+const WIDE: u32 = 4;
+const NARROW: u32 = 2;
 
 pub(crate) fn install(compiler: &mut Compiler) {
     compiler.constant("CONV_COLUMNS", COLUMNS);
     compiler.constant("CONV_SPAN", SPAN);
     compiler.constant("CONV_WINDOW", WINDOW);
+    compiler.constant("CONV_WIDE", WIDE);
     device::define(compiler);
+    for channels in [NARROW, WIDE] {
+        compiler.specialize(
+            "template_conv2d_channels",
+            &format!("conv2d_channels_{channels}"),
+            &[("CONV_CHANNELS", channels)],
+        );
+    }
 }
 
 #[neura_compiler::module]
@@ -21,127 +31,37 @@ mod device {
         let out_channels = taps.dims.x / (input.dims.y / channels);
         let input_rows = i32(input.dims.z);
         let input_columns = i32(input.dims.w);
-        if task.stride_columns == 1u32
-            && task.dilation_columns == 1u32
-            && task.reach_columns >= 2u32
-            && task.reach_columns <= CONV_SPAN
-        {
-            for group in stride(
-                task.first + lid * CONV_COLUMNS,
-                task.first + task.count,
-                WORKGROUP_SIZE * CONV_COLUMNS,
-            ) {
-                let at = coordinates(group, output.dims);
-                if at.w + CONV_COLUMNS <= output.dims.w
-                    && group + CONV_COLUMNS <= task.first + task.count
-                {
-                    conv2d_columns(
-                        task,
-                        at,
-                        group,
-                        input,
-                        taps,
-                        output,
-                        channels,
-                        out_channels,
-                        input_rows,
-                        input_columns,
-                    );
-                } else {
-                    for offset in unroll(0u32, CONV_COLUMNS, 1u32) {
-                        let index = group + offset;
-                        if index < task.first + task.count {
-                            conv2d_element(
-                                task,
-                                index,
-                                input,
-                                taps,
-                                output,
-                                channels,
-                                out_channels,
-                                input_rows,
-                                input_columns,
-                            );
-                        }
-                    }
-                }
-            }
-            return;
-        }
+        let wide = channels % CONV_WIDE == 0u32;
         for index in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
-            conv2d_element(
-                task,
-                index,
-                input,
-                taps,
-                output,
-                channels,
-                out_channels,
-                input_rows,
-                input_columns,
-            );
-        }
-    }
-
-    fn conv2d_columns(
-        task: Task,
-        at: uvec4,
-        group: u32,
-        input: Value,
-        taps: Value,
-        output: Value,
-        channels: u32,
-        out_channels: u32,
-        input_rows: i32,
-        input_columns: i32,
-    ) {
-        let first_channel = (at.y / out_channels) * channels;
-        let plane = at.x * input.strides.x + first_channel * input.strides.y;
-        let mut totals = scalar_array(0.0, CONV_COLUMNS);
-        for channel in stride(0u32, channels, 1u32) {
-            let planes = plane + channel * input.strides.y;
-            for reach_row in stride(0u32, task.reach_rows, 1u32) {
-                let row = i32(at.z) * i32(task.stride_rows)
-                    + i32(reach_row) * i32(task.dilation_rows)
-                    - i32(task.pad_rows);
-                if row < 0i32 || row >= input_rows {
-                    continue;
-                }
-                let left = i32(at.w) - i32(task.pad_columns);
-                let mut window = scalar_array(0.0, CONV_WINDOW);
-                for slot in unroll(0u32, CONV_WINDOW, 1u32) {
-                    let column = left + i32(slot);
-                    let inside = column >= 0i32 && column < input_columns;
-                    let address = select(
-                        0u32,
-                        planes + u32(row) * input.strides.z + u32(column) * input.strides.w,
-                        inside,
-                    );
-                    window[slot] = select(0.0, fetch(input, address), inside);
-                }
-                let mut weight = read_address(uvec4(at.y, channel, reach_row, 0u32), taps.strides);
-                for reach_column in unroll(0u32, CONV_SPAN, 1u32) {
-                    if reach_column < task.reach_columns {
-                        let weighed = fetch(taps, weight);
-                        for offset in unroll(0u32, CONV_COLUMNS, 1u32) {
-                            totals[offset] =
-                                totals[offset] + window[offset + reach_column] * weighed;
-                        }
-                        weight = weight + taps.strides.w;
-                    }
-                }
+            if wide {
+                conv2d_channels_4(
+                    task,
+                    index,
+                    input,
+                    taps,
+                    output,
+                    channels,
+                    out_channels,
+                    input_rows,
+                    input_columns,
+                );
+            } else {
+                conv2d_channels_2(
+                    task,
+                    index,
+                    input,
+                    taps,
+                    output,
+                    channels,
+                    out_channels,
+                    input_rows,
+                    input_columns,
+                );
             }
         }
-        for offset in unroll(0u32, CONV_COLUMNS, 1u32) {
-            publish(
-                output,
-                group + offset,
-                chained(task, uvec4(at.x, at.y, at.z, at.w + offset), totals[offset]),
-            );
-        }
     }
 
-    fn conv2d_element(
+    fn template_conv2d_channels(
         task: Task,
         index: u32,
         input: Value,
@@ -154,8 +74,49 @@ mod device {
     ) {
         let at = coordinates(index, output.dims);
         let first_channel = (at.y / out_channels) * channels;
+        let mut totals = scalar_array(0.0, CONV_CHANNELS);
+        let blocks = channels / CONV_CHANNELS;
+        for block in stride(0u32, blocks, 1u32) {
+            let channel = block * CONV_CHANNELS;
+            for reach_row in stride(0u32, task.reach_rows, 1u32) {
+                let row = i32(at.z) * i32(task.stride_rows)
+                    + i32(reach_row) * i32(task.dilation_rows)
+                    - i32(task.pad_rows);
+                if row < 0i32 || row >= input_rows {
+                    continue;
+                }
+                let mut weights = scalar_array(0u32, CONV_CHANNELS);
+                let mut sources = scalar_array(0u32, CONV_CHANNELS);
+                for unit in unroll(0u32, CONV_CHANNELS, 1u32) {
+                    weights[unit] =
+                        read_address(uvec4(at.y, channel + unit, reach_row, 0u32), taps.strides);
+                    sources[unit] = read_address(
+                        uvec4(at.x, first_channel + channel + unit, u32(row), 0u32),
+                        input.strides,
+                    );
+                }
+                for reach_column in stride(0u32, task.reach_columns, 1u32) {
+                    let column = i32(at.w) * i32(task.stride_columns)
+                        + i32(reach_column) * i32(task.dilation_columns)
+                        - i32(task.pad_columns);
+                    if column >= 0i32 && column < input_columns {
+                        let offset = u32(column) * input.strides.w;
+                        for unit in unroll(0u32, CONV_CHANNELS, 1u32) {
+                            totals[unit] = totals[unit]
+                                + fetch(input, sources[unit] + offset) * fetch(taps, weights[unit]);
+                        }
+                    }
+                    for unit in unroll(0u32, CONV_CHANNELS, 1u32) {
+                        weights[unit] = weights[unit] + taps.strides.w;
+                    }
+                }
+            }
+        }
         let mut total = 0.0;
-        for channel in stride(0u32, channels, 1u32) {
+        for unit in unroll(0u32, CONV_CHANNELS, 1u32) {
+            total = total + totals[unit];
+        }
+        for channel in stride(blocks * CONV_CHANNELS, channels, 1u32) {
             for reach_row in stride(0u32, task.reach_rows, 1u32) {
                 let row = i32(at.z) * i32(task.stride_rows)
                     + i32(reach_row) * i32(task.dilation_rows)
@@ -164,7 +125,7 @@ mod device {
                     continue;
                 }
                 let mut weight = read_address(uvec4(at.y, channel, reach_row, 0u32), taps.strides);
-                let mut source = read_address(
+                let source = read_address(
                     uvec4(at.x, first_channel + channel, u32(row), 0u32),
                     input.strides,
                 );

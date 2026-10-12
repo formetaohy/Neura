@@ -747,6 +747,34 @@ fn matrix_specialization_contains_every_tile_in_the_profile() {
     }
 }
 
+#[test]
+fn a_convolution_carries_the_channels_it_unrolls_and_no_column_window() {
+    let forward = selected(profiles()[0], &[Kind::Conv2d], &[Element::Single]).program();
+    let reachable = functions(&forward);
+    for name in ["run_conv2d", "conv2d_channels_2", "conv2d_channels_4"] {
+        assert!(reachable.contains(name), "a convolution misses {name}");
+    }
+    for absent in [
+        "conv2d_input_columns",
+        "conv2d_input_chunk",
+        "template_conv2d_channels",
+    ] {
+        assert!(
+            !reachable.contains(absent),
+            "a forward convolution carries the gradient body {absent}"
+        );
+    }
+    let gradient = selected(profiles()[0], &[Kind::Conv2dInputGrad], &[Element::Single]).program();
+    let reachable = functions(&gradient);
+    assert!(reachable.contains("conv2d_input_columns"));
+    for absent in ["conv2d_channels_2", "conv2d_channels_4"] {
+        assert!(
+            !reachable.contains(absent),
+            "an input gradient carries the forward body {absent}"
+        );
+    }
+}
+
 fn workgroup_bytes(program: &ComputeProgram) -> u64 {
     program
         .module()

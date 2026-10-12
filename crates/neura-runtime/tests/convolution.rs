@@ -346,27 +346,27 @@ fn a_dilated_convolution_walks_the_span_its_gradient_scatters() {
 }
 
 #[test]
-fn a_convolution_reads_a_window_of_columns_for_every_row_of_taps() {
+fn a_convolution_walks_the_channels_of_a_padded_row_together() {
     let runtime = open();
-    for (rows, columns) in [(5u32, 7u32), (5, 12), (4, 5)] {
+    for (channels, rows, columns) in [(3u32, 5u32, 7u32), (4, 5, 12), (8, 4, 5), (1, 3, 6)] {
         let graph = Graph::new();
-        let input = graph.input(Shape::of([2, 3, rows, columns]), Element::Single);
-        let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+        let input = graph.input(Shape::of([2, channels, rows, columns]), Element::Single);
+        let filter = graph.parameter(Shape::of([4, channels, 3, 3]), Init::Zero, Element::Single);
         let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
         let convolved = graph.conv2d(input, filter, window);
         assert_eq!(convolved.shape(), Shape::of([2, 4, rows, columns]));
         graph.retain(convolved);
         let weights = runtime.weights(&graph);
         let program = runtime.compile(&graph, &weights);
-        let input_values = samples(2 * 3 * rows * columns, 167);
-        let filter_values = samples(108, 173);
+        let input_values = samples(2 * channels * rows * columns, 167);
+        let filter_values = samples(4 * channels * 9, 173);
         runtime.write(&program, input, &input_values);
         runtime.write(&program, filter, &filter_values);
         runtime.run(&program);
         let expected = conv2d_reference(
             &input_values,
             &filter_values,
-            [2, 3, rows, columns],
+            [2, channels, rows, columns],
             4,
             window,
         );
