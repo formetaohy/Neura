@@ -216,7 +216,7 @@ impl Runtime {
     }
 
     pub fn profiles(&self) -> Vec<Profile> {
-        Profile::derive(self.budget(), self.cooperative_matrix())
+        Profile::ladder(self.budget(), self.cooperative_matrix())
     }
 
     pub fn capability(&self) -> &neura_gpu::Capability {

@@ -3774,3 +3774,62 @@ fn a_convolution_weight_gradient_walks_the_positions_of_every_workgroup() {
         "a walk of a free extent and a walk of a static length chunk the positions of their weight gradient alike",
     );
 }
+
+#[test]
+fn a_plan_slices_the_row_of_an_attention_down_to_the_registers_its_profile_offers() {
+    let attend = |profile: Profile| {
+        let graph = Graph::new();
+        let tensor = |width: u32| {
+            graph.parameter(Shape::of([2, 1, 128, width]), Init::Zero, Element::Single)
+        };
+        let queries = tensor(64);
+        let keys = tensor(64);
+        let out = graph.attention(
+            queries,
+            keys,
+            keys,
+            AttentionOptions {
+                bias: None,
+                scale: Some(graph.knob(0.125)),
+                causal: true,
+                origin: None,
+                segments: None,
+                reach: None,
+                query_segments: None,
+            },
+        );
+        graph.retain(out);
+        plan_with(&graph, profile).attention()[0]
+    };
+    let rungs = Profile::ladder(Budget::BASELINE, None)
+        .into_iter()
+        .filter(|profile| profile.workgroup() == 256)
+        .collect::<Vec<_>>();
+    assert!(
+        rungs.len() > 1,
+        "a device offers one register budget for the workgroup it balances on",
+    );
+    let loose = attend(rungs[0]);
+    let tight = attend(*rungs.last().expect("a rung"));
+    assert_eq!(
+        loose.slices(),
+        1,
+        "the loosest budget keeps a row of 64 numbers on one thread",
+    );
+    assert!(
+        tight.slices() > loose.slices() && tight.slice_width() < loose.slice_width(),
+        "the tightest budget of {} registers hands the row of {} numbers to {} threads of {} where {} registers keep it on {}",
+        rungs.last().expect("a rung").registers(),
+        tight.width(),
+        tight.slices(),
+        tight.slice_width(),
+        rungs[0].registers(),
+        loose.slices(),
+    );
+    assert!(
+        tight.registers() <= rungs.last().expect("a rung").registers(),
+        "a plan walks an attention of {} registers through a profile that offers {}",
+        tight.registers(),
+        rungs.last().expect("a rung").registers(),
+    );
+}

@@ -892,6 +892,7 @@ fn a_device_program_shares_one_scratch_pool_between_its_bodies() {
     let attention = [AttentionTile::fit(
         profile.scratch_bytes(),
         profile.workgroup(),
+        profile.registers(),
         8,
         1,
         AttentionTile::PANELS,
@@ -941,6 +942,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         AttentionTile::fit(
             profile.scratch_bytes(),
             profile.workgroup(),
+            profile.registers(),
             8,
             1,
             AttentionTile::PANELS,
@@ -948,6 +950,7 @@ fn attention_specialization_contains_every_tile_of_its_geometry() {
         AttentionTile::fit(
             profile.scratch_bytes(),
             profile.workgroup(),
+            profile.registers(),
             16,
             1,
             AttentionTile::RECOMPUTED_PANELS,

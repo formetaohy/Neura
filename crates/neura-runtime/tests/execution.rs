@@ -1187,6 +1187,16 @@ fn one_pool_lets_a_plan_stage_every_body_it_runs() {
     graph.retain(chosen);
     let weights = runtime.weights(&graph);
     let data = random(tokens * width, 5);
+    let balanced = runtime.default_profile().workgroup();
+    assert!(
+        runtime
+            .profiles()
+            .iter()
+            .filter(|profile| profile.workgroup() == balanced)
+            .count()
+            > 1,
+        "a device offers one register budget for the workgroup it balances on",
+    );
     let mut sampled = Vec::new();
     for profile in runtime.profiles() {
         let program = runtime.compile_with(&graph, &weights, profile);
@@ -1220,7 +1230,9 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
         "a profile asks for more than the baseline pool",
     );
     assert!(
-        profiles.len() < Profile::derive(Budget::of(1024, 48 << 10), None).len(),
+        Profile::derive(Budget::of(1024, 48 << 10), None)
+            .iter()
+            .any(|profile| profile.shared_bytes() > 16 * 1024),
         "the baseline pool must drop a profile the wide pool keeps",
     );
     let graph = Graph::new();
@@ -1229,7 +1241,10 @@ fn a_device_pool_of_sixteen_kibibytes_drops_the_widest_profile() {
     let out = graph.matmul(data, weight);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
-    assert_eq!(program.profile(), *profiles.last().expect("a profile"));
+    assert!(
+        profiles.contains(&program.profile()),
+        "a device compiles into a profile it offers",
+    );
     assert!(
         refuses(|| {
             let widest = *Profile::derive(Budget::of(1024, 48 << 10), None)
@@ -1260,8 +1275,14 @@ fn tuning_measures_every_profile_the_device_offers() {
         "a tuned program carries a profile the device offers",
     );
     assert!(
-        runtime.declared_kernels() >= runtime.profiles().len(),
-        "tuning declares a device program for every profile it measures",
+        runtime.declared_kernels()
+            >= runtime
+                .profiles()
+                .iter()
+                .map(|profile| profile.workgroup())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+        "tuning declares a device program for every workgroup it measures",
     );
     assert!(
         program

@@ -69,6 +69,24 @@ impl AttentionTile {
     pub const RECOMPUTED_PANELS: u32 = 3;
 
     pub fn new(keys: u32, width: u32, groups: u32, panels: u32) -> Self {
+        Self::within(
+            keys,
+            width,
+            groups,
+            panels,
+            Self::slices_of(width),
+            Self::REGISTER_CEILING,
+        )
+    }
+
+    fn within(
+        keys: u32,
+        width: u32,
+        groups: u32,
+        panels: u32,
+        slices: u32,
+        registers: u32,
+    ) -> Self {
         let ceiling = if groups == 1 {
             Self::KEYS_CEILING
         } else {
@@ -88,14 +106,12 @@ impl AttentionTile {
             Self::PANELS,
             Self::RECOMPUTED_PANELS,
         );
-        let slices = Self::slices_of(width);
         let slice_width = width.div_ceil(slices);
         let key_group = keys / groups;
         assert!(
-            3 * slice_width + 2 * key_group <= Self::REGISTER_CEILING,
-            "an attention of width {width} spreads one query row over {slices} threads of {slice_width} numbers beside {key_group} keys of one group, and the {} numbers of that row, its gradients and those keys still outrun the {} a device thread holds",
+            3 * slice_width + 2 * key_group <= registers,
+            "an attention of width {width} spreads one query row over {slices} threads of {slice_width} numbers beside {key_group} keys of one group, and the {} numbers of that row, its gradients and those keys still outrun the {registers} a device thread holds here",
             3 * slice_width + 2 * key_group,
-            Self::REGISTER_CEILING,
         );
         Self {
             keys,
@@ -106,25 +122,40 @@ impl AttentionTile {
         }
     }
 
-    pub fn fit(pool: u64, workgroup: u32, width: u32, rows: u32, panels: u32) -> Self {
+    pub fn fit(
+        pool: u64,
+        workgroup: u32,
+        registers: u32,
+        width: u32,
+        rows: u32,
+        panels: u32,
+    ) -> Self {
         assert!(rows > 0, "an attention tile serves no row per task");
-        Self::try_fit(pool, workgroup, width, rows, panels).unwrap_or_else(|| {
+        Self::try_fit(pool, workgroup, registers, width, rows, panels).unwrap_or_else(|| {
             panic!(
                 "an attention of width {width} fits no key of {workgroup} threads beside the {pool} bytes of workgroup scratch its profile offers",
             )
         })
     }
 
-    pub fn try_fit(pool: u64, workgroup: u32, width: u32, rows: u32, panels: u32) -> Option<Self> {
+    pub fn try_fit(
+        pool: u64,
+        workgroup: u32,
+        registers: u32,
+        width: u32,
+        rows: u32,
+        panels: u32,
+    ) -> Option<Self> {
         if rows == 0 {
             return None;
         }
-        let slices = Self::slices_of(width);
+        let ceiling = registers.min(Self::REGISTER_CEILING);
+        let slices = Self::slices_within(width, ceiling);
         if slices > workgroup {
             return None;
         }
         let slice_width = width.div_ceil(slices);
-        if 3 * slice_width >= Self::REGISTER_CEILING {
+        if 3 * slice_width + 2 * Self::KEYS_PER_GROUP > ceiling {
             return None;
         }
         let wanted = workgroup
@@ -135,7 +166,9 @@ impl AttentionTile {
         loop {
             let mut groups = wanted;
             loop {
-                if let Some(tile) = Self::holding(pool, workgroup, width, slices, groups, panels) {
+                if let Some(tile) =
+                    Self::holding(pool, workgroup, ceiling, width, slices, groups, panels)
+                {
                     return Some(tile);
                 }
                 if groups == 1 {
@@ -153,6 +186,7 @@ impl AttentionTile {
     fn holding(
         pool: u64,
         workgroup: u32,
+        registers: u32,
         width: u32,
         slices: u32,
         groups: u32,
@@ -162,7 +196,7 @@ impl AttentionTile {
             return None;
         }
         let slice_width = width.div_ceil(slices);
-        let per_thread = (Self::REGISTER_CEILING - 3 * slice_width) / 2;
+        let per_thread = (registers - 3 * slice_width) / 2;
         let ceiling = if groups == 1 {
             Self::KEYS_CEILING
         } else {
@@ -171,7 +205,7 @@ impl AttentionTile {
         let mut keys = ceiling.min(groups * per_thread);
         keys -= keys % groups;
         while keys >= groups * Self::KEYS_PER_GROUP {
-            let tile = Self::new(keys, width, groups, panels);
+            let tile = Self::within(keys, width, groups, panels, slices, registers);
             if tile.shared_bytes(workgroup) <= pool {
                 return Some(tile);
             }
@@ -182,6 +216,14 @@ impl AttentionTile {
 
     fn slices_of(width: u32) -> u32 {
         width.div_ceil(Self::WIDTH_PER_THREAD).next_power_of_two()
+    }
+
+    fn slices_within(width: u32, registers: u32) -> u32 {
+        let per_thread = ((registers.saturating_sub(2 * Self::KEYS_PER_GROUP)) / 3).max(1);
+        width
+            .div_ceil(per_thread)
+            .next_power_of_two()
+            .max(Self::slices_of(width))
     }
 
     pub const fn keys(self) -> u32 {
@@ -806,10 +848,25 @@ const SCRATCH_WORDS_PER_THREAD: u64 = 2;
 const REGISTER_FILE: u32 = 65_536;
 const REGISTER_SLACK: u32 = 24;
 const THREAD_REGISTER_CEILING: u32 = 255;
+const MIN_REGISTER_BUDGET: u32 = 32;
+const RESIDENT_LADDER: [u32; 3] = [1, 2, 4];
 
 fn carries_registers(workgroup: u32, registers: u32) -> bool {
-    let per_thread = registers + REGISTER_SLACK;
-    per_thread <= THREAD_REGISTER_CEILING && per_thread.saturating_mul(workgroup) <= REGISTER_FILE
+    registers <= loose_registers(workgroup)
+}
+
+const fn loose_registers(workgroup: u32) -> u32 {
+    let pool = REGISTER_FILE / workgroup;
+    let ceiling = if pool < THREAD_REGISTER_CEILING {
+        pool
+    } else {
+        THREAD_REGISTER_CEILING
+    };
+    ceiling - REGISTER_SLACK
+}
+
+const fn resident_registers(workgroup: u32, resident: u32) -> u32 {
+    (REGISTER_FILE / (workgroup * resident)).saturating_sub(REGISTER_SLACK)
 }
 
 const fn scratch_budget(workgroup: u32, staging: u64, copy: u64) -> u64 {
@@ -825,6 +882,7 @@ const fn scratch_budget(workgroup: u32, staging: u64, copy: u64) -> u64 {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Profile {
     workgroup: u32,
+    registers: u32,
     shared_bytes: u64,
     tiles: [MatmulTile; MAX_TILES],
     count: u8,
@@ -834,6 +892,7 @@ impl std::fmt::Debug for Profile {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         out.debug_struct("Profile")
             .field("workgroup", &self.workgroup)
+            .field("registers", &self.registers)
             .field("shared_bytes", &self.shared_bytes)
             .field("tiles", &self.tiles())
             .finish()
@@ -842,6 +901,10 @@ impl std::fmt::Debug for Profile {
 
 impl Profile {
     pub fn of(tiles: &[MatmulTile]) -> Self {
+        Self::within(tiles, loose_registers(tiles[0].threads()))
+    }
+
+    pub fn within(tiles: &[MatmulTile], registers: u32) -> Self {
         assert!(
             !tiles.is_empty() && tiles.len() <= MAX_TILES,
             "a profile offers between one and thirty-two matmul tiles",
@@ -861,10 +924,9 @@ impl Profile {
                 "a profile hands one device program two workgroup sizes",
             );
             assert!(
-                carries_registers(workgroup, tile.registers() + tile.operands()),
-                "a {workgroup} thread workgroup of {tile:?} carries {} registers a thread beside the {} a device holds for it",
+                tile.registers() + tile.operands() <= registers,
+                "a {workgroup} thread workgroup of {tile:?} spends {} registers a thread where its profile offers {registers}",
                 tile.registers() + tile.operands(),
-                REGISTER_FILE,
             );
             if let MatmulTile::Cooperative(cooperative) = tile {
                 assert!(
@@ -893,6 +955,7 @@ impl Profile {
         let staging = 2 * (left_stage + right_stage) * WORD_BYTES;
         Self {
             workgroup,
+            registers,
             shared_bytes: scratch_budget(workgroup, staging, copy) + panels,
             tiles: entries,
             count: tiles.len() as u8,
@@ -947,8 +1010,40 @@ impl Profile {
         profiles
     }
 
+    pub fn ladder(budget: Budget, cooperative: Option<CooperativeMatrix>) -> Vec<Self> {
+        let mut ladder: Vec<Self> = Vec::new();
+        for profile in Self::derive(budget, cooperative) {
+            let loose = profile.registers();
+            for resident in RESIDENT_LADDER {
+                let registers = resident_registers(profile.workgroup(), resident).min(loose);
+                if registers < MIN_REGISTER_BUDGET {
+                    continue;
+                }
+                let tiles = profile
+                    .tiles()
+                    .iter()
+                    .copied()
+                    .filter(|tile| tile.registers() + tile.operands() <= registers)
+                    .collect::<Vec<_>>();
+                if tiles.is_empty()
+                    || ladder.last().is_some_and(|held| {
+                        held.workgroup() == profile.workgroup() && held.registers() == registers
+                    })
+                {
+                    continue;
+                }
+                ladder.push(Self::within(&tiles, registers));
+            }
+        }
+        ladder
+    }
+
     pub const fn workgroup(self) -> u32 {
         self.workgroup
+    }
+
+    pub const fn registers(self) -> u32 {
+        self.registers
     }
 
     pub fn tiles(&self) -> &[MatmulTile] {

@@ -296,23 +296,40 @@ fn a_fallible_tile_fit_answers_where_the_fit_refuses() {
     let workgroup = 256u32;
     let width = 64u32;
     let rows = 128u32;
-    let tile = AttentionTile::fit(pool, workgroup, width, rows, AttentionTile::PANELS);
+    let registers = AttentionTile::REGISTER_CEILING;
+    let tile = AttentionTile::fit(
+        pool,
+        workgroup,
+        registers,
+        width,
+        rows,
+        AttentionTile::PANELS,
+    );
     assert_eq!(
-        AttentionTile::try_fit(pool, workgroup, width, rows, AttentionTile::PANELS),
+        AttentionTile::try_fit(
+            pool,
+            workgroup,
+            registers,
+            width,
+            rows,
+            AttentionTile::PANELS
+        ),
         Some(tile),
         "a pool that stages a key answers with the tile the fit walks",
     );
     assert!(
-        AttentionTile::try_fit(0, workgroup, width, rows, AttentionTile::PANELS).is_none(),
+        AttentionTile::try_fit(0, workgroup, registers, width, rows, AttentionTile::PANELS)
+            .is_none(),
         "a pool that stages no key of a {width} wide attention fits no tile",
     );
     assert!(
-        AttentionTile::try_fit(pool, workgroup, width, 0, AttentionTile::PANELS).is_none(),
+        AttentionTile::try_fit(pool, workgroup, registers, width, 0, AttentionTile::PANELS)
+            .is_none(),
         "an attention tile serves at least one row",
     );
     assert!(
         refuses(|| {
-            let _ = AttentionTile::fit(0, workgroup, width, rows, AttentionTile::PANELS);
+            let _ = AttentionTile::fit(0, workgroup, registers, width, rows, AttentionTile::PANELS);
         }),
         "a fit of no tile is refused where the fallible fit answers",
     );
@@ -323,14 +340,29 @@ fn a_key_gradient_stages_the_forward_output_beside_its_query() {
     let workgroup = 1024u32;
     let width = 256u32;
     let floor = AttentionTile::new(2, width, 1, AttentionTile::PANELS).shared_bytes(workgroup);
-    let staged = AttentionTile::fit(floor, workgroup, width, 1, AttentionTile::RECOMPUTED_PANELS);
+    let staged = AttentionTile::fit(
+        floor,
+        workgroup,
+        AttentionTile::REGISTER_CEILING,
+        width,
+        1,
+        AttentionTile::RECOMPUTED_PANELS,
+    );
     assert_eq!(
         staged.panels(),
         AttentionTile::PANELS,
         "a pool that holds no more than its query and its gradient leaves the key gradient the forward output it reads again",
     );
     assert_eq!(
-        AttentionTile::fit(48 << 10, 512, 64, 1, AttentionTile::RECOMPUTED_PANELS).panels(),
+        AttentionTile::fit(
+            48 << 10,
+            512,
+            AttentionTile::REGISTER_CEILING,
+            64,
+            1,
+            AttentionTile::RECOMPUTED_PANELS,
+        )
+        .panels(),
         AttentionTile::RECOMPUTED_PANELS,
         "a pool with room beside the two panels a forward stages carries the forward output a key gradient stages",
     );
@@ -420,4 +452,90 @@ fn a_profile_offers_a_streamed_tile_for_the_narrowest_product() {
             "a profile counts the staging of the tiles it does not carry",
         );
     }
+}
+
+#[test]
+fn a_device_ladder_opens_every_workgroup_at_every_register_budget() {
+    for budget in [Budget::BASELINE, mid_device(), wide_device()] {
+        let declared = Profile::derive(budget, None);
+        let ladder = Profile::ladder(budget, None);
+        assert!(!ladder.is_empty(), "a device offers no profile");
+        for profile in &declared {
+            let rungs = ladder
+                .iter()
+                .filter(|held| held.workgroup() == profile.workgroup())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rungs.first().copied(),
+                Some(profile),
+                "the ladder opens a workgroup at the loosest registers its profile offers",
+            );
+            assert!(
+                rungs
+                    .windows(2)
+                    .all(|pair| pair[1].registers() < pair[0].registers()),
+                "the ladder hands one workgroup two budgets in another order",
+            );
+            assert!(
+                rungs
+                    .windows(2)
+                    .all(|pair| pair[1].shared_bytes() <= pair[0].shared_bytes()),
+                "a tighter register budget widens the pool a workgroup stages from",
+            );
+        }
+        for profile in &ladder {
+            assert!(
+                profile.fits(budget.threads(), budget.shared_bytes()),
+                "{profile:?} outruns the {budget:?} it was derived from",
+            );
+            for tile in profile.tiles() {
+                assert!(
+                    tile.registers() + tile.operands() <= profile.registers(),
+                    "{tile:?} spends {} registers a thread where its profile offers {}",
+                    tile.registers() + tile.operands(),
+                    profile.registers(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn an_attention_row_spends_row_slices_instead_of_registers() {
+    let pool = 48 << 10;
+    let workgroup = 256u32;
+    let width = 64u32;
+    let rows = 128u32;
+    let loose = AttentionTile::fit(
+        pool,
+        workgroup,
+        AttentionTile::REGISTER_CEILING,
+        width,
+        rows,
+        AttentionTile::PANELS,
+    );
+    assert_eq!(
+        loose.slices(),
+        1,
+        "a row of {width} numbers fits one device thread beside the {pool} bytes it stages in",
+    );
+    assert_eq!(loose.slice_width(), width);
+    let tight = AttentionTile::fit(pool, workgroup, 40, width, rows, AttentionTile::PANELS);
+    assert!(
+        tight.slices() > loose.slices() && tight.slice_width() < loose.slice_width(),
+        "an attention told it holds 40 registers hands one row to {} threads of {} numbers where its loose twin spends {} threads",
+        tight.slices(),
+        tight.slice_width(),
+        loose.slices(),
+    );
+    assert!(
+        tight.registers() <= 40,
+        "an attention within 40 registers spreads {} numbers of a row and its gradients alone",
+        tight.registers(),
+    );
+    assert_eq!(
+        tight.width(),
+        loose.width(),
+        "a register budget narrows the threads that carry a row, not the row",
+    );
 }

@@ -884,6 +884,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
         [AttentionTile::fit(
             profile.scratch_bytes(),
             profile.workgroup(),
+            profile.registers(),
             width,
             rows,
             AttentionTile::PANELS,

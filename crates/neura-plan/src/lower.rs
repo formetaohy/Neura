@@ -425,6 +425,7 @@ fn schedule_unit(
             let tile = AttentionTile::fit(
                 profile.scratch_bytes(),
                 profile.workgroup(),
+                profile.registers(),
                 rows[3],
                 wanted,
                 AttentionTile::PANELS,
@@ -776,8 +777,14 @@ fn attention_forward_body(
     let half = (workgroup / 2).max(1).min(tokens.max(1));
     let sealed = unit.segments == NO_VALUE && attention_sealed(plan, unit);
     if sealed
-        && let Some(tile) =
-            AttentionTile::try_fit(pool, workgroup, width, half, AttentionTile::PANELS)
+        && let Some(tile) = AttentionTile::try_fit(
+            pool,
+            workgroup,
+            profile.registers(),
+            width,
+            half,
+            AttentionTile::PANELS,
+        )
     {
         let blocks = u64::from(keys.div_ceil(tile.keys().max(1)));
         if blocks >= ATTENTION_KEY_CHAIN {
@@ -788,7 +795,14 @@ fn attention_forward_body(
         }
     }
     let wanted = attention_rows(tokens, planes, workgroup);
-    let tile = AttentionTile::fit(pool, workgroup, width, wanted, AttentionTile::PANELS);
+    let tile = AttentionTile::fit(
+        pool,
+        workgroup,
+        profile.registers(),
+        width,
+        wanted,
+        AttentionTile::PANELS,
+    );
     let per_task = workgroup / (tile.groups() * tile.slices());
     let sections = attention_sections(plan, unit, tokens, planes, tile, per_task, profile);
     (wanted, sections)
@@ -953,6 +967,7 @@ fn attention_geometry(
     let tile = AttentionTile::fit(
         profile.scratch_bytes(),
         profile.workgroup(),
+        profile.registers(),
         width,
         rows,
         panels,
