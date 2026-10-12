@@ -1,18 +1,24 @@
+use crate::unicode;
 use neura::gguf::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub struct Tokenizer {
     tokens: Vec<String>,
-    plain: Vec<bool>,
+    special: Vec<bool>,
     ids: HashMap<String, u32>,
     ranks: HashMap<(String, String), u32>,
     control: Vec<(String, u32)>,
-    alphabet: Vec<char>,
+    alphabet: [char; 256],
     bytes: HashMap<char, u8>,
 }
 
+enum Part<'a> {
+    Token(u32),
+    Text(&'a str),
+}
+
 impl Tokenizer {
-    pub fn read(metadata: &std::collections::BTreeMap<String, Value>) -> Self {
+    pub fn read(metadata: &BTreeMap<String, Value>) -> Self {
         let tokens = array(metadata, "tokenizer.ggml.tokens")
             .iter()
             .map(|value| value.text().expect("a token is text").to_owned())
@@ -26,17 +32,17 @@ impl Tokenizer {
             .map(|value| value.text().expect("a merge is text").to_owned())
             .collect::<Vec<String>>();
         let mut ids = HashMap::with_capacity(tokens.len());
+        let mut special = Vec::with_capacity(tokens.len());
         let mut control = Vec::new();
-        let mut plain = Vec::with_capacity(tokens.len());
         for (at, token) in tokens.iter().enumerate() {
             ids.insert(token.clone(), at as u32);
-            let special = matches!(kinds.get(at), Some(&2) | Some(&3));
-            plain.push(special);
-            if special {
+            let held = matches!(kinds.get(at).copied(), Some(2..=4));
+            special.push(held);
+            if held {
                 control.push((token.clone(), at as u32));
             }
         }
-        control.sort_by_key(|held| std::cmp::Reverse(held.0.len()));
+        control.sort_by_key(|(token, _)| std::cmp::Reverse(token.len()));
         let mut ranks = HashMap::with_capacity(merges.len());
         for (at, merge) in merges.iter().enumerate() {
             let (left, right) = merge
@@ -47,7 +53,7 @@ impl Tokenizer {
         let (alphabet, bytes) = byte_alphabet();
         Self {
             tokens,
-            plain,
+            special,
             ids,
             ranks,
             control,
@@ -62,126 +68,163 @@ impl Tokenizer {
 
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut ids = Vec::new();
-        let held = text.as_bytes();
-        let mut at = 0usize;
-        while at < held.len() {
-            if let Some((token, id, width)) = self.control_at(text, at) {
-                let _ = token;
-                ids.push(id);
-                at += width;
-                continue;
+        for part in self.parted(text) {
+            match part {
+                Part::Token(id) => ids.push(id),
+                Part::Text(held) => {
+                    for piece in self.pieces(held) {
+                        ids.extend(self.merge(&piece));
+                    }
+                }
             }
-            let (piece, width) = self.pretoken(held, at);
-            ids.extend(self.merge(&piece));
-            at += width;
         }
         ids
     }
 
-    pub fn decode(&self, id: u32) -> &str {
-        &self.tokens[id as usize]
-    }
-
     pub fn piece(&self, id: u32) -> Vec<u8> {
-        let held = self.decode(id);
-        if self.plain[id as usize] {
+        let held = &self.tokens[id as usize];
+        if self.special[id as usize] {
             return held.as_bytes().to_vec();
         }
         held.chars()
-            .map(|character| self.bytes.get(&character).copied().unwrap_or(b'?'))
+            .map(|character| {
+                self.bytes.get(&character).copied().unwrap_or_else(|| {
+                    panic!("the token {held} holds a character no byte of it stands behind")
+                })
+            })
             .collect()
     }
 
-    fn control_at(&self, text: &str, at: usize) -> Option<(String, u32, usize)> {
-        let rest = &text[at..];
-        self.control
-            .iter()
-            .find(|(token, _)| rest.starts_with(token.as_str()))
-            .map(|(token, id)| (token.clone(), *id, token.len()))
-    }
-
-    fn pretoken(&self, bytes: &[u8], at: usize) -> (String, usize) {
-        let held = |index: usize| bytes.get(index).copied();
-        if held(at) == Some(b'\'') {
-            for suffix in ["s", "t", "re", "ve", "m", "ll", "d"] {
-                let end = at + 1 + suffix.len();
-                if end <= bytes.len()
-                    && bytes[at + 1..end]
-                        .iter()
-                        .zip(suffix.as_bytes())
-                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
-                {
-                    return (self.spell(&bytes[at..end]), end - at);
+    fn parted<'a>(&self, text: &'a str) -> Vec<Part<'a>> {
+        let mut parts = vec![Part::Text(text)];
+        for (token, id) in &self.control {
+            let mut next = Vec::with_capacity(parts.len());
+            for part in parts {
+                let Part::Text(held) = part else {
+                    next.push(part);
+                    continue;
+                };
+                let mut at = 0usize;
+                while let Some(found) = held[at..].find(token.as_str()) {
+                    let start = at + found;
+                    if start > at {
+                        next.push(Part::Text(&held[at..start]));
+                    }
+                    next.push(Part::Token(*id));
+                    at = start + token.len();
+                }
+                if at < held.len() {
+                    next.push(Part::Text(&held[at..]));
                 }
             }
+            parts = next;
         }
-        let letter = |byte: u8| byte.is_ascii_alphabetic() || byte >= 0x80;
-        if at + 1 < bytes.len() && !letter(bytes[at]) && held(at + 1).is_some_and(letter) {
-            let end = self.letters(bytes, at + 1);
-            return (self.spell(&bytes[at..end]), end - at);
-        }
-        if held(at).is_some_and(letter) {
-            let end = self.letters(bytes, at);
-            return (self.spell(&bytes[at..end]), end - at);
-        }
-        if held(at).is_some_and(|byte| byte.is_ascii_digit()) {
-            return (self.spell(&bytes[at..at + 1]), 1);
-        }
-        if held(at) == Some(b' ') && held(at + 1).is_some_and(|byte| self.punct(byte)) {
-            let end = self.run(bytes, at + 1, |byte| self.punct(byte));
-            let end = self.newlines(bytes, end);
-            return (self.spell(&bytes[at..end]), end - at);
-        }
-        if held(at).is_some_and(|byte| self.punct(byte)) {
-            let end = self.run(bytes, at, |byte| self.punct(byte));
-            let end = self.newlines(bytes, end);
-            return (self.spell(&bytes[at..end]), end - at);
-        }
-        if held(at).is_some_and(|byte| byte == b'\n' || byte == b'\r') {
-            let end = self.run(bytes, at, |byte| byte == b'\n' || byte == b'\r');
-            return (self.spell(&bytes[at..end]), end - at);
-        }
-        if held(at).is_some_and(|byte| byte == b' ' || byte == b'\t') {
-            let end = self.run(bytes, at, |byte| byte == b' ' || byte == b'\t');
-            let end = if end == bytes.len() {
-                end
-            } else {
-                let mut held = end;
-                while held > at + 1 && bytes[held - 1] == b' ' {
-                    held -= 1;
+        parts
+    }
+
+    fn pieces(&self, text: &str) -> Vec<String> {
+        let held = text.chars().collect::<Vec<char>>();
+        let letterish = |at: usize| held.get(at).is_some_and(|held| unicode::letterish(*held));
+        let whitespace = |at: usize| held.get(at).is_some_and(|held| held.is_whitespace());
+        let lower = |at: usize| {
+            held.get(at)
+                .and_then(|held| held.to_lowercase().next())
+                .unwrap_or(char::MAX)
+        };
+        let mut pieces = Vec::new();
+        let mut at = 0usize;
+        while at < held.len() {
+            let start = at;
+            let cpt = held[at];
+            if cpt == '\'' && matches!(lower(at + 1), 's' | 't' | 'm' | 'd') {
+                at += 2;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            if cpt == '\''
+                && matches!(
+                    (lower(at + 1), lower(at + 2)),
+                    ('r', 'e') | ('v', 'e') | ('l', 'l')
+                )
+            {
+                at += 3;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            if !(cpt == '\r' || cpt == '\n' || unicode::is_number(cpt))
+                && (unicode::letterish(cpt) || letterish(at + 1))
+            {
+                at += 1;
+                while letterish(at) {
+                    at += 1;
                 }
-                held
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            if unicode::is_number(cpt) {
+                at += 1;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            let punctuation = |character: char| {
+                !character.is_whitespace()
+                    && !unicode::letterish(character)
+                    && !unicode::is_number(character)
             };
-            return (self.spell(&bytes[at..end]), end - at);
+            let leading = if cpt == ' ' {
+                held.get(at + 1).copied()
+            } else {
+                Some(cpt)
+            };
+            if leading.is_some_and(punctuation) {
+                at += usize::from(cpt == ' ');
+                while held.get(at).copied().is_some_and(punctuation) {
+                    at += 1;
+                }
+                while matches!(held.get(at), Some('\r' | '\n')) {
+                    at += 1;
+                }
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            let mut run = 0usize;
+            let mut newline = 0usize;
+            while whitespace(at + run) {
+                if matches!(held[at + run], '\r' | '\n') {
+                    newline = at + run + 1;
+                }
+                run += 1;
+            }
+            if newline > 0 {
+                at = newline;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            if run > 1 && at + run < held.len() {
+                at += run - 1;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            if run > 0 {
+                at += run;
+                pieces.push(self.spell(&held[start..at]));
+                continue;
+            }
+            at += 1;
+            pieces.push(self.spell(&held[start..at]));
         }
-        (self.spell(&bytes[at..at + 1]), 1)
+        pieces
     }
 
-    fn letters(&self, bytes: &[u8], at: usize) -> usize {
-        self.run(bytes, at, |byte| byte.is_ascii_alphabetic() || byte >= 0x80)
-    }
-
-    fn punct(&self, byte: u8) -> bool {
-        !byte.is_ascii_alphanumeric() && !byte.is_ascii_whitespace() && byte < 0x80
-    }
-
-    fn run(&self, bytes: &[u8], at: usize, accept: impl Fn(u8) -> bool) -> usize {
-        let mut end = at;
-        while end < bytes.len() && accept(bytes[end]) {
-            end += 1;
+    fn spell(&self, held: &[char]) -> String {
+        let mut piece = String::with_capacity(held.len());
+        let mut bytes = [0u8; 4];
+        for character in held {
+            for byte in character.encode_utf8(&mut bytes).as_bytes() {
+                piece.push(self.alphabet[*byte as usize]);
+            }
         }
-        end
-    }
-
-    fn newlines(&self, bytes: &[u8], at: usize) -> usize {
-        self.run(bytes, at, |byte| byte == b'\n' || byte == b'\r')
-    }
-
-    fn spell(&self, bytes: &[u8]) -> String {
-        bytes
-            .iter()
-            .map(|byte| self.alphabet[*byte as usize])
-            .collect()
+        piece
     }
 
     fn merge(&self, piece: &str) -> Vec<u32> {
@@ -223,12 +266,12 @@ impl Tokenizer {
     }
 }
 
-fn byte_alphabet() -> (Vec<char>, HashMap<char, u8>) {
+fn byte_alphabet() -> ([char; 256], HashMap<char, u8>) {
     let printable = (0x21u32..=0x7e)
         .chain(0xa1..=0xac)
         .chain(0xae..=0xff)
         .collect::<std::collections::HashSet<u32>>();
-    let mut table = vec![char::from_u32(0).expect("a code point"); 256];
+    let mut table = [char::MAX; 256];
     let mut extra = 0u32;
     for byte in 0..=0xffu32 {
         let character = if printable.contains(&byte) {
@@ -248,7 +291,7 @@ fn byte_alphabet() -> (Vec<char>, HashMap<char, u8>) {
     (table, bytes)
 }
 
-fn array<'v>(metadata: &'v std::collections::BTreeMap<String, Value>, key: &str) -> &'v [Value] {
+fn array<'v>(metadata: &'v BTreeMap<String, Value>, key: &str) -> &'v [Value] {
     metadata
         .get(key)
         .and_then(Value::array)

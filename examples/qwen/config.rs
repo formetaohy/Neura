@@ -1,4 +1,4 @@
-use neura::gguf::Value;
+use neura::gguf::Value as Held;
 use std::collections::BTreeMap;
 
 pub struct Config {
@@ -17,30 +17,40 @@ pub struct Config {
     pub vocabulary: u32,
     pub context: u32,
     pub floor: f32,
-    pub eos: u32,
+    pub end: u32,
 }
 
 impl Config {
-    pub fn read(metadata: &BTreeMap<String, Value>, vocabulary: usize) -> Self {
+    pub fn read(metadata: &BTreeMap<String, Held>, vocabulary: usize) -> Self {
         let arch = text(metadata, "general.architecture");
         let key = |suffix: &str| format!("{arch}.{suffix}");
-        let tokens = metadata
-            .get("tokenizer.ggml.tokens")
-            .and_then(Value::array)
-            .expect("a gguf names every token it holds");
-        let eos = metadata
+        let linear_heads = integer(metadata, &key("ssm.group_count"));
+        let linear_width = integer(metadata, &key("ssm.state_size"));
+        let value_heads = integer(metadata, &key("ssm.time_step_rank"));
+        assert_eq!(
+            value_heads, linear_heads,
+            "this gguf weighs {value_heads} value heads against {linear_heads} key heads, and this model holds one value head beside every key head",
+        );
+        let inner = integer(metadata, &key("ssm.inner_size"));
+        assert_eq!(
+            inner,
+            linear_heads * linear_width,
+            "this gguf spans {inner} numbers of linear attention where {linear_heads} heads of {linear_width} span {}",
+            linear_heads * linear_width,
+        );
+        let end = metadata
             .get("tokenizer.ggml.eos_token_id")
-            .and_then(Value::integer)
+            .and_then(Held::integer)
             .map_or_else(
                 || {
-                    tokens
+                    array(metadata, "tokenizer.ggml.tokens")
                         .iter()
                         .position(|token| token.text() == Some("<|im_end|>"))
                         .unwrap_or_else(|| {
                             panic!("this gguf names no end of turn, and holds no <|im_end|>")
                         }) as u32
                 },
-                |eos| eos as u32,
+                |end| end as u32,
             );
         Self {
             layers: integer(metadata, &key("block_count")),
@@ -52,13 +62,13 @@ impl Config {
             rope_base: number(metadata, &key("rope.freq_base")),
             rope_width: integer(metadata, &key("rope.dimension_count")),
             interval: integer(metadata, &key("full_attention_interval")),
-            linear_heads: integer(metadata, &key("ssm.group_count")),
-            linear_width: integer(metadata, &key("ssm.state_size")),
+            linear_heads,
+            linear_width,
             conv_kernel: integer(metadata, &key("ssm.conv_kernel")),
             vocabulary: vocabulary as u32,
             context: integer(metadata, &key("context_length")),
             floor: number(metadata, &key("attention.layer_norm_rms_epsilon")),
-            eos,
+            end,
         }
     }
 
@@ -66,33 +76,40 @@ impl Config {
         (layer + 1).is_multiple_of(self.interval)
     }
 
-    pub fn linear_keys(&self) -> u32 {
+    pub fn linear_width_total(&self) -> u32 {
         self.linear_heads * self.linear_width
     }
 
     pub fn mixed_width(&self) -> u32 {
-        self.linear_keys() * 2 + self.linear_heads * self.linear_width
+        self.linear_width_total() * 3
     }
 }
 
-pub fn text(metadata: &BTreeMap<String, Value>, key: &str) -> String {
+pub fn text(metadata: &BTreeMap<String, Held>, key: &str) -> String {
     metadata
         .get(key)
-        .and_then(Value::text)
+        .and_then(Held::text)
         .unwrap_or_else(|| panic!("this gguf holds no {key}"))
         .to_owned()
 }
 
-pub fn integer(metadata: &BTreeMap<String, Value>, key: &str) -> u32 {
+fn integer(metadata: &BTreeMap<String, Held>, key: &str) -> u32 {
     metadata
         .get(key)
-        .and_then(Value::integer)
+        .and_then(Held::integer)
         .unwrap_or_else(|| panic!("this gguf holds no {key}")) as u32
 }
 
-pub fn number(metadata: &BTreeMap<String, Value>, key: &str) -> f32 {
+fn number(metadata: &BTreeMap<String, Held>, key: &str) -> f32 {
     metadata
         .get(key)
-        .and_then(Value::number)
+        .and_then(Held::number)
         .unwrap_or_else(|| panic!("this gguf holds no {key}")) as f32
+}
+
+fn array<'v>(metadata: &'v BTreeMap<String, Held>, key: &str) -> &'v [Held] {
+    metadata
+        .get(key)
+        .and_then(Held::array)
+        .unwrap_or_else(|| panic!("this gguf holds no {key}"))
 }

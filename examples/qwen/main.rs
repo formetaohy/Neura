@@ -1,11 +1,17 @@
+mod attention;
+mod chat;
 mod config;
+mod delta;
+mod mlp;
 mod model;
+mod ops;
 mod tokenizer;
+mod unicode;
 
 use config::Config;
 use model::Model;
 use neura::gguf::GgufFile;
-use neura::{Graph, MemoryRequest, Runtime, RuntimeRequest, Shape};
+use neura::{Element, Graph, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
 use std::time::Instant;
 use tokenizer::Tokenizer;
@@ -37,11 +43,20 @@ fn main() {
 
     let prompt = match prompt.strip_prefix("raw:") {
         Some(held) => held.to_owned(),
-        None => chat(&prompt),
+        None => chat::render(&prompt),
     };
     let tokens = tokenizer.encode(&prompt);
+    assert!(
+        !tokens.is_empty(),
+        "the prompt {prompt:?} holds no token this tokenizer knows",
+    );
+    assert!(
+        tokens.len() < context as usize,
+        "the prompt holds {} tokens where this run holds {context} of context",
+        tokens.len(),
+    );
     println!("prompt: {prompt:?}");
-    println!("tokens: {} ", tokens.len());
+    println!("tokens: {}", tokens.len());
 
     let runtime = Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
@@ -54,8 +69,8 @@ fn main() {
     .expect("a device that runs the model");
     let graph = Graph::new();
     let model = Model::new(&graph, &source, &config, context);
-    let token = graph.input(Shape::matrix(1, 1), neura::Element::Single);
-    let position = graph.input(Shape::matrix(1, 1), neura::Element::Single);
+    let token = graph.input(Shape::matrix(1, 1), Element::Single);
+    let position = graph.input(Shape::matrix(1, 1), Element::Single);
     let logits = model.step(&graph, token, position);
     graph.retain(logits);
     let weights = runtime.load(&graph, &source);
@@ -71,44 +86,36 @@ fn main() {
     }
 
     let started = Instant::now();
-    let mut held = Vec::new();
-    let mut next = tokens[0];
-    let mut produced = 0usize;
-    for (at, id) in tokens.iter().enumerate() {
-        let last = at + 1 == tokens.len();
-        runtime.write(&program, token, &[*id as f32]);
+    let mut text = Text::new();
+    let mut at = 0u32;
+    for id in tokens.iter().copied() {
+        runtime.write(&program, token, &[id as f32]);
         runtime.write(&program, position, &[at as f32]);
         runtime.run(&program);
-        if last {
-            next = choose(&runtime.read(&program, logits));
-        }
-        held.push(*id);
+        text.push(&tokenizer.piece(id));
+        at += 1;
     }
-    print!("{}", detach(&tokenizer, &held));
 
-    while produced < wanted && next != config.eos {
+    let mut next = choose(&runtime.read(&program, logits));
+    let mut produced = 0usize;
+    while produced < wanted && next != config.end && at < context {
         runtime.write(&program, token, &[next as f32]);
-        runtime.write(&program, position, &[(tokens.len() + produced) as f32]);
+        runtime.write(&program, position, &[at as f32]);
         runtime.run(&program);
-        held.push(next);
-        print!("{}", detach(&tokenizer, &held[held.len() - 1..]));
-        next = choose(&runtime.read(&program, logits));
+        text.push(&tokenizer.piece(next));
+        at += 1;
         produced += 1;
-        if tokens.len() + produced >= context as usize {
-            println!("\n(the model reached its {context} token context)");
-            break;
-        }
+        next = choose(&runtime.read(&program, logits));
     }
+    text.finish();
+    let elapsed = started.elapsed().as_secs_f64();
     println!(
-        "\n{} tokens in {:.2}s ({:.1} tokens/s)",
-        produced + 1,
-        started.elapsed().as_secs_f64(),
-        (produced + 1) as f64 / started.elapsed().as_secs_f64(),
+        "\n{produced} tokens in {elapsed:.2}s ({:.1} tokens/s)",
+        produced as f64 / elapsed,
     );
-}
-
-fn chat(prompt: &str) -> String {
-    format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n")
+    if at >= context {
+        println!("(the model reached its {context} token context)");
+    }
 }
 
 fn choose(logits: &[f32]) -> u32 {
@@ -121,10 +128,54 @@ fn choose(logits: &[f32]) -> u32 {
     best as u32
 }
 
-fn detach(tokenizer: &Tokenizer, ids: &[u32]) -> String {
-    let mut bytes = Vec::new();
-    for id in ids {
-        bytes.extend(tokenizer.piece(*id));
+fn emit(held: &mut Vec<u8>) {
+    loop {
+        match std::str::from_utf8(held) {
+            Ok(_) => break,
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if valid > 0 {
+                    print!(
+                        "{}",
+                        std::str::from_utf8(&held[..valid]).expect("a valid prefix reads as text"),
+                    );
+                    held.drain(..valid);
+                    continue;
+                }
+                match error.error_len() {
+                    Some(width) => {
+                        print!("{}", String::from_utf8_lossy(&held[..width]));
+                        held.drain(..width);
+                    }
+                    None => break,
+                }
+            }
+        }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    if let Ok(text) = std::str::from_utf8(held) {
+        print!("{text}");
+        held.clear();
+    }
+}
+
+struct Text {
+    held: Vec<u8>,
+}
+
+impl Text {
+    fn new() -> Self {
+        Self { held: Vec::new() }
+    }
+
+    fn push(&mut self, piece: &[u8]) {
+        self.held.extend_from_slice(piece);
+        emit(&mut self.held);
+    }
+
+    fn finish(&mut self) {
+        if !self.held.is_empty() {
+            print!("{}", String::from_utf8_lossy(&self.held));
+            self.held.clear();
+        }
+    }
 }
