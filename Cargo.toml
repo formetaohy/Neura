@@ -39,6 +39,11 @@ neura-runtime = { version = "0.6.0", path = "crates/neura-runtime" }
 neura-source = { version = "0.6.0", path = "crates/neura-source" }
 neura-gguf = { version = "0.6.0", path = "crates/neura-gguf" }
 neura-nn = { version = "0.6.0", path = "crates/neura-nn" }
+neura-tokenizer = { version = "0.6.0", path = "crates/neura-tokenizer" }
+neura-template = { version = "0.6.0", path = "crates/neura-template" }
+neura-decoder = { version = "0.6.0", path = "crates/neura-decoder" }
+neura-generate = { version = "0.6.0", path = "crates/neura-generate" }
+neura-model = { version = "0.6.0", path = "crates/neura-model" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -57,12 +62,16 @@ repository.workspace = true
 
 [dependencies]
 neura-abi = { workspace = true }
+neura-decoder = { workspace = true }
+neura-generate = { workspace = true }
 neura-gguf = { workspace = true }
 neura-graph = { workspace = true }
 neura-plan = { workspace = true }
 neura-profile = { workspace = true }
 neura-runtime = { workspace = true }
 neura-source = { workspace = true }
+neura-template = { workspace = true }
+neura-tokenizer = { workspace = true }
 neura-nn = { workspace = true }
 neura-gpu = { workspace = true }
 
@@ -70,6 +79,7 @@ neura-gpu = { workspace = true }
 workspace = true
 
 [dev-dependencies]
+neura-model = { workspace = true, features = ["qwen35"] }
 flate2 = { workspace = true }
 
 [profile.dev.package."*"]

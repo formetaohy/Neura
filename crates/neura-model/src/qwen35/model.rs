@@ -1,9 +1,9 @@
-use crate::attention::Attention;
-use crate::config::Config;
-use crate::delta::Delta;
-use crate::ops::{rms, tensor};
-use neura::gguf::GgufFile;
-use neura::{Graph, Shape, Value};
+use crate::qwen35::attention::Attention;
+use crate::qwen35::config::Config;
+use crate::qwen35::delta::Delta;
+use neura_decoder::{matrix, rms, vector};
+use neura_gguf::Archive;
+use neura_graph::{Graph, Shape, Value};
 
 pub struct Model<'g> {
     embedding: Value<'g>,
@@ -18,39 +18,25 @@ enum Layer<'g> {
 }
 
 impl<'g> Model<'g> {
-    pub fn new(graph: &Graph<'g>, source: &GgufFile, config: &Config, context: u32) -> Self {
+    pub fn new(graph: &Graph<'g>, source: &impl Archive, config: &Config, context: u32) -> Self {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
-                    Layer::Attend(Attention::build(graph, source, config, layer, context))
+                    Layer::Attend(Attention::new(graph, source, config, layer, context))
                 } else {
-                    Layer::Delta(Delta::build(graph, source, config, layer))
+                    Layer::Delta(Delta::new(graph, source, config, layer))
                 }
             })
             .collect::<Vec<Layer<'g>>>();
-        let embedding = tensor(graph, source, "token_embd.weight");
-        let output_norm = tensor(graph, source, "output_norm.weight");
-        assert_eq!(
-            graph.shape(embedding).dims(),
-            [1, 1, config.vocabulary, config.hidden],
-            "the token embeddings walk {:?} where {} tokens of {} numbers walk [1, 1, {}, {}]",
-            graph.shape(embedding).dims(),
-            config.vocabulary,
-            config.hidden,
-            config.vocabulary,
-            config.hidden,
-        );
-        assert_eq!(
-            graph.shape(output_norm).dims(),
-            [1, 1, 1, config.hidden],
-            "the output norm walks {:?} where {} numbers walk [1, 1, 1, {}]",
-            graph.shape(output_norm).dims(),
-            config.hidden,
-            config.hidden,
-        );
         Self {
-            embedding,
-            output_norm,
+            embedding: matrix(
+                graph,
+                source,
+                "token_embd.weight",
+                config.vocabulary,
+                config.hidden,
+            ),
+            output_norm: vector(graph, source, "output_norm.weight", config.hidden),
             floor: graph.fill(Shape::scalar(), config.floor),
             layers,
         }

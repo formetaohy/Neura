@@ -1,0 +1,13 @@
+[package]
+name = "neura-tokenizer"
+version.workspace = true
+edition.workspace = true
+description = "Byte level bpe over the vocabulary a gguf holds"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-gguf = { workspace = true }

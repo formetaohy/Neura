@@ -1,12 +1,16 @@
+mod archive;
 mod header;
+mod metadata;
 mod value;
 
+pub use archive::Archive;
 pub use header::Tensor;
+pub use metadata::Metadata;
 pub use value::Value;
 
 use header::{Fault, Header, expect, parse};
 use neura_source::{Placed, Source};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -38,8 +42,8 @@ impl Gguf {
         &self.bytes
     }
 
-    pub fn metadata(&self) -> &BTreeMap<String, Value> {
-        &self.header.metadata
+    pub fn metadata(&self) -> Metadata<'_> {
+        Metadata::of(&self.header.metadata)
     }
 
     pub fn value(&self, key: &str) -> Option<&Value> {
@@ -142,8 +146,8 @@ impl GgufFile {
         self.reads.load(Ordering::Relaxed)
     }
 
-    pub fn metadata(&self) -> &BTreeMap<String, Value> {
-        &self.header.metadata
+    pub fn metadata(&self) -> Metadata<'_> {
+        Metadata::of(&self.header.metadata)
     }
 
     pub fn value(&self, key: &str) -> Option<&Value> {

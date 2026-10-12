@@ -137,14 +137,19 @@ version = "0.6.0"
 dependencies = [
  "flate2",
  "neura-abi",
+ "neura-decoder",
+ "neura-generate",
  "neura-gguf",
  "neura-gpu",
  "neura-graph",
+ "neura-model",
  "neura-nn",
  "neura-plan",
  "neura-profile",
  "neura-runtime",
  "neura-source",
+ "neura-template",
+ "neura-tokenizer",
 ]
 
 [[package]]
@@ -166,6 +171,27 @@ dependencies = [
  "neura-ast",
  "neura-macro",
  "neura-shader",
+]
+
+[[package]]
+name = "neura-decoder"
+version = "0.6.0"
+dependencies = [
+ "neura-abi",
+ "neura-gguf",
+ "neura-graph",
+]
+
+[[package]]
+name = "neura-generate"
+version = "0.6.0"
+dependencies = [
+ "neura-abi",
+ "neura-decoder",
+ "neura-gguf",
+ "neura-graph",
+ "neura-runtime",
+ "neura-tokenizer",
 ]
 
 [[package]]
@@ -218,6 +244,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "neura-model"
+version = "0.6.0"
+dependencies = [
+ "neura-abi",
+ "neura-decoder",
+ "neura-gguf",
+ "neura-graph",
+ "neura-tokenizer",
 ]
 
 [[package]]
@@ -292,6 +329,20 @@ name = "neura-source"
 version = "0.6.0"
 dependencies = [
  "neura-abi",
+]
+
+[[package]]
+name = "neura-template"
+version = "0.6.0"
+dependencies = [
+ "neura-gguf",
+]
+
+[[package]]
+name = "neura-tokenizer"
+version = "0.6.0"
+dependencies = [
+ "neura-gguf",
 ]
 
 [[package]]

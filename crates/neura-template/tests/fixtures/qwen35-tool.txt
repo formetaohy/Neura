@@ -1,0 +1,23 @@
+<|im_start|>user
+Weather in Paris?<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+<tool_call>
+<function=get_weather>
+<parameter=city>
+Paris
+</parameter>
+</function>
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+18C and sunny
+</tool_response><|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

@@ -1,4 +1,6 @@
 pub use neura_abi::{Element, Placement, Store};
+pub use neura_decoder as decoder;
+pub use neura_generate as generate;
 pub use neura_gguf as gguf;
 pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, ArtifactCache, Backend, DEFAULT_ARTIFACT_BYTES, Device,
@@ -19,3 +21,5 @@ pub use neura_runtime::{
     DEFAULT_READBACK_SLOTS, MemoryRequest, Program, Readout, Run, Runtime, RuntimeRequest, Weights,
 };
 pub use neura_source::{Placed, Source};
+pub use neura_template as template;
+pub use neura_tokenizer as tokenizer;

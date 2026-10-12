@@ -1,0 +1,11 @@
+<|im_start|>user
+What is 2+2?<|im_end|>
+<|im_start|>assistant
+Four.<|im_end|>
+<|im_start|>user
+Thanks<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

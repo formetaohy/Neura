@@ -1,0 +1,15 @@
+[package]
+name = "neura-decoder"
+version.workspace = true
+edition.workspace = true
+description = "Assembling the decoder only models a gguf weighs onto the graph"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+neura-gguf = { workspace = true }
+neura-graph = { workspace = true }

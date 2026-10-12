@@ -1,0 +1,13 @@
+[package]
+name = "neura-template"
+version.workspace = true
+edition.workspace = true
+description = "Rendering the chat template a gguf names"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-gguf = { workspace = true }
