@@ -151,18 +151,11 @@ pub(crate) fn type_element(kind: u32) -> Option<Element> {
     match kind {
         0 => Some(Element::Single),
         1 => Some(Element::Half),
-        2 => Some(Element::Q4_0),
-        3 => Some(Element::Q4_1),
-        6 => Some(Element::Q5_0),
-        7 => Some(Element::Q5_1),
         8 => Some(Element::Q8_0),
-        10 => Some(Element::Q2K),
-        11 => Some(Element::Q3K),
         12 => Some(Element::Q4K),
         13 => Some(Element::Q5K),
         14 => Some(Element::Q6K),
         30 => Some(Element::Bfloat16),
-        39 => Some(Element::Mxfp4),
         _ => None,
     }
 }

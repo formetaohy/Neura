@@ -359,17 +359,9 @@ fn rounding_contract(backend: neura_gpu::Backend) {
                 quantized_contract(&runtime, *element, scale, &quantized_probes(scale));
             }
             Element::Int4 | Element::Fp4E2M1 => block_contract(&runtime, *element),
-            Element::Q4_0
-            | Element::Q4_1
-            | Element::Q5_0
-            | Element::Q5_1
-            | Element::Q8_0
-            | Element::Q2K
-            | Element::Q3K
-            | Element::Q4K
-            | Element::Q5K
-            | Element::Q6K
-            | Element::Mxfp4 => block_contract(&runtime, *element),
+            Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => {
+                block_contract(&runtime, *element)
+            }
         }
     }
 }

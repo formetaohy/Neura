@@ -17,11 +17,10 @@ use support::{assert_close, open};
 fn kind(element: Element) -> u32 {
     match element {
         Element::Half => 1,
-        Element::Q4_0 => 2,
         Element::Q8_0 => 8,
         Element::Q4K => 12,
+        Element::Q5K => 13,
         Element::Q6K => 14,
-        Element::Mxfp4 => 39,
         other => panic!("{} storage carries no ggml type", other.name()),
     }
 }
@@ -102,10 +101,9 @@ fn a_gguf_holds_every_element_a_store_reads() {
     let runtime = open();
     let held = [
         (Element::Half, 256u64),
-        (Element::Q4_0, 64),
         (Element::Q8_0, 64),
+        (Element::Q5K, 256),
         (Element::Q6K, 512),
-        (Element::Mxfp4, 64),
     ];
     let values = random(held.iter().map(|(_, elements)| *elements as u32).sum(), 41);
     let mut payloads = Vec::new();
@@ -160,10 +158,10 @@ fn a_gguf_holds_every_element_a_store_reads() {
 fn a_gguf_that_lacks_a_declared_tensor_is_refused() {
     let runtime = open();
     let values = random(32, 29);
-    let payload = pack(Element::Q4_0, 1.0, &values);
-    let gguf = Gguf::decode(&build(32, &[(Element::Q4_0, &[32], &payload)]));
+    let payload = pack(Element::Q8_0, 1.0, &values);
+    let gguf = Gguf::decode(&build(32, &[(Element::Q8_0, &[32], &payload)]));
     let graph = Graph::new();
-    graph.named_block_quantized_parameter("absent", Shape::vector(32), Init::Zero, Element::Q4_0);
+    graph.named_block_quantized_parameter("absent", Shape::vector(32), Init::Zero, Element::Q8_0);
     assert!(
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runtime.load(&graph, &gguf);

@@ -15,18 +15,11 @@ fn kind(element: Element) -> u32 {
     match element {
         Element::Single => 0,
         Element::Half => 1,
-        Element::Q4_0 => 2,
-        Element::Q4_1 => 3,
-        Element::Q5_0 => 6,
-        Element::Q5_1 => 7,
         Element::Q8_0 => 8,
-        Element::Q2K => 10,
-        Element::Q3K => 11,
         Element::Q4K => 12,
         Element::Q5K => 13,
         Element::Q6K => 14,
         Element::Bfloat16 => 30,
-        Element::Mxfp4 => 39,
         other => panic!("{} storage carries no ggml type", other.name()),
     }
 }
@@ -101,17 +94,10 @@ fn a_gguf_names_the_element_every_tensor_packs() {
     let held = [
         (Element::Single, 8u64),
         (Element::Half, 16),
-        (Element::Q4_0, 32),
-        (Element::Q4_1, 32),
-        (Element::Q5_0, 32),
-        (Element::Q5_1, 32),
         (Element::Q8_0, 32),
-        (Element::Q2K, 256),
-        (Element::Q3K, 256),
         (Element::Q4K, 256),
         (Element::Q5K, 256),
         (Element::Q6K, 256),
-        (Element::Mxfp4, 32),
         (Element::Bfloat16, 4),
     ];
     let payloads = held

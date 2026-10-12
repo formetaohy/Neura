@@ -69,17 +69,10 @@ impl Dtype {
             Element::Int8 => Some(Self::Int8),
             Element::Int4
             | Element::Fp4E2M1
-            | Element::Q4_0
-            | Element::Q4_1
-            | Element::Q5_0
-            | Element::Q5_1
             | Element::Q8_0
-            | Element::Q2K
-            | Element::Q3K
             | Element::Q4K
             | Element::Q5K
-            | Element::Q6K
-            | Element::Mxfp4 => None,
+            | Element::Q6K => None,
         }
     }
 

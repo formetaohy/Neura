@@ -56,17 +56,10 @@ fn fetch_of(element: Element) -> &'static str {
         Element::Bfloat16 => "fetch_bfloat16",
         Element::Int8 => "fetch_int8",
         Element::Int4 => "fetch_int4",
-        Element::Q4_0 => "fetch_q4_0",
-        Element::Q4_1 => "fetch_q4_1",
-        Element::Q5_0 => "fetch_q5_0",
-        Element::Q5_1 => "fetch_q5_1",
         Element::Q8_0 => "fetch_q8_0",
-        Element::Q2K => "fetch_q2_k",
-        Element::Q3K => "fetch_q3_k",
         Element::Q4K => "fetch_q4_k",
         Element::Q5K => "fetch_q5_k",
         Element::Q6K => "fetch_q6_k",
-        Element::Mxfp4 => "fetch_mxfp4",
         Element::Fp8E4M3 | Element::Fp8E5M2 | Element::Fp4E2M1 => panic!(
             "{} storage walks a float grid, and its fetch is specialized from the grid the ABI declares",
             element.name(),
@@ -190,13 +183,6 @@ mod device {
         return (word >> ((at & 3u32) * 8u32)) & 0xffu32;
     }
 
-    fn ggml_word(value: Value, at: u32) -> u32 {
-        return ggml_byte(value, at)
-            | (ggml_byte(value, at + 1u32) << 8u32)
-            | (ggml_byte(value, at + 2u32) << 16u32)
-            | (ggml_byte(value, at + 3u32) << 24u32);
-    }
-
     fn ggml_half(value: Value, at: u32) -> f32 {
         let pair = unpack2x16float(bitcast_u32(peek(word_of(value, at >> 2u32))));
         return select(pair.x, pair.y, (at & 3u32) == 2u32);
@@ -224,128 +210,10 @@ mod device {
         return low | select(0u32, (ggml_byte(value, base + at) >> 6u32) << 4u32, upper);
     }
 
-    fn ggml_k3_code(value: Value, base: u32, at: u32) -> u32 {
-        let upper = at >= 8u32;
-        let seat = select(at, at - 8u32, upper);
-        let packed = ggml_byte(value, base + 98u32 + seat);
-        let nibble = select(packed & 0xfu32, packed >> 4u32, upper);
-        let high = (ggml_byte(value, base + 106u32 + (at % 4u32)) >> ((at / 4u32) * 2u32)) & 3u32;
-        return (high << 4u32) | nibble;
-    }
-
-    fn fetch_q4_0(value: Value, at: u32) -> f32 {
-        let base = (at / Q4_0_BLOCK) * Q4_0_BYTES;
-        let within = at % Q4_0_BLOCK;
-        let packed = ggml_byte(value, base + 2u32 + (within % (Q4_0_BLOCK / 2u32)));
-        let quant = select(
-            packed & 0xfu32,
-            packed >> 4u32,
-            within >= (Q4_0_BLOCK / 2u32),
-        );
-        return (f32(quant) - 8.0) * ggml_half(value, base);
-    }
-
-    fn fetch_q4_1(value: Value, at: u32) -> f32 {
-        let base = (at / Q4_1_BLOCK) * Q4_1_BYTES;
-        let within = at % Q4_1_BLOCK;
-        let packed = ggml_byte(value, base + 4u32 + (within % (Q4_1_BLOCK / 2u32)));
-        let quant = select(
-            packed & 0xfu32,
-            packed >> 4u32,
-            within >= (Q4_1_BLOCK / 2u32),
-        );
-        return f32(quant) * ggml_half(value, base) + ggml_half(value, base + 2u32);
-    }
-
-    fn fetch_q5_0(value: Value, at: u32) -> f32 {
-        let base = (at / Q5_0_BLOCK) * Q5_0_BYTES;
-        let within = at % Q5_0_BLOCK;
-        let packed = ggml_byte(value, base + 6u32 + (within % (Q5_0_BLOCK / 2u32)));
-        let nibble = select(
-            packed & 0xfu32,
-            packed >> 4u32,
-            within >= (Q5_0_BLOCK / 2u32),
-        );
-        let quant = nibble | (((ggml_word(value, base + 2u32) >> within) & 1u32) << 4u32);
-        return (f32(quant) - 16.0) * ggml_half(value, base);
-    }
-
-    fn fetch_q5_1(value: Value, at: u32) -> f32 {
-        let base = (at / Q5_1_BLOCK) * Q5_1_BYTES;
-        let within = at % Q5_1_BLOCK;
-        let packed = ggml_byte(value, base + 8u32 + (within % (Q5_1_BLOCK / 2u32)));
-        let nibble = select(
-            packed & 0xfu32,
-            packed >> 4u32,
-            within >= (Q5_1_BLOCK / 2u32),
-        );
-        let quant = nibble | (((ggml_word(value, base + 4u32) >> within) & 1u32) << 4u32);
-        return f32(quant) * ggml_half(value, base) + ggml_half(value, base + 2u32);
-    }
-
     fn fetch_q8_0(value: Value, at: u32) -> f32 {
         let base = (at / Q8_0_BLOCK) * Q8_0_BYTES;
         return ggml_signed(ggml_byte(value, base + 2u32 + (at % Q8_0_BLOCK)))
             * ggml_half(value, base);
-    }
-
-    fn mxfp4_grid(code: u32) -> f32 {
-        let magnitude = code & 7u32;
-        let exponent = magnitude >> 1u32;
-        let mantissa = magnitude & 1u32;
-        let carried = bitcast_f32((exponent + 126u32) << 23u32) * (1.0 + 0.5 * f32(mantissa));
-        let value = select(carried, f32(mantissa) * 0.5, exponent == 0u32);
-        return select(-value, value, (code & 8u32) == 0u32);
-    }
-
-    fn fetch_mxfp4(value: Value, at: u32) -> f32 {
-        let base = (at / MXFP4_BLOCK) * MXFP4_BYTES;
-        let within = at % MXFP4_BLOCK;
-        let packed = ggml_byte(value, base + 1u32 + (within % (MXFP4_BLOCK / 2u32)));
-        let code = select(
-            packed & 0xfu32,
-            packed >> 4u32,
-            within >= (MXFP4_BLOCK / 2u32),
-        );
-        let exponent = ggml_byte(value, base);
-        let quantum = bitcast_f32(select(0x00400000u32, exponent << 23u32, exponent > 0u32));
-        return mxfp4_grid(code) * quantum;
-    }
-
-    fn fetch_q2_k(value: Value, at: u32) -> f32 {
-        let base = (at / Q2_K_BLOCK) * Q2_K_BYTES;
-        let within = at % Q2_K_BLOCK;
-        let half = within / 128u32;
-        let seat = within % 128u32;
-        let sub = seat / SUPER_SMALL_BLOCK;
-        let lane = seat % SUPER_SMALL_BLOCK;
-        let codes = ggml_byte(value, base + 4u32 + half * 8u32 + sub);
-        let packed = ggml_byte(
-            value,
-            base + 20u32 + half * 32u32 + (sub % 2u32) * 16u32 + lane,
-        );
-        let quant = (packed >> ((sub / 2u32) * 2u32)) & 3u32;
-        return ggml_half(value, base) * f32(codes & 0xfu32) * f32(quant)
-            - ggml_half(value, base + 2u32) * f32(codes >> 4u32);
-    }
-
-    fn fetch_q3_k(value: Value, at: u32) -> f32 {
-        let base = (at / Q3_K_BLOCK) * Q3_K_BYTES;
-        let within = at % Q3_K_BLOCK;
-        let half = within / 128u32;
-        let seat = within % 128u32;
-        let sub = seat / SUPER_SMALL_BLOCK;
-        let lane = seat % SUPER_SMALL_BLOCK;
-        let step = sub % 8u32;
-        let packed = ggml_byte(
-            value,
-            base + 34u32 + half * 32u32 + (step % 2u32) * 16u32 + lane,
-        );
-        let quant = (packed >> ((step / 2u32) * 2u32)) & 3u32;
-        let high = (ggml_byte(value, base + 2u32 + (within % 32u32)) >> (within / 32u32)) & 1u32;
-        let factor =
-            ggml_half(value, base) * (f32(ggml_k3_code(value, base, half * 8u32 + sub)) - 32.0);
-        return factor * (f32(quant) - select(4.0, 0.0, high == 1u32));
     }
 
     fn fetch_q4_k(value: Value, at: u32) -> f32 {

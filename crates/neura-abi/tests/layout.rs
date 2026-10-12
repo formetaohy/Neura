@@ -141,14 +141,12 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
     assert!(!Element::Single.narrow() && !Element::Single.quantized());
     assert_eq!(Element::Int8.storage_words(5), 3);
     assert_eq!(Element::Int4.storage_words(200), 27);
-    assert_eq!(Element::Q4_0.payload_bytes(32), 18);
-    assert_eq!(Element::Q4_0.payload_words(32), 5);
-    assert_eq!(Element::Q4_0.storage_words(32), 5);
-    assert_eq!(Element::Q2K.payload_bytes(256), 84);
-    assert_eq!(Element::Q3K.payload_bytes(256), 110);
     assert_eq!(Element::Q4K.payload_bytes(256), 144);
     assert_eq!(Element::Q5K.payload_bytes(256), 176);
     assert_eq!(Element::Q6K.payload_bytes(256), 210);
+    assert_eq!(Element::Q4K.payload_bytes(256), 144);
+    assert_eq!(Element::Q5K.payload_bytes(256), 176);
+    assert_eq!(Element::Q8_0.payload_bytes(32), 34);
     assert_eq!(Element::Q6K.storage_words(256), 53);
     assert_eq!(Element::Q4K.word_span(300, 20), (36, 72));
     assert!(Element::Q4K.quantized() && !Element::Q4K.sidecar());
@@ -208,17 +206,10 @@ fn every_float_grid_is_declared_once_for_the_host_and_the_device() {
             | Element::Bfloat16
             | Element::Int8
             | Element::Int4
-            | Element::Q4_0
-            | Element::Q4_1
-            | Element::Q5_0
-            | Element::Q5_1
             | Element::Q8_0
-            | Element::Q2K
-            | Element::Q3K
             | Element::Q4K
             | Element::Q5K
-            | Element::Q6K
-            | Element::Mxfp4 => {
+            | Element::Q6K => {
                 assert!(
                     element.format().is_none(),
                     "{} storage carries no exponent and mantissa of its own",

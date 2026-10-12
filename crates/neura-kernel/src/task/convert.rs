@@ -39,18 +39,9 @@ fn convert_of(element: Element) -> &'static str {
         Element::Bfloat16 => "run_convert_bfloat16",
         Element::Int8 => "run_convert_int8",
         Element::Single => panic!("a single precision tensor holds one element per word"),
-        Element::Int4
-        | Element::Q4_0
-        | Element::Q4_1
-        | Element::Q5_0
-        | Element::Q5_1
-        | Element::Q8_0
-        | Element::Q2K
-        | Element::Q3K
-        | Element::Q4K
-        | Element::Q5K
-        | Element::Q6K
-        | Element::Mxfp4 => panic!("a block quantized tensor is written by its host"),
+        Element::Int4 | Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => {
+            panic!("a block quantized tensor is written by its host")
+        }
         Element::Fp8E4M3 | Element::Fp8E5M2 => panic!(
             "{} storage walks a float grid, and its convert is specialized from the grid the ABI declares",
             element.name(),
