@@ -142,7 +142,6 @@ dependencies = [
  "neura-gguf",
  "neura-gpu",
  "neura-graph",
- "neura-model",
  "neura-nn",
  "neura-plan",
  "neura-profile",
@@ -244,17 +243,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "neura-model"
-version = "0.6.0"
-dependencies = [
- "neura-abi",
- "neura-decoder",
- "neura-gguf",
- "neura-graph",
- "neura-tokenizer",
 ]
 
 [[package]]

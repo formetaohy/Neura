@@ -1,9 +1,10 @@
 # QWEN
 
 Runs a Qwen3.5 gguf through Neura, printing the answer to a prompt one token at a time. The model
-lives in the `neura-model` crate under its `qwen35` feature: its metadata, the tensor names it
-declares, its `qwen35` pre-tokenizer, its gated delta net and its full attention layers. This
-example only names the model, draws the prompt its gguf asks for and drives the loop.
+lives in the modules of this example: its metadata, the tensor names it declares, its `qwen35`
+pre-tokenizer, its gated delta net and its full attention layers. The framework holds no model of
+its own, so this example names every weight its gguf weighs and draws the prompt that gguf asks
+for.
 
 ```sh
 cargo run --release --example qwen -- <model.gguf> "What is the capital of France?" 48

@@ -1,4 +1,4 @@
-use neura_graph::{Graph, Value};
+use neura::{Graph, Value};
 
 pub(crate) fn interleaved(
     graph: &Graph,

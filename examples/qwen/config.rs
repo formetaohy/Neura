@@ -1,4 +1,4 @@
-use neura_gguf::Metadata;
+use neura::gguf::Metadata;
 
 pub struct Config {
     pub layers: u32,

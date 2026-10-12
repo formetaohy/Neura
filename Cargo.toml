@@ -43,7 +43,6 @@ neura-tokenizer = { version = "0.6.0", path = "crates/neura-tokenizer" }
 neura-template = { version = "0.6.0", path = "crates/neura-template" }
 neura-decoder = { version = "0.6.0", path = "crates/neura-decoder" }
 neura-generate = { version = "0.6.0", path = "crates/neura-generate" }
-neura-model = { version = "0.6.0", path = "crates/neura-model" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
@@ -79,7 +78,6 @@ neura-gpu = { workspace = true }
 workspace = true
 
 [dev-dependencies]
-neura-model = { workspace = true, features = ["qwen35"] }
 flate2 = { workspace = true }
 
 [profile.dev.package."*"]

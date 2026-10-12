@@ -52,12 +52,6 @@ jobs:
       - name: Check Android compute backend
         run: cargo check --workspace --all-targets --all-features --target aarch64-linux-android
 
-      - name: Check a model library on its own
-        run: cargo check -p neura-model --no-default-features
-
-      - name: Check every model on its own
-        run: for feature in qwen35; do cargo check -p neura-model --no-default-features --features "$feature"; done
-
       - name: Test
         run: cargo test --workspace --all-features
 

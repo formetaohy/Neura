@@ -1,9 +1,9 @@
-use crate::qwen35::config::Config;
-use crate::qwen35::mlp::Mlp;
-use crate::qwen35::ops::interleaved;
-use neura_decoder::{Cache, flatten, heads, matrix, partial, rms, vector};
-use neura_gguf::Archive;
-use neura_graph::{Graph, Shape, Value};
+use crate::config::Config;
+use crate::mlp::Mlp;
+use crate::ops::interleaved;
+use neura::decoder::{Cache, flatten, heads, matrix, partial, rms, vector};
+use neura::gguf::Archive;
+use neura::{Graph, Shape, Value};
 
 pub(crate) struct Attention {
     norm: Value,

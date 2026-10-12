@@ -1,9 +1,9 @@
-use crate::qwen35::attention::Attention;
-use crate::qwen35::config::Config;
-use crate::qwen35::delta::Delta;
-use neura_decoder::{matrix, rms, vector};
-use neura_gguf::Archive;
-use neura_graph::{Graph, Shape, Value};
+use crate::attention::Attention;
+use crate::config::Config;
+use crate::delta::Delta;
+use neura::decoder::{matrix, rms, vector};
+use neura::gguf::Archive;
+use neura::{Graph, Shape, Value};
 
 pub struct Model {
     embedding: Value,

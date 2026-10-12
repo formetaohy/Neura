@@ -1,10 +1,21 @@
+mod attention;
+mod config;
+mod delta;
+mod mlp;
+mod model;
+mod ops;
+mod text;
+mod tokenizer;
+
+use config::Config;
+use model::Model;
 use neura::decoder::Decoder;
 use neura::generate::Generator;
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::{Element, Graph, MemoryRequest, Runtime, RuntimeRequest, Shape};
-use neura_model::qwen35::{Config, Model, Tokenizer};
 use std::path::Path;
+use tokenizer::Tokenizer;
 
 const CONTEXT: u32 = 1024;
 const READBACK: u64 = 8 << 20;

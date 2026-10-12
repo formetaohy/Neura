@@ -1,6 +1,6 @@
-use neura_decoder::{matrix, rms, vector};
-use neura_gguf::Archive;
-use neura_graph::{Graph, Value};
+use neura::decoder::{matrix, rms, vector};
+use neura::gguf::Archive;
+use neura::{Graph, Value};
 
 pub(crate) struct Mlp {
     norm: Value,

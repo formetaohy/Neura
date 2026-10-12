@@ -1,5 +1,5 @@
 use crate::text::unicode;
-use neura_tokenizer::Rule;
+use neura::tokenizer::Rule;
 
 pub(crate) struct Qwen;
 

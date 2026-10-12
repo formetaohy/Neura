@@ -1,9 +1,8 @@
-use crate::qwen35::config::Config;
-use crate::qwen35::mlp::Mlp;
-use neura_abi::Element;
-use neura_decoder::{flatten, heads, l2, matrix, rms, softplus, vector};
-use neura_gguf::Archive;
-use neura_graph::{Graph, Shape, Value};
+use crate::config::Config;
+use crate::mlp::Mlp;
+use neura::decoder::{flatten, heads, l2, matrix, rms, softplus, vector};
+use neura::gguf::Archive;
+use neura::{Element, Graph, Shape, Value};
 
 pub(crate) struct Delta {
     norm: Value,
