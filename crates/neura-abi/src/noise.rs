@@ -9,7 +9,7 @@ pub const UNIFORM: u32 = Distribution::Uniform as u32;
 pub const NORMAL: u32 = Distribution::Normal as u32;
 
 impl Distribution {
-    pub const ALL: &'static [Self] = &[Self::Uniform, Self::Normal];
+    pub const ALL: &[Self] = &[Self::Uniform, Self::Normal];
     pub const COUNT: u32 = Self::ALL.len() as u32;
 
     pub const fn code(self) -> u32 {

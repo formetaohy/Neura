@@ -841,7 +841,7 @@ impl Plan {
         start: usize,
         end: usize,
         at_bound: bool,
-        emitted: &mut Emitted<'a, 'a>,
+        emitted: &mut Emitted<'a>,
     ) {
         let split = self.splits[start];
         let dependencies = self.depends_of(start);
@@ -1258,21 +1258,21 @@ impl Plan {
     }
 }
 
-struct Emitted<'a, 'b> {
-    walks: Vec<Walked<'a, 'b>>,
+struct Emitted<'a> {
+    walks: Vec<Walked<'a>>,
     sources: Vec<u32>,
     declared: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
-struct Walked<'a, 'b> {
+struct Walked<'a> {
     recorded: Recorded<'a>,
-    depends: &'b [u32],
+    depends: &'a [u32],
     span: (u32, u32),
     work: u64,
 }
 
-impl Reads for Walked<'_, '_> {
+impl Reads for Walked<'_> {
     fn out(&self) -> u32 {
         self.recorded.out()
     }
@@ -1290,7 +1290,7 @@ impl Reads for Walked<'_, '_> {
     }
 }
 
-impl Walk for Walked<'_, '_> {
+impl Walk for Walked<'_> {
     fn kind(&self) -> Kind {
         self.recorded.kind()
     }
@@ -1332,7 +1332,7 @@ impl Walk for Walked<'_, '_> {
     }
 }
 
-impl schedule::Scheduled for Walked<'_, '_> {
+impl schedule::Scheduled for Walked<'_> {
     fn span(&self) -> (u32, u32) {
         self.span
     }

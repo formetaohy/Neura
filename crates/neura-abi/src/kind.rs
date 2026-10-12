@@ -19,7 +19,7 @@ pub enum DeviceModule {
 }
 
 impl DeviceModule {
-    pub const ALL: &'static [DeviceModule] = &[
+    pub const ALL: &[DeviceModule] = &[
         Self::Matmul,
         Self::MatmulTiles,
         Self::Attention,
@@ -108,7 +108,7 @@ macro_rules! kinds {
         $(pub const $symbol: u32 = Kind::$variant as u32;)+
 
         impl Kind {
-            pub const ALL: &'static [Kind] = &[$(Kind::$variant),+];
+            pub const ALL: &[Kind] = &[$(Kind::$variant),+];
             pub const COUNT: u32 = Self::ALL.len() as u32;
 
             pub const fn code(self) -> u32 {

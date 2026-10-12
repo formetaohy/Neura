@@ -16,7 +16,7 @@ pub enum BuiltIn {
 }
 
 impl BuiltIn {
-    pub const ALL: &'static [BuiltIn] = &[
+    pub const ALL: &[BuiltIn] = &[
         Self::LocalInvocationIndex,
         Self::WorkGroupId,
         Self::GlobalInvocationId,
@@ -102,7 +102,7 @@ pub enum BinaryOp {
 }
 
 impl BinaryOp {
-    pub const ALL: &'static [BinaryOp] = &[
+    pub const ALL: &[BinaryOp] = &[
         Self::Add,
         Self::Subtract,
         Self::Multiply,
@@ -181,7 +181,7 @@ pub enum MathFun {
 }
 
 impl MathFun {
-    pub const ALL: &'static [MathFun] = &[
+    pub const ALL: &[MathFun] = &[
         Self::Min,
         Self::Max,
         Self::Abs,
@@ -236,7 +236,7 @@ pub enum AtomicOp {
 }
 
 impl AtomicOp {
-    pub const ALL: &'static [AtomicOp] = &[
+    pub const ALL: &[AtomicOp] = &[
         Self::Add,
         Self::Subtract,
         Self::Min,

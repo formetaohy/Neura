@@ -8,7 +8,7 @@ pub enum Store {
 }
 
 impl Store {
-    pub const ALL: &'static [Store] = &[Self::Tensors, Self::Weights];
+    pub const ALL: &[Store] = &[Self::Tensors, Self::Weights];
 
     pub const fn code(self) -> u32 {
         match self {

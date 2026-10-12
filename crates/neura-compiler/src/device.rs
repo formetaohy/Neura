@@ -14,7 +14,7 @@ macro_rules! vocabulary {
         }
 
         impl Intrinsic {
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
 
             pub const fn name(self) -> &'static str {
                 match self {
@@ -95,7 +95,7 @@ macro_rules! loop_forms {
         }
 
         impl LoopForm {
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+            pub const ALL: &[Self] = &[$(Self::$variant),+];
 
             pub const fn name(self) -> &'static str {
                 match self {

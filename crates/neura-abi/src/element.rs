@@ -55,7 +55,7 @@ pub struct FloatFormat {
 }
 
 impl Element {
-    pub const ALL: &'static [Element] = &[
+    pub const ALL: &[Element] = &[
         Self::Single,
         Self::Half,
         Self::Bfloat16,

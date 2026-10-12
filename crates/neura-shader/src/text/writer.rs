@@ -1010,10 +1010,10 @@ impl<'m> Writer<'m> {
     }
 }
 
-pub(super) fn addresses<'m>(
-    module: &'m Module,
+pub(super) fn addresses(
+    module: &Module,
     locals: &[String],
-    body: &'m [Instruction],
+    body: &[Instruction],
     names: &mut HashMap<ValueId, String>,
 ) {
     for instruction in body {

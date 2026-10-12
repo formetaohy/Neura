@@ -25,7 +25,7 @@ pub(crate) enum Dtype {
 }
 
 impl Dtype {
-    const ALL: &'static [Dtype] = &[
+    const ALL: &[Dtype] = &[
         Self::F32,
         Self::F16,
         Self::Bfloat16,

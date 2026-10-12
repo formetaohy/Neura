@@ -485,26 +485,11 @@ impl FunctionLower<'_> {
                     intrinsic.yields(),
                     "the device intrinsic {name} writes without yielding a value",
                 );
-                let args = self.intrinsic_arguments(intrinsic, args);
+                let args = intrinsic_arguments(intrinsic, args);
                 self.intrinsic(intrinsic, args)
             }
             None => self.device_function(name, args),
         }
-    }
-
-    pub(super) fn intrinsic_arguments<'a>(
-        &self,
-        intrinsic: Intrinsic,
-        arguments: &'a [ast::Expression],
-    ) -> &'a [ast::Expression] {
-        assert_eq!(
-            arguments.len(),
-            intrinsic.arity() as usize,
-            "the device intrinsic {} takes {} arguments",
-            intrinsic.name(),
-            intrinsic.arity(),
-        );
-        arguments
     }
 
     fn intrinsic(&mut self, intrinsic: Intrinsic, args: &[ast::Expression]) -> Typed {
@@ -743,4 +728,18 @@ fn pointer_space(lower: &FunctionLower<'_>, ty: TypeId) -> neura_shader::Space {
 
 fn pointee(lower: &FunctionLower<'_>, ty: TypeId) -> TypeId {
     lower.compiler.module().pointee(ty).1
+}
+
+pub(super) fn intrinsic_arguments(
+    intrinsic: Intrinsic,
+    arguments: &[ast::Expression],
+) -> &[ast::Expression] {
+    assert_eq!(
+        arguments.len(),
+        intrinsic.arity() as usize,
+        "the device intrinsic {} takes {} arguments",
+        intrinsic.name(),
+        intrinsic.arity(),
+    );
+    arguments
 }

@@ -24,7 +24,7 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    pub const ALL: &'static [Refusal] = &[
+    pub const ALL: &[Refusal] = &[
         Self::Op,
         Self::Partial,
         Self::Index,

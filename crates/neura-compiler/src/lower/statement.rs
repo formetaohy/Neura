@@ -1,3 +1,4 @@
+use super::value::intrinsic_arguments;
 use super::{FunctionLower, Symbol, Typed};
 use crate::DeviceInstruction;
 use crate::ast;
@@ -21,7 +22,7 @@ impl FunctionLower<'_> {
                         && Intrinsic::of(intrinsic) == Some(Intrinsic::ScalarArray)
                     {
                         assert!(*mutable, "scalar registers are mutable");
-                        let arguments = self.intrinsic_arguments(Intrinsic::ScalarArray, arguments);
+                        let arguments = intrinsic_arguments(Intrinsic::ScalarArray, arguments);
                         let initial = self.value(&arguments[0]);
                         let count = self.compiler.evaluate(&arguments[1]);
                         assert!(count > 0, "a scalar register array is not empty");
@@ -248,7 +249,7 @@ impl FunctionLower<'_> {
         if let E::Call { name, arguments } = expr {
             match Intrinsic::of(name) {
                 Some(intrinsic) => {
-                    let arguments = self.intrinsic_arguments(intrinsic, arguments);
+                    let arguments = intrinsic_arguments(intrinsic, arguments);
                     match intrinsic {
                         Intrinsic::WorkgroupBarrier => {
                             self.push(DeviceInstruction::Barrier(Barrier::WorkGroup));
