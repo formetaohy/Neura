@@ -44,15 +44,15 @@ fn open_bounded(directory: &Path, artifact_bytes: u64) -> Runtime {
 }
 
 struct Model {
-    graph: Graph<'static>,
-    input: Value<'static>,
-    weight: Value<'static>,
-    bias: Value<'static>,
-    out: Value<'static>,
+    graph: Graph,
+    input: Value,
+    weight: Value,
+    bias: Value,
+    out: Value,
 }
 
 fn model(samples: u32) -> Model {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::matrix(samples, 8), Element::Single);
     let weight = graph.parameter(Shape::matrix(8, 4), Init::Zero, Element::Single);
     let bias = graph.parameter(Shape::vector(4), Init::Zero, Element::Single);

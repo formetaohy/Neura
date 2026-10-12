@@ -449,7 +449,7 @@ const TRAIN_ROWS: u32 = 64;
 const TRAIN_DEPTH: u32 = 4;
 const TRAIN_SLOTS: u32 = 64;
 
-fn trains<'g>(graph: &Graph<'g>, rows: neura_graph::Value<'g>) {
+fn trains(graph: &Graph, rows: neura_graph::Value) {
     let weights = (0..TRAIN_DEPTH)
         .map(|_| {
             graph.parameter(

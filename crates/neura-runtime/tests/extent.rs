@@ -13,14 +13,14 @@ enum Extent {
     Tokens,
 }
 
-struct Model<'g> {
-    inputs: Vec<Value<'g>>,
-    parameter: Value<'g>,
-    output: Value<'g>,
+struct Model {
+    inputs: Vec<Value>,
+    parameter: Value,
+    output: Value,
     frees: Vec<(Extent, Free)>,
 }
 
-impl Model<'_> {
+impl Model {
     fn binding(&self, batch: u32, tokens: u32) -> Vec<u32> {
         self.frees
             .iter()
@@ -70,12 +70,7 @@ fn weights() -> Init {
     }
 }
 
-fn stream(
-    graph: &Graph<'static>,
-    batch: u32,
-    tokens: u32,
-    frees: Option<(Free, Free)>,
-) -> Value<'static> {
+fn stream(graph: &Graph, batch: u32, tokens: u32, frees: Option<(Free, Free)>) -> Value {
     let shape = match frees {
         Some((batch_extent, token_extent)) => {
             Shape::of([1, batch, tokens, 8]).freed(&[(1, batch_extent), (2, token_extent)])
@@ -85,12 +80,7 @@ fn stream(
     graph.input(shape, Element::Single)
 }
 
-fn attention_model(
-    graph: &Graph<'static>,
-    batch: u32,
-    tokens: u32,
-    dynamic: bool,
-) -> Model<'static> {
+fn attention_model(graph: &Graph, batch: u32, tokens: u32, dynamic: bool) -> Model {
     let batch_extent = graph.free(batch);
     let token_extent = graph.free(tokens);
     let frees = dynamic.then_some((batch_extent, token_extent));
@@ -125,12 +115,7 @@ fn attention_model(
     }
 }
 
-fn reduction_model(
-    graph: &Graph<'static>,
-    batch: u32,
-    tokens: u32,
-    dynamic: bool,
-) -> Model<'static> {
+fn reduction_model(graph: &Graph, batch: u32, tokens: u32, dynamic: bool) -> Model {
     let batch_extent = graph.free(batch);
     let token_extent = graph.free(tokens);
     let frees = dynamic.then_some((batch_extent, token_extent));
@@ -158,12 +143,7 @@ fn reduction_model(
     }
 }
 
-fn convolution_model(
-    graph: &Graph<'static>,
-    batch: u32,
-    tokens: u32,
-    dynamic: bool,
-) -> Model<'static> {
+fn convolution_model(graph: &Graph, batch: u32, tokens: u32, dynamic: bool) -> Model {
     let batch_extent = graph.free(batch);
     let shape = if dynamic {
         Shape::of([batch, 16, tokens, 8]).freed(&[(0, batch_extent)])
@@ -192,7 +172,7 @@ fn convolution_model(
 
 fn reference(
     runtime: &Runtime,
-    build: fn(&Graph<'static>, u32, u32, bool) -> Model<'static>,
+    build: fn(&Graph, u32, u32, bool) -> Model,
     batch: u32,
     tokens: u32,
     seed: u32,
@@ -215,10 +195,7 @@ fn reference(
     (runtime.read(&program, model.output), parameter)
 }
 
-fn family_runs_every_binding(
-    build: fn(&Graph<'static>, u32, u32, bool) -> Model<'static>,
-    bindings: &[(u32, u32)],
-) {
+fn family_runs_every_binding(build: fn(&Graph, u32, u32, bool) -> Model, bindings: &[(u32, u32)]) {
     let runtime = open();
     let (batch, tokens) = bindings[0];
     let graph = Graph::new();
@@ -620,15 +597,7 @@ fn a_fold_of_one_number_walks_the_length_a_binding_holds() {
     );
 }
 
-fn mean_family(
-    graph: &Graph<'static>,
-    shape: Shape,
-) -> (
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-) {
+fn mean_family(graph: &Graph, shape: Shape) -> (Value, Value, Value, Value) {
     let values = graph.gradient_input(shape, Element::Single);
     let weight = graph.input(Shape::of([1, 1, 1, 4]), Element::Single);
     let mean = graph.mean_axis(values, 2);
@@ -720,16 +689,7 @@ fn a_softmax_family_walks_every_width_a_binding_holds() {
     }
 }
 
-fn softmax_family(
-    graph: &Graph<'static>,
-    log: bool,
-    shape: Shape,
-) -> (
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-) {
+fn softmax_family(graph: &Graph, log: bool, shape: Shape) -> (Value, Value, Value, Value) {
     let logits = graph.gradient_input(shape, Element::Single);
     let weight = graph.input(shape, Element::Single);
     let probabilities = if log {
@@ -816,16 +776,10 @@ fn refuses(action: impl FnOnce()) -> bool {
 }
 
 fn beside_family(
-    graph: &Graph<'static>,
+    graph: &Graph,
     rows: Shape,
     position: Shape,
-) -> (
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    neura_graph::Gradients<'static>,
-) {
+) -> (Value, Value, Value, Value, neura_graph::Gradients) {
     let rows = graph.gradient_input(rows, Element::Single);
     let position = graph.gradient_input(position, Element::Single);
     let weight = graph.input(graph.shape(rows), Element::Single);

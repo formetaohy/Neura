@@ -559,7 +559,7 @@ impl Program {
         values
     }
 
-    pub(crate) fn declare_rows(&self, table: Value<'_>, rows: &[u32]) {
+    pub(crate) fn declare_rows(&self, table: Value, rows: &[u32]) {
         assert!(
             self.plan.gather_tables().contains(&table.id()),
             "value {} is no table this program gathers rows of, and a host declares the rows of a table a task of the plan walks",

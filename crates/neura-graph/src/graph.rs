@@ -6,7 +6,6 @@ use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE, StepRecord}
 use neura_pointwise as op;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
@@ -15,14 +14,13 @@ static NEXT_GRAPH: AtomicU64 = AtomicU64::new(1);
 pub(crate) const NORM_FLOOR: f32 = 1e-6;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
-pub struct Value<'g> {
+pub struct Value {
     graph: u64,
     id: u32,
     shape: Shape,
-    brand: PhantomData<fn(&'g ()) -> &'g ()>,
 }
 
-impl<'g> Value<'g> {
+impl Value {
     pub const fn id(self) -> u32 {
         self.id
     }
@@ -31,49 +29,48 @@ impl<'g> Value<'g> {
         self.shape
     }
 
+    pub(crate) const fn graph(self) -> u64 {
+        self.graph
+    }
+
     fn of(graph: u64, id: u32, shape: Shape) -> Self {
-        Self {
-            graph,
-            id,
-            shape,
-            brand: PhantomData,
-        }
+        Self { graph, id, shape }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct AttentionOptions<'g> {
-    pub scale: Option<Value<'g>>,
+pub struct AttentionOptions {
+    pub scale: Option<Value>,
     pub causal: bool,
-    pub origin: Option<Value<'g>>,
-    pub segments: Option<Value<'g>>,
+    pub origin: Option<Value>,
+    pub segments: Option<Value>,
     pub reach: Option<u32>,
-    pub query_segments: Option<Value<'g>>,
-    pub bias: Option<Value<'g>>,
+    pub query_segments: Option<Value>,
+    pub bias: Option<Value>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Ragged<'g> {
+pub struct Ragged {
     pub extent: Free,
-    pub offsets: Value<'g>,
+    pub offsets: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Rows<'g> {
-    pub plane: Value<'g>,
-    pub position: Value<'g>,
+pub struct Rows {
+    pub plane: Value,
+    pub position: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Prefixes<'g> {
-    pub exclusive: Value<'g>,
-    pub total: Value<'g>,
+pub struct Prefixes {
+    pub exclusive: Value,
+    pub total: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Compacted<'g> {
-    pub indices: Value<'g>,
-    pub count: Value<'g>,
+pub struct Compacted {
+    pub indices: Value,
+    pub count: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -326,13 +323,12 @@ impl<'a> Declaration<'a> {
     }
 }
 
-pub struct Graph<'g> {
+pub struct Graph {
     pub(crate) instance: u64,
     pub(crate) state: RefCell<GraphState>,
-    brand: PhantomData<fn(&'g ()) -> &'g ()>,
 }
 
-impl<'g> Graph<'g> {
+impl Graph {
     pub fn new() -> Self {
         Self {
             state: RefCell::new(GraphState {
@@ -350,7 +346,6 @@ impl<'g> Graph<'g> {
                 frees: 0,
             }),
             instance: NEXT_GRAPH.fetch_add(1, Ordering::Relaxed),
-            brand: PhantomData,
         }
     }
 
@@ -392,14 +387,14 @@ impl<'g> Graph<'g> {
         Free::of(slot, bound)
     }
 
-    pub fn counted(&self, bound: u32, count: Value<'g>) -> Free {
+    pub fn counted(&self, bound: u32, count: Value) -> Free {
         let count = self.own(count);
         let free = self.free(bound);
         self.author(free, count);
         free
     }
 
-    pub fn trim(&self, value: Value<'g>, axis: u32, count: Value<'g>) -> Value<'g> {
+    pub fn trim(&self, value: Value, axis: u32, count: Value) -> Value {
         let value = self.own(value);
         let count = self.own(count);
         assert!(
@@ -513,7 +508,7 @@ impl<'g> Graph<'g> {
         }
     }
 
-    pub fn author(&self, free: Free, count: Value<'g>) {
+    pub fn author(&self, free: Free, count: Value) {
         let count = self.own(count);
         let elements = self.shape(count).elements();
         assert_eq!(
@@ -551,7 +546,7 @@ impl<'g> Graph<'g> {
         advance(&mut state);
     }
 
-    pub fn ragged(&self, bound: u32, lengths: Value<'g>) -> Ragged<'g> {
+    pub fn ragged(&self, bound: u32, lengths: Value) -> Ragged {
         let lengths = self.own(lengths);
         assert!(
             bound <= EXACT_WALK_LIMIT,
@@ -584,7 +579,7 @@ impl<'g> Graph<'g> {
         Ragged { extent, offsets }
     }
 
-    pub fn rows(&self, ragged: Ragged<'g>) -> Rows<'g> {
+    pub fn rows(&self, ragged: Ragged) -> Rows {
         let offsets = self.own(ragged.offsets);
         let axis = {
             let state = self.state.borrow();
@@ -626,7 +621,7 @@ impl<'g> Graph<'g> {
         Rows { plane, position }
     }
 
-    pub fn prefix_sum(&self, value: Value<'g>) -> Prefixes<'g> {
+    pub fn prefix_sum(&self, value: Value) -> Prefixes {
         let value = self.own(value);
         self.exact_walk(value, "a prefix sum");
         let shape = self.shape(value);
@@ -636,7 +631,7 @@ impl<'g> Graph<'g> {
         Prefixes { exclusive, total }
     }
 
-    pub fn compact(&self, mask: Value<'g>) -> Compacted<'g> {
+    pub fn compact(&self, mask: Value) -> Compacted {
         let mask = self.own(mask);
         let shape = self.shape(mask);
         assert_eq!(
@@ -674,7 +669,7 @@ impl<'g> Graph<'g> {
         }
     }
 
-    fn exact_walk(&self, value: Value<'g>, walks: &str) {
+    fn exact_walk(&self, value: Value, walks: &str) {
         assert!(
             self.contiguous(value),
             "{walks} walks a tensor its storage lays out row by row, and value {} is a view",
@@ -694,7 +689,7 @@ impl<'g> Graph<'g> {
         );
     }
 
-    fn prefix(&self, value: Value<'g>, offsets: Value<'g>, total: Value<'g>) {
+    fn prefix(&self, value: Value, offsets: Value, total: Value) {
         let mut unit = TaskInfo::of(
             Kind::PrefixChunk,
             op::NONE,
@@ -705,7 +700,7 @@ impl<'g> Graph<'g> {
         self.push(unit);
     }
 
-    pub fn input(&self, shape: Shape, element: Element) -> Value<'g> {
+    pub fn input(&self, shape: Shape, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "an input of {} storage is declared with the quantum it reconstructs by, and an input carries none; quantize the tensor that reads it instead",
@@ -714,7 +709,7 @@ impl<'g> Graph<'g> {
         self.hold(Declaration::of(shape, element, Residency::Input))
     }
 
-    pub fn gradient_input(&self, shape: Shape, element: Element) -> Value<'g> {
+    pub fn gradient_input(&self, shape: Shape, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a gradient input of {} storage is declared with the quantum it reconstructs by, and a gradient input carries none; quantize the tensor that reads it instead",
@@ -723,7 +718,7 @@ impl<'g> Graph<'g> {
         self.hold(Declaration::of(shape, element, Residency::Input).trained(true))
     }
 
-    pub fn resident(&self, shape: Shape, element: Element) -> Value<'g> {
+    pub fn resident(&self, shape: Shape, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
@@ -732,7 +727,7 @@ impl<'g> Graph<'g> {
         self.hold(Declaration::of(shape, element, Residency::Resident))
     }
 
-    pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
+    pub fn parameter(&self, shape: Shape, init: Init, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
@@ -745,13 +740,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn named_parameter(
-        &self,
-        name: &str,
-        shape: Shape,
-        init: Init,
-        element: Element,
-    ) -> Value<'g> {
+    pub fn named_parameter(&self, name: &str, shape: Shape, init: Init, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a parameter of {} storage is declared with the quantum it reconstructs by, and a parameter carries none; declare a quantized or a block quantized parameter instead",
@@ -765,14 +754,14 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn knob(&self, value: f32) -> Value<'g> {
+    pub fn knob(&self, value: f32) -> Value {
         self.hold(
             Declaration::of(Shape::scalar(), Element::Single, Residency::State)
                 .seeded(Init::Constant(value)),
         )
     }
 
-    pub fn named_knob(&self, name: &str, value: f32) -> Value<'g> {
+    pub fn named_knob(&self, name: &str, value: f32) -> Value {
         self.hold(
             Declaration::of(Shape::scalar(), Element::Single, Residency::State)
                 .named(name)
@@ -780,7 +769,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value<'g> {
+    pub fn state(&self, shape: Shape, init: Init, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
@@ -789,7 +778,7 @@ impl<'g> Graph<'g> {
         self.hold(Declaration::of(shape, element, Residency::State).seeded(init))
     }
 
-    pub fn named_state(&self, name: &str, shape: Shape, init: Init, element: Element) -> Value<'g> {
+    pub fn named_state(&self, name: &str, shape: Shape, init: Init, element: Element) -> Value {
         assert!(
             !element.quantized(),
             "a training state of {} storage is declared with the quantum it reconstructs by, and a training state carries none",
@@ -802,7 +791,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value<'g> {
+    pub fn quantized_parameter(&self, shape: Shape, init: Init, scale: f32) -> Value {
         self.hold(
             Declaration::of(shape, Element::Int8, Residency::Parameter)
                 .scaled(scale)
@@ -816,7 +805,7 @@ impl<'g> Graph<'g> {
         shape: Shape,
         init: Init,
         scale: f32,
-    ) -> Value<'g> {
+    ) -> Value {
         self.hold(
             Declaration::of(shape, Element::Int8, Residency::Parameter)
                 .named(name)
@@ -825,12 +814,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn block_quantized_parameter(
-        &self,
-        shape: Shape,
-        init: Init,
-        element: Element,
-    ) -> Value<'g> {
+    pub fn block_quantized_parameter(&self, shape: Shape, init: Init, element: Element) -> Value {
         assert!(
             element.block().is_some(),
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
@@ -845,7 +829,7 @@ impl<'g> Graph<'g> {
         shape: Shape,
         init: Init,
         element: Element,
-    ) -> Value<'g> {
+    ) -> Value {
         assert!(
             element.block().is_some(),
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
@@ -858,7 +842,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn quantize(&self, value: Value<'g>, scale: f32) -> Value<'g> {
+    pub fn quantize(&self, value: Value, scale: f32) -> Value {
         let value = self.own(value);
         let out = self.quantized(self.shape(value), scale);
         self.push(TaskInfo::of(
@@ -870,7 +854,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn fill(&self, shape: Shape, value: f32) -> Value<'g> {
+    pub fn fill(&self, shape: Shape, value: f32) -> Value {
         let out = self.fresh(shape, Element::Single, Residency::Derived, false);
         let mut task = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 6]);
         task.literal = value;
@@ -878,24 +862,24 @@ impl<'g> Graph<'g> {
         out
     }
 
-    fn materialized(&self, value: Value<'g>) -> Value<'g> {
+    fn materialized(&self, value: Value) -> Value {
         let element = self.element(value);
         let out = self.unary_as(op::IDENTITY, value, element);
         self.retain(out);
         out
     }
 
-    pub fn shape(&self, value: Value<'g>) -> Shape {
+    pub fn shape(&self, value: Value) -> Shape {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].shape
     }
 
-    pub fn element(&self, value: Value<'g>) -> Element {
+    pub fn element(&self, value: Value) -> Element {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].element
     }
 
-    pub fn scale(&self, value: Value<'g>) -> f32 {
+    pub fn scale(&self, value: Value) -> f32 {
         let value = self.own(value);
         let info = &self.state.borrow().values[value.id() as usize];
         assert!(
@@ -910,7 +894,7 @@ impl<'g> Graph<'g> {
         info.scale
     }
 
-    pub(crate) fn declared_quantum(&self, value: Value<'g>) -> f32 {
+    pub(crate) fn declared_quantum(&self, value: Value) -> f32 {
         let value = self.own(value);
         self.state.borrow().values[value.id() as usize].scale
     }
@@ -943,7 +927,7 @@ impl<'g> Graph<'g> {
         })
     }
 
-    pub(crate) fn elementwise(&self, op: u32, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub(crate) fn elementwise(&self, op: u32, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         let shape = self.shape(left).combined(self.shape(right));
@@ -971,11 +955,11 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub(crate) fn unary(&self, op: u32, value: Value<'g>) -> Value<'g> {
+    pub(crate) fn unary(&self, op: u32, value: Value) -> Value {
         self.unary_as(op, value, self.element(value))
     }
 
-    pub(crate) fn unary_as(&self, op: u32, value: Value<'g>, element: Element) -> Value<'g> {
+    pub(crate) fn unary_as(&self, op: u32, value: Value, element: Element) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         let out = self.stored(
@@ -994,7 +978,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn retain(&self, value: Value<'g>) {
+    pub fn retain(&self, value: Value) {
         let value = self.own(value);
         let storage = self.state.borrow().values[value.id() as usize].storage;
         let mut state = self.state.borrow_mut();
@@ -1002,7 +986,7 @@ impl<'g> Graph<'g> {
         advance(&mut state);
     }
 
-    pub fn freeze(&self, values: &[Value<'g>]) {
+    pub fn freeze(&self, values: &[Value]) {
         assert!(
             !values.is_empty(),
             "freezing no tensor leaves every parameter learning",
@@ -1031,7 +1015,7 @@ impl<'g> Graph<'g> {
         advance(&mut state);
     }
 
-    pub fn detach(&self, value: Value<'g>) -> Value<'g> {
+    pub fn detach(&self, value: Value) -> Value {
         let value = self.own(value);
         let (shape, strides_rank, storage, element, scale) = {
             let state = self.state.borrow();
@@ -1054,7 +1038,7 @@ impl<'g> Graph<'g> {
         ))
     }
 
-    pub(crate) fn update_in_place(&self, op: u32, target: Value<'g>, operand: Value<'g>) {
+    pub(crate) fn update_in_place(&self, op: u32, target: Value, operand: Value) {
         let target = self.own(target);
         let operand = self.own(operand);
         self.assert_in_place(target, operand);
@@ -1076,7 +1060,7 @@ impl<'g> Graph<'g> {
         self.wrote_in_place(target);
     }
 
-    pub(crate) fn assert_in_place(&self, target: Value<'g>, operand: Value<'g>) {
+    pub(crate) fn assert_in_place(&self, target: Value, operand: Value) {
         let target = self.own(target);
         let operand = self.own(operand);
         {
@@ -1115,7 +1099,7 @@ impl<'g> Graph<'g> {
         );
     }
 
-    pub(crate) fn wrote_in_place(&self, target: Value<'g>) {
+    pub(crate) fn wrote_in_place(&self, target: Value) {
         let target = self.own(target);
         let mut state = self.state.borrow_mut();
         state.values[target.id() as usize].written_in_place = true;
@@ -1123,13 +1107,7 @@ impl<'g> Graph<'g> {
         advance(&mut state);
     }
 
-    pub(crate) fn scatter(
-        &self,
-        kind: Kind,
-        target: Value<'g>,
-        indices: Value<'g>,
-        updates: Value<'g>,
-    ) {
+    pub(crate) fn scatter(&self, kind: Kind, target: Value, indices: Value, updates: Value) {
         self.index_list(indices);
         assert!(
             self.contiguous(target),
@@ -1175,13 +1153,13 @@ impl<'g> Graph<'g> {
         self.push(task);
     }
 
-    pub fn sum_rows(&self, value: Value<'g>) -> Value<'g> {
+    pub fn sum_rows(&self, value: Value) -> Value {
         let value = self.own(value);
         self.assert_axis_packs_one_plane(value, MAX_RANK - 1);
         self.fold(value, MAX_RANK - 1)
     }
 
-    pub fn sum_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+    pub fn sum_axis(&self, value: Value, axis: u32) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1193,7 +1171,7 @@ impl<'g> Graph<'g> {
         self.fold(value, axis)
     }
 
-    fn assert_axis_packs_one_plane(&self, value: Value<'g>, axis: u32) {
+    fn assert_axis_packs_one_plane(&self, value: Value, axis: u32) {
         let shape = self.shape(value);
         let Some(slot) = shape.free(axis) else {
             return;
@@ -1214,7 +1192,7 @@ impl<'g> Graph<'g> {
         }
     }
 
-    pub fn length(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+    pub fn length(&self, value: Value, axis: u32) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1243,7 +1221,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn mean_axis(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+    pub fn mean_axis(&self, value: Value, axis: u32) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1262,7 +1240,7 @@ impl<'g> Graph<'g> {
         self.mul(summed, self.fill(shape.reduced(axis), 1.0 / count as f32))
     }
 
-    pub fn broadcast_to(&self, value: Value<'g>, shape: Shape) -> Value<'g> {
+    pub fn broadcast_to(&self, value: Value, shape: Shape) -> Value {
         let value = self.own(value);
         let source = self.shape(value);
         assert!(
@@ -1277,7 +1255,7 @@ impl<'g> Graph<'g> {
         self.broadcast(value, shape)
     }
 
-    pub(crate) fn fold(&self, value: Value<'g>, axis: u32) -> Value<'g> {
+    pub(crate) fn fold(&self, value: Value, axis: u32) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1305,7 +1283,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub(crate) fn broadcast(&self, source: Value<'g>, shape: Shape) -> Value<'g> {
+    pub(crate) fn broadcast(&self, source: Value, shape: Shape) -> Value {
         let source = self.own(source);
         assert!(
             self.shape(source).fits_within(shape),
@@ -1340,7 +1318,7 @@ impl<'g> Graph<'g> {
         self.state.borrow().values[value as usize].storage
     }
 
-    pub fn trains(&self, value: Value<'g>) -> bool {
+    pub fn trains(&self, value: Value) -> bool {
         let value = self.own(value);
         self.carries_gradient(value.id())
     }
@@ -1351,28 +1329,28 @@ impl<'g> Graph<'g> {
         info.requires_grad && matches!(info.residency, Residency::Input | Residency::Parameter)
     }
 
-    pub(crate) fn contiguous(&self, value: Value<'g>) -> bool {
+    pub(crate) fn contiguous(&self, value: Value) -> bool {
         let value = self.own(value);
         let state = self.state.borrow();
         let info = &state.values[value.id() as usize];
         info.strides == info.shape.strides()
     }
 
-    pub(crate) fn carries(&self, element: Element, sources: &[Value<'g>]) -> f32 {
+    pub(crate) fn carries(&self, element: Element, sources: &[Value]) -> f32 {
         sources
             .iter()
             .find(|source| self.element(**source) == element)
             .map_or(1.0, |source| self.declared_quantum(*source))
     }
 
-    pub(crate) fn tracked(&self, values: &[Value<'g>]) -> bool {
+    pub(crate) fn tracked(&self, values: &[Value]) -> bool {
         let state = self.state.borrow();
         values
             .iter()
-            .any(|value| state.values[value.id() as usize].requires_grad)
+            .any(|value| state.values[self.own(*value).id() as usize].requires_grad)
     }
 
-    pub(crate) fn own(&self, value: Value<'g>) -> Value<'g> {
+    pub(crate) fn own(&self, value: Value) -> Value {
         assert_eq!(
             value.graph, self.instance,
             "a tensor of another graph reached this graph",
@@ -1380,7 +1358,7 @@ impl<'g> Graph<'g> {
         value
     }
 
-    pub(crate) fn value_of(&self, id: u32) -> Value<'g> {
+    pub(crate) fn value_of(&self, id: u32) -> Value {
         Value::of(
             self.instance,
             id,
@@ -1388,7 +1366,7 @@ impl<'g> Graph<'g> {
         )
     }
 
-    pub fn name_of(&self, value: Value<'g>) -> Option<Arc<str>> {
+    pub fn name_of(&self, value: Value) -> Option<Arc<str>> {
         let value = self.own(value);
         let state = self.state.borrow();
         let info = &state.values[value.id() as usize];
@@ -1399,7 +1377,7 @@ impl<'g> Graph<'g> {
         self.state.borrow().tasks[index].clone()
     }
 
-    fn hold(&self, declared: Declaration<'_>) -> Value<'g> {
+    fn hold(&self, declared: Declaration<'_>) -> Value {
         assert!(
             !matches!(declared.residency, Residency::Parameter | Residency::State)
                 || !declared.shape.dynamic(),
@@ -1409,7 +1387,7 @@ impl<'g> Graph<'g> {
         self.declare(declared)
     }
 
-    pub(crate) fn declare(&self, declared: Declaration<'_>) -> Value<'g> {
+    pub(crate) fn declare(&self, declared: Declaration<'_>) -> Value {
         let Declaration {
             name,
             shape,
@@ -1450,11 +1428,11 @@ impl<'g> Graph<'g> {
         element: Element,
         residency: Residency,
         tracked: bool,
-    ) -> Value<'g> {
+    ) -> Value {
         self.stored(shape, element, 1.0, residency, tracked)
     }
 
-    fn quantized(&self, shape: Shape, scale: f32) -> Value<'g> {
+    fn quantized(&self, shape: Shape, scale: f32) -> Value {
         assert!(
             scale.is_finite() && scale > 0.0,
             "an int8 tensor of quantum {scale} reconstructs nothing",
@@ -1469,7 +1447,7 @@ impl<'g> Graph<'g> {
         scale: f32,
         residency: Residency,
         tracked: bool,
-    ) -> Value<'g> {
+    ) -> Value {
         assert!(
             element.block().is_none(),
             "a {} tensor is a weight whose storage packs the quantum of every {} numbers, and a task writes the numbers of a tensor it does not weigh; cast the weight into exact storage first",
@@ -1493,7 +1471,7 @@ impl<'g> Graph<'g> {
     }
 }
 
-impl<'g> Default for Graph<'g> {
+impl Default for Graph {
     fn default() -> Self {
         Self::new()
     }

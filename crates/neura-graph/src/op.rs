@@ -8,8 +8,8 @@ use neura_pointwise as op;
 const SEGMENT_CHUNK_ROWS: u32 = 512;
 const SEGMENT_CHUNK_LIMIT: u32 = 64;
 
-impl<'g> Graph<'g> {
-    pub fn matmul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+impl Graph {
+    pub fn matmul(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         let left_shape = self.shape(left);
@@ -54,12 +54,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn grouped_matmul(
-        &self,
-        left: Value<'g>,
-        weights: Value<'g>,
-        segments: Value<'g>,
-    ) -> Value<'g> {
+    pub fn grouped_matmul(&self, left: Value, weights: Value, segments: Value) -> Value {
         let left = self.own(left);
         let weights = self.own(weights);
         let segments = self.own(segments);
@@ -145,7 +140,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn segment_sum(&self, value: Value<'g>, ragged: Ragged<'g>) -> Value<'g> {
+    pub fn segment_sum(&self, value: Value, ragged: Ragged) -> Value {
         let value = self.own(value);
         let offsets = self.own(ragged.offsets);
         let axis = {
@@ -239,11 +234,11 @@ impl<'g> Graph<'g> {
 
     pub fn attention(
         &self,
-        query: Value<'g>,
-        key: Value<'g>,
-        value: Value<'g>,
-        attention: AttentionOptions<'g>,
-    ) -> Value<'g> {
+        query: Value,
+        key: Value,
+        value: Value,
+        attention: AttentionOptions,
+    ) -> Value {
         let query = self.own(query);
         let key = self.own(key);
         let value = self.own(value);
@@ -598,12 +593,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn rope(
-        &self,
-        value: Value<'g>,
-        origin: Option<Value<'g>>,
-        base: Option<Value<'g>>,
-    ) -> Value<'g> {
+    pub fn rope(&self, value: Value, origin: Option<Value>, base: Option<Value>) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         let width = shape.dims()[3];
@@ -689,7 +679,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn conv2d(&self, input: Value<'g>, filter: Value<'g>, window: Window) -> Value<'g> {
+    pub fn conv2d(&self, input: Value, filter: Value, window: Window) -> Value {
         let input = self.own(input);
         let filter = self.own(filter);
         let input_shape = self.shape(input);
@@ -746,11 +736,11 @@ impl<'g> Graph<'g> {
 
     pub fn conv2d_transpose(
         &self,
-        input: Value<'g>,
-        filter: Value<'g>,
+        input: Value,
+        filter: Value,
         window: Window,
         groups: u32,
-    ) -> Value<'g> {
+    ) -> Value {
         let input = self.own(input);
         let filter = self.own(filter);
         let input_shape = self.shape(input);
@@ -811,7 +801,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn pool2d(&self, input: Value<'g>, window: Window, mode: Pool) -> Value<'g> {
+    pub fn pool2d(&self, input: Value, window: Window, mode: Pool) -> Value {
         let input = self.own(input);
         let input_shape = self.shape(input);
         let input_dims = input_shape.dims();
@@ -841,79 +831,79 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn add(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn add(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::ADD, left, right)
     }
 
-    pub fn mul(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn mul(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::MUL, left, right)
     }
 
-    pub fn sub(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn sub(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::SUB, left, right)
     }
 
-    pub fn div(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn div(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::DIV, left, right)
     }
 
-    pub fn max(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn max(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::MAXIMUM, left, right)
     }
 
-    pub fn greater(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn greater(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::GREATER, left, right)
     }
 
-    pub fn greater_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn greater_equal(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::GREATER_EQUAL, left, right)
     }
 
-    pub fn less(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn less(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::LESS, left, right)
     }
 
-    pub fn less_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn less_equal(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::LESS_EQUAL, left, right)
     }
 
-    pub fn equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn equal(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::EQUAL, left, right)
     }
 
-    pub fn not_equal(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn not_equal(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::NOT_EQUAL, left, right)
     }
 
-    pub fn min(&self, left: Value<'g>, right: Value<'g>) -> Value<'g> {
+    pub fn min(&self, left: Value, right: Value) -> Value {
         let left = self.own(left);
         let right = self.own(right);
         self.elementwise(op::MINIMUM, left, right)
     }
 
-    pub fn select(&self, condition: Value<'g>, accept: Value<'g>, reject: Value<'g>) -> Value<'g> {
+    pub fn select(&self, condition: Value, accept: Value, reject: Value) -> Value {
         let condition = self.own(condition);
         let accept = self.own(accept);
         let reject = self.own(reject);
@@ -948,57 +938,57 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn relu(&self, value: Value<'g>) -> Value<'g> {
+    pub fn relu(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::RELU, value)
     }
 
-    pub fn sqrt(&self, value: Value<'g>) -> Value<'g> {
+    pub fn sqrt(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::SQRT, value)
     }
 
-    pub fn recip(&self, value: Value<'g>) -> Value<'g> {
+    pub fn recip(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::RECIP, value)
     }
 
-    pub fn exp(&self, value: Value<'g>) -> Value<'g> {
+    pub fn exp(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::EXP, value)
     }
 
-    pub fn log(&self, value: Value<'g>) -> Value<'g> {
+    pub fn log(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::LOG, value)
     }
 
-    pub fn tanh(&self, value: Value<'g>) -> Value<'g> {
+    pub fn tanh(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::TANH, value)
     }
 
-    pub fn sigmoid(&self, value: Value<'g>) -> Value<'g> {
+    pub fn sigmoid(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::SIGMOID, value)
     }
 
-    pub fn neg(&self, value: Value<'g>) -> Value<'g> {
+    pub fn neg(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::NEG, value)
     }
 
-    pub fn abs(&self, value: Value<'g>) -> Value<'g> {
+    pub fn abs(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::ABS, value)
     }
 
-    pub fn identity(&self, value: Value<'g>) -> Value<'g> {
+    pub fn identity(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::IDENTITY, value)
     }
 
-    pub fn cast(&self, value: Value<'g>, element: Element) -> Value<'g> {
+    pub fn cast(&self, value: Value, element: Element) -> Value {
         let value = self.own(value);
         assert!(
             !element.quantized(),
@@ -1011,61 +1001,61 @@ impl<'g> Graph<'g> {
         self.unary_as(op::IDENTITY, value, element)
     }
 
-    pub fn sin(&self, value: Value<'g>) -> Value<'g> {
+    pub fn sin(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::SIN, value)
     }
 
-    pub fn cos(&self, value: Value<'g>) -> Value<'g> {
+    pub fn cos(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::COS, value)
     }
 
-    pub fn floor(&self, value: Value<'g>) -> Value<'g> {
+    pub fn floor(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::FLOOR, value)
     }
 
-    pub fn gelu(&self, value: Value<'g>) -> Value<'g> {
+    pub fn gelu(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::GELU, value)
     }
 
-    pub fn silu(&self, value: Value<'g>) -> Value<'g> {
+    pub fn silu(&self, value: Value) -> Value {
         let value = self.own(value);
         self.unary(op::SILU, value)
     }
 
-    pub fn pow(&self, base: Value<'g>, exponent: Value<'g>) -> Value<'g> {
+    pub fn pow(&self, base: Value, exponent: Value) -> Value {
         let base = self.own(base);
         let exponent = self.own(exponent);
         self.elementwise(op::POW, base, exponent)
     }
 
-    pub fn softmax(&self, value: Value<'g>) -> Value<'g> {
+    pub fn softmax(&self, value: Value) -> Value {
         let value = self.own(value);
         self.rowwise(Kind::Softmax, value)
     }
 
-    pub fn log_softmax(&self, value: Value<'g>) -> Value<'g> {
+    pub fn log_softmax(&self, value: Value) -> Value {
         let value = self.own(value);
         self.rowwise(Kind::LogSoftmax, value)
     }
 
-    pub fn argmax(&self, value: Value<'g>) -> Value<'g> {
+    pub fn argmax(&self, value: Value) -> Value {
         let value = self.own(value);
         self.choice(Kind::Argmax, value, [NO_VALUE, NO_VALUE, NO_VALUE])
     }
 
-    pub fn uniform(&self, shape: Shape, seed: Value<'g>) -> Value<'g> {
+    pub fn uniform(&self, shape: Shape, seed: Value) -> Value {
         self.draw(Distribution::Uniform, shape, seed)
     }
 
-    pub fn normal(&self, shape: Shape, seed: Value<'g>) -> Value<'g> {
+    pub fn normal(&self, shape: Shape, seed: Value) -> Value {
         self.draw(Distribution::Normal, shape, seed)
     }
 
-    fn draw(&self, distribution: Distribution, shape: Shape, seed: Value<'g>) -> Value<'g> {
+    fn draw(&self, distribution: Distribution, shape: Shape, seed: Value) -> Value {
         let seed = self.own(seed);
         assert!(
             self.shape(seed).is_scalar(),
@@ -1084,7 +1074,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn dropout(&self, value: Value<'g>, keep: Value<'g>, seed: Value<'g>) -> Value<'g> {
+    pub fn dropout(&self, value: Value, keep: Value, seed: Value) -> Value {
         let value = self.own(value);
         let keep = self.own(keep);
         assert!(
@@ -1099,7 +1089,7 @@ impl<'g> Graph<'g> {
         self.mul(masked, self.recip(keep))
     }
 
-    pub fn categorical(&self, logits: Value<'g>, seed: Value<'g>) -> Value<'g> {
+    pub fn categorical(&self, logits: Value, seed: Value) -> Value {
         let logits = self.own(logits);
         let seed = self.own(seed);
         assert!(
@@ -1111,7 +1101,7 @@ impl<'g> Graph<'g> {
         self.choice(Kind::Categorical, logits, [seed.id(), NO_VALUE, NO_VALUE])
     }
 
-    pub fn top_k(&self, value: Value<'g>, keep: u32) -> (Value<'g>, Value<'g>) {
+    pub fn top_k(&self, value: Value, keep: u32) -> (Value, Value) {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1149,13 +1139,7 @@ impl<'g> Graph<'g> {
         (values, indices)
     }
 
-    pub fn sample(
-        &self,
-        logits: Value<'g>,
-        seed: Value<'g>,
-        keep: Value<'g>,
-        cumulative: Value<'g>,
-    ) -> Value<'g> {
+    pub fn sample(&self, logits: Value, seed: Value, keep: Value, cumulative: Value) -> Value {
         let logits = self.own(logits);
         let mut scalars = [NO_VALUE; 3];
         for (slot, (value, name)) in [
@@ -1178,7 +1162,7 @@ impl<'g> Graph<'g> {
         self.choice(Kind::Sample, logits, scalars)
     }
 
-    fn choice(&self, kind: Kind, source: Value<'g>, scalars: [u32; 3]) -> Value<'g> {
+    fn choice(&self, kind: Kind, source: Value, scalars: [u32; 3]) -> Value {
         let source = self.own(source);
         assert!(
             self.contiguous(source),
@@ -1209,7 +1193,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub(crate) fn index_list(&self, indices: Value<'g>) {
+    pub(crate) fn index_list(&self, indices: Value) {
         let indices = self.own(indices);
         let shape = self.shape(indices);
         assert!(
@@ -1225,7 +1209,7 @@ impl<'g> Graph<'g> {
         );
     }
 
-    pub fn one_hot(&self, indices: Value<'g>, classes: u32) -> Value<'g> {
+    pub fn one_hot(&self, indices: Value, classes: u32) -> Value {
         let indices = self.own(indices);
         self.index_list(indices);
         assert!(
@@ -1254,7 +1238,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn gather(&self, table: Value<'g>, indices: Value<'g>) -> Value<'g> {
+    pub fn gather(&self, table: Value, indices: Value) -> Value {
         let table = self.own(table);
         let indices = self.own(indices);
         self.index_list(indices);
@@ -1296,7 +1280,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn concat(&self, values: &[Value<'g>], axis: u32) -> Value<'g> {
+    pub fn concat(&self, values: &[Value], axis: u32) -> Value {
         assert!(
             !values.is_empty(),
             "a concatenation joins at least one tensor",
@@ -1360,7 +1344,7 @@ impl<'g> Graph<'g> {
         }
     }
 
-    pub fn slice(&self, value: Value<'g>, axis: u32, start: u32, length: u32) -> Value<'g> {
+    pub fn slice(&self, value: Value, axis: u32, start: u32, length: u32) -> Value {
         let value = self.own(value);
         let shape = self.shape(value);
         assert!(
@@ -1391,15 +1375,15 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn scatter_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+    pub fn scatter_into(&self, target: Value, indices: Value, updates: Value) {
         self.rows_into(Kind::Scatter, target, indices, updates);
     }
 
-    pub fn write_into(&self, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+    pub fn write_into(&self, target: Value, indices: Value, updates: Value) {
         self.rows_into(Kind::ScatterWrite, target, indices, updates);
     }
 
-    fn rows_into(&self, kind: Kind, target: Value<'g>, indices: Value<'g>, updates: Value<'g>) {
+    fn rows_into(&self, kind: Kind, target: Value, indices: Value, updates: Value) {
         let target = self.own(target);
         let indices = self.own(indices);
         let updates = self.own(updates);
@@ -1422,7 +1406,7 @@ impl<'g> Graph<'g> {
         self.wrote_in_place(target);
     }
 
-    pub fn sum(&self, value: Value<'g>) -> Value<'g> {
+    pub fn sum(&self, value: Value) -> Value {
         let value = self.own(value);
         assert!(
             self.contiguous(value),
@@ -1444,7 +1428,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn permute(&self, value: Value<'g>, order: [u32; 4]) -> Value<'g> {
+    pub fn permute(&self, value: Value, order: [u32; 4]) -> Value {
         let value = self.own(value);
         let mut walked = 0u32;
         for axis in order {
@@ -1487,7 +1471,7 @@ impl<'g> Graph<'g> {
         ))
     }
 
-    pub fn reshape(&self, value: Value<'g>, shape: Shape) -> Value<'g> {
+    pub fn reshape(&self, value: Value, shape: Shape) -> Value {
         let value = self.own(value);
         assert!(
             self.contiguous(value),
@@ -1518,19 +1502,19 @@ impl<'g> Graph<'g> {
         ))
     }
 
-    pub fn add_into(&self, target: Value<'g>, addend: Value<'g>) {
+    pub fn add_into(&self, target: Value, addend: Value) {
         let target = self.own(target);
         let addend = self.own(addend);
         self.update_in_place(op::ADD, target, addend);
     }
 
-    pub fn mul_into(&self, target: Value<'g>, factor: Value<'g>) {
+    pub fn mul_into(&self, target: Value, factor: Value) {
         let target = self.own(target);
         let factor = self.own(factor);
         self.update_in_place(op::MUL, target, factor);
     }
 
-    pub fn copy_into(&self, target: Value<'g>, source: Value<'g>) {
+    pub fn copy_into(&self, target: Value, source: Value) {
         let target = self.own(target);
         let source = self.own(source);
         self.assert_in_place(target, source);

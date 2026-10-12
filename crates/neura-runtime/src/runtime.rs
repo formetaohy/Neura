@@ -355,7 +355,7 @@ impl Runtime {
         }
     }
 
-    pub fn rebind(&self, weights: &Weights, graph: &Graph<'_>) {
+    pub fn rebind(&self, weights: &Weights, graph: &Graph) {
         self.context.assert_alive();
         let layout = Layout::of(graph, self.alignment);
         assert_eq!(
@@ -598,7 +598,7 @@ impl Runtime {
         program.materialize(self.context.queue(), &lengths);
     }
 
-    pub fn declare_rows(&self, program: &Program, table: Value<'_>, rows: &[u32]) {
+    pub fn declare_rows(&self, program: &Program, table: Value, rows: &[u32]) {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();
@@ -677,7 +677,7 @@ impl Runtime {
         }
     }
 
-    pub fn write(&self, program: &Program, value: Value<'_>, data: &[f32]) {
+    pub fn write(&self, program: &Program, value: Value, data: &[f32]) {
         self.assert_owns(program);
         program.assert_current();
         let span = program.span(value);
@@ -721,16 +721,16 @@ impl Runtime {
         }
     }
 
-    pub fn read(&self, program: &Program, value: Value<'_>) -> Vec<f32> {
+    pub fn read(&self, program: &Program, value: Value) -> Vec<f32> {
         let mut values = self.pull(program, &[value]).collect();
         values.pop().expect("one tensor was read")
     }
 
-    pub fn read_many(&self, program: &Program, values: &[Value<'_>]) -> Vec<Vec<f32>> {
+    pub fn read_many(&self, program: &Program, values: &[Value]) -> Vec<Vec<f32>> {
         self.pull(program, values).collect()
     }
 
-    pub fn pull(&self, program: &Program, values: &[Value<'_>]) -> Readout {
+    pub fn pull(&self, program: &Program, values: &[Value]) -> Readout {
         self.assert_owns(program);
         program.assert_current();
         self.context.assert_alive();

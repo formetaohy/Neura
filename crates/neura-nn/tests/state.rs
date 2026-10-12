@@ -40,15 +40,15 @@ const HIDDEN: u32 = 8;
 const OUTPUT: u32 = 2;
 const STEPS: u32 = 60;
 
-struct Model<'g> {
-    observations: Value<'g>,
-    targets: Value<'g>,
-    prediction: Value<'g>,
-    loss: Value<'g>,
-    parameters: Vec<Value<'g>>,
+struct Model {
+    observations: Value,
+    targets: Value,
+    prediction: Value,
+    loss: Value,
+    parameters: Vec<Value>,
 }
 
-fn network<'g>(graph: &Graph<'g>, hidden: u32) -> Model<'g> {
+fn network(graph: &Graph, hidden: u32) -> Model {
     let observations = graph.input(Shape::matrix(SAMPLES, WIDTH), Element::Single);
     let targets = graph.input(Shape::matrix(SAMPLES, OUTPUT), Element::Single);
     let spread = Init::Uniform {
@@ -75,7 +75,7 @@ fn network<'g>(graph: &Graph<'g>, hidden: u32) -> Model<'g> {
     }
 }
 
-fn descend<'g>(graph: &Graph<'g>, model: &Model<'g>) {
+fn descend(graph: &Graph, model: &Model) {
     let gradients = graph.backward(model.loss);
     let mut optimizer = AdamW::new(graph, "optimizer", 0.02, 0.9, 0.999, 1e-8, 0.0);
     optimizer.track_all(graph, &model.parameters);

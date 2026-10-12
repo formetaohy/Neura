@@ -1,7 +1,7 @@
 use neura_abi::Element;
 use neura_graph::{Gradients, Graph, Init, Shape, Value};
 
-fn knob<'g>(graph: &Graph<'g>, name: &str, knob: &str, value: f32) -> Value<'g> {
+fn knob(graph: &Graph, name: &str, knob: &str, value: f32) -> Value {
     graph.named_state(
         &format!("{name}.{knob}"),
         Shape::scalar(),
@@ -10,28 +10,28 @@ fn knob<'g>(graph: &Graph<'g>, name: &str, knob: &str, value: f32) -> Value<'g> 
     )
 }
 
-pub struct Sgd<'g> {
-    rate: Value<'g>,
-    minus_one: Value<'g>,
-    weight_decay: Option<Value<'g>>,
-    tracked: Tracked<'g>,
+pub struct Sgd {
+    rate: Value,
+    minus_one: Value,
+    weight_decay: Option<Value>,
+    tracked: Tracked,
 }
 
-enum Tracked<'g> {
-    Plain(Vec<Value<'g>>),
+enum Tracked {
+    Plain(Vec<Value>),
     Momentum {
-        momentum_decay: Value<'g>,
-        velocities: Vec<Velocity<'g>>,
+        momentum_decay: Value,
+        velocities: Vec<Velocity>,
     },
 }
 
-struct Velocity<'g> {
-    parameter: Value<'g>,
-    velocity: Value<'g>,
+struct Velocity {
+    parameter: Value,
+    velocity: Value,
 }
 
-impl<'g> Sgd<'g> {
-    pub fn new(graph: &Graph<'g>, name: &str, rate: f32, weight_decay: f32) -> Self {
+impl Sgd {
+    pub fn new(graph: &Graph, name: &str, rate: f32, weight_decay: f32) -> Self {
         assert!(rate > 0.0, "a descent rate of {rate} moves nothing");
         assert!(
             weight_decay >= 0.0 && weight_decay.is_finite(),
@@ -47,7 +47,7 @@ impl<'g> Sgd<'g> {
     }
 
     pub fn momentum(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         rate: f32,
         momentum_decay: f32,
@@ -65,22 +65,22 @@ impl<'g> Sgd<'g> {
         descent
     }
 
-    pub fn rate(&self) -> Value<'g> {
+    pub fn rate(&self) -> Value {
         self.rate
     }
 
-    pub fn weight_decay(&self) -> Option<Value<'g>> {
+    pub fn weight_decay(&self) -> Option<Value> {
         self.weight_decay
     }
 
-    pub fn momentum_decay(&self) -> Option<Value<'g>> {
+    pub fn momentum_decay(&self) -> Option<Value> {
         match &self.tracked {
             Tracked::Plain(_) => None,
             Tracked::Momentum { momentum_decay, .. } => Some(*momentum_decay),
         }
     }
 
-    pub fn track(&mut self, graph: &Graph<'g>, parameter: Value<'g>) {
+    pub fn track(&mut self, graph: &Graph, parameter: Value) {
         assert!(
             graph.trains(parameter),
             "a descent follows a parameter a gradient reaches, and value {} learns nothing",
@@ -115,13 +115,13 @@ impl<'g> Sgd<'g> {
         }
     }
 
-    pub fn track_all(&mut self, graph: &Graph<'g>, parameters: &[Value<'g>]) {
+    pub fn track_all(&mut self, graph: &Graph, parameters: &[Value]) {
         for parameter in parameters {
             self.track(graph, *parameter);
         }
     }
 
-    pub fn step(&self, graph: &Graph<'g>, gradients: &Gradients<'g>) {
+    pub fn step(&self, graph: &Graph, gradients: &Gradients) {
         assert!(
             match &self.tracked {
                 Tracked::Plain(parameters) => !parameters.is_empty(),
@@ -156,51 +156,40 @@ impl<'g> Sgd<'g> {
         }
     }
 
-    fn regularized(
-        &self,
-        graph: &Graph<'g>,
-        parameter: Value<'g>,
-        gradient: Value<'g>,
-    ) -> Value<'g> {
+    fn regularized(&self, graph: &Graph, parameter: Value, gradient: Value) -> Value {
         match self.weight_decay {
             Some(decay) => graph.add(gradient, graph.mul(parameter, decay)),
             None => gradient,
         }
     }
 
-    fn descend(
-        &self,
-        graph: &Graph<'g>,
-        parameter: Value<'g>,
-        gradient: Value<'g>,
-        descent: Value<'g>,
-    ) {
+    fn descend(&self, graph: &Graph, parameter: Value, gradient: Value, descent: Value) {
         graph.add_into(parameter, graph.mul(gradient, descent));
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Moments<'g> {
-    pub parameter: Value<'g>,
-    pub mean: Value<'g>,
-    pub variance: Value<'g>,
+pub struct Moments {
+    pub parameter: Value,
+    pub mean: Value,
+    pub variance: Value,
 }
 
-pub struct AdamW<'g> {
-    rate: Value<'g>,
-    mean_decay: Value<'g>,
-    variance_decay: Value<'g>,
-    floor: Value<'g>,
-    weight_decay: Option<Value<'g>>,
-    clock: Value<'g>,
-    one: Value<'g>,
-    minus_one: Value<'g>,
-    moments: Vec<Moments<'g>>,
+pub struct AdamW {
+    rate: Value,
+    mean_decay: Value,
+    variance_decay: Value,
+    floor: Value,
+    weight_decay: Option<Value>,
+    clock: Value,
+    one: Value,
+    minus_one: Value,
+    moments: Vec<Moments>,
 }
 
-impl<'g> AdamW<'g> {
+impl AdamW {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         rate: f32,
         mean_decay: f32,
@@ -241,27 +230,27 @@ impl<'g> AdamW<'g> {
         }
     }
 
-    pub fn rate(&self) -> Value<'g> {
+    pub fn rate(&self) -> Value {
         self.rate
     }
 
-    pub fn mean_decay(&self) -> Value<'g> {
+    pub fn mean_decay(&self) -> Value {
         self.mean_decay
     }
 
-    pub fn variance_decay(&self) -> Value<'g> {
+    pub fn variance_decay(&self) -> Value {
         self.variance_decay
     }
 
-    pub fn floor(&self) -> Value<'g> {
+    pub fn floor(&self) -> Value {
         self.floor
     }
 
-    pub fn weight_decay(&self) -> Option<Value<'g>> {
+    pub fn weight_decay(&self) -> Option<Value> {
         self.weight_decay
     }
 
-    pub fn track(&mut self, graph: &Graph<'g>, parameter: Value<'g>) -> Moments<'g> {
+    pub fn track(&mut self, graph: &Graph, parameter: Value) -> Moments {
         assert!(
             graph.trains(parameter),
             "a descent follows a parameter a gradient reaches, and value {} learns nothing",
@@ -293,18 +282,18 @@ impl<'g> AdamW<'g> {
         moments
     }
 
-    pub fn track_all(&mut self, graph: &Graph<'g>, parameters: &[Value<'g>]) -> Vec<Moments<'g>> {
+    pub fn track_all(&mut self, graph: &Graph, parameters: &[Value]) -> Vec<Moments> {
         parameters
             .iter()
             .map(|parameter| self.track(graph, *parameter))
             .collect()
     }
 
-    pub fn moments(&self) -> &[Moments<'g>] {
+    pub fn moments(&self) -> &[Moments] {
         &self.moments
     }
 
-    pub fn step(&self, graph: &Graph<'g>, gradients: &Gradients<'g>) {
+    pub fn step(&self, graph: &Graph, gradients: &Gradients) {
         assert!(
             !self.moments.is_empty(),
             "a step without tracked parameters leaves the model as it was",
@@ -343,7 +332,7 @@ impl<'g> AdamW<'g> {
     }
 }
 
-fn state_name<'g>(graph: &Graph<'g>, parameter: Value<'g>, suffix: &str) -> String {
+fn state_name(graph: &Graph, parameter: Value, suffix: &str) -> String {
     let name = graph.name_of(parameter).unwrap_or_else(|| {
         panic!(
             "value {} carries no name, and a descent names the state it keeps of every parameter it follows; declare the parameter with a named parameter",

@@ -7,9 +7,9 @@ mod support;
 
 use support::{assert_close, open};
 
-struct Model<'g> {
-    observations: Value<'g>,
-    prediction: Value<'g>,
+struct Model {
+    observations: Value,
+    prediction: Value,
 }
 
 fn spread() -> Init {
@@ -19,7 +19,7 @@ fn spread() -> Init {
     }
 }
 
-fn network<'g>(graph: &Graph<'g>, hidden: u32, element: Element) -> Model<'g> {
+fn network(graph: &Graph, hidden: u32, element: Element) -> Model {
     let observations = graph.input(Shape::matrix(8, 4), Element::Single);
     let first = graph.named_parameter("first", Shape::matrix(4, hidden), spread(), element);
     let second = graph.named_parameter("second", Shape::matrix(hidden, 2), spread(), element);
@@ -149,7 +149,7 @@ fn a_store_loads_only_the_tensors_its_graph_names() {
     );
 }
 
-fn named_network<'g>(graph: &Graph<'g>, hidden: u32, element: Element, first: &str) -> Model<'g> {
+fn named_network(graph: &Graph, hidden: u32, element: Element, first: &str) -> Model {
     let observations = graph.input(Shape::matrix(8, 4), Element::Single);
     let head = graph.named_parameter(first, Shape::matrix(4, hidden), spread(), element);
     let tail = graph.named_parameter("second", Shape::matrix(hidden, 2), spread(), element);

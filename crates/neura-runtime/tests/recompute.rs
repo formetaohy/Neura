@@ -27,7 +27,7 @@ fn data(elements: u32, scale: f32) -> Vec<f32> {
         .collect()
 }
 
-fn layer<'g>(graph: &Graph<'g>, value: Value<'g>, parameters: &mut Vec<Value<'g>>) -> Value<'g> {
+fn layer(graph: &Graph, value: Value, parameters: &mut Vec<Value>) -> Value {
     let weight = graph.parameter(
         Shape::matrix(WIDTH, WIDTH),
         Init::Uniform {
@@ -42,7 +42,7 @@ fn layer<'g>(graph: &Graph<'g>, value: Value<'g>, parameters: &mut Vec<Value<'g>
     graph.relu(graph.add(graph.matmul(value, weight), bias))
 }
 
-fn stack<'g>(graph: &Graph<'g>, recomputed: bool) -> (Value<'g>, Value<'g>, Vec<Value<'g>>) {
+fn stack(graph: &Graph, recomputed: bool) -> (Value, Value, Vec<Value>) {
     let input = graph.input(Shape::matrix(SAMPLES, WIDTH), Element::Single);
     let mut parameters = Vec::new();
     let mut value = input;
@@ -68,10 +68,7 @@ fn stack<'g>(graph: &Graph<'g>, recomputed: bool) -> (Value<'g>, Value<'g>, Vec<
     (input, value, parameters)
 }
 
-fn trained<'g>(
-    graph: &Graph<'g>,
-    recomputed: bool,
-) -> (Value<'g>, Value<'g>, Value<'g>, Vec<Value<'g>>) {
+fn trained(graph: &Graph, recomputed: bool) -> (Value, Value, Value, Vec<Value>) {
     let (input, out, parameters) = stack(graph, recomputed);
     let loss = graph.sum(out);
     let gradients = graph.backward(loss);
@@ -183,7 +180,7 @@ fn a_recomputed_block_reaches_the_readers_of_its_view() {
     );
 }
 
-fn viewed<'g>(graph: &Graph<'g>, recomputed: bool) -> (Value<'g>, Value<'g>, Value<'g>) {
+fn viewed(graph: &Graph, recomputed: bool) -> (Value, Value, Value) {
     let (input, out, parameters) = stack(graph, recomputed);
     let flat = graph.reshape(out, Shape::vector(SAMPLES * WIDTH));
     let loss = graph.sum(graph.mul(flat, flat));

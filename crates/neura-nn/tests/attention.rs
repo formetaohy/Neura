@@ -29,11 +29,11 @@ fn assert_slope(element: usize, analytic: f32, numeric: f32, elements: usize) {
 
 struct Block {
     runtime: Runtime,
-    graph: Graph<'static>,
-    model: MultiHeadAttention<'static>,
-    input: Value<'static>,
-    target: Value<'static>,
-    loss: Value<'static>,
+    graph: Graph,
+    model: MultiHeadAttention,
+    input: Value,
+    target: Value,
+    loss: Value,
     input_elements: u32,
     target_elements: u32,
 }

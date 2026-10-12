@@ -5,7 +5,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn residency(graph: &Graph<'_>, id: u32) -> Residency {
+fn residency(graph: &Graph, id: u32) -> Residency {
     graph.snapshot().values()[id as usize].residency
 }
 

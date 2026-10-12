@@ -3,10 +3,10 @@ use neura_runtime::{Program, Runtime};
 use neura_tokenizer::{Text, Tokenizer};
 use std::time::Instant;
 
-pub struct Generator<'g, 't> {
+pub struct Generator<'t> {
     runtime: Runtime,
     program: Program,
-    decoder: Decoder<'g>,
+    decoder: Decoder,
     tokenizer: &'t Tokenizer,
     text: Text,
     position: u32,
@@ -33,11 +33,11 @@ impl Report {
     }
 }
 
-impl<'g, 't> Generator<'g, 't> {
+impl<'t> Generator<'t> {
     pub fn new(
         runtime: Runtime,
         program: Program,
-        decoder: Decoder<'g>,
+        decoder: Decoder,
         tokenizer: &'t Tokenizer,
         context: u32,
     ) -> Self {

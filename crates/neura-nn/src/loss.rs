@@ -1,19 +1,19 @@
 use neura_graph::{Graph, Shape, Value};
 
-fn mean_over<'g>(graph: &Graph<'g>, value: Value<'g>, axes: &[u32]) -> Value<'g> {
+fn mean_over(graph: &Graph, value: Value, axes: &[u32]) -> Value {
     axes.iter()
         .fold(value, |folded, axis| graph.mean_axis(folded, *axis))
 }
 
-fn mean<'g>(graph: &Graph<'g>, value: Value<'g>) -> Value<'g> {
+fn mean(graph: &Graph, value: Value) -> Value {
     mean_over(graph, value, &[3, 2, 1, 0])
 }
 
-fn mean_rows<'g>(graph: &Graph<'g>, value: Value<'g>) -> Value<'g> {
+fn mean_rows(graph: &Graph, value: Value) -> Value {
     mean_over(graph, value, &[2, 1, 0])
 }
 
-pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>) -> Value<'g> {
+pub fn mse_loss(graph: &Graph, prediction: Value, target: Value) -> Value {
     let shape = graph.shape(prediction);
     assert_eq!(
         shape,
@@ -27,7 +27,7 @@ pub fn mse_loss<'g>(graph: &Graph<'g>, prediction: Value<'g>, target: Value<'g>)
     mean(graph, graph.mul(difference, difference))
 }
 
-pub fn cross_entropy<'g>(graph: &Graph<'g>, logits: Value<'g>, target: Value<'g>) -> Value<'g> {
+pub fn cross_entropy(graph: &Graph, logits: Value, target: Value) -> Value {
     let shape = graph.shape(logits);
     assert_eq!(
         shape,
@@ -39,12 +39,7 @@ pub fn cross_entropy<'g>(graph: &Graph<'g>, logits: Value<'g>, target: Value<'g>
     graph.neg(mean_rows(graph, graph.sum_rows(weighted)))
 }
 
-pub fn policy_loss<'g>(
-    graph: &Graph<'g>,
-    logits: Value<'g>,
-    action: Value<'g>,
-    advantage: Value<'g>,
-) -> Value<'g> {
+pub fn policy_loss(graph: &Graph, logits: Value, action: Value, advantage: Value) -> Value {
     let shape = graph.shape(logits);
     let classes = shape.dims()[3];
     let rows = shape.rows();

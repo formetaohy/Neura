@@ -5,7 +5,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn windowed(reach: u32, causal: bool) -> Graph<'static> {
+fn windowed(reach: u32, causal: bool) -> Graph {
     let graph = Graph::new();
     let tensor = || graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
     let (query, key, value) = (tensor(), tensor(), tensor());
@@ -74,7 +74,7 @@ fn an_attention_carries_the_scale_it_weighs_with() {
     let weighed = graph.attention(query, key, value, options(Some(scale)));
     let standard = graph.attention(query, key, value, options(None));
     let snapshot = graph.snapshot();
-    let task = |out: neura_graph::Value<'static>| {
+    let task = |out: neura_graph::Value| {
         snapshot
             .tasks()
             .iter()
@@ -109,11 +109,7 @@ fn an_attention_refuses_a_scale_of_other_than_one_number() {
     }));
 }
 
-fn biased() -> (
-    Graph<'static>,
-    neura_graph::Value<'static>,
-    neura_graph::Value<'static>,
-) {
+fn biased() -> (Graph, neura_graph::Value, neura_graph::Value) {
     let graph = Graph::new();
     let tensor = || graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
     let (query, key, value) = (tensor(), tensor(), tensor());

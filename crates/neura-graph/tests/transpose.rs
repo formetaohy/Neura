@@ -8,7 +8,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 
 #[test]
 fn a_transposed_convolution_writes_the_channels_and_size_its_filter_undoes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::of([2, 4, 5, 5]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [2, 2], [1, 1], [1, 1]);
@@ -29,7 +29,7 @@ fn a_transposed_convolution_writes_the_channels_and_size_its_filter_undoes() {
 
 #[test]
 fn a_free_batch_of_a_transposed_convolution_walks_the_extent_of_its_input() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let batch = graph.free(2);
     let input = graph.input(
         Shape::of([2, 4, 5, 5]).freed(&[(0, batch)]),
@@ -48,7 +48,7 @@ fn a_free_batch_of_a_transposed_convolution_walks_the_extent_of_its_input() {
 
 #[test]
 fn a_transposed_convolution_refuses_the_shapes_it_cannot_scatter() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::of([1, 4, 5, 5]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     assert!(

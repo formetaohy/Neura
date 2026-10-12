@@ -22,12 +22,12 @@ fn bounded(heap_bytes: u64) -> Runtime {
     })
 }
 
-struct Model<'g> {
-    input: Value<'g>,
-    output: Value<'g>,
+struct Model {
+    input: Value,
+    output: Value,
 }
 
-fn model<'g>(graph: &Graph<'g>, rows: u32, bound: Option<u32>) -> Model<'g> {
+fn model(graph: &Graph, rows: u32, bound: Option<u32>) -> Model {
     let input = match bound {
         Some(bound) => graph.input(
             Shape::matrix(rows, WIDTH).freed(&[(2, graph.free(bound))]),
@@ -71,7 +71,7 @@ fn fixed(runtime: &Runtime, rows: u32, data: &[f32]) -> Vec<f32> {
     runtime.read(&program, model.output)
 }
 
-fn step(runtime: &Runtime, program: &Program, model: &Model<'_>, rows: u32) -> Vec<f32> {
+fn step(runtime: &Runtime, program: &Program, model: &Model, rows: u32) -> Vec<f32> {
     let data = observations(rows);
     runtime.bind(program, &[rows]);
     runtime.write(program, model.input, &data);
@@ -150,12 +150,12 @@ fn a_binding_the_heap_cannot_hold_refuses() {
     );
 }
 
-struct Training<'g> {
-    inputs: [Value<'g>; 2],
-    loss: Value<'g>,
+struct Training {
+    inputs: [Value; 2],
+    loss: Value,
 }
 
-fn training<'g>(graph: &Graph<'g>, rows: u32, bound: Option<u32>) -> Training<'g> {
+fn training(graph: &Graph, rows: u32, bound: Option<u32>) -> Training {
     let (observations, targets) = match bound {
         Some(bound) => {
             let batch = graph.free(bound);

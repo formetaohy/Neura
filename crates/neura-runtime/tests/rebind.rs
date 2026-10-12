@@ -6,15 +6,15 @@ mod support;
 
 use support::{assert_close, open};
 
-struct Model<'g> {
-    observations: Value<'g>,
-    targets: Value<'g>,
-    prediction: Value<'g>,
-    loss: Value<'g>,
-    parameters: [Value<'g>; 2],
+struct Model {
+    observations: Value,
+    targets: Value,
+    prediction: Value,
+    loss: Value,
+    parameters: [Value; 2],
 }
 
-fn trained<'g>(graph: &Graph<'g>, samples: u32, hidden: u32) -> Model<'g> {
+fn trained(graph: &Graph, samples: u32, hidden: u32) -> Model {
     let observations = graph.input(Shape::matrix(samples, 4), Element::Single);
     let targets = graph.input(Shape::matrix(samples, 2), Element::Single);
     let first = graph.parameter(

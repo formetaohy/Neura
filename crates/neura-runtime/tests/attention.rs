@@ -32,28 +32,14 @@ fn data(count: u32, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-fn graph_of(
-    shapes: Shapes,
-) -> (
-    Graph<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-) {
+fn graph_of(shapes: Shapes) -> (Graph, Value, Value, Value, Value) {
     graph_of_beside(shapes, None)
 }
 
 fn graph_of_beside(
     shapes: Shapes,
     beside_the_output: Option<f32>,
-) -> (
-    Graph<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-    Value<'static>,
-) {
+) -> (Graph, Value, Value, Value, Value) {
     let graph = Graph::new();
     let tensor = |heads: u32, tokens: u32| {
         graph.parameter(
@@ -799,11 +785,7 @@ fn every_profile_the_device_offers_runs_the_same_attention() {
     }
 }
 
-fn block<'g>(
-    graph: &Graph<'g>,
-    shapes: Shapes,
-    recomputed: bool,
-) -> (Value<'g>, [Value<'g>; 3], [Value<'g>; 3]) {
+fn block(graph: &Graph, shapes: Shapes, recomputed: bool) -> (Value, [Value; 3], [Value; 3]) {
     let tensor = |heads: u32, tokens: u32| {
         graph.parameter(
             Shape::of([heads, shapes.batch, tokens, shapes.width]),
@@ -817,7 +799,7 @@ fn block<'g>(
     let queries = tensor(shapes.heads, shapes.queries);
     let keys = tensor(shapes.key_heads, shapes.keys);
     let values = tensor(shapes.key_heads, shapes.keys);
-    let attend = |graph: &Graph<'g>| {
+    let attend = |graph: &Graph| {
         graph.attention(
             queries,
             keys,
@@ -929,10 +911,7 @@ fn a_window_wider_than_the_keys_weighs_them_all() {
 const KNOB_WIDTH: u32 = 4;
 const KNOB_ROWS: u32 = 3;
 
-fn knob_graph<'g>(
-    graph: &Graph<'g>,
-    scale: Option<Value<'g>>,
-) -> (Value<'g>, Value<'g>, Value<'g>, Value<'g>) {
+fn knob_graph(graph: &Graph, scale: Option<Value>) -> (Value, Value, Value, Value) {
     let tensor = || {
         graph.parameter(
             Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
@@ -985,7 +964,7 @@ fn knob_inputs() -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 #[test]
 fn an_attention_scale_the_host_writes_steers_every_score_it_weighs() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let knob = graph.named_knob("attention.scale", 1.0);
     let (queries, keys, values, out) = knob_graph(&graph, Some(knob));
     let weights = runtime.weights(&graph);
@@ -1016,7 +995,7 @@ fn an_attention_scale_the_host_writes_steers_every_score_it_weighs() {
 #[test]
 fn an_attention_without_a_scale_weighs_its_scores_by_the_width_it_spans() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let (queries, keys, values, out) = knob_graph(&graph, None);
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
@@ -1038,7 +1017,7 @@ fn an_attention_without_a_scale_weighs_its_scores_by_the_width_it_spans() {
 #[test]
 fn the_device_refuses_an_attention_scale_it_cannot_weigh_with() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let knob = graph.named_knob("attention.scale", 1.0);
     let (_, _, _, out) = knob_graph(&graph, Some(knob));
     let weights = runtime.weights(&graph);
@@ -1064,7 +1043,7 @@ fn the_device_refuses_an_attention_scale_it_cannot_weigh_with() {
 #[test]
 fn a_device_task_steers_the_scale_of_an_attention_it_feeds() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let knob = graph.named_knob("attention.scale", 1.0);
     graph.mul_into(knob, graph.fill(Shape::scalar(), 2.0));
     let (queries, keys, values, out) = knob_graph(&graph, Some(knob));
@@ -1350,7 +1329,7 @@ fn dense_of_head_plane(planes: &[f32]) -> Vec<f32> {
 fn an_attention_reads_the_head_planes_a_dense_token_row_carries() {
     let runtime = open();
     let graph = Graph::new();
-    let tensor = |graph: &Graph<'static>| {
+    let tensor = |graph: &Graph| {
         let dense = graph.parameter(
             Shape::of([1, HEAD_TOKENS, HEAD_DEPTH]),
             Init::Zero,
@@ -1416,16 +1395,16 @@ fn an_attention_reads_the_head_planes_a_dense_token_row_carries() {
     assert_close(&produced[2], &dense_of_head_plane(&expected_value), 1e-5);
 }
 
-struct Biased<'g> {
-    graph: Graph<'g>,
-    queries: Value<'g>,
-    keys: Value<'g>,
-    values: Value<'g>,
-    bias: Value<'g>,
-    out: Value<'g>,
+struct Biased {
+    graph: Graph,
+    queries: Value,
+    keys: Value,
+    values: Value,
+    bias: Value,
+    out: Value,
 }
 
-fn biased(shapes: Shapes, dims: [u32; 4]) -> Biased<'static> {
+fn biased(shapes: Shapes, dims: [u32; 4]) -> Biased {
     let graph = Graph::new();
     let tensor = |heads: u32, tokens: u32| {
         graph.parameter(
@@ -1589,7 +1568,7 @@ fn a_bias_that_learns_or_walks_a_binding_is_refused() {
     let queries = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
     let keys = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
     let values = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
-    fn options<'g>(graph: &Graph<'g>, bias: Option<Value<'g>>) -> AttentionOptions<'g> {
+    fn options(graph: &Graph, bias: Option<Value>) -> AttentionOptions {
         AttentionOptions {
             bias,
             scale: Some(graph.knob(0.5)),

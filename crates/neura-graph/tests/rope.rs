@@ -5,7 +5,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn packed<'g>(graph: &Graph<'g>, extent: neura_graph::Free, bound: u32, planes: u32) -> Value<'g> {
+fn packed(graph: &Graph, extent: neura_graph::Free, bound: u32, planes: u32) -> Value {
     graph.input(
         Shape::of([planes, 1, bound, 4]).freed(&[(2, extent)]),
         Element::Single,
@@ -203,12 +203,12 @@ fn a_packed_rope_keeps_the_seat_of_a_single_plane() {
     assert_eq!(graph.shape(turned).free(2), Some(ragged.extent.slot()));
 }
 
-fn packed_attention<'g>(
-    graph: &Graph<'g>,
-    query: Value<'g>,
-    keys: neura_graph::Ragged<'g>,
-    queries: neura_graph::Ragged<'g>,
-) -> Value<'g> {
+fn packed_attention(
+    graph: &Graph,
+    query: Value,
+    keys: neura_graph::Ragged,
+    queries: neura_graph::Ragged,
+) -> Value {
     let cache = packed(graph, keys.extent, 16, 1);
     graph.attention(
         query,

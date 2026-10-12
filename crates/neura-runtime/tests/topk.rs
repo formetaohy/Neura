@@ -48,10 +48,10 @@ fn top_k_reference(values: &[f32], rows: u32, columns: u32, keep: u32) -> (Vec<f
 }
 
 struct Selecting {
-    graph: Graph<'static>,
-    value: Value<'static>,
-    kept_values: Value<'static>,
-    kept_indices: Value<'static>,
+    graph: Graph,
+    value: Value,
+    kept_values: Value,
+    kept_indices: Value,
 }
 
 impl Selecting {

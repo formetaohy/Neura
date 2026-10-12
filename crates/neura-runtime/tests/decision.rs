@@ -38,12 +38,12 @@ fn refusal_message(action: impl FnOnce()) -> String {
 }
 
 struct Sampling {
-    graph: Graph<'static>,
-    logits: Value<'static>,
-    seed: Value<'static>,
-    keep: Value<'static>,
-    cumulative: Value<'static>,
-    draw: Value<'static>,
+    graph: Graph,
+    logits: Value,
+    seed: Value,
+    keep: Value,
+    cumulative: Value,
+    draw: Value,
 }
 
 impl Sampling {

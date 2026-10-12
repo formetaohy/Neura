@@ -11,15 +11,15 @@ const WIDTH: u32 = 128;
 const STEPS: u32 = 3;
 const RATE: f32 = 0.05;
 
-struct Model<'g> {
-    first_weight: Value<'g>,
-    first_bias: Value<'g>,
-    second_weight: Value<'g>,
-    second_bias: Value<'g>,
+struct Model {
+    first_weight: Value,
+    first_bias: Value,
+    second_weight: Value,
+    second_bias: Value,
 }
 
-impl<'g> Model<'g> {
-    fn new(graph: &Graph<'g>) -> Self {
+impl Model {
+    fn new(graph: &Graph) -> Self {
         let init = Init::Uniform {
             low: -0.1,
             high: 0.1,
@@ -32,12 +32,12 @@ impl<'g> Model<'g> {
         }
     }
 
-    fn forward(&self, graph: &Graph<'g>, data: Value<'g>) -> Value<'g> {
+    fn forward(&self, graph: &Graph, data: Value) -> Value {
         let hidden = graph.relu(graph.add(graph.matmul(data, self.first_weight), self.first_bias));
         graph.add(graph.matmul(hidden, self.second_weight), self.second_bias)
     }
 
-    fn parameters(&self) -> [Value<'g>; 4] {
+    fn parameters(&self) -> [Value; 4] {
         [
             self.first_weight,
             self.first_bias,
@@ -941,11 +941,7 @@ const TABLE_WIDTH: u32 = 8;
 const TABLE_BYTES: u64 = 2 * (1 << 14);
 const _: () = assert!(TABLE_ROWS as u64 * TABLE_WIDTH as u64 * 4 > TABLE_BYTES);
 
-fn table_graph(
-    graph: &Graph<'static>,
-    extent: Free,
-    bound: u32,
-) -> (Value<'static>, Value<'static>, Value<'static>) {
+fn table_graph(graph: &Graph, extent: Free, bound: u32) -> (Value, Value, Value) {
     let indices = graph.input(
         Shape::of([1, bound, 1, 1]).freed(&[(1, extent)]),
         Element::Single,
@@ -971,7 +967,7 @@ fn table_walk(
 ) -> (Vec<Vec<f32>>, Vec<u32>) {
     let runtime = open(backend, memory);
     let bound = steps.iter().map(|rows| rows.len()).max().expect("a step") as u32;
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let extent = graph.free(bound);
     let (indices, table, gathered) = table_graph(&graph, extent, bound);
     let weights = runtime.weights(&graph);
@@ -1037,7 +1033,7 @@ fn a_table_walk_a_host_leaves_unnamed_refuses() {
                 ..Default::default()
             },
         );
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let extent = graph.free(4);
         let (indices, table, gathered) = table_graph(&graph, extent, 4);
         let weights = runtime.weights(&graph);
@@ -1100,7 +1096,7 @@ fn a_table_walk_a_host_leaves_unnamed_refuses() {
 
 fn table_training(backend: Backend, memory: MemoryRequest) -> Vec<f32> {
     let runtime = open(backend, memory);
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let extent = graph.free(8);
     let (indices, table, gathered) = table_graph(&graph, extent, 8);
     let target = graph.input(
@@ -1168,7 +1164,7 @@ fn a_streamed_table_trains_the_rows_a_host_names() {
 
 fn static_table(backend: Backend, memory: MemoryRequest, rows: &[u32]) -> (Vec<f32>, u32) {
     let runtime = open(backend, memory);
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let count = rows.len() as u32;
     let indices = graph.input(Shape::of([1, count, 1, 1]), Element::Single);
     let table = graph.named_parameter(

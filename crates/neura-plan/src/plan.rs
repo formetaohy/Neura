@@ -303,12 +303,12 @@ pub struct Plan {
 }
 
 impl Plan {
-    pub fn of(graph: &Graph<'_>, alignment: u64, profile: Profile, encoding_bytes: u64) -> Self {
+    pub fn of(graph: &Graph, alignment: u64, profile: Profile, encoding_bytes: u64) -> Self {
         Self::chosen(graph, alignment, profile, &[], encoding_bytes, 0)
     }
 
     pub fn chosen(
-        graph: &Graph<'_>,
+        graph: &Graph,
         alignment: u64,
         profile: Profile,
         chosen: &[(Product, MatmulTile)],
@@ -1137,14 +1137,14 @@ impl Plan {
         self.bound.tasks()
     }
 
-    pub fn span(&self, value: Value<'_>, placement: Placement) -> Span {
+    pub fn span(&self, value: Value, placement: Placement) -> Span {
         self.span_at(&self.bound, value, placement, &self.slot_bounds)
     }
 
     pub fn span_at(
         &self,
         encoding: &Encoding,
-        value: Value<'_>,
+        value: Value,
         placement: Placement,
         lengths: &[u32],
     ) -> Span {
@@ -1169,7 +1169,7 @@ impl Plan {
         }
     }
 
-    pub fn readable(&self, value: Value<'_>) -> bool {
+    pub fn readable(&self, value: Value) -> bool {
         self.bound.readable(value.id())
     }
 

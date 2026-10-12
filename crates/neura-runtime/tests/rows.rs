@@ -63,26 +63,26 @@ fn cursors(lengths: &[f32], planes: u32) -> Vec<f32> {
 
 struct Batch {
     runtime: Runtime,
-    graph: Graph<'static>,
-    written: Value<'static>,
+    graph: Graph,
+    written: Value,
     masked: bool,
     binding: bool,
-    plane: Value<'static>,
-    position: Value<'static>,
-    source: Value<'static>,
-    dest: Value<'static>,
-    batched: Value<'static>,
-    packed: Value<'static>,
-    unpacked: Value<'static>,
-    query: Value<'static>,
-    cursor: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
+    plane: Value,
+    position: Value,
+    source: Value,
+    dest: Value,
+    batched: Value,
+    packed: Value,
+    unpacked: Value,
+    query: Value,
+    cursor: Value,
+    out: Value,
+    offsets: Value,
 }
 
 impl Batch {
     fn of(planes: u32, bound: u32, capacity: u32, width: u32, masked: bool, binding: bool) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live: Option<Free> = binding.then(|| graph.free(planes));
         let planed = |dims: &[u32], axis: u32| match live {
             Some(free) => Shape::of(dims).freed(&[(axis, free)]),
@@ -391,7 +391,7 @@ fn a_row_map_walks_only_the_planes_a_binding_holds() {
 #[test]
 fn a_row_map_of_a_table_no_ragged_axis_closed_is_refused() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let offsets = graph.input(Shape::matrix(PLANES + 1, 1), Element::Single);
         let extent = graph.free(BOUND);
         graph.rows(neura_graph::Ragged { extent, offsets });
@@ -401,7 +401,7 @@ fn a_row_map_of_a_table_no_ragged_axis_closed_is_refused() {
 #[test]
 fn a_row_map_names_the_extent_its_axis_closes() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
         let other = graph.free(BOUND);

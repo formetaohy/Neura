@@ -5,7 +5,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn strides<'g>(graph: &Graph<'g>, value: Value<'g>) -> [u32; 4] {
+fn strides(graph: &Graph, value: Value) -> [u32; 4] {
     graph.snapshot().values()[value.id() as usize].strides
 }
 

@@ -184,16 +184,16 @@ impl Case {
 
 struct Packed {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    keys: Value<'static>,
-    values: Value<'static>,
-    queries: Value<'static>,
-    weight: Value<'static>,
-    offsets: Value<'static>,
-    out: Value<'static>,
-    gradients: [Value<'static>; 3],
-    factor: Option<Value<'static>>,
+    graph: Graph,
+    lengths: Value,
+    keys: Value,
+    values: Value,
+    queries: Value,
+    weight: Value,
+    offsets: Value,
+    out: Value,
+    gradients: [Value; 3],
+    factor: Option<Value>,
     case: Case,
 }
 
@@ -212,7 +212,7 @@ impl Packed {
             binding,
             weighed,
         } = case;
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = binding.then(|| graph.free(planes));
         let lengths = graph.input(
             match live {

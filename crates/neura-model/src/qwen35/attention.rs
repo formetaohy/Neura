@@ -5,28 +5,28 @@ use neura_decoder::{Cache, flatten, heads, matrix, partial, rms, vector};
 use neura_gguf::Archive;
 use neura_graph::{Graph, Shape, Value};
 
-pub(crate) struct Attention<'g> {
-    norm: Value<'g>,
-    query: Value<'g>,
-    key: Value<'g>,
-    value: Value<'g>,
-    output: Value<'g>,
-    query_norm: Value<'g>,
-    key_norm: Value<'g>,
-    cache: Cache<'g>,
-    mlp: Mlp<'g>,
-    floor: Value<'g>,
-    base: Value<'g>,
-    scale: Value<'g>,
+pub(crate) struct Attention {
+    norm: Value,
+    query: Value,
+    key: Value,
+    value: Value,
+    output: Value,
+    query_norm: Value,
+    key_norm: Value,
+    cache: Cache,
+    mlp: Mlp,
+    floor: Value,
+    base: Value,
+    scale: Value,
     rope: u32,
     heads: u32,
     key_heads: u32,
     width: u32,
 }
 
-impl<'g> Attention<'g> {
+impl Attention {
     pub(crate) fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         source: &impl Archive,
         config: &Config,
         layer: u32,
@@ -78,16 +78,11 @@ impl<'g> Attention<'g> {
         }
     }
 
-    pub(crate) fn states(&self) -> [Value<'g>; 2] {
+    pub(crate) fn states(&self) -> [Value; 2] {
         self.cache.states()
     }
 
-    pub(crate) fn forward(
-        &self,
-        graph: &Graph<'g>,
-        hidden: Value<'g>,
-        position: Value<'g>,
-    ) -> Value<'g> {
+    pub(crate) fn forward(&self, graph: &Graph, hidden: Value, position: Value) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let packed = graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2]));
         let query = interleaved(graph, packed, self.heads, self.width, 0);

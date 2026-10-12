@@ -68,16 +68,16 @@ fn reference(packed: Packed<'_>) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 
 struct Segmented {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    counted: Option<Value<'static>>,
-    left: Value<'static>,
-    weights: Value<'static>,
-    weight: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
-    left_gradient: Value<'static>,
-    weight_gradient: Value<'static>,
+    graph: Graph,
+    lengths: Value,
+    counted: Option<Value>,
+    left: Value,
+    weights: Value,
+    weight: Value,
+    out: Value,
+    offsets: Value,
+    left_gradient: Value,
+    weight_gradient: Value,
     depth: u32,
     columns: u32,
     bound: u32,
@@ -94,7 +94,7 @@ impl Segmented {
     }
 
     fn build(planes: u32, bound: u32, depth: u32, columns: u32, counted: bool) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let mask = counted.then(|| graph.input(Shape::of([planes, 1, bound, 1]), Element::Single));
         let lengths = match mask {
             Some(mask) => graph.sum_axis(mask, 2),
@@ -259,15 +259,15 @@ fn a_device_count_of_the_rows_weighs_every_segment_it_closes() {
 
 struct Mixture {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    batched: Value<'static>,
-    weights: Value<'static>,
-    weight: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
-    batched_gradient: Value<'static>,
-    weight_gradient: Value<'static>,
+    graph: Graph,
+    lengths: Value,
+    batched: Value,
+    weights: Value,
+    weight: Value,
+    out: Value,
+    offsets: Value,
+    batched_gradient: Value,
+    weight_gradient: Value,
     depth: u32,
     columns: u32,
     capacity: u32,
@@ -277,7 +277,7 @@ struct Mixture {
 
 impl Mixture {
     fn of(planes: u32, capacity: u32, bound: u32, depth: u32, columns: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
         let mapped = graph.rows(ragged);

@@ -408,13 +408,13 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
 }
 
 struct LossFamily {
-    logits: Value<'static>,
-    target: Value<'static>,
-    loss: Value<'static>,
-    gradient: Value<'static>,
+    logits: Value,
+    target: Value,
+    loss: Value,
+    gradient: Value,
 }
 
-fn loss_family(graph: &Graph<'static>, shape: Shape, cross: bool) -> LossFamily {
+fn loss_family(graph: &Graph, shape: Shape, cross: bool) -> LossFamily {
     let logits = graph.gradient_input(shape, Element::Single);
     let target = graph.input(shape, Element::Single);
     let loss = if cross {

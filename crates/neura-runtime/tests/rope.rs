@@ -67,20 +67,20 @@ fn rotate_planes(lengths: &[f32], width: u32, base: f32, inverse: bool, image: &
     out
 }
 
-struct Packed<'a> {
+struct Packed {
     runtime: neura_runtime::Runtime,
-    graph: Graph<'a>,
-    lengths: Value<'a>,
+    graph: Graph,
+    lengths: Value,
     extent: neura_graph::Free,
-    packed: Value<'a>,
-    turned: Value<'a>,
+    packed: Value,
+    turned: Value,
 }
 
 const PACKED_BOUND: u32 = 8;
 const PACKED_WIDTH: u32 = 4;
 const PACKED_BASE: f32 = 10000.0;
 
-impl<'a> Packed<'a> {
+impl Packed {
     fn build() -> Self {
         let graph = Graph::new();
         let lengths = graph.input(Shape::vector(4), Element::Single);
@@ -131,7 +131,7 @@ fn a_packed_rope_places_every_row_in_the_plane_its_offsets_close() {
 
 #[test]
 fn a_packed_rope_turns_the_rows_of_a_plane_wider_than_a_workgroup() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(3), Element::Single);
     let bound = 512;
     let ragged = graph.ragged(bound, lengths);
@@ -186,7 +186,7 @@ fn a_packed_rope_gradient_turns_the_rows_back_to_the_seat_they_came_from() {
 
 #[test]
 fn a_packed_rope_of_one_plane_walks_the_row_its_cursor_names() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(1), Element::Single);
     let ragged = graph.ragged(PACKED_BOUND, lengths);
     let packed = graph.input(
@@ -215,7 +215,7 @@ fn a_packed_rope_of_one_plane_walks_the_row_its_cursor_names() {
 #[test]
 fn a_narrow_packed_rope_packs_the_turn_of_every_plane() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);
     let ragged = graph.ragged(PACKED_BOUND, lengths);
     let data = graph.input(
@@ -249,7 +249,7 @@ fn a_narrow_packed_rope_packs_the_turn_of_every_plane() {
 
 #[test]
 fn a_packed_rope_leaves_the_planes_a_binding_never_closes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let free = graph.free(4);
     let lengths = graph.input(Shape::vector(4).freed(&[(3, free)]), Element::Single);
     let ragged = graph.ragged(PACKED_BOUND, lengths);
@@ -291,7 +291,7 @@ fn a_packed_rope_leaves_the_planes_a_binding_never_closes() {
 
 #[test]
 fn a_packed_rope_carries_the_epilogue_that_folds_into_it() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(4), Element::Single);
     let ragged = graph.ragged(PACKED_BOUND, lengths);
     let shape = Shape::of([1, 1, PACKED_BOUND, PACKED_WIDTH]).freed(&[(2, ragged.extent)]);
@@ -485,7 +485,7 @@ const KNOB_WIDTH: u32 = 4;
 #[test]
 fn a_rotary_base_the_host_writes_places_each_position_on_the_angle_it_names() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let knob = graph.named_knob("rope.base", 10_000.0);
     let data = graph.parameter(
         Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),
@@ -540,7 +540,7 @@ fn a_rotation_of_the_standard_base_needs_no_knob() {
 #[test]
 fn the_device_refuses_a_rotary_base_it_cannot_turn_with() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let knob = graph.named_knob("rope.base", 10_000.0);
     let data = graph.parameter(
         Shape::of([1, 1, KNOB_ROWS, KNOB_WIDTH]),

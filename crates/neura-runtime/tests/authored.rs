@@ -38,13 +38,13 @@ fn live_probe(bound: u32, live: u32) -> Vec<f32> {
 }
 
 struct Model {
-    probe: Value<'static>,
-    tokens: Value<'static>,
-    live: Value<'static>,
-    out: Value<'static>,
+    probe: Value,
+    tokens: Value,
+    live: Value,
+    out: Value,
 }
 
-fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model {
+fn build(graph: &Graph, bound: u32, batch: u32, layers: bool) -> Model {
     let batch_extent = graph.free(batch);
     let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
     let tokens = graph.input(
@@ -86,12 +86,12 @@ fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model 
 }
 
 struct Counted {
-    probe: Value<'static>,
-    tokens: Value<'static>,
-    out: Value<'static>,
+    probe: Value,
+    tokens: Value,
+    out: Value,
 }
 
-fn counted(graph: &Graph<'static>, bound: u32) -> Counted {
+fn counted(graph: &Graph, bound: u32) -> Counted {
     let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
     let tokens = graph.input(Shape::of([1, 1, bound, WIDTH]), Element::Single);
     let count = graph.sum_axis(probe, 2);
@@ -230,13 +230,13 @@ fn a_reduction_over_a_device_count_walks_the_live_rows() {
     }
 }
 
-struct HostCounted<'g> {
-    count: Value<'g>,
-    tokens: Value<'g>,
-    out: Value<'g>,
+struct HostCounted {
+    count: Value,
+    tokens: Value,
+    out: Value,
 }
 
-fn host_counted(graph: &Graph<'static>, bound: u32) -> HostCounted<'static> {
+fn host_counted(graph: &Graph, bound: u32) -> HostCounted {
     let count = graph.input(Shape::scalar(), Element::Single);
     let tokens = graph.input(Shape::of([1, 1, bound, WIDTH]), Element::Single);
     let weight = graph.parameter(Shape::of([WIDTH, WIDTH]), weights(), Element::Single);
@@ -299,13 +299,13 @@ fn a_count_beyond_the_bound_the_graph_declares_is_refused() {
 const CUT_PLANES: u32 = 4;
 
 struct Cut {
-    mask: Value<'static>,
-    planes: Value<'static>,
-    live: Value<'static>,
-    out: Value<'static>,
+    mask: Value,
+    planes: Value,
+    live: Value,
+    out: Value,
 }
 
-fn cut(graph: &Graph<'static>, planes: u32, tokens: u32) -> Cut {
+fn cut(graph: &Graph, planes: u32, tokens: u32) -> Cut {
     let token_extent = graph.free(tokens);
     let mask = graph.input(Shape::of([planes, 1, 1, 1]), Element::Single);
     let held = graph.input(
@@ -382,12 +382,12 @@ const SPLIT_DEPTH: u32 = 1024;
 const SPLIT_COLUMNS: u32 = 64;
 
 struct Split {
-    probe: Value<'static>,
-    tokens: Value<'static>,
-    out: Value<'static>,
+    probe: Value,
+    tokens: Value,
+    out: Value,
 }
 
-fn split_product(graph: &Graph<'static>, bound: u32) -> Split {
+fn split_product(graph: &Graph, bound: u32) -> Split {
     let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
     let tokens = graph.input(Shape::of([1, 1, bound, SPLIT_DEPTH]), Element::Single);
     let weight = graph.parameter(
@@ -455,15 +455,15 @@ fn a_device_count_rules_the_rows_a_depth_split_product_walks() {
 const WIDE_ROWS: u32 = 12;
 const NARROW_ROWS: u32 = 6;
 
-struct Shared<'g> {
-    probe: Value<'g>,
-    longer: Value<'g>,
-    shorter: Value<'g>,
-    factor: Value<'g>,
-    out: Value<'g>,
+struct Shared {
+    probe: Value,
+    longer: Value,
+    shorter: Value,
+    factor: Value,
+    out: Value,
 }
 
-fn shared(graph: &Graph<'static>) -> Shared<'static> {
+fn shared(graph: &Graph) -> Shared {
     let probe = graph.input(Shape::of([1, 1, WIDE_ROWS, 1]), Element::Single);
     let count = graph.relu(graph.sum(probe));
     let longer = graph.input(Shape::of([1, 1, WIDE_ROWS, WIDTH]), Element::Single);

@@ -226,18 +226,18 @@ impl Case {
 
 struct Chunked {
     runtime: Runtime,
-    graph: Graph<'static>,
-    query_lengths: Value<'static>,
-    key_lengths: Value<'static>,
-    keys: Value<'static>,
-    values: Value<'static>,
-    queries: Value<'static>,
-    weight: Value<'static>,
-    cursors: Option<Value<'static>>,
-    query_offsets: Value<'static>,
-    key_offsets: Value<'static>,
-    out: Value<'static>,
-    gradients: [Value<'static>; 3],
+    graph: Graph,
+    query_lengths: Value,
+    key_lengths: Value,
+    keys: Value,
+    values: Value,
+    queries: Value,
+    weight: Value,
+    cursors: Option<Value>,
+    query_offsets: Value,
+    key_offsets: Value,
+    out: Value,
+    gradients: [Value; 3],
     case: Case,
 }
 
@@ -257,7 +257,7 @@ impl Chunked {
             binding,
             ringed,
         } = case;
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = binding.then(|| graph.free(planes));
         let lengths = |bound: u32| {
             let shape = match live {

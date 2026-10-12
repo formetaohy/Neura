@@ -139,7 +139,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn of(graph: &Graph<'_>, alignment: u64) -> Self {
+    pub fn of(graph: &Graph, alignment: u64) -> Self {
         Self::of_values(graph.snapshot().values(), alignment)
     }
 

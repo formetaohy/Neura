@@ -28,7 +28,7 @@ fn a_dilated_window_reads_every_dilationth_tap_of_its_span() {
 
 #[test]
 fn a_dilated_convolution_writes_the_size_its_span_walks() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::of([2, 3, 9, 9]), Element::Single);
     let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [2, 2], [1, 1], [2, 2]);
@@ -46,7 +46,7 @@ fn a_dilated_convolution_writes_the_size_its_span_walks() {
 
 #[test]
 fn a_dilated_transposed_convolution_undoes_the_span_it_scattered() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::of([1, 3, 4, 4]), Element::Single);
     let filter = graph.parameter(Shape::of([3, 2, 3, 3]), Init::Zero, Element::Single);
     let window = Window::new([3, 3], [2, 2], [1, 1], [2, 2]);
@@ -58,7 +58,7 @@ fn a_dilated_transposed_convolution_undoes_the_span_it_scattered() {
 
 #[test]
 fn a_dilated_pool_writes_the_size_its_span_walks() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let input = graph.input(Shape::of([1, 2, 8, 8]), Element::Single);
     let window = Window::dilated([2, 2], [3, 3]);
     let pooled = graph.pool2d(input, window, Pool::Max);
@@ -69,7 +69,7 @@ fn a_dilated_pool_writes_the_size_its_span_walks() {
 
 #[test]
 fn a_dilated_window_refuses_the_sizes_its_span_outruns() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let filter = graph.parameter(Shape::of([2, 2, 3, 3]), Init::Zero, Element::Single);
     let narrow = graph.input(Shape::of([1, 2, 4, 6]), Element::Single);
     assert!(

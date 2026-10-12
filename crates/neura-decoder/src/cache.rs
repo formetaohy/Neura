@@ -1,16 +1,16 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Shape, Value};
 
-pub struct Cache<'g> {
-    keys: Value<'g>,
-    values: Value<'g>,
+pub struct Cache {
+    keys: Value,
+    values: Value,
     heads: u32,
     width: u32,
     capacity: u32,
 }
 
-impl<'g> Cache<'g> {
-    pub fn new(graph: &Graph<'g>, heads: u32, width: u32, capacity: u32) -> Self {
+impl Cache {
+    pub fn new(graph: &Graph, heads: u32, width: u32, capacity: u32) -> Self {
         assert!(
             heads > 0 && width > 0,
             "a cache of {heads} heads of {width} numbers holds no key",
@@ -25,17 +25,11 @@ impl<'g> Cache<'g> {
         }
     }
 
-    pub fn states(&self) -> [Value<'g>; 2] {
+    pub fn states(&self) -> [Value; 2] {
         [self.keys, self.values]
     }
 
-    pub fn write(
-        &self,
-        graph: &Graph<'g>,
-        position: Value<'g>,
-        keys: Value<'g>,
-        values: Value<'g>,
-    ) {
+    pub fn write(&self, graph: &Graph, position: Value, keys: Value, values: Value) {
         for (held, what) in [(keys, "key"), (values, "value")] {
             assert_eq!(
                 graph.shape(held).dims(),
@@ -52,13 +46,7 @@ impl<'g> Cache<'g> {
         graph.write_into(self.values, rows, values);
     }
 
-    pub fn attend(
-        &self,
-        graph: &Graph<'g>,
-        query: Value<'g>,
-        position: Value<'g>,
-        scale: Value<'g>,
-    ) -> Value<'g> {
+    pub fn attend(&self, graph: &Graph, query: Value, position: Value, scale: Value) -> Value {
         let shape = graph.shape(query).dims();
         assert_eq!(
             shape[3], self.width,

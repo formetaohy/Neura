@@ -897,7 +897,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
 fn a_key_gradient_stages_the_forward_output_it_recomputes_with() {
     let tokens = 8u32;
     let width = 32u32;
-    fn options<'g>(graph: &Graph<'g>) -> neura_graph::AttentionOptions<'g> {
+    fn options(graph: &Graph) -> neura_graph::AttentionOptions {
         neura_graph::AttentionOptions {
             bias: None,
             scale: Some(graph.knob(0.5)),

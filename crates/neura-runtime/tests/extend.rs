@@ -36,21 +36,16 @@ fn weights() -> Init {
 }
 
 struct Extent {
-    probe: Value<'static>,
-    count: Value<'static>,
-    tokens: Value<'static>,
-    gate: Value<'static>,
-    loss: Value<'static>,
-    gradient: Value<'static>,
-    gate_gradient: Value<'static>,
+    probe: Value,
+    count: Value,
+    tokens: Value,
+    gate: Value,
+    loss: Value,
+    gradient: Value,
+    gate_gradient: Value,
 }
 
-fn extent(
-    graph: &Graph<'static>,
-    count: Value<'static>,
-    probe: Value<'static>,
-    bound: u32,
-) -> Extent {
+fn extent(graph: &Graph, count: Value, probe: Value, bound: u32) -> Extent {
     let gate = graph.gradient_input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
     let tokens = graph.gradient_input(Shape::of([1, 1, bound, WIDTH]), Element::Single);
     let rows = graph.trim(tokens, 2, count);
@@ -71,13 +66,13 @@ fn extent(
     }
 }
 
-fn device_counted(graph: &Graph<'static>, bound: u32) -> Extent {
+fn device_counted(graph: &Graph, bound: u32) -> Extent {
     let probe = graph.input(Shape::of([1, 1, bound, 1]), Element::Single);
     let count = graph.sum_axis(probe, 2);
     extent(graph, count, probe, bound)
 }
 
-fn host_counted(graph: &Graph<'static>, bound: u32) -> Extent {
+fn host_counted(graph: &Graph, bound: u32) -> Extent {
     let count = graph.input(Shape::scalar(), Element::Single);
     extent(graph, count, count, bound)
 }

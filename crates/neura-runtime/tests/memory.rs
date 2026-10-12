@@ -34,7 +34,7 @@ fn refusal(action: impl FnOnce()) -> String {
         .unwrap_or_else(|error| panic!("a refusal carries its words: {error:?}"))
 }
 
-fn linear<'g>(graph: &Graph<'g>, inputs: u32, outputs: u32) -> (Value<'g>, Value<'g>) {
+fn linear(graph: &Graph, inputs: u32, outputs: u32) -> (Value, Value) {
     (
         graph.parameter(
             Shape::matrix(inputs, outputs),

@@ -7,12 +7,19 @@ use neura_pointwise as op;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Gradients<'g> {
-    values: BTreeMap<u32, (Value<'g>, Value<'g>)>,
+pub struct Gradients {
+    instance: u64,
+    values: BTreeMap<u32, (Value, Value)>,
 }
 
-impl<'g> Gradients<'g> {
-    pub fn of(&self, value: Value<'g>) -> Value<'g> {
+impl Gradients {
+    pub fn of(&self, value: Value) -> Value {
+        assert_eq!(
+            value.graph(),
+            self.instance,
+            "a gradient reaches a tensor of the graph that differentiated it, and value {} walks another graph",
+            value.id(),
+        );
         self.values
             .get(&value.id())
             .map(|(_, gradient)| *gradient)
@@ -24,7 +31,7 @@ impl<'g> Gradients<'g> {
             })
     }
 
-    pub fn clip(&self, graph: &Graph<'g>, threshold: Value<'g>) -> Self {
+    pub fn clip(&self, graph: &Graph, threshold: Value) -> Self {
         let threshold = graph.own(threshold);
         assert!(
             graph.shape(threshold).is_scalar(),
@@ -48,6 +55,7 @@ impl<'g> Gradients<'g> {
             ),
         );
         Self {
+            instance: self.instance,
             values: self
                 .values
                 .iter()
@@ -80,7 +88,7 @@ pub(crate) struct Recomputing {
 }
 
 impl Recomputing {
-    fn prepare<'g>(&mut self, graph: &Graph<'g>, task: &TaskInfo) {
+    fn prepare(&mut self, graph: &Graph, task: &TaskInfo) {
         for written in [task.out, task.extra] {
             if written == NO_VALUE || self.copies.contains_key(&written) {
                 continue;
@@ -90,7 +98,7 @@ impl Recomputing {
         }
     }
 
-    fn resolved<'g>(&mut self, graph: &Graph<'g>, task: &TaskInfo) -> TaskInfo {
+    fn resolved(&mut self, graph: &Graph, task: &TaskInfo) -> TaskInfo {
         let mut resolved = task.clone();
         resolved.out = self.resolve(graph, task.out);
         resolved.extra = self.resolve(graph, task.extra);
@@ -107,7 +115,7 @@ impl Recomputing {
         resolved
     }
 
-    fn resolve<'g>(&mut self, graph: &Graph<'g>, value: u32) -> u32 {
+    fn resolve(&mut self, graph: &Graph, value: u32) -> u32 {
         if value == NO_VALUE {
             return value;
         }
@@ -159,8 +167,8 @@ impl Recomputing {
     }
 }
 
-impl<'g> Graph<'g> {
-    pub fn recompute(&self, region: impl FnOnce(&Graph<'g>) -> Value<'g>) -> Value<'g> {
+impl Graph {
+    pub fn recompute(&self, region: impl FnOnce(&Graph) -> Value) -> Value {
         let first = self.state.borrow().tasks.len();
         assert!(
             !self.state.borrow().differentiated,
@@ -212,7 +220,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    pub fn backward(&self, loss: Value<'g>) -> Gradients<'g> {
+    pub fn backward(&self, loss: Value) -> Gradients {
         let loss = self.own(loss);
         {
             let state = self.state.borrow();
@@ -269,7 +277,10 @@ impl<'g> Graph<'g> {
                 values.insert(id as u32, (self.value_of(id as u32), self.value_of(grad)));
             }
         }
-        Gradients { values }
+        Gradients {
+            instance: self.instance,
+            values,
+        }
     }
 
     fn recomputing(&self) -> Recomputing {
@@ -417,7 +428,7 @@ impl<'g> Graph<'g> {
         id
     }
 
-    fn backward_task(&self, task: &TaskInfo, gradient: Value<'g>, grads: &mut [Option<u32>]) {
+    fn backward_task(&self, task: &TaskInfo, gradient: Value, grads: &mut [Option<u32>]) {
         let gradient = self.own(gradient);
         match task.kind {
             Kind::Broadcast => {
@@ -866,13 +877,7 @@ impl<'g> Graph<'g> {
         }
     }
 
-    fn partial(
-        &self,
-        definition: &op::Op,
-        task: &TaskInfo,
-        slot: u32,
-        gradient: Value<'g>,
-    ) -> Value<'g> {
+    fn partial(&self, definition: &op::Op, task: &TaskInfo, slot: u32, gradient: Value) -> Value {
         let gradient = self.own(gradient);
         let op::Partial::Formula { roles, .. } = definition.partial(slot) else {
             return gradient;
@@ -910,8 +915,8 @@ impl<'g> Graph<'g> {
         &self,
         kind: Kind,
         task: &TaskInfo,
-        source: Value<'g>,
-        gradient: Value<'g>,
+        source: Value,
+        gradient: Value,
         grads: &mut [Option<u32>],
     ) {
         let source = self.own(source);
@@ -938,7 +943,7 @@ impl<'g> Graph<'g> {
         self.accumulate(grads, source, out);
     }
 
-    pub(crate) fn rowwise(&self, kind: Kind, value: Value<'g>) -> Value<'g> {
+    pub(crate) fn rowwise(&self, kind: Kind, value: Value) -> Value {
         let value = self.own(value);
         assert!(
             self.contiguous(value),
@@ -963,7 +968,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    fn reduced_to(&self, gradient: Value<'g>, value: Value<'g>) -> Value<'g> {
+    fn reduced_to(&self, gradient: Value, value: Value) -> Value {
         let gradient = self.own(gradient);
         let value = self.own(value);
         let shape = self.shape(value);
@@ -985,7 +990,7 @@ impl<'g> Graph<'g> {
         folded
     }
 
-    fn weighed(&self, left: Value<'g>, gradient: Value<'g>, weight: Value<'g>) -> Value<'g> {
+    fn weighed(&self, left: Value, gradient: Value, weight: Value) -> Value {
         let left_shape = self.shape(left);
         let gradient_shape = self.shape(gradient);
         let planes = self.shape(weight).dims();
@@ -1013,7 +1018,7 @@ impl<'g> Graph<'g> {
         self.matmul(reduced, walked)
     }
 
-    fn accumulate(&self, grads: &mut [Option<u32>], value: Value<'g>, contribution: Value<'g>) {
+    fn accumulate(&self, grads: &mut [Option<u32>], value: Value, contribution: Value) {
         let value = self.own(value);
         let owner = self.owner_of(value.id());
         let contribution = self.reduced_to(contribution, value);
@@ -1027,7 +1032,7 @@ impl<'g> Graph<'g> {
         });
     }
 
-    fn aligned(&self, value: Value<'g>, contribution: Value<'g>) -> Value<'g> {
+    fn aligned(&self, value: Value, contribution: Value) -> Value {
         assert!(
             self.shape(contribution).dims() == self.shape(value).dims(),
             "a gradient lands in the layout of the storage that owns value {}, and value {} walks {:?} where that gradient walks {:?}; fold the axes the tensor spread over before its storage lays the gradient out",
@@ -1106,7 +1111,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    fn extended(&self, view: Value<'g>, contribution: Value<'g>) -> Value<'g> {
+    fn extended(&self, view: Value, contribution: Value) -> Value {
         let view = self.own(view);
         let contribution = self.own(contribution);
         let element = self.element(contribution);
@@ -1134,7 +1139,7 @@ impl<'g> Graph<'g> {
         out
     }
 
-    fn landed(&self, value: Value<'g>) -> Value<'g> {
+    fn landed(&self, value: Value) -> Value {
         let value = self.own(value);
         if self.owner_of(value.id()) == value.id() {
             return value;

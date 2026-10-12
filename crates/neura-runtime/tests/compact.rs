@@ -47,18 +47,18 @@ fn total(values: &[f32]) -> f32 {
 
 struct Selection {
     runtime: Runtime,
-    graph: Graph<'static>,
-    mask: Value<'static>,
-    table: Value<'static>,
-    indices: Value<'static>,
-    count: Value<'static>,
-    selected: Value<'static>,
-    sum: Value<'static>,
+    graph: Graph,
+    mask: Value,
+    table: Value,
+    indices: Value,
+    count: Value,
+    selected: Value,
+    sum: Value,
 }
 
 impl Selection {
     fn of(bound: u32, width: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let rows = graph.free(bound);
         let mask = graph.input(Shape::matrix(bound, 1).freed(&[(2, rows)]), Element::Single);
         let compacted = graph.compact(mask);
@@ -145,15 +145,15 @@ impl SelectionOut {
 
 struct Prefix {
     runtime: Runtime,
-    graph: Graph<'static>,
-    value: Value<'static>,
-    exclusive: Value<'static>,
-    total: Value<'static>,
+    graph: Graph,
+    value: Value,
+    exclusive: Value,
+    total: Value,
 }
 
 impl Prefix {
     fn of(bound: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let rows = graph.free(bound);
         let value = graph.input(Shape::matrix(bound, 1).freed(&[(2, rows)]), Element::Single);
         let prefix = graph.prefix_sum(value);
@@ -239,7 +239,7 @@ fn a_compaction_selects_the_rows_a_mask_names() {
 
 #[test]
 fn a_compaction_walks_the_rows_a_device_count_names() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let counts = graph.input(Shape::matrix(BOUND, 1), Element::Single);
     let count = graph.sum(counts);
     let mask = graph.trim(graph.mul(counts, counts), 2, count);

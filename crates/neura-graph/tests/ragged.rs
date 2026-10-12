@@ -11,7 +11,7 @@ fn refuses(action: impl FnOnce()) -> bool {
     catch_unwind(AssertUnwindSafe(action)).is_err()
 }
 
-fn causal<'g>(segments: neura_graph::Value<'g>) -> AttentionOptions<'g> {
+fn causal(segments: neura_graph::Value) -> AttentionOptions {
     AttentionOptions {
         bias: None,
         scale: None,
@@ -252,10 +252,7 @@ fn a_packed_query_holds_no_plane_beside_the_rows_it_packs() {
     );
 }
 
-fn chunked<'g>(
-    queries: neura_graph::Ragged<'g>,
-    keys: neura_graph::Ragged<'g>,
-) -> AttentionOptions<'g> {
+fn chunked(queries: neura_graph::Ragged, keys: neura_graph::Ragged) -> AttentionOptions {
     AttentionOptions {
         bias: None,
         scale: None,
@@ -267,7 +264,7 @@ fn chunked<'g>(
     }
 }
 
-fn packed<'g>(graph: &Graph<'g>, extent: neura_graph::Free, bound: u32) -> neura_graph::Value<'g> {
+fn packed(graph: &Graph, extent: neura_graph::Free, bound: u32) -> neura_graph::Value {
     graph.input(
         Shape::of([1, 1, bound, WIDTH]).freed(&[(2, extent)]),
         Element::Single,

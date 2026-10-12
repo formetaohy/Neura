@@ -1,20 +1,20 @@
 use neura_graph::{Graph, Value};
 
-pub struct Decoder<'g> {
-    token: Value<'g>,
-    position: Value<'g>,
-    chosen: Value<'g>,
-    states: Vec<Value<'g>>,
+pub struct Decoder {
+    token: Value,
+    position: Value,
+    chosen: Value,
+    states: Vec<Value>,
     end: u32,
 }
 
-impl<'g> Decoder<'g> {
+impl Decoder {
     pub fn greedy(
-        graph: &Graph<'g>,
-        token: Value<'g>,
-        position: Value<'g>,
-        logits: Value<'g>,
-        states: impl IntoIterator<Item = Value<'g>>,
+        graph: &Graph,
+        token: Value,
+        position: Value,
+        logits: Value,
+        states: impl IntoIterator<Item = Value>,
         end: u32,
     ) -> Self {
         for (held, what) in [(token, "token"), (position, "position")] {
@@ -36,19 +36,19 @@ impl<'g> Decoder<'g> {
         }
     }
 
-    pub fn token(&self) -> Value<'g> {
+    pub fn token(&self) -> Value {
         self.token
     }
 
-    pub fn position(&self) -> Value<'g> {
+    pub fn position(&self) -> Value {
         self.position
     }
 
-    pub fn chosen(&self) -> Value<'g> {
+    pub fn chosen(&self) -> Value {
         self.chosen
     }
 
-    pub fn states(&self) -> &[Value<'g>] {
+    pub fn states(&self) -> &[Value] {
         &self.states
     }
 

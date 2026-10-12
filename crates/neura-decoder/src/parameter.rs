@@ -2,13 +2,7 @@ use neura_abi::Element;
 use neura_gguf::{Archive, Tensor};
 use neura_graph::{Graph, Init, Shape, Value};
 
-pub fn matrix<'g>(
-    graph: &Graph<'g>,
-    source: &impl Archive,
-    name: &str,
-    rows: u32,
-    columns: u32,
-) -> Value<'g> {
+pub fn matrix(graph: &Graph, source: &impl Archive, name: &str, rows: u32, columns: u32) -> Value {
     let held = held(source, name);
     assert_eq!(
         (held.rank, held.shape[0], held.shape[1]),
@@ -20,7 +14,7 @@ pub fn matrix<'g>(
     declare(graph, name, Shape::matrix(rows, columns), held.element)
 }
 
-pub fn vector<'g>(graph: &Graph<'g>, source: &impl Archive, name: &str, width: u32) -> Value<'g> {
+pub fn vector(graph: &Graph, source: &impl Archive, name: &str, width: u32) -> Value {
     let held = held(source, name);
     assert_eq!(
         (held.rank, held.shape[0]),
@@ -38,7 +32,7 @@ fn held(source: &impl Archive, name: &str) -> Tensor {
         .unwrap_or_else(|| panic!("this gguf holds no tensor named {name}"))
 }
 
-fn declare<'g>(graph: &Graph<'g>, name: &str, shape: Shape, element: Element) -> Value<'g> {
+fn declare(graph: &Graph, name: &str, shape: Shape, element: Element) -> Value {
     if element.block().is_some() {
         graph.named_block_quantized_parameter(name, shape, Init::Zero, element)
     } else {

@@ -5,34 +5,29 @@ use neura_decoder::{flatten, heads, l2, matrix, rms, softplus, vector};
 use neura_gguf::Archive;
 use neura_graph::{Graph, Shape, Value};
 
-pub(crate) struct Delta<'g> {
-    norm: Value<'g>,
-    qkv: Value<'g>,
-    gate: Value<'g>,
-    output: Value<'g>,
-    conv: Value<'g>,
-    alpha: Value<'g>,
-    beta: Value<'g>,
-    decay: Value<'g>,
-    bias: Value<'g>,
-    output_norm: Value<'g>,
-    mlp: Mlp<'g>,
-    conv_state: Value<'g>,
-    state: Value<'g>,
-    floor: Value<'g>,
-    scale: Value<'g>,
+pub(crate) struct Delta {
+    norm: Value,
+    qkv: Value,
+    gate: Value,
+    output: Value,
+    conv: Value,
+    alpha: Value,
+    beta: Value,
+    decay: Value,
+    bias: Value,
+    output_norm: Value,
+    mlp: Mlp,
+    conv_state: Value,
+    state: Value,
+    floor: Value,
+    scale: Value,
     heads: u32,
     width: u32,
     kernel: u32,
 }
 
-impl<'g> Delta<'g> {
-    pub(crate) fn new(
-        graph: &Graph<'g>,
-        source: &impl Archive,
-        config: &Config,
-        layer: u32,
-    ) -> Self {
+impl Delta {
+    pub(crate) fn new(graph: &Graph, source: &impl Archive, config: &Config, layer: u32) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.linear_width;
         let held = config.linear_width_total();
@@ -83,18 +78,18 @@ impl<'g> Delta<'g> {
         }
     }
 
-    pub(crate) fn states(&self) -> [Value<'g>; 2] {
+    pub(crate) fn states(&self) -> [Value; 2] {
         [self.conv_state, self.state]
     }
 
-    pub(crate) fn forward(&self, graph: &Graph<'g>, hidden: Value<'g>) -> Value<'g> {
+    pub(crate) fn forward(&self, graph: &Graph, hidden: Value) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let mixed = graph.matmul(normed, graph.permute(self.qkv, [0, 1, 3, 2]));
         let window = graph.concat(
             &(0..self.kernel - 1)
                 .map(|row| graph.slice(self.conv_state, 2, row, 1))
                 .chain([mixed])
-                .collect::<Vec<Value<'g>>>(),
+                .collect::<Vec<Value>>(),
             2,
         );
         let convolved = graph

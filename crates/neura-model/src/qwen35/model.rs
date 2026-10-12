@@ -5,20 +5,20 @@ use neura_decoder::{matrix, rms, vector};
 use neura_gguf::Archive;
 use neura_graph::{Graph, Shape, Value};
 
-pub struct Model<'g> {
-    embedding: Value<'g>,
-    output_norm: Value<'g>,
-    floor: Value<'g>,
-    layers: Vec<Layer<'g>>,
+pub struct Model {
+    embedding: Value,
+    output_norm: Value,
+    floor: Value,
+    layers: Vec<Layer>,
 }
 
-enum Layer<'g> {
-    Attend(Attention<'g>),
-    Delta(Delta<'g>),
+enum Layer {
+    Attend(Attention),
+    Delta(Delta),
 }
 
-impl<'g> Model<'g> {
-    pub fn new(graph: &Graph<'g>, source: &impl Archive, config: &Config, context: u32) -> Self {
+impl Model {
+    pub fn new(graph: &Graph, source: &impl Archive, config: &Config, context: u32) -> Self {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
@@ -27,7 +27,7 @@ impl<'g> Model<'g> {
                     Layer::Delta(Delta::new(graph, source, config, layer))
                 }
             })
-            .collect::<Vec<Layer<'g>>>();
+            .collect::<Vec<Layer>>();
         Self {
             embedding: matrix(
                 graph,
@@ -42,7 +42,7 @@ impl<'g> Model<'g> {
         }
     }
 
-    pub fn states(&self) -> Vec<Value<'g>> {
+    pub fn states(&self) -> Vec<Value> {
         let mut states = Vec::new();
         for layer in &self.layers {
             match layer {
@@ -53,7 +53,7 @@ impl<'g> Model<'g> {
         states
     }
 
-    pub fn step(&self, graph: &Graph<'g>, token: Value<'g>, position: Value<'g>) -> Value<'g> {
+    pub fn step(&self, graph: &Graph, token: Value, position: Value) -> Value {
         let mut hidden = graph.gather(self.embedding, token);
         for layer in &self.layers {
             hidden = match layer {

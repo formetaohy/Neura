@@ -14,7 +14,7 @@ const ROWS: u32 = 64;
 const COLUMNS: u32 = 64;
 const ELEMENTS: usize = (ROWS * COLUMNS) as usize;
 
-fn seed_of<'g>(graph: &Graph<'g>) -> Value<'g> {
+fn seed_of(graph: &Graph) -> Value {
     graph.input(Shape::scalar(), Element::Single)
 }
 

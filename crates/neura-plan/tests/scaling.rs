@@ -10,7 +10,7 @@ fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
 }
 
-fn chain(rounds: usize) -> Graph<'static> {
+fn chain(rounds: usize) -> Graph {
     let graph = Graph::new();
     let state = graph.state(Shape::of([1, 1, 1, 4096]), Init::Zero, Element::Single);
     let one = graph.fill(Shape::of([1, 1, 1, 4096]), 0.5);

@@ -270,7 +270,7 @@ fn planned_tiles(products: &[Product], profile: Profile) -> Vec<(Product, Matmul
         .collect()
 }
 
-fn product_graph(product: Product) -> Graph<'static> {
+fn product_graph(product: Product) -> Graph {
     let graph = Graph::new();
     let left = graph.parameter(
         Shape::of([product.planes(), 1, product.rows(), product.depth()]),

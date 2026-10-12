@@ -14,7 +14,7 @@ fn open() -> Runtime {
     .unwrap_or_else(|error| panic!("no device runs the tests: {error}"))
 }
 
-fn constant<'g>(graph: &Graph<'g>, name: f32) -> Value<'g> {
+fn constant(graph: &Graph, name: f32) -> Value {
     graph.fill(Shape::scalar(), name)
 }
 

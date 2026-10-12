@@ -56,7 +56,7 @@ fn spilled_with(backend: Backend, directory: &Path, bytes: u64) -> Runtime {
     )
 }
 
-fn layers<'g>(graph: &Graph<'g>) -> Vec<(Value<'g>, Value<'g>)> {
+fn layers(graph: &Graph) -> Vec<(Value, Value)> {
     let init = Init::Uniform {
         low: -0.02,
         high: 0.02,
@@ -81,13 +81,13 @@ fn layers<'g>(graph: &Graph<'g>) -> Vec<(Value<'g>, Value<'g>)> {
         .collect()
 }
 
-struct Session<'g> {
-    layers: Vec<(Value<'g>, Value<'g>)>,
-    data: Value<'g>,
-    loss: Value<'g>,
+struct Session {
+    layers: Vec<(Value, Value)>,
+    data: Value,
+    loss: Value,
 }
 
-fn training<'g>(graph: &Graph<'g>) -> Session<'g> {
+fn training(graph: &Graph) -> Session {
     let layers = layers(graph);
     let data = graph.input(Shape::matrix(BATCH, WIDTH), Element::Single);
     let mut value = data;
@@ -116,12 +116,7 @@ struct Trained {
     loss: f32,
 }
 
-fn train(
-    runtime: &Runtime,
-    graph: &Graph<'_>,
-    session: &Session<'_>,
-    weights: &Weights,
-) -> Trained {
+fn train(runtime: &Runtime, graph: &Graph, session: &Session, weights: &Weights) -> Trained {
     let program = runtime.compile(graph, weights);
     let input = numbers();
     let mut loss = 0.0;
@@ -133,7 +128,7 @@ fn train(
     Trained { program, loss }
 }
 
-fn parameters(runtime: &Runtime, program: &Program, session: &Session<'_>) -> Vec<f32> {
+fn parameters(runtime: &Runtime, program: &Program, session: &Session) -> Vec<f32> {
     session
         .layers
         .iter()
@@ -506,8 +501,8 @@ fn carries_every_quantum_of_a_quantized_model(backend: Backend, directory: &Path
 fn run_quantized(
     runtime: &Runtime,
     program: &Program,
-    first: Value<'_>,
-    out: Value<'_>,
+    first: Value,
+    out: Value,
     written: &[f32],
 ) -> (Vec<f32>, Vec<f32>) {
     runtime.write(program, first, written);
@@ -522,7 +517,7 @@ fn run_quantized(
     (runtime.read(program, out), read)
 }
 
-fn quantized<'g>(graph: &Graph<'g>) -> (Value<'g>, Value<'g>) {
+fn quantized(graph: &Graph) -> (Value, Value) {
     let first = graph.block_quantized_parameter(
         Shape::matrix(1024, 256),
         Init::Uniform {

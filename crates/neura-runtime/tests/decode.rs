@@ -31,7 +31,7 @@ fn data(count: u32, seed: u32) -> Vec<f32> {
         .collect()
 }
 
-fn options<'g>(graph: &Graph<'g>, cursor: Value<'g>) -> AttentionOptions<'g> {
+fn options(graph: &Graph, cursor: Value) -> AttentionOptions {
     AttentionOptions {
         bias: None,
         scale: Some(graph.knob(SCALE)),
@@ -60,12 +60,12 @@ fn cached_shapes(queries: u32, origin: u32, reach: u32) -> Shapes {
 
 struct Decoder {
     runtime: Runtime,
-    graph: Graph<'static>,
-    cursor: Value<'static>,
-    slot: Value<'static>,
-    row: Value<'static>,
-    query: Value<'static>,
-    out: Value<'static>,
+    graph: Graph,
+    cursor: Value,
+    slot: Value,
+    row: Value,
+    query: Value,
+    out: Value,
     ring: bool,
 }
 
@@ -79,7 +79,7 @@ impl Decoder {
     }
 
     fn of(agents: u32, reach: Option<u32>) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let keys = graph.resident(Shape::of([agents, 1, CAPACITY, WIDTH]), Element::Single);
         let values = graph.resident(Shape::of([agents, 1, CAPACITY, WIDTH]), Element::Single);
         let cursor = graph.input(Shape::of([agents, 1, 1, 1]), Element::Single);
@@ -191,7 +191,7 @@ fn a_decode_step_reads_the_keys_its_cursor_reaches() {
 #[test]
 fn a_decode_gradient_reaches_the_keys_a_cursor_exposes() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let keys = graph.parameter(
         Shape::of([1, 1, CAPACITY, WIDTH]),
         Init::Zero,
@@ -308,7 +308,7 @@ fn a_cursor_frees_each_plane_at_its_own_position() {
 fn a_grouped_decode_reads_one_cache_for_every_query_head() {
     let runtime = open();
     let heads = 2u32;
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let keys = graph.resident(Shape::of([1, 1, CAPACITY, WIDTH]), Element::Single);
     let values = graph.resident(Shape::of([1, 1, CAPACITY, WIDTH]), Element::Single);
     let cursor = graph.input(Shape::scalar(), Element::Single);
@@ -456,7 +456,7 @@ fn a_ring_of_no_window_still_reads_every_key_its_cursor_reaches() {
 #[test]
 fn a_windowed_decode_gradient_reaches_the_keys_a_ring_exposes() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let keys = graph.parameter(
         Shape::of([1, 1, CAPACITY, WIDTH]),
         Init::Zero,

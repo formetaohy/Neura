@@ -33,10 +33,10 @@ fn refusal_message(action: impl FnOnce()) -> String {
 
 struct Counted {
     runtime: Runtime,
-    graph: Graph<'static>,
-    count: Value<'static>,
-    tokens: Value<'static>,
-    total: Value<'static>,
+    graph: Graph,
+    count: Value,
+    tokens: Value,
+    total: Value,
 }
 
 impl Counted {
@@ -84,7 +84,7 @@ fn a_refusal_survives_the_runs_the_host_never_reads() {
 #[test]
 fn a_refusal_survives_the_binding_the_host_never_reads() {
     let runtime = open();
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let bound = graph.free(BOUND);
     let tokens = graph.input(
         Shape::of([BOUND, 1, WIDTH, WIDTH]).freed(&[(0, bound)]),

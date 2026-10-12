@@ -552,7 +552,7 @@ fn every_platform_backend_rounds_the_numbers_the_host_would() {
     }
 }
 
-fn narrow_stack<'g>(graph: &Graph<'g>, element: Element, data: Shape) -> [Value<'g>; 6] {
+fn narrow_stack(graph: &Graph, element: Element, data: Shape) -> [Value; 6] {
     let filter = graph.parameter(
         Shape::of([4, 2, 3, 3]),
         Init::Uniform {

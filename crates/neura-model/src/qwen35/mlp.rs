@@ -2,16 +2,16 @@ use neura_decoder::{matrix, rms, vector};
 use neura_gguf::Archive;
 use neura_graph::{Graph, Value};
 
-pub(crate) struct Mlp<'g> {
-    norm: Value<'g>,
-    gate: Value<'g>,
-    up: Value<'g>,
-    down: Value<'g>,
+pub(crate) struct Mlp {
+    norm: Value,
+    gate: Value,
+    up: Value,
+    down: Value,
 }
 
-impl<'g> Mlp<'g> {
+impl Mlp {
     pub(crate) fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         source: &impl Archive,
         layer: u32,
         hidden: u32,
@@ -26,12 +26,7 @@ impl<'g> Mlp<'g> {
         }
     }
 
-    pub(crate) fn forward(
-        &self,
-        graph: &Graph<'g>,
-        value: Value<'g>,
-        floor: Value<'g>,
-    ) -> Value<'g> {
+    pub(crate) fn forward(&self, graph: &Graph, value: Value, floor: Value) -> Value {
         let normed = rms(graph, value, self.norm, floor);
         let left = graph.silu(graph.matmul(normed, graph.permute(self.gate, [0, 1, 3, 2])));
         let right = graph.matmul(normed, graph.permute(self.up, [0, 1, 3, 2]));

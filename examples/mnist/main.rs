@@ -24,16 +24,16 @@ const RATE: f32 = 1e-3;
 const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const HEAP_BYTES: u64 = 1 << 26;
 
-struct Model<'g> {
-    conv1: Conv2d<'g>,
-    conv2: Conv2d<'g>,
-    head: Linear<'g>,
-    out: Linear<'g>,
+struct Model {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    head: Linear,
+    out: Linear,
     flattened: u32,
 }
 
-impl<'g> Model<'g> {
-    fn new(graph: &Graph<'g>, flattened: u32) -> Self {
+impl Model {
+    fn new(graph: &Graph, flattened: u32) -> Self {
         let init = Init::Uniform {
             low: -0.25,
             high: 0.25,
@@ -64,7 +64,7 @@ impl<'g> Model<'g> {
         }
     }
 
-    fn logits(&self, graph: &Graph<'g>, images: Value<'g>, batch: Free) -> Value<'g> {
+    fn logits(&self, graph: &Graph, images: Value, batch: Free) -> Value {
         let pool = Window::new(POOL, POOL, [0, 0], [1, 1]);
         let first = graph.pool2d(
             graph.relu(self.conv1.forward(graph, images)),
@@ -82,7 +82,7 @@ impl<'g> Model<'g> {
             .forward(graph, graph.relu(self.head.forward(graph, rows)))
     }
 
-    fn parameters(&self) -> Vec<Value<'g>> {
+    fn parameters(&self) -> Vec<Value> {
         let mut parameters = self.conv1.parameters().to_vec();
         parameters.extend(self.conv2.parameters());
         parameters.extend(self.head.parameters());
@@ -91,14 +91,14 @@ impl<'g> Model<'g> {
     }
 }
 
-struct Session<'g> {
-    images: Value<'g>,
-    labels: Value<'g>,
-    logits: Value<'g>,
-    loss: Value<'g>,
+struct Session {
+    images: Value,
+    labels: Value,
+    logits: Value,
+    loss: Value,
 }
 
-fn session<'g>(graph: &Graph<'g>, model: &Model<'g>, rows: u32, columns: u32) -> Session<'g> {
+fn session(graph: &Graph, model: &Model, rows: u32, columns: u32) -> Session {
     let batch = graph.free(BOUND);
     let images = graph.input(
         Shape::of([BOUND, 1, rows, columns]).freed(&[(0, batch)]),
@@ -232,7 +232,7 @@ struct Held {
     confusion: [[u32; CLASSES as usize]; CLASSES as usize],
 }
 
-fn measure(runtime: &Runtime, program: &Program, session: &Session<'_>, test: &Dataset) -> Held {
+fn measure(runtime: &Runtime, program: &Program, session: &Session, test: &Dataset) -> Held {
     let order = Order::ordered(test.len());
     let mut images = Vec::new();
     let mut labels = Vec::new();
@@ -273,7 +273,7 @@ struct Gallery {
 fn classify(
     runtime: &Runtime,
     program: &Program,
-    session: &Session<'_>,
+    session: &Session,
     test: &Dataset,
     count: u32,
 ) -> Gallery {

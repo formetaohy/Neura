@@ -117,13 +117,13 @@ fn expected_with(
 
 struct Ragged {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    cursor: Value<'static>,
-    query: Value<'static>,
-    cache: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
+    graph: Graph,
+    lengths: Value,
+    cursor: Value,
+    query: Value,
+    cache: Value,
+    out: Value,
+    offsets: Value,
     reach: u32,
 }
 
@@ -137,7 +137,7 @@ impl Ragged {
     }
 
     fn beside(planes: u32, bound: u32, width: u32, reach: u32, bias: Option<f32>) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
         let cache = graph.resident(
@@ -235,7 +235,7 @@ fn a_prefix_walks_every_chunk_of_a_long_plane_axis() {
 
 #[test]
 fn device_counts_rule_the_key_spans() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let mask = graph.input(Shape::of([PLANES, 1, BOUND, 1]), Element::Single);
     let counts = graph.sum_axis(mask, 2);
     let ragged = graph.ragged(BOUND, counts);
@@ -326,7 +326,7 @@ fn an_extent_beyond_the_bound_a_graph_declares_is_refused() {
 #[test]
 fn a_segmented_attention_names_an_offset_per_plane() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
         let cache = graph.resident(
@@ -354,7 +354,7 @@ fn a_segmented_attention_names_an_offset_per_plane() {
 #[test]
 fn a_causal_segmented_attention_walks_a_cursor() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
         let cache = graph.resident(
@@ -382,11 +382,11 @@ fn a_causal_segmented_attention_walks_a_cursor() {
 #[test]
 fn a_ragged_extent_outruns_the_numbers_a_device_sums_exactly() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         graph.ragged((1 << 24) + 1, lengths);
     }));
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     graph.ragged(1 << 24, lengths);
 }
@@ -394,7 +394,7 @@ fn a_ragged_extent_outruns_the_numbers_a_device_sums_exactly() {
 #[test]
 fn a_ragged_axis_refuses_a_length_the_host_holds_as_a_view() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let observations = graph.input(Shape::matrix(PLANES, PLANES), Element::Single);
         let lengths = graph.permute(observations, [0, 1, 3, 2]);
         graph.ragged(BOUND, lengths);
@@ -404,7 +404,7 @@ fn a_ragged_axis_refuses_a_length_the_host_holds_as_a_view() {
 #[test]
 fn a_segmented_attention_walks_an_axis_a_device_authors() {
     assert!(refuses(|| {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let offsets = graph.input(Shape::vector(PLANES + 1), Element::Single);
         let cache = graph.input(
             Shape::of([1, 1, BOUND, WIDTH]).freed(&[(2, graph.free(BOUND))]),
@@ -430,19 +430,19 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
 
 struct Planes {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    cursor: Value<'static>,
-    query: Value<'static>,
-    cache: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
-    total: Value<'static>,
+    graph: Graph,
+    lengths: Value,
+    cursor: Value,
+    query: Value,
+    cache: Value,
+    out: Value,
+    offsets: Value,
+    total: Value,
 }
 
 impl Planes {
     fn of(planes: u32, bound: u32, width: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = graph.free(planes);
         let lengths = graph.input(Shape::of([1, planes]).freed(&[(3, live)]), Element::Single);
         let ragged = graph.ragged(bound, lengths);
@@ -578,20 +578,20 @@ fn a_ragged_axis_of_one_plane_walks_the_plane_a_binding_holds() {
 
 struct CountedPlanes {
     runtime: Runtime,
-    graph: Graph<'static>,
-    count: Value<'static>,
-    lengths: Value<'static>,
-    cursor: Value<'static>,
-    query: Value<'static>,
-    cache: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
-    total: Value<'static>,
+    graph: Graph,
+    count: Value,
+    lengths: Value,
+    cursor: Value,
+    query: Value,
+    cache: Value,
+    out: Value,
+    offsets: Value,
+    total: Value,
 }
 
 impl CountedPlanes {
     fn of(planes: u32, bound: u32, width: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let count = graph.input(Shape::scalar(), Element::Single);
         let live = graph.counted(planes, count);
         let lengths = graph.input(
@@ -704,7 +704,7 @@ fn a_ragged_axis_a_device_count_narrows_closes_only_the_planes_it_walks() {
 
 #[test]
 fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let flags = graph.input(Shape::of([1, 1, 1, PLANES]), Element::Single);
     let count = graph.sum(flags);
     let live = graph.counted(PLANES, count);
@@ -921,17 +921,17 @@ fn trainable_reference(packed: Packed<'_>, width: u32) -> (Vec<f32>, Vec<f32>, V
 
 struct Trainable {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    cursor: Value<'static>,
-    queries: Value<'static>,
-    keys: Value<'static>,
-    values: Value<'static>,
-    weight: Value<'static>,
-    offsets: Value<'static>,
-    out: Value<'static>,
-    rows: [Value<'static>; 2],
-    gradients: [Value<'static>; 3],
+    graph: Graph,
+    lengths: Value,
+    cursor: Value,
+    queries: Value,
+    keys: Value,
+    values: Value,
+    weight: Value,
+    offsets: Value,
+    out: Value,
+    rows: [Value; 2],
+    gradients: [Value; 3],
 }
 
 impl Trainable {
@@ -958,7 +958,7 @@ impl Trainable {
     ) -> Self {
         assert_eq!(planes % heads, 0, "a head carries a whole number of planes");
         let batch = planes / heads;
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = binding.then(|| graph.free(planes));
         let lengths = graph.input(
             match live {

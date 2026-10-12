@@ -13,14 +13,14 @@ use input::random;
 use reference::matmul_reference;
 use support::{assert_close, open};
 
-struct Sensor<'g> {
+struct Sensor {
     program: neura_runtime::Program,
-    input: Value<'g>,
-    out: Value<'g>,
-    weight: Value<'g>,
+    input: Value,
+    out: Value,
+    weight: Value,
 }
 
-fn sensor<'g>(runtime: &'g Runtime, graph: &Graph<'g>, samples: u32) -> Sensor<'g> {
+fn sensor(runtime: &Runtime, graph: &Graph, samples: u32) -> Sensor {
     let input = graph.input(Shape::matrix(samples, 4), Element::Single);
     let weight = graph.parameter(
         Shape::matrix(4, 2),

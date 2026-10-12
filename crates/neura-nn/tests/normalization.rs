@@ -241,15 +241,15 @@ fn a_group_normalization_keeps_its_scale_beside_its_shift() {
 }
 
 struct NormFamily {
-    input: Value<'static>,
-    weight: Value<'static>,
-    out: Value<'static>,
-    gradient: Value<'static>,
-    scale: Value<'static>,
-    shift: Option<Value<'static>>,
+    input: Value,
+    weight: Value,
+    out: Value,
+    gradient: Value,
+    scale: Value,
+    shift: Option<Value>,
 }
 
-fn norm_family(graph: &Graph<'static>, rms: bool, shape: Shape) -> NormFamily {
+fn norm_family(graph: &Graph, rms: bool, shape: Shape) -> NormFamily {
     let input = graph.gradient_input(shape, Element::Single);
     let weight = graph.input(shape, Element::Single);
     let (out, scale, shift) = if rms {

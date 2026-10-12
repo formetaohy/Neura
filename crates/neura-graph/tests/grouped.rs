@@ -13,7 +13,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 
 #[test]
 fn a_grouped_product_walks_the_rows_a_ragged_axis_packs() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.input(
@@ -44,7 +44,7 @@ fn a_grouped_product_walks_the_rows_a_ragged_axis_packs() {
 
 #[test]
 fn a_grouped_product_walks_the_segments_a_ragged_axis_closes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let offsets = graph.input(Shape::vector(PLANES + 1), Element::Single);
     let loose = graph.free(BOUND);
     let left = graph.input(
@@ -69,7 +69,7 @@ fn a_grouped_product_walks_the_segments_a_ragged_axis_closes() {
 
 #[test]
 fn a_grouped_product_walks_the_extent_its_ragged_axis_closes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let other = graph.input(Shape::vector(PLANES), Element::Single);
@@ -96,7 +96,7 @@ fn a_grouped_product_walks_the_extent_its_ragged_axis_closes() {
 
 #[test]
 fn a_grouped_product_weighs_one_plane_of_every_segment() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.input(
@@ -121,7 +121,7 @@ fn a_grouped_product_weighs_one_plane_of_every_segment() {
 
 #[test]
 fn a_grouped_product_weighs_the_depth_of_every_packed_row() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.input(
@@ -147,7 +147,7 @@ fn a_grouped_product_weighs_the_depth_of_every_packed_row() {
 
 #[test]
 fn a_grouped_product_walks_one_axis_of_packed_rows() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.input(
@@ -172,7 +172,7 @@ fn a_grouped_product_walks_one_axis_of_packed_rows() {
 
 #[test]
 fn a_grouped_product_walks_the_rows_its_storage_lays_out() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let packed = graph.input(
@@ -198,7 +198,7 @@ fn a_grouped_product_walks_the_rows_its_storage_lays_out() {
 
 #[test]
 fn a_grouped_product_weighs_the_weights_of_static_planes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.input(
@@ -220,7 +220,7 @@ fn a_grouped_product_weighs_the_weights_of_static_planes() {
 
 #[test]
 fn a_grouped_product_carries_the_gradients_of_the_rows_and_the_weights_it_weighs() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let left = graph.gradient_input(

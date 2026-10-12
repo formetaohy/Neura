@@ -54,12 +54,12 @@ fn expected(
 
 struct Grouped {
     runtime: Runtime,
-    graph: Graph<'static>,
-    left: Value<'static>,
-    weights: Value<'static>,
-    lengths: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
+    graph: Graph,
+    left: Value,
+    weights: Value,
+    lengths: Value,
+    out: Value,
+    offsets: Value,
     depth: u32,
     columns: u32,
 }
@@ -70,7 +70,7 @@ impl Grouped {
     }
 
     fn over(runtime: Runtime, planes: u32, bound: u32, depth: u32, columns: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
         let left = graph.input(
@@ -195,12 +195,12 @@ fn a_grouped_product_splits_the_depth_of_a_long_pair() {
 
 struct Planes {
     runtime: Runtime,
-    graph: Graph<'static>,
-    left: Value<'static>,
-    weights: Value<'static>,
-    mask: Value<'static>,
-    out: Value<'static>,
-    offsets: Value<'static>,
+    graph: Graph,
+    left: Value,
+    weights: Value,
+    mask: Value,
+    out: Value,
+    offsets: Value,
     depth: u32,
     columns: u32,
     bound: u32,
@@ -209,7 +209,7 @@ struct Planes {
 
 impl Planes {
     fn of(planes: u32, bound: u32, depth: u32, columns: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = graph.free(planes);
         let mask = graph.input(
             Shape::of([planes, 1, bound, 1]).freed(&[(0, live)]),
@@ -310,12 +310,12 @@ fn a_grouped_product_walks_the_segments_a_binding_holds() {
 
 struct Fused {
     runtime: Runtime,
-    graph: Graph<'static>,
-    left: Value<'static>,
-    weights: Value<'static>,
-    bias: Value<'static>,
-    lengths: Value<'static>,
-    out: Value<'static>,
+    graph: Graph,
+    left: Value,
+    weights: Value,
+    bias: Value,
+    lengths: Value,
+    out: Value,
     depth: u32,
     columns: u32,
 }
@@ -327,7 +327,7 @@ impl Fused {
     }
 
     fn of(planes: u32, bound: u32, depth: u32, columns: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
         let left = graph.input(

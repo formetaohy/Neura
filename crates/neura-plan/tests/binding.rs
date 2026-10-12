@@ -12,7 +12,7 @@ fn narrow() -> Profile {
     Profile::derive(Budget::BASELINE, None)[0]
 }
 
-fn chain(rows: u32, free: Option<u32>) -> Graph<'static> {
+fn chain(rows: u32, free: Option<u32>) -> Graph {
     let graph = Graph::new();
     let batch = free.map(|bound| graph.free(bound));
     let mut value = match batch {
@@ -114,7 +114,7 @@ fn a_static_plan_holds_the_arena_it_derives() {
     );
 }
 
-fn training(rows: u32, free: Option<u32>) -> Graph<'static> {
+fn training(rows: u32, free: Option<u32>) -> Graph {
     let graph = Graph::new();
     let (observations, targets) = match free {
         Some(bound) => {

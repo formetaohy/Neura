@@ -1,15 +1,15 @@
 use neura_abi::{Element, MAX_RANK};
 use neura_graph::{AttentionOptions, Fan, Graph, Init, Shape, Value, Window};
 
-pub struct Adapter<'g> {
-    down: Value<'g>,
-    up: Value<'g>,
-    scale: Value<'g>,
+pub struct Adapter {
+    down: Value,
+    up: Value,
+    scale: Value,
 }
 
-impl<'g> Adapter<'g> {
+impl Adapter {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         planes: [u32; 2],
         rank: u32,
@@ -46,36 +46,36 @@ impl<'g> Adapter<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>, base: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value, base: Value) -> Value {
         let bypass = graph.matmul(graph.matmul(input, self.down), self.up);
         graph.add(base, graph.mul(bypass, self.scale))
     }
 
-    pub fn down(&self) -> Value<'g> {
+    pub fn down(&self) -> Value {
         self.down
     }
 
-    pub fn up(&self) -> Value<'g> {
+    pub fn up(&self) -> Value {
         self.up
     }
 
-    pub fn scale(&self) -> Value<'g> {
+    pub fn scale(&self) -> Value {
         self.scale
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.down, self.up]
     }
 }
 
-pub struct Linear<'g> {
-    weight: Value<'g>,
-    bias: Value<'g>,
+pub struct Linear {
+    weight: Value,
+    bias: Value,
 }
 
-impl<'g> Linear<'g> {
+impl Linear {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         inputs: u32,
         outputs: u32,
@@ -96,7 +96,7 @@ impl<'g> Linear<'g> {
     }
 
     pub fn quantized(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         inputs: u32,
         outputs: u32,
@@ -118,7 +118,7 @@ impl<'g> Linear<'g> {
     }
 
     pub fn block_quantized(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         inputs: u32,
         outputs: u32,
@@ -140,11 +140,11 @@ impl<'g> Linear<'g> {
     }
 
     fn declared(
-        graph: &Graph<'g>,
+        graph: &Graph,
         inputs: u32,
         outputs: u32,
         element: Element,
-        declare: impl FnOnce(&Graph<'g>, Shape, Shape) -> (Value<'g>, Value<'g>),
+        declare: impl FnOnce(&Graph, Shape, Shape) -> (Value, Value),
     ) -> Self {
         assert!(
             inputs > 0 && outputs > 0,
@@ -163,32 +163,32 @@ impl<'g> Linear<'g> {
         Self { weight, bias }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         graph.add(graph.matmul(input, self.weight), self.bias)
     }
 
-    pub fn weight(&self) -> Value<'g> {
+    pub fn weight(&self) -> Value {
         self.weight
     }
 
-    pub fn bias(&self) -> Value<'g> {
+    pub fn bias(&self) -> Value {
         self.bias
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.weight, self.bias]
     }
 }
 
-pub struct Conv2d<'g> {
-    filter: Value<'g>,
-    bias: Value<'g>,
+pub struct Conv2d {
+    filter: Value,
+    bias: Value,
     window: Window,
 }
 
-impl<'g> Conv2d<'g> {
+impl Conv2d {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         channels: [u32; 2],
         groups: u32,
@@ -231,33 +231,33 @@ impl<'g> Conv2d<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         graph.add(graph.conv2d(input, self.filter, self.window), self.bias)
     }
 
-    pub fn filter(&self) -> Value<'g> {
+    pub fn filter(&self) -> Value {
         self.filter
     }
 
-    pub fn bias(&self) -> Value<'g> {
+    pub fn bias(&self) -> Value {
         self.bias
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.filter, self.bias]
     }
 }
 
-pub struct ConvTranspose2d<'g> {
-    filter: Value<'g>,
-    bias: Value<'g>,
+pub struct ConvTranspose2d {
+    filter: Value,
+    bias: Value,
     window: Window,
     groups: u32,
 }
 
-impl<'g> ConvTranspose2d<'g> {
+impl ConvTranspose2d {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         channels: [u32; 2],
         groups: u32,
@@ -301,36 +301,36 @@ impl<'g> ConvTranspose2d<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         graph.add(
             graph.conv2d_transpose(input, self.filter, self.window, self.groups),
             self.bias,
         )
     }
 
-    pub fn filter(&self) -> Value<'g> {
+    pub fn filter(&self) -> Value {
         self.filter
     }
 
-    pub fn bias(&self) -> Value<'g> {
+    pub fn bias(&self) -> Value {
         self.bias
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.filter, self.bias]
     }
 }
 
-pub struct LayerNorm<'g> {
+pub struct LayerNorm {
     columns: u32,
-    scale: Value<'g>,
-    shift: Value<'g>,
-    floor: Value<'g>,
+    scale: Value,
+    shift: Value,
+    floor: Value,
 }
 
-impl<'g> LayerNorm<'g> {
+impl LayerNorm {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         columns: u32,
         init: Init,
@@ -360,7 +360,7 @@ impl<'g> LayerNorm<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         assert_eq!(
             graph.shape(input).columns(),
             self.columns,
@@ -376,26 +376,26 @@ impl<'g> LayerNorm<'g> {
         graph.add(graph.mul(sharpened, self.scale), self.shift)
     }
 
-    pub fn scale(&self) -> Value<'g> {
+    pub fn scale(&self) -> Value {
         self.scale
     }
 
-    pub fn shift(&self) -> Value<'g> {
+    pub fn shift(&self) -> Value {
         self.shift
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.scale, self.shift]
     }
 }
 
-pub struct Embedding<'g> {
-    table: Value<'g>,
+pub struct Embedding {
+    table: Value,
 }
 
-impl<'g> Embedding<'g> {
+impl Embedding {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         rows: u32,
         width: u32,
@@ -416,15 +416,15 @@ impl<'g> Embedding<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, indices: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, indices: Value) -> Value {
         graph.gather(self.table, indices)
     }
 
-    pub fn table(&self) -> Value<'g> {
+    pub fn table(&self) -> Value {
         self.table
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 1] {
+    pub fn parameters(&self) -> [Value; 1] {
         [self.table]
     }
 }
@@ -466,39 +466,39 @@ impl HeadShape {
     }
 }
 
-pub struct MultiHeadAttention<'g> {
+pub struct MultiHeadAttention {
     head: HeadShape,
-    queries: Value<'g>,
-    keys: Value<'g>,
-    values: Value<'g>,
-    output: Value<'g>,
-    query_bias: Value<'g>,
-    key_bias: Value<'g>,
-    value_bias: Value<'g>,
-    output_bias: Value<'g>,
-    options: AttentionOptions<'g>,
-    rotary: Option<Value<'g>>,
+    queries: Value,
+    keys: Value,
+    values: Value,
+    output: Value,
+    query_bias: Value,
+    key_bias: Value,
+    value_bias: Value,
+    output_bias: Value,
+    options: AttentionOptions,
+    rotary: Option<Value>,
 }
 
-impl<'g> MultiHeadAttention<'g> {
+impl MultiHeadAttention {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
-        options: AttentionOptions<'g>,
+        options: AttentionOptions,
     ) -> Self {
         Self::declared(graph, name, head, init, element, options, None)
     }
 
     pub fn rotary(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
-        options: AttentionOptions<'g>,
+        options: AttentionOptions,
         base: f32,
     ) -> Self {
         assert!(
@@ -517,13 +517,13 @@ impl<'g> MultiHeadAttention<'g> {
     }
 
     fn declared(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         head: HeadShape,
         init: Init,
         element: Element,
-        options: AttentionOptions<'g>,
-        rotary: Option<Value<'g>>,
+        options: AttentionOptions,
+        rotary: Option<Value>,
     ) -> Self {
         let projection = |heads: u32, columns: u32, what: &str| {
             graph.named_parameter(
@@ -559,7 +559,7 @@ impl<'g> MultiHeadAttention<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         let shape = graph.shape(input);
         assert!(
             shape.dims()[0] == 1 || shape.dims()[0] == self.head.heads(),
@@ -580,7 +580,7 @@ impl<'g> MultiHeadAttention<'g> {
             self.head.width(),
             shape.dims()[3],
         );
-        let project = |source: Value<'g>, weight: Value<'g>, bias: Value<'g>| {
+        let project = |source: Value, weight: Value, bias: Value| {
             graph.add(graph.matmul(source, weight), bias)
         };
         let query = project(input, self.queries, self.query_bias);
@@ -601,7 +601,7 @@ impl<'g> MultiHeadAttention<'g> {
         project(attended, self.output, self.output_bias)
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 8] {
+    pub fn parameters(&self) -> [Value; 8] {
         [
             self.queries,
             self.keys,
@@ -614,7 +614,7 @@ impl<'g> MultiHeadAttention<'g> {
         ]
     }
 
-    pub fn rotary_base(&self) -> Option<Value<'g>> {
+    pub fn rotary_base(&self) -> Option<Value> {
         self.rotary
     }
 
@@ -635,18 +635,12 @@ impl<'g> MultiHeadAttention<'g> {
     }
 }
 
-pub struct Mlp<'g> {
-    layers: Vec<Linear<'g>>,
+pub struct Mlp {
+    layers: Vec<Linear>,
 }
 
-impl<'g> Mlp<'g> {
-    pub fn new(
-        graph: &Graph<'g>,
-        name: &str,
-        widths: &[u32],
-        init: Init,
-        element: Element,
-    ) -> Self {
+impl Mlp {
+    pub fn new(graph: &Graph, name: &str, widths: &[u32], init: Init, element: Element) -> Self {
         assert!(
             widths.len() >= 2,
             "a multilayer perceptron spans at least two widths",
@@ -668,7 +662,7 @@ impl<'g> Mlp<'g> {
         Self { layers }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         let mut value = input;
         for (index, layer) in self.layers.iter().enumerate() {
             let dense = layer.forward(graph, value);
@@ -681,27 +675,27 @@ impl<'g> Mlp<'g> {
         value
     }
 
-    pub fn parameters(&self) -> Vec<Value<'g>> {
+    pub fn parameters(&self) -> Vec<Value> {
         self.layers
             .iter()
             .flat_map(|layer| layer.parameters())
             .collect()
     }
 
-    pub fn layers(&self) -> &[Linear<'g>] {
+    pub fn layers(&self) -> &[Linear] {
         &self.layers
     }
 }
 
-pub struct RmsNorm<'g> {
+pub struct RmsNorm {
     columns: u32,
-    scale: Value<'g>,
-    floor: Value<'g>,
+    scale: Value,
+    floor: Value,
 }
 
-impl<'g> RmsNorm<'g> {
+impl RmsNorm {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         columns: u32,
         init: Init,
@@ -725,7 +719,7 @@ impl<'g> RmsNorm<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         assert_eq!(
             graph.shape(input).columns(),
             self.columns,
@@ -739,26 +733,26 @@ impl<'g> RmsNorm<'g> {
         graph.mul(graph.mul(input, graph.recip(deviation)), self.scale)
     }
 
-    pub fn scale(&self) -> Value<'g> {
+    pub fn scale(&self) -> Value {
         self.scale
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 1] {
+    pub fn parameters(&self) -> [Value; 1] {
         [self.scale]
     }
 }
 
-pub struct GroupNorm<'g> {
+pub struct GroupNorm {
     channels: u32,
     groups: u32,
-    scale: Value<'g>,
-    shift: Value<'g>,
-    floor: Value<'g>,
+    scale: Value,
+    shift: Value,
+    floor: Value,
 }
 
-impl<'g> GroupNorm<'g> {
+impl GroupNorm {
     pub fn new(
-        graph: &Graph<'g>,
+        graph: &Graph,
         name: &str,
         channels: u32,
         groups: u32,
@@ -790,7 +784,7 @@ impl<'g> GroupNorm<'g> {
         }
     }
 
-    pub fn forward(&self, graph: &Graph<'g>, input: Value<'g>) -> Value<'g> {
+    pub fn forward(&self, graph: &Graph, input: Value) -> Value {
         let dims = graph.shape(input).dims();
         assert_eq!(
             dims[1], self.channels,
@@ -818,15 +812,15 @@ impl<'g> GroupNorm<'g> {
         graph.add(graph.mul(whole, self.scale), self.shift)
     }
 
-    pub fn scale(&self) -> Value<'g> {
+    pub fn scale(&self) -> Value {
         self.scale
     }
 
-    pub fn shift(&self) -> Value<'g> {
+    pub fn shift(&self) -> Value {
         self.shift
     }
 
-    pub fn parameters(&self) -> [Value<'g>; 2] {
+    pub fn parameters(&self) -> [Value; 2] {
         [self.scale, self.shift]
     }
 }

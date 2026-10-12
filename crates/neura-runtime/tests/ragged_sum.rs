@@ -58,11 +58,11 @@ fn expected(lengths: &[f32], cache: &[f32], width: u32) -> Vec<f32> {
 
 struct Sums {
     runtime: Runtime,
-    graph: Graph<'static>,
-    lengths: Value<'static>,
-    cache: Value<'static>,
-    offsets: Value<'static>,
-    total: Value<'static>,
+    graph: Graph,
+    lengths: Value,
+    cache: Value,
+    offsets: Value,
+    total: Value,
     planes: u32,
     bound: u32,
     width: u32,
@@ -74,7 +74,7 @@ impl Sums {
     }
 
     fn over(runtime: Runtime, planes: u32, bound: u32, width: u32) -> Self {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
         let cache = graph.resident(
@@ -145,7 +145,7 @@ fn a_plane_sums_the_rows_of_a_long_axis_in_chunks() {
 #[test]
 fn a_plane_sums_a_length_a_device_counts() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let mask = graph.input(Shape::of([PLANES, 1, BOUND, 1]), Element::Single);
         let counts = graph.sum_axis(mask, 2);
         let ragged = graph.ragged(BOUND, counts);
@@ -181,7 +181,7 @@ fn a_plane_sums_a_length_a_device_counts() {
 #[test]
 fn a_plane_sums_a_binding_that_narrows_the_plane_axis() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let live = graph.free(PLANES);
         let lengths = graph.input(Shape::of([1, PLANES]).freed(&[(3, live)]), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
@@ -218,7 +218,7 @@ fn a_plane_sums_a_batch_the_lengths_lay_out_by_head() {
         for broad in [true, false] {
             let heads = 2u32;
             let batch = 3u32;
-            let graph: Graph<'static> = Graph::new();
+            let graph: Graph = Graph::new();
             let live = graph.free(batch);
             let lengths = graph.input(
                 Shape::of([heads, batch, 1, 1]).freed(&[(1, live)]),
@@ -253,7 +253,7 @@ fn a_plane_sums_a_batch_the_lengths_lay_out_by_head() {
 #[test]
 fn a_per_plane_sum_trains_the_rows_that_reach_it() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
         let cache = graph.gradient_input(
@@ -294,7 +294,7 @@ fn a_per_plane_sum_trains_the_rows_that_reach_it() {
 #[test]
 fn a_per_plane_sum_walks_the_planes_a_device_counts() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let flags = graph.input(Shape::of([1, 1, 1, PLANES]), Element::Single);
         let count = graph.sum(flags);
         let live = graph.counted(PLANES, count);
@@ -335,7 +335,7 @@ fn a_per_plane_sum_walks_the_planes_a_device_counts() {
 #[test]
 fn a_per_plane_sum_folds_the_packs_it_fused() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
         let cache = graph.gradient_input(
@@ -386,7 +386,7 @@ fn a_per_plane_sum_folds_the_packs_it_fused() {
 #[test]
 fn a_per_plane_sum_carries_the_width_a_binding_rules() {
     for &backend in PREFERENCE {
-        let graph: Graph<'static> = Graph::new();
+        let graph: Graph = Graph::new();
         let widths = graph.free(WIDTH);
         let lengths = graph.input(Shape::vector(PLANES), Element::Single);
         let ragged = graph.ragged(BOUND, lengths);
@@ -417,7 +417,7 @@ fn a_per_plane_sum_carries_the_width_a_binding_rules() {
 
 #[test]
 fn a_fold_over_a_ragged_axis_refuses_to_mix_its_planes() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let cache = graph.resident(
@@ -431,7 +431,7 @@ fn a_fold_over_a_ragged_axis_refuses_to_mix_its_planes() {
 
 #[test]
 fn a_per_plane_sum_names_the_axis_it_walks() {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let lengths = graph.input(Shape::vector(PLANES), Element::Single);
     let ragged = graph.ragged(BOUND, lengths);
     let bare = graph.input(Shape::matrix(PLANES + 1, 1), Element::Single);

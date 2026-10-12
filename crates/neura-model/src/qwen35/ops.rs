@@ -1,14 +1,14 @@
 use neura_graph::{Graph, Value};
 
-pub(crate) fn interleaved<'g>(
-    graph: &Graph<'g>,
-    value: Value<'g>,
+pub(crate) fn interleaved(
+    graph: &Graph,
+    value: Value,
     count: u32,
     width: u32,
     offset: u32,
-) -> Value<'g> {
+) -> Value {
     let parts = (0..count)
         .map(|head| graph.slice(value, 3, head * width * 2 + offset, width))
-        .collect::<Vec<Value<'g>>>();
+        .collect::<Vec<Value>>();
     graph.concat(&parts, 0)
 }

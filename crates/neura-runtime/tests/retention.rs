@@ -16,7 +16,7 @@ use support::{assert_close, open};
 
 const ELEMENTS: [Element; 3] = [Element::Single, Element::Half, Element::Fp8E4M3];
 
-type Mix = fn(&Graph<'static>, Value<'static>) -> Value<'static>;
+type Mix = fn(&Graph, Value) -> Value;
 
 fn mixes() -> [Mix; 5] {
     [
@@ -34,13 +34,13 @@ const COLUMNS: u32 = 64;
 
 struct Built {
     program: Program,
-    out: Value<'static>,
+    out: Value,
     left_data: Vec<f32>,
     right_data: Vec<f32>,
 }
 
 fn compiled(runtime: &Runtime, element: Element, mix: Mix) -> Built {
-    let graph: Graph<'static> = Graph::new();
+    let graph: Graph = Graph::new();
     let left = graph.input(Shape::matrix(ROWS, DEPTH), Element::Single);
     let right = graph.parameter(Shape::matrix(DEPTH, COLUMNS), Init::Zero, element);
     let out = mix(&graph, graph.matmul(left, right));
