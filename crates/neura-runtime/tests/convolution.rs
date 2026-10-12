@@ -344,3 +344,103 @@ fn a_dilated_convolution_walks_the_span_its_gradient_scatters() {
         conv2d_transpose_reference(&upstream_values, &filter_values, [1, 3, 2, 4], 1, window);
     assert_close(&runtime.read(&program, input_grad), &expected, 1e-4);
 }
+
+#[test]
+fn a_convolution_reads_a_window_of_columns_for_every_row_of_taps() {
+    let runtime = open();
+    for (rows, columns) in [(5u32, 7u32), (5, 12), (4, 5)] {
+        let graph = Graph::new();
+        let input = graph.input(Shape::of([2, 3, rows, columns]), Element::Single);
+        let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+        let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
+        let convolved = graph.conv2d(input, filter, window);
+        assert_eq!(convolved.shape(), Shape::of([2, 4, rows, columns]));
+        graph.retain(convolved);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        let input_values = samples(2 * 3 * rows * columns, 167);
+        let filter_values = samples(108, 173);
+        runtime.write(&program, input, &input_values);
+        runtime.write(&program, filter, &filter_values);
+        runtime.run(&program);
+        let expected = conv2d_reference(
+            &input_values,
+            &filter_values,
+            [2, 3, rows, columns],
+            4,
+            window,
+        );
+        assert_close(&runtime.read(&program, convolved), &expected, 1e-4);
+    }
+}
+
+#[test]
+fn a_convolution_gradient_reads_a_window_of_columns_for_every_row_of_taps() {
+    let runtime = open();
+    for (rows, columns) in [(5u32, 7u32), (5, 12), (4, 5)] {
+        let graph = Graph::new();
+        let input = graph.gradient_input(Shape::of([2, 3, rows, columns]), Element::Single);
+        let filter = graph.parameter(Shape::of([4, 3, 3, 3]), Init::Zero, Element::Single);
+        let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
+        let convolved = graph.conv2d(input, filter, window);
+        let upstream = graph.parameter(
+            Shape::of([2, 4, rows, columns]),
+            Init::Zero,
+            Element::Single,
+        );
+        let loss = graph.sum(graph.mul(convolved, upstream));
+        let gradients = graph.backward(loss);
+        let input_grad = gradients.of(input);
+        graph.retain(input_grad);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        let input_values = samples(2 * 3 * rows * columns, 179);
+        let filter_values = samples(108, 181);
+        let upstream_values = samples(2 * 4 * rows * columns, 191);
+        runtime.write(&program, input, &input_values);
+        runtime.write(&program, filter, &filter_values);
+        runtime.write(&program, upstream, &upstream_values);
+        runtime.run(&program);
+        let expected = conv2d_transpose_reference(
+            &upstream_values,
+            &filter_values,
+            [2, 4, rows, columns],
+            1,
+            window,
+        );
+        assert_close(&runtime.read(&program, input_grad), &expected, 1e-4);
+    }
+}
+
+#[test]
+fn a_convolution_weight_gradient_walks_every_row_of_the_positions_it_reduces() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([4, 4, 10, 16]), Element::Single);
+    let filter = graph.parameter(Shape::of([4, 4, 3, 3]), Init::Zero, Element::Single);
+    let window = Window::new([3, 3], [1, 1], [1, 1], [1, 1]);
+    let convolved = graph.conv2d(input, filter, window);
+    let upstream = graph.parameter(Shape::of([4, 4, 10, 16]), Init::Zero, Element::Single);
+    let loss = graph.sum(graph.mul(convolved, upstream));
+    let gradients = graph.backward(loss);
+    let filter_grad = gradients.of(filter);
+    graph.retain(filter_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = samples(4 * 4 * 10 * 16, 193);
+    let filter_values = samples(4 * 4 * 3 * 3, 197);
+    let upstream_values = samples(4 * 4 * 10 * 16, 199);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.write(&program, upstream, &upstream_values);
+    runtime.run(&program);
+    let expected = conv2d_transpose_weight_grad_reference(
+        &upstream_values,
+        [4, 4, 10, 16],
+        &input_values,
+        [4, 4, 10, 16],
+        1,
+        window,
+    );
+    assert_close(&runtime.read(&program, filter_grad), &expected, 1e-4);
+}
