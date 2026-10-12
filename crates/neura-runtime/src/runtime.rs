@@ -7,8 +7,8 @@ use crate::spill::Spill;
 use crate::store::WeightStore;
 use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, control};
 use neura_gpu::{
-    BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, Queue, Readback,
-    ReadbackLease, Submission, SubmissionIndex,
+    BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, HostDevice, Queue,
+    Readback, ReadbackLease, Submission, SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::{Banks, Kernel, binding_count};
@@ -146,6 +146,10 @@ impl Runtime {
     pub fn open(request: RuntimeRequest) -> Result<Self, GpuUnavailable> {
         let context = GpuContext::open(&request.gpu)?;
         Ok(Self::from_device(context.device().clone(), request.memory))
+    }
+
+    pub fn borrow(host: HostDevice<'_>, request: RuntimeRequest) -> Result<Self, GpuUnavailable> {
+        Device::borrow(host, &request.gpu).map(|device| Self::from_device(device, request.memory))
     }
 
     pub fn from_device(device: Device, memory: MemoryRequest) -> Self {

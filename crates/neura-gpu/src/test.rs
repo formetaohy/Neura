@@ -5,6 +5,8 @@ use crate::{
 };
 use std::sync::Arc;
 
+mod borrow;
+
 #[test]
 fn shared_devices_live_only_as_long_as_their_owners() {
     for &backend in PREFERENCE {

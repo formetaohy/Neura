@@ -4,6 +4,7 @@ use crate::cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Capability, Limits, PowerPreference,
 };
+use crate::host::HostDevice;
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
 use crate::pipeline::PipelineHandle;
@@ -63,9 +64,21 @@ pub enum GpuUnavailable {
         wanted: Backend,
         offered: &'static [Backend],
     },
+    BackendMismatch {
+        wanted: Backend,
+        host: Backend,
+    },
+    AdapterMismatch {
+        wanted: AdapterId,
+        host: AdapterInfo,
+    },
     UnsupportedLimits {
         info: AdapterInfo,
         limits: Limits,
+    },
+    HostUnusable {
+        backend: Backend,
+        reason: String,
     },
 }
 
@@ -87,10 +100,22 @@ impl Display for GpuUnavailable {
                 out,
                 "the requested {wanted:?} backend is missing from a build that offers {offered:?}"
             ),
+            Self::BackendMismatch { wanted, host } => write!(
+                out,
+                "the request names the {wanted:?} backend, and the host device is {host:?}"
+            ),
+            Self::AdapterMismatch { wanted, host } => write!(
+                out,
+                "the request names the adapter {wanted}, and the host device is {host}"
+            ),
             Self::UnsupportedLimits { info, limits } => write!(
                 out,
                 "{} ({:?}) cannot provide the compute baseline: {limits:?}",
                 info.name, info.backend
+            ),
+            Self::HostUnusable { backend, reason } => write!(
+                out,
+                "the {backend:?} device of the host cannot run Neura compute: {reason}"
             ),
         }
     }
@@ -120,6 +145,13 @@ struct Registration {
 static DEVICE_REGISTRY: LazyLock<Mutex<Vec<Registration>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
+fn cache(request: &GpuRequest) -> ArtifactCache {
+    match &request.artifacts {
+        Some(root) => ArtifactCache::bounded(root.clone(), request.artifact_bytes),
+        None => ArtifactCache::default_location(request.artifact_bytes),
+    }
+}
+
 impl Device {
     pub(crate) fn shared(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
         let mut registry = DEVICE_REGISTRY
@@ -142,11 +174,25 @@ impl Device {
     }
 
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
-        let artifacts = match &request.artifacts {
-            Some(root) => ArtifactCache::bounded(root.clone(), request.artifact_bytes),
-            None => ArtifactCache::default_location(request.artifact_bytes),
-        };
+        let artifacts = cache(request);
         let (native, info, limits, capability) = native::open(request, artifacts.clone())?;
+        Self::assemble(native, info, limits, capability, artifacts, request)
+    }
+
+    pub fn borrow(host: HostDevice<'_>, request: &GpuRequest) -> Result<Self, GpuUnavailable> {
+        let artifacts = cache(request);
+        let (native, info, limits, capability) = native::borrow(host, request, artifacts.clone())?;
+        Self::assemble(native, info, limits, capability, artifacts, request)
+    }
+
+    fn assemble(
+        native: NativeDevice,
+        info: AdapterInfo,
+        limits: Limits,
+        capability: Capability,
+        artifacts: ArtifactCache,
+        request: &GpuRequest,
+    ) -> Result<Self, GpuUnavailable> {
         if !limits.supports(&Limits::BASELINE) {
             return Err(GpuUnavailable::UnsupportedLimits { info, limits });
         }

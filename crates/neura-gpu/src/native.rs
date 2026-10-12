@@ -9,6 +9,7 @@ use crate::backend::{Backend, PREFERENCE};
 use crate::cache::ArtifactCache;
 use crate::capability::{AdapterInfo, AdapterPolicy, BufferUsages, Capability, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
+use crate::host::HostDevice;
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use neura_shader::ComputeProgram;
@@ -48,6 +49,13 @@ impl DeviceFailure {
     pub(crate) fn reason(reason: impl Into<String>) -> Self {
         Self::Unavailable {
             reason: reason.into(),
+        }
+    }
+
+    fn unusable(self, backend: Backend) -> GpuUnavailable {
+        match self {
+            Self::Unavailable { reason } => GpuUnavailable::HostUnusable { backend, reason },
+            Self::Missing { .. } => unreachable!("a borrowed device enumerates no adapter"),
         }
     }
 }
@@ -138,6 +146,49 @@ pub(crate) fn open(
             reasons.join("; ")
         },
     })
+}
+
+pub(crate) fn borrow(
+    host: HostDevice<'_>,
+    request: &GpuRequest,
+    artifacts: ArtifactCache,
+) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), GpuUnavailable> {
+    let backend = host.backend();
+    if let Some(wanted) = request.backend
+        && wanted != backend
+    {
+        return Err(GpuUnavailable::BackendMismatch {
+            wanted,
+            host: backend,
+        });
+    }
+    let (native, info, limits, capability) = match host {
+        #[cfg(dx12_backend)]
+        HostDevice::Dx12(raw) => {
+            dx12::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+                (NativeDevice::Dx12(device), info, limits, capability)
+            })
+        }
+        #[cfg(metal_backend)]
+        HostDevice::Metal(raw) => {
+            metal::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+                (NativeDevice::Metal(device), info, limits, capability)
+            })
+        }
+        #[cfg(vulkan_backend)]
+        HostDevice::Vulkan(raw) => {
+            vulkan::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+                (NativeDevice::Vulkan(device), info, limits, capability)
+            })
+        }
+    }
+    .map_err(|failure| failure.unusable(backend))?;
+    if let AdapterPolicy::Identity(wanted) = request.adapter
+        && wanted != info.id
+    {
+        return Err(GpuUnavailable::AdapterMismatch { wanted, host: info });
+    }
+    Ok((native, info, limits, capability))
 }
 
 fn candidate(

@@ -228,6 +228,41 @@ fn describe(device: &ProtocolObject<dyn MTLDevice>) -> AdapterInfo {
     }
 }
 
+fn limits(device: &ProtocolObject<dyn MTLDevice>) -> Limits {
+    let bytes = (device.maxBufferLength() as u64).min(MAX_BINDING_BYTES);
+    Limits {
+        max_storage_buffers_per_shader_stage: u32::from(METAL_SIZE_BUFFER_SLOT),
+        max_storage_buffer_binding_size: bytes,
+        max_buffer_size: bytes,
+        max_compute_invocations_per_workgroup: device.maxThreadsPerThreadgroup().width as u32,
+        max_compute_workgroup_size_x: device.maxThreadsPerThreadgroup().width as u32,
+        max_compute_workgroup_storage_size: device.maxThreadgroupMemoryLength() as u32,
+        max_compute_workgroups_per_dimension: 65_535,
+        min_storage_buffer_offset_alignment: 256,
+    }
+}
+
+fn assemble(
+    raw: Retained<ProtocolObject<dyn MTLDevice>>,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    artifacts: ArtifactCache,
+) -> Arc<Device> {
+    Arc::new(Device {
+        raw,
+        queue,
+        state: Mutex::new(QueueState::default()),
+        artifacts,
+    })
+}
+
+fn queue(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLCommandQueue>>, DeviceFailure> {
+    device
+        .newCommandQueue()
+        .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))
+}
+
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
@@ -252,28 +287,22 @@ impl Device {
                 AdapterPolicy::Power(_) => DeviceFailure::reason("no Metal compute device"),
             });
         };
-        let bytes = (raw.maxBufferLength() as u64).min(MAX_BINDING_BYTES);
-        let limits = Limits {
-            max_storage_buffers_per_shader_stage: u32::from(METAL_SIZE_BUFFER_SLOT),
-            max_storage_buffer_binding_size: bytes,
-            max_buffer_size: bytes,
-            max_compute_invocations_per_workgroup: raw.maxThreadsPerThreadgroup().width as u32,
-            max_compute_workgroup_size_x: raw.maxThreadsPerThreadgroup().width as u32,
-            max_compute_workgroup_storage_size: raw.maxThreadgroupMemoryLength() as u32,
-            max_compute_workgroups_per_dimension: 65_535,
-            min_storage_buffer_offset_alignment: 256,
-        };
-        let queue = raw
-            .newCommandQueue()
-            .ok_or_else(|| DeviceFailure::reason("Metal refused a compute command queue"))?;
+        let limits = limits(&raw);
         let capability = capability(&raw);
+        let queue = queue(&raw)?;
+        Ok((assemble(raw, queue, artifacts), info, limits, capability))
+    }
+
+    pub(crate) fn borrow(
+        raw: &Retained<ProtocolObject<dyn MTLDevice>>,
+        artifacts: ArtifactCache,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        let info = describe(raw);
+        let limits = limits(raw);
+        let capability = capability(raw);
+        let queue = queue(raw)?;
         Ok((
-            Arc::new(Self {
-                raw,
-                queue,
-                state: Mutex::new(QueueState::default()),
-                artifacts,
-            }),
+            assemble(raw.clone(), queue, artifacts),
             info,
             limits,
             capability,

@@ -9,6 +9,7 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
     Limits,
 };
+use crate::host::VulkanHost;
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
@@ -20,8 +21,37 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 struct InstanceOwner {
-    _entry: Entry,
+    entry: Entry,
     raw: Instance,
+}
+
+struct Facts {
+    limits: Limits,
+    memory: vk::PhysicalDeviceMemoryProperties,
+    ticks: f64,
+    bits: u32,
+    uuid: [u8; vk::UUID_SIZE],
+    portability: bool,
+    capability: Option<CooperativeMatrix>,
+}
+
+struct Candidate {
+    physical: vk::PhysicalDevice,
+    family: u32,
+    info: AdapterInfo,
+    facts: Result<Facts, String>,
+}
+
+struct Selection {
+    offered: Vec<AdapterInfo>,
+    candidates: Vec<Candidate>,
+}
+
+struct Parts {
+    raw: ash::Device,
+    queue: vk::Queue,
+    pool: vk::CommandPool,
+    stamps: vk::QueryPool,
 }
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,6 +59,60 @@ const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 impl Drop for InstanceOwner {
     fn drop(&mut self) {
         unsafe { self.raw.destroy_instance(None) };
+    }
+}
+
+impl InstanceOwner {
+    fn create(entry: Entry) -> Result<Self, DeviceFailure> {
+        let available =
+            complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
+                .map_err(|error| format!("enumerating instance extensions: {error:?}"))?;
+        let advertised = |name: &CStr| {
+            available.iter().any(|extension| unsafe {
+                CStr::from_ptr(extension.extension_name.as_ptr()) == name
+            })
+        };
+        let portability = advertised(ash::khr::portability_enumeration::NAME);
+        let mut extension_names = Vec::new();
+        if portability {
+            extension_names.push(ash::khr::portability_enumeration::NAME.as_ptr());
+        }
+        if advertised(ash::khr::get_physical_device_properties2::NAME) {
+            extension_names.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
+        }
+        let diagnostics =
+            CString::new("VK_LAYER_KHRONOS_validation").expect("a constant layer name");
+        let layers = if cfg!(debug_assertions)
+            && complete_enumeration(|| unsafe { entry.enumerate_instance_layer_properties() })
+                .map_err(|error| format!("enumerating layers: {error:?}"))?
+                .iter()
+                .any(|layer| unsafe {
+                    CStr::from_ptr(layer.layer_name.as_ptr()) == diagnostics.as_c_str()
+                }) {
+            vec![diagnostics.as_ptr()]
+        } else {
+            Vec::new()
+        };
+        let application = CString::new("neura").expect("a constant application name");
+        let loaded = unsafe { entry.try_enumerate_instance_version() }
+            .map_err(|error| format!("reading the loader version: {error:?}"))?
+            .unwrap_or(vk::API_VERSION_1_0);
+        let application_info = vk::ApplicationInfo::default()
+            .application_name(&application)
+            .api_version(loaded.min(vk::API_VERSION_1_3));
+        let flags = if portability {
+            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
+        } else {
+            vk::InstanceCreateFlags::empty()
+        };
+        let info = vk::InstanceCreateInfo::default()
+            .application_info(&application_info)
+            .flags(flags)
+            .enabled_extension_names(&extension_names)
+            .enabled_layer_names(&layers);
+        let raw = unsafe { entry.create_instance(&info, None) }
+            .map_err(|error| format!("creating an instance: {error:?}"))?;
+        Ok(Self { entry, raw })
     }
 }
 
@@ -132,8 +216,8 @@ impl Default for QueueState {
 }
 
 pub(crate) struct Device {
-    _owner: InstanceOwner,
     raw: ash::Device,
+    instance: Option<InstanceOwner>,
     memory: vk::PhysicalDeviceMemoryProperties,
     queue: vk::Queue,
     pool: vk::CommandPool,
@@ -156,18 +240,15 @@ pub(crate) struct Buffer {
     resource: Arc<BufferResource>,
 }
 
-fn instance_fn<T>(owner: &InstanceOwner, name: &CStr) -> Option<T> {
-    let raw = unsafe {
-        owner
-            ._entry
-            .get_instance_proc_addr(owner.raw.handle(), name.as_ptr())
-    };
+fn instance_fn<T>(entry: &Entry, instance: vk::Instance, name: &CStr) -> Option<T> {
+    let raw = unsafe { entry.get_instance_proc_addr(instance, name.as_ptr()) };
     let raw = raw?;
     Some(unsafe { std::mem::transmute_copy(&raw) })
 }
 
 fn cooperation(
-    owner: &InstanceOwner,
+    entry: &Entry,
+    instance: &Instance,
     physical: vk::PhysicalDevice,
     available: &[vk::ExtensionProperties],
 ) -> Option<CooperativeMatrix> {
@@ -177,14 +258,21 @@ fn cooperation(
     if !advertised {
         return None;
     }
-    let properties2: vk::PFN_vkGetPhysicalDeviceProperties2 =
-        instance_fn(owner, c"vkGetPhysicalDeviceProperties2KHR")
-            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceProperties2"))?;
+    let properties2: vk::PFN_vkGetPhysicalDeviceProperties2 = instance_fn(
+        entry,
+        instance.handle(),
+        c"vkGetPhysicalDeviceProperties2KHR",
+    )
+    .or_else(|| instance_fn(entry, instance.handle(), c"vkGetPhysicalDeviceProperties2"))?;
     let features2: vk::PFN_vkGetPhysicalDeviceFeatures2 =
-        instance_fn(owner, c"vkGetPhysicalDeviceFeatures2KHR")
-            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceFeatures2"))?;
+        instance_fn(entry, instance.handle(), c"vkGetPhysicalDeviceFeatures2KHR")
+            .or_else(|| instance_fn(entry, instance.handle(), c"vkGetPhysicalDeviceFeatures2"))?;
     let cooperative_properties: vk::PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR =
-        instance_fn(owner, c"vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR")?;
+        instance_fn(
+            entry,
+            instance.handle(),
+            c"vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR",
+        )?;
     let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
     let mut stages = vk::PhysicalDeviceCooperativeMatrixPropertiesKHR::default();
     let mut properties = vk::PhysicalDeviceProperties2::default();
@@ -344,109 +432,227 @@ fn complete_enumeration<T>(
     Err(vk::Result::INCOMPLETE)
 }
 
+impl Facts {
+    fn of(
+        entry: &Entry,
+        instance: &Instance,
+        physical: vk::PhysicalDevice,
+        family: u32,
+        properties: &vk::PhysicalDeviceProperties,
+    ) -> Result<Self, String> {
+        let families = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+        let Some(queue) = families.get(family as usize) else {
+            return Err(format!(
+                "the queue family {family} outruns the {} families of this device",
+                families.len()
+            ));
+        };
+        if !queue.queue_flags.contains(vk::QueueFlags::COMPUTE) {
+            return Err(format!(
+                "the queue family {family} carries no compute queue"
+            ));
+        }
+        let bits = queue.timestamp_valid_bits;
+        let ticks = f64::from(properties.limits.timestamp_period);
+        if bits == 0 || ticks == 0.0 {
+            return Err(format!(
+                "its compute queue carries no timestamp of {bits} valid bits over {ticks} nanoseconds"
+            ));
+        }
+        let available = complete_enumeration(|| unsafe {
+            instance.enumerate_device_extension_properties(physical)
+        })
+        .map_err(|error| format!("enumerating device extensions: {error:?}"))?;
+        let portability = available.iter().any(|extension| unsafe {
+            CStr::from_ptr(extension.extension_name.as_ptr()) == ash::khr::portability_subset::NAME
+        });
+        let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
+        let capability = if vk::api_version_major(properties.api_version) > 1
+            || vk::api_version_minor(properties.api_version) >= 3
+        {
+            cooperation(entry, instance, physical, &available)
+        } else {
+            None
+        };
+        Ok(Self {
+            limits: limits(properties, &memory, allocation(entry, instance, physical)),
+            memory,
+            ticks,
+            bits,
+            uuid: properties.pipeline_cache_uuid,
+            portability,
+            capability,
+        })
+    }
+
+    fn assemble(
+        &self,
+        parts: Parts,
+        instance: Option<InstanceOwner>,
+        artifacts: ArtifactCache,
+    ) -> Arc<Device> {
+        Arc::new(Device {
+            raw: parts.raw,
+            instance,
+            memory: self.memory,
+            queue: parts.queue,
+            pool: parts.pool,
+            stamps: parts.stamps,
+            ticks: self.ticks,
+            bits: self.bits,
+            uuid: self.uuid,
+            artifacts,
+            state: Mutex::new(QueueState::default()),
+        })
+    }
+}
+
+fn pools(device: &ash::Device, family: u32) -> Result<(vk::CommandPool, vk::QueryPool), String> {
+    let pool = unsafe {
+        device.create_command_pool(
+            &vk::CommandPoolCreateInfo::default()
+                .queue_family_index(family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
+            None,
+        )
+    }
+    .map_err(|error| format!("creating a compute command pool failed: {error:?}"))?;
+    let stamps = match unsafe {
+        device.create_query_pool(
+            &vk::QueryPoolCreateInfo::default()
+                .query_type(vk::QueryType::TIMESTAMP)
+                .query_count(2 * FRAMES_IN_FLIGHT as u32),
+            None,
+        )
+    } {
+        Ok(stamps) => stamps,
+        Err(error) => {
+            unsafe { device.destroy_command_pool(pool, None) };
+            return Err(format!("creating a timestamp pool failed: {error:?}"));
+        }
+    };
+    Ok((pool, stamps))
+}
+
+fn create(
+    instance: &Instance,
+    physical: vk::PhysicalDevice,
+    family: u32,
+    facts: &Facts,
+) -> Result<Parts, String> {
+    let priority = [1.0];
+    let queues = [vk::DeviceQueueCreateInfo::default()
+        .queue_family_index(family)
+        .queue_priorities(&priority)];
+    let cooperative = facts.capability.is_some();
+    let mut extensions = if facts.portability {
+        vec![ash::khr::portability_subset::NAME.as_ptr()]
+    } else {
+        Vec::new()
+    };
+    if cooperative {
+        extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
+    }
+    let mut memory_model = vk::PhysicalDeviceVulkan12Features::default();
+    let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
+    let mut features = vk::PhysicalDeviceFeatures2::default();
+    let mut config = vk::DeviceCreateInfo::default()
+        .queue_create_infos(&queues)
+        .enabled_extension_names(&extensions);
+    if cooperative {
+        memory_model.shader_float16 = vk::TRUE;
+        memory_model.vulkan_memory_model = vk::TRUE;
+        memory_model.vulkan_memory_model_device_scope = vk::TRUE;
+        matrix.cooperative_matrix = vk::TRUE;
+        features = features.push_next(&mut memory_model).push_next(&mut matrix);
+        config = config.push_next(&mut features);
+    }
+    let raw = unsafe { instance.create_device(physical, &config, None) }
+        .map_err(|error| format!("creating a compute device failed: {error:?}"))?;
+    let queue = unsafe { raw.get_device_queue(family, 0) };
+    match pools(&raw, family) {
+        Ok((pool, stamps)) => Ok(Parts {
+            raw,
+            queue,
+            pool,
+            stamps,
+        }),
+        Err(reason) => {
+            unsafe { raw.destroy_device(None) };
+            Err(reason)
+        }
+    }
+}
+
+fn select(owner: &InstanceOwner, policy: AdapterPolicy) -> Result<Selection, DeviceFailure> {
+    let physical_devices =
+        complete_enumeration(|| unsafe { owner.raw.enumerate_physical_devices() })
+            .map_err(|error| format!("enumerating devices: {error:?}"))?;
+    let mut candidates = Vec::new();
+    for physical in physical_devices {
+        let properties = unsafe { owner.raw.get_physical_device_properties(physical) };
+        if vk::api_version_major(properties.api_version) < 1
+            || (vk::api_version_major(properties.api_version) == 1
+                && vk::api_version_minor(properties.api_version) < 1)
+        {
+            continue;
+        }
+        let families = unsafe {
+            owner
+                .raw
+                .get_physical_device_queue_family_properties(physical)
+        };
+        let Some(family) = families
+            .iter()
+            .enumerate()
+            .filter(|(_, queue)| {
+                queue.queue_count > 0 && queue.queue_flags.contains(vk::QueueFlags::COMPUTE)
+            })
+            .min_by_key(|(_, queue)| queue.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(index, _)| index as u32)
+        else {
+            continue;
+        };
+        candidates.push(Candidate {
+            physical,
+            family,
+            info: describe(&properties, device_type(properties.device_type)),
+            facts: Facts::of(&owner.entry, &owner.raw, physical, family, &properties),
+        });
+    }
+    let offered = candidates
+        .iter()
+        .map(|candidate| candidate.info.clone())
+        .collect::<Vec<_>>();
+    candidates.retain(|candidate| policy.wants(candidate.info.id));
+    if let AdapterPolicy::Power(preference) = policy {
+        candidates.sort_by_key(|candidate| {
+            Reverse((
+                candidate
+                    .facts
+                    .as_ref()
+                    .is_ok_and(|facts| facts.limits.supports(&Limits::BASELINE)),
+                candidate.info.device_type.rank(preference),
+            ))
+        });
+    }
+    Ok(Selection {
+        offered,
+        candidates,
+    })
+}
+
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
         artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
-        let extensions =
-            complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
-                .map_err(|error| format!("enumerating extensions: {error:?}"))?;
-        let portability = extensions.iter().any(|extension| unsafe {
-            CStr::from_ptr(extension.extension_name.as_ptr())
-                == ash::khr::portability_enumeration::NAME
-        });
-        let instance_extensions =
-            complete_enumeration(|| unsafe { entry.enumerate_instance_extension_properties(None) })
-                .map_err(|error| format!("enumerating instance extensions: {error:?}"))?;
-        let mut extension_names = Vec::new();
-        if portability {
-            extension_names.push(ash::khr::portability_enumeration::NAME.as_ptr());
-        }
-        if instance_extensions.iter().any(|extension| unsafe {
-            CStr::from_ptr(extension.extension_name.as_ptr())
-                == ash::khr::get_physical_device_properties2::NAME
-        }) {
-            extension_names.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
-        }
-        let diagnostics =
-            CString::new("VK_LAYER_KHRONOS_validation").expect("a constant layer name");
-        let layers = if cfg!(debug_assertions)
-            && complete_enumeration(|| unsafe { entry.enumerate_instance_layer_properties() })
-                .map_err(|error| format!("enumerating layers: {error:?}"))?
-                .iter()
-                .any(|layer| unsafe {
-                    CStr::from_ptr(layer.layer_name.as_ptr()) == diagnostics.as_c_str()
-                }) {
-            vec![diagnostics.as_ptr()]
-        } else {
-            Vec::new()
-        };
-        let application = CString::new("neura").expect("a constant application name");
-        let loaded = unsafe { entry.try_enumerate_instance_version() }
-            .map_err(|error| format!("reading the loader version: {error:?}"))?
-            .unwrap_or(vk::API_VERSION_1_0);
-        let application_info = vk::ApplicationInfo::default()
-            .application_name(&application)
-            .api_version(loaded.min(vk::API_VERSION_1_3));
-        let flags = if portability {
-            vk::InstanceCreateFlags::ENUMERATE_PORTABILITY_KHR
-        } else {
-            vk::InstanceCreateFlags::empty()
-        };
-        let info = vk::InstanceCreateInfo::default()
-            .application_info(&application_info)
-            .flags(flags)
-            .enabled_extension_names(&extension_names)
-            .enabled_layer_names(&layers);
-        let instance = unsafe { entry.create_instance(&info, None) }
-            .map_err(|error| format!("creating an instance: {error:?}"))?;
-        let owner = InstanceOwner {
-            _entry: entry,
-            raw: instance,
-        };
-        let physical = complete_enumeration(|| unsafe { owner.raw.enumerate_physical_devices() })
-            .map_err(|error| format!("enumerating devices: {error:?}"))?;
-        let mut candidates = physical
-            .iter()
-            .filter_map(|physical| {
-                let props = unsafe { owner.raw.get_physical_device_properties(*physical) };
-                if vk::api_version_major(props.api_version) < 1
-                    || (vk::api_version_major(props.api_version) == 1
-                        && vk::api_version_minor(props.api_version) < 1)
-                {
-                    return None;
-                }
-                let queues = unsafe {
-                    owner
-                        .raw
-                        .get_physical_device_queue_family_properties(*physical)
-                };
-                let family = queues
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, queue)| {
-                        queue.queue_count > 0 && queue.queue_flags.contains(vk::QueueFlags::COMPUTE)
-                    })
-                    .min_by_key(|(_, queue)| queue.queue_flags.contains(vk::QueueFlags::GRAPHICS))?
-                    .0 as u32;
-                let ty = device_type(props.device_type);
-                let memory = unsafe { owner.raw.get_physical_device_memory_properties(*physical) };
-                let limits = limits(&props, &memory, allocation(&owner, *physical, loaded));
-                Some((*physical, props, family, ty, limits, memory))
-            })
-            .collect::<Vec<_>>();
-        let offered = candidates
-            .iter()
-            .map(|(_, props, _, ty, _, _)| describe(props, *ty))
-            .collect::<Vec<_>>();
-        candidates.retain(|(_, props, _, _, _, _)| policy.wants(identity(props)));
-        if let AdapterPolicy::Power(preference) = policy {
-            candidates.sort_by_key(|(_, _, _, ty, limits, _)| {
-                Reverse((limits.supports(&Limits::BASELINE), ty.rank(preference)))
-            });
-        }
+        let owner = InstanceOwner::create(entry)?;
+        let Selection {
+            offered,
+            candidates,
+        } = select(&owner, policy)?;
         if candidates.is_empty() {
             return Err(match policy {
                 AdapterPolicy::Identity(wanted)
@@ -463,148 +669,83 @@ impl Device {
             });
         }
         let mut failures = Vec::new();
-        for (physical, props, family, ty, limits, memory) in candidates {
-            let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
-                .to_string_lossy()
-                .into_owned();
-            let priority = [1.0];
-            let queues = [vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(family)
-                .queue_priorities(&priority)];
-            let available = complete_enumeration(|| unsafe {
-                owner.raw.enumerate_device_extension_properties(physical)
-            });
-            let available = match available {
-                Ok(available) => available,
-                Err(error) => {
-                    failures.push(format!("{name}: enumerating extensions failed: {error:?}"));
+        for Candidate {
+            physical,
+            family,
+            info,
+            facts,
+        } in candidates
+        {
+            let facts = match facts {
+                Ok(facts) => facts,
+                Err(reason) => {
+                    failures.push(format!("{}: {reason}", info.name));
                     continue;
                 }
             };
-            let portability = available.iter().any(|extension| unsafe {
-                CStr::from_ptr(extension.extension_name.as_ptr())
-                    == ash::khr::portability_subset::NAME
-            });
-            let capability = if vk::api_version_major(props.api_version) > 1
-                || vk::api_version_minor(props.api_version) >= 3
-            {
-                cooperation(&owner, physical, &available)
-            } else {
-                None
-            };
-            let mut device_extensions = if portability {
-                vec![ash::khr::portability_subset::NAME.as_ptr()]
-            } else {
-                Vec::new()
-            };
-            if capability.is_some() {
-                device_extensions.push(ash::khr::cooperative_matrix::NAME.as_ptr());
-            }
-            let mut memory_model = vk::PhysicalDeviceVulkan12Features::default();
-            let mut matrix = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
-            let mut features = vk::PhysicalDeviceFeatures2::default();
-            let mut config = vk::DeviceCreateInfo::default()
-                .queue_create_infos(&queues)
-                .enabled_extension_names(&device_extensions);
-            if capability.is_some() {
-                memory_model.shader_float16 = vk::TRUE;
-                memory_model.vulkan_memory_model = vk::TRUE;
-                memory_model.vulkan_memory_model_device_scope = vk::TRUE;
-                matrix.cooperative_matrix = vk::TRUE;
-                features = features.push_next(&mut memory_model).push_next(&mut matrix);
-                config = config.push_next(&mut features);
-            }
-            let raw = match unsafe { owner.raw.create_device(physical, &config, None) } {
-                Ok(raw) => raw,
-                Err(error) => {
-                    failures.push(format!(
-                        "{name}: creating a compute device failed: {error:?}"
+            let capability = facts.capability;
+            match create(&owner.raw, physical, family, &facts) {
+                Ok(parts) => {
+                    return Ok((
+                        facts.assemble(parts, Some(owner), artifacts),
+                        info,
+                        facts.limits,
+                        Capability {
+                            cooperative_matrix: capability,
+                        },
                     ));
-                    continue;
                 }
-            };
-            let queue = unsafe { raw.get_device_queue(family, 0) };
-            let pool = match unsafe {
-                raw.create_command_pool(
-                    &vk::CommandPoolCreateInfo::default()
-                        .queue_family_index(family)
-                        .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                    None,
-                )
-            } {
-                Ok(pool) => pool,
-                Err(error) => {
-                    failures.push(format!(
-                        "{name}: creating a compute command pool failed: {error:?}"
-                    ));
-                    unsafe { raw.destroy_device(None) };
-                    continue;
-                }
-            };
-            let adapter_info = describe(&props, ty);
-            let bits = unsafe {
-                owner
-                    .raw
-                    .get_physical_device_queue_family_properties(physical)
-            }[family as usize]
-                .timestamp_valid_bits;
-            let ticks = f64::from(props.limits.timestamp_period);
-            if bits == 0 || ticks == 0.0 {
-                failures.push(format!(
-                    "{name}: its compute queue carries no timestamp of {bits} valid bits over {ticks} nanoseconds"
-                ));
-                unsafe {
-                    raw.destroy_command_pool(pool, None);
-                    raw.destroy_device(None);
-                };
-                continue;
+                Err(reason) => failures.push(format!("{}: {reason}", info.name)),
             }
-            let stamps = match unsafe {
-                raw.create_query_pool(
-                    &vk::QueryPoolCreateInfo::default()
-                        .query_type(vk::QueryType::TIMESTAMP)
-                        .query_count(2 * FRAMES_IN_FLIGHT as u32),
-                    None,
-                )
-            } {
-                Ok(stamps) => stamps,
-                Err(error) => {
-                    failures.push(format!(
-                        "{name}: creating a timestamp pool failed: {error:?}"
-                    ));
-                    unsafe {
-                        raw.destroy_command_pool(pool, None);
-                        raw.destroy_device(None);
-                    };
-                    continue;
-                }
-            };
-            return Ok((
-                Arc::new(Self {
-                    _owner: owner,
-                    raw,
-                    memory,
-                    queue,
-                    pool,
-                    stamps,
-                    ticks,
-                    bits,
-                    uuid: props.pipeline_cache_uuid,
-                    artifacts,
-                    state: Mutex::new(QueueState::default()),
-                }),
-                adapter_info,
-                limits,
-                Capability {
-                    cooperative_matrix: capability,
-                },
-            ));
         }
         Err(DeviceFailure::reason(if failures.is_empty() {
             "no Vulkan 1.1 device with a compute queue".to_owned()
         } else {
             failures.join("; ")
         }))
+    }
+
+    pub(crate) fn borrow(
+        host: VulkanHost<'_>,
+        artifacts: ArtifactCache,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        let properties = unsafe { host.instance.get_physical_device_properties(host.physical) };
+        let info = describe(&properties, device_type(properties.device_type));
+        let facts = Facts::of(
+            host.entry,
+            host.instance,
+            host.physical,
+            host.queue_family,
+            &properties,
+        )
+        .map_err(DeviceFailure::reason)?;
+        let capability = if host.cooperative_matrix {
+            Some(facts.capability.ok_or_else(|| {
+                DeviceFailure::reason(format!(
+                    "the host claims cooperative matrices, and {} cannot run them",
+                    info.name
+                ))
+            })?)
+        } else {
+            None
+        };
+        let (pool, stamps) =
+            pools(host.device, host.queue_family).map_err(DeviceFailure::reason)?;
+        let parts = Parts {
+            raw: host.device.clone(),
+            queue: host.queue,
+            pool,
+            stamps,
+        };
+        let device = facts.assemble(parts, None, artifacts);
+        Ok((
+            device,
+            info,
+            facts.limits,
+            Capability {
+                cooperative_matrix: capability,
+            },
+        ))
     }
 
     pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
@@ -1214,13 +1355,13 @@ impl Device {
     }
 }
 
-fn allocation(owner: &InstanceOwner, physical: vk::PhysicalDevice, version: u32) -> u64 {
-    if version < vk::API_VERSION_1_1 {
-        return u64::MAX;
-    }
-    let properties2: Option<vk::PFN_vkGetPhysicalDeviceProperties2> =
-        instance_fn(owner, c"vkGetPhysicalDeviceProperties2KHR")
-            .or_else(|| instance_fn(owner, c"vkGetPhysicalDeviceProperties2"));
+fn allocation(entry: &Entry, instance: &Instance, physical: vk::PhysicalDevice) -> u64 {
+    let properties2: Option<vk::PFN_vkGetPhysicalDeviceProperties2> = instance_fn(
+        entry,
+        instance.handle(),
+        c"vkGetPhysicalDeviceProperties2KHR",
+    )
+    .or_else(|| instance_fn(entry, instance.handle(), c"vkGetPhysicalDeviceProperties2"));
     let Some(properties2) = properties2 else {
         return u64::MAX;
     };
@@ -1305,7 +1446,9 @@ impl Drop for Device {
         unsafe {
             self.raw.destroy_query_pool(self.stamps, None);
             self.raw.destroy_command_pool(self.pool, None);
-            self.raw.destroy_device(None);
+            if self.instance.is_some() {
+                self.raw.destroy_device(None);
+            }
         }
     }
 }

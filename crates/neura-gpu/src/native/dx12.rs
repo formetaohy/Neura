@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DE
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG, DXGI_ADAPTER_FLAG_SOFTWARE,
     DXGI_ERROR_NOT_FOUND, DXGI_GPU_PREFERENCE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-    DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6,
+    DXGI_GPU_PREFERENCE_MINIMUM_POWER, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory4, IDXGIFactory6,
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::{GUID, Interface, PCWSTR};
@@ -274,6 +274,26 @@ fn describe(desc: &DXGI_ADAPTER_DESC1) -> AdapterInfo {
     }
 }
 
+fn describe_device(device: &ID3D12Device) -> Result<AdapterInfo, String> {
+    let luid = unsafe { device.GetAdapterLuid() };
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.map_err(|error| format!("creating DXGI: {error}"))?;
+    let factory: IDXGIFactory4 = factory
+        .cast()
+        .map_err(|error| format!("asking DXGI for its fourth factory: {error}"))?;
+    let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapterByLuid(luid) }
+        .map_err(|error| format!("finding the adapter of a D3D12 device: {error}"))?;
+    let desc = unsafe { adapter.GetDesc1() }
+        .map_err(|error| format!("querying the adapter of a D3D12 device: {error}"))?;
+    let mut info = describe(&desc);
+    info.device_type = if software(&desc) {
+        DeviceType::Cpu
+    } else {
+        architecture(device)
+    };
+    Ok(info)
+}
+
 fn limits(device: &ID3D12Device) -> Limits {
     let mut space = D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT::default();
     unsafe {
@@ -456,6 +476,20 @@ impl Device {
             candidate.limits,
             Capability::default(),
         ))
+    }
+
+    pub(crate) fn borrow(
+        raw: &ID3D12Device,
+        artifacts: ArtifactCache,
+    ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
+        if !shader_model(raw) {
+            return Err(DeviceFailure::reason("it runs no compute shader model 6.0"));
+        }
+        let info = describe_device(raw)?;
+        let limits = limits(raw);
+        let device = Self::assemble(raw.clone(), artifacts)?;
+        Ok((device, info, limits, Capability::default()))
     }
 
     fn assemble(raw: ID3D12Device, artifacts: ArtifactCache) -> Result<Arc<Device>, DeviceFailure> {

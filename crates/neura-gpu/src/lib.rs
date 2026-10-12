@@ -3,6 +3,7 @@ mod buffer;
 mod cache;
 mod capability;
 mod context;
+mod host;
 mod library;
 mod native;
 mod pipeline;
@@ -19,6 +20,9 @@ pub use capability::{
     Limits, PowerPreference,
 };
 pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
+pub use host::HostDevice;
+#[cfg(vulkan_backend)]
+pub use host::VulkanHost;
 pub use library::WARM_PROGRAMS;
 pub use pipeline::{BindGroup, Binding, PipelineHandle};
 pub use readback::{READBACK_TIMEOUT, Readback, ReadbackLease};
