@@ -57,6 +57,7 @@ fn a_prefix_sum_is_no_ragged_axis() {
                 cache,
                 cache,
                 AttentionOptions {
+                    bias: None,
                     scale: Some(graph.knob(0.5)),
                     causal: true,
                     origin: None,

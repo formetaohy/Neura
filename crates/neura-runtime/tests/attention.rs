@@ -70,6 +70,7 @@ fn graph_of_beside(
         keys,
         values,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(shapes.scale)),
             causal: shapes.causal,
             origin: None,
@@ -415,6 +416,7 @@ fn an_attention_refuses_values_of_another_width() {
                 keys,
                 values,
                 AttentionOptions {
+                    bias: None,
                     scale: Some(graph.knob(0.5)),
                     causal: false,
                     origin: None,
@@ -549,6 +551,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             key,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: None,
@@ -566,6 +569,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             key,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(vector),
                 causal: false,
                 origin: None,
@@ -581,6 +585,7 @@ fn a_causal_attention_stops_the_graph_it_cannot_align() {
             wide,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.5)),
                 causal: false,
                 origin: None,
@@ -701,6 +706,7 @@ fn a_fused_attention_holds_a_sequence_no_score_matrix_holds() {
         tensor,
         tensor,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(1.0 / (width as f32).sqrt())),
             causal: true,
             origin: None,
@@ -817,6 +823,7 @@ fn block<'g>(
             keys,
             values,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(shapes.scale)),
                 causal: shapes.causal,
                 origin: None,
@@ -939,6 +946,7 @@ fn knob_graph<'g>(
         keys,
         values,
         AttentionOptions {
+            bias: None,
             scale,
             causal: true,
             origin: None,
@@ -1359,6 +1367,7 @@ fn an_attention_reads_the_head_planes_a_dense_token_row_carries() {
         key_planes,
         value_planes,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(HEAD_SCALE)),
             causal: true,
             origin: None,
@@ -1405,4 +1414,224 @@ fn an_attention_reads_the_head_planes_a_dense_token_row_carries() {
     assert_close(&produced[0], &dense_of_head_plane(&expected_query), 1e-5);
     assert_close(&produced[1], &dense_of_head_plane(&expected_key), 1e-5);
     assert_close(&produced[2], &dense_of_head_plane(&expected_value), 1e-5);
+}
+
+struct Biased<'g> {
+    graph: Graph<'g>,
+    queries: Value<'g>,
+    keys: Value<'g>,
+    values: Value<'g>,
+    bias: Value<'g>,
+    out: Value<'g>,
+}
+
+fn biased(shapes: Shapes, dims: [u32; 4]) -> Biased<'static> {
+    let graph = Graph::new();
+    let tensor = |heads: u32, tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, shapes.batch, tokens, shapes.width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let queries = tensor(shapes.heads, shapes.queries);
+    let keys = tensor(shapes.key_heads, shapes.keys);
+    let values = tensor(shapes.key_heads, shapes.keys);
+    let bias = graph.resident(Shape::of(dims), Element::Single);
+    let out = graph.attention(
+        queries,
+        keys,
+        values,
+        AttentionOptions {
+            bias: Some(bias),
+            scale: Some(graph.knob(shapes.scale)),
+            causal: shapes.causal,
+            origin: None,
+            segments: None,
+            reach: (shapes.reach > 0).then_some(shapes.reach),
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    Biased {
+        graph,
+        queries,
+        keys,
+        values,
+        bias,
+        out,
+    }
+}
+
+fn biased_tables(shapes: Shapes, dims: [u32; 4]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    (
+        data(
+            shapes.heads * shapes.batch * shapes.queries * shapes.width,
+            17,
+        ),
+        data(
+            shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+            29,
+        ),
+        data(
+            shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+            43,
+        ),
+        data(dims.iter().product(), 71),
+    )
+}
+
+fn run_biased(shapes: Shapes, dims: [u32; 4], tolerance: f32) {
+    let runtime = open();
+    let forward = biased(shapes, dims);
+    let (queries_data, keys_data, values_data, bias_data) = biased_tables(shapes, dims);
+    let reference = reference::Bias {
+        dims,
+        data: &bias_data,
+    };
+    let weights = runtime.weights(&forward.graph);
+    let program = runtime.compile(&forward.graph, &weights);
+    runtime.write(&program, forward.queries, &queries_data);
+    runtime.write(&program, forward.keys, &keys_data);
+    runtime.write(&program, forward.values, &values_data);
+    runtime.write(&program, forward.bias, &bias_data);
+    runtime.run(&program);
+    let (expected, statistics) = reference::attention_forward_beside(
+        shapes,
+        &queries_data,
+        &keys_data,
+        &values_data,
+        Some(reference),
+    );
+    assert_close(&runtime.read(&program, forward.out), &expected, tolerance);
+
+    let training = biased(shapes, dims);
+    let gradients = training.graph.backward(training.graph.sum(training.out));
+    let query_grad = gradients.of(training.queries);
+    let key_grad = gradients.of(training.keys);
+    let value_grad = gradients.of(training.values);
+    training.graph.retain(query_grad);
+    training.graph.retain(key_grad);
+    training.graph.retain(value_grad);
+    let weights = runtime.weights(&training.graph);
+    let program = runtime.compile(&training.graph, &weights);
+    runtime.write(&program, training.queries, &queries_data);
+    runtime.write(&program, training.keys, &keys_data);
+    runtime.write(&program, training.values, &values_data);
+    runtime.write(&program, training.bias, &bias_data);
+    runtime.run(&program);
+    let gradient = vec![1.0f32; expected.len()];
+    let (expected_query, expected_key, expected_value) = reference::attention_backward_beside(
+        shapes,
+        &queries_data,
+        &keys_data,
+        &values_data,
+        reference::Walked {
+            output: &expected,
+            statistics: &statistics,
+            gradient: &gradient,
+            bias: Some(reference),
+        },
+    );
+    let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+    assert_close(&produced[0], &expected_query, tolerance);
+    assert_close(&produced[1], &expected_key, tolerance);
+    assert_close(&produced[2], &expected_value, tolerance);
+}
+
+fn biased_shapes(causal: bool, reach: u32) -> Shapes {
+    Shapes {
+        heads: 2,
+        key_heads: 2,
+        batch: 2,
+        queries: 5,
+        keys: 5,
+        width: 4,
+        causal,
+        origin: 0,
+        reach,
+        scale: 0.5,
+    }
+}
+
+#[test]
+fn an_attention_adds_the_bias_it_weighs_the_keys_of_every_head_by() {
+    run_biased(biased_shapes(false, 0), [2, 1, 1, 5], 1e-5);
+}
+
+#[test]
+fn an_attention_adds_a_bias_that_walks_a_whole_plane_of_scores() {
+    let shapes = Shapes {
+        heads: 2,
+        key_heads: 1,
+        batch: 2,
+        queries: 5,
+        keys: 5,
+        width: 4,
+        causal: true,
+        origin: 0,
+        reach: 0,
+        scale: 0.5,
+    };
+    run_biased(shapes, [1, 2, 5, 5], 1e-5);
+}
+
+#[test]
+fn an_attention_adds_the_bias_of_every_key_it_reaches_back_to() {
+    run_biased(biased_shapes(true, 3), [1, 1, 1, 5], 1e-5);
+    run_biased(biased_shapes(true, 3), [1, 1, 1, 1], 1e-5);
+    run_biased(biased_shapes(true, 3), [1, 1, 5, 1], 1e-5);
+}
+
+#[test]
+fn a_bias_that_learns_or_walks_a_binding_is_refused() {
+    let graph = Graph::new();
+    let queries = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
+    let keys = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
+    let values = graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
+    fn options<'g>(graph: &Graph<'g>, bias: Option<Value<'g>>) -> AttentionOptions<'g> {
+        AttentionOptions {
+            bias,
+            scale: Some(graph.knob(0.5)),
+            causal: false,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        }
+    }
+    let trained = graph.parameter(Shape::of([1, 1, 1, 4]), Init::Zero, Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(queries, keys, values, options(&graph, Some(trained)));
+        }),
+        "an attention bias that a gradient reaches was weighed",
+    );
+    let extent = graph.free(8);
+    let walked = graph.resident(
+        Shape::of([1, 1, 1, 8]).freed(&[(3, extent)]),
+        Element::Single,
+    );
+    assert!(
+        refuses(|| {
+            graph.attention(queries, keys, values, options(&graph, Some(walked)));
+        }),
+        "an attention bias that walks a free extent was weighed",
+    );
+    let beyond = graph.resident(Shape::of([1, 1, 1, 5]), Element::Single);
+    assert!(
+        refuses(|| {
+            graph.attention(queries, keys, values, options(&graph, Some(beyond)));
+        }),
+        "an attention bias of another length of key was weighed",
+    );
+    let quantized = graph.quantized_parameter(Shape::of([1, 1, 1, 4]), Init::Zero, 0.5);
+    assert!(
+        refuses(|| {
+            graph.attention(queries, keys, values, options(&graph, Some(quantized)));
+        }),
+        "an attention bias of quantized storage was weighed",
+    );
+    let held = graph.resident(Shape::of([1, 1, 1, 4]), Element::Single);
+    graph.attention(queries, keys, values, options(&graph, Some(held)));
 }

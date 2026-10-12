@@ -117,6 +117,7 @@ impl Batch {
             packed,
             packed,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),

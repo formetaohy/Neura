@@ -1762,6 +1762,7 @@ fn a_cursor_stays_in_the_plan_the_block_it_starts_from_reads_it() {
         keys,
         keys,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
@@ -1798,6 +1799,7 @@ fn a_cursor_holds_one_position_per_plane() {
     let keys = graph.parameter(Shape::of([2, 1, 4, 4]), Init::Zero, Element::Single);
     let positions = |dims: [u32; 4]| graph.fill(Shape::of(dims), 1.0);
     let options = |origin| neura_graph::AttentionOptions {
+        bias: None,
         scale: Some(graph.knob(0.5)),
         causal: true,
         origin,
@@ -1868,6 +1870,7 @@ fn a_wide_attention_head_spreads_its_row_over_the_threads_it_outruns() {
             keys,
             keys,
             neura_graph::AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.125)),
                 causal: true,
                 origin: None,
@@ -1916,6 +1919,7 @@ fn a_head_wider_than_the_workgroup_can_hold_is_refused() {
         keys,
         keys,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.125)),
             causal: true,
             origin: None,
@@ -2291,6 +2295,7 @@ fn every_task_that_walks_a_device_count_stands_after_the_task_that_authors_it() 
         rotated,
         rotated,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.125)),
             causal: true,
             origin: None,
@@ -2504,6 +2509,7 @@ fn a_ragged_axis_walks_the_offsets_a_device_prefix_closes() {
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
@@ -2720,6 +2726,7 @@ fn a_ragged_axis_a_device_count_narrows_closes_its_offsets_once() {
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
@@ -2989,6 +2996,7 @@ fn a_packed_attention_hands_its_gradients_the_segments_its_offsets_close() {
         key,
         value,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
@@ -3110,6 +3118,7 @@ fn a_packed_query_walks_the_rows_its_offsets_close() {
         key,
         value,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
@@ -3213,6 +3222,7 @@ fn a_row_map_parts_a_plane_beside_the_chunks_the_gradients_of_its_attention_walk
         key,
         value,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: Some(cursor),
@@ -3310,6 +3320,7 @@ fn two_ragged_axes_of_the_plane_count_they_close_part_their_planes_apart() {
             key,
             key,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: Some(cursor),
@@ -3567,6 +3578,7 @@ fn a_chunked_query_walks_its_own_offsets_beside_the_keys_it_weighs() {
         key,
         value,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,

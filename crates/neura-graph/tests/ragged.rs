@@ -13,6 +13,7 @@ fn refuses(action: impl FnOnce()) -> bool {
 
 fn causal<'g>(segments: neura_graph::Value<'g>) -> AttentionOptions<'g> {
     AttentionOptions {
+        bias: None,
         scale: None,
         causal: false,
         origin: None,
@@ -216,6 +217,7 @@ fn a_cursor_places_no_row_a_packed_query_holds() {
                 cache,
                 cache,
                 AttentionOptions {
+                    bias: None,
                     scale: Some(graph.knob(1.0)),
                     causal: true,
                     origin: Some(cursor),
@@ -255,6 +257,7 @@ fn chunked<'g>(
     keys: neura_graph::Ragged<'g>,
 ) -> AttentionOptions<'g> {
     AttentionOptions {
+        bias: None,
         scale: None,
         causal: true,
         origin: None,
@@ -304,6 +307,7 @@ fn a_query_axis_walks_beside_the_keys_the_offsets_of_the_keys_close() {
                 cache,
                 cache,
                 AttentionOptions {
+                    bias: None,
                     segments: None,
                     reach: None,
                     query_segments: Some(queries.offsets),
@@ -347,6 +351,7 @@ fn a_query_axis_seats_a_cursor_beside_the_rows_it_packs() {
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             origin: Some(cursor),
             ..chunked(queries, keys)
         },
@@ -375,6 +380,7 @@ fn a_query_axis_refuses_a_cursor_that_holds_no_count_per_plane() {
                 cache,
                 cache,
                 AttentionOptions {
+                    bias: None,
                     origin: Some(cursor),
                     ..chunked(queries, keys)
                 },

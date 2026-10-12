@@ -626,6 +626,7 @@ fn an_attention_hands_the_device_a_row_block_for_every_plane() {
         tensor(tokens),
         tensor(tokens),
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
@@ -702,6 +703,7 @@ fn a_key_chain_longer_than_the_device_width_walks_half_a_workgroup_of_rows() {
         keys,
         keys,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
@@ -753,6 +755,7 @@ fn a_key_chain_shorter_than_the_device_width_walks_the_rows_the_plan_asks_for() 
         tensor(tokens),
         tensor(tokens),
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
@@ -810,6 +813,7 @@ fn an_attention_parts_its_keys_beside_the_rows_the_device_already_walks() {
         tensor(tokens),
         tensor(tokens),
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
@@ -862,6 +866,7 @@ fn an_attention_keys_against_the_whole_pool_a_profile_offers() {
         data,
         data,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,
@@ -893,6 +898,7 @@ fn a_key_gradient_stages_the_forward_output_it_recomputes_with() {
     let width = 32u32;
     fn options<'g>(graph: &Graph<'g>) -> neura_graph::AttentionOptions<'g> {
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,
@@ -982,6 +988,7 @@ fn a_starved_attention_parts_every_row_block_across_its_threads_and_key_sections
         tensor,
         tensor,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,

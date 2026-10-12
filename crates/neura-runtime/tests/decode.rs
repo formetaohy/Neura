@@ -33,6 +33,7 @@ fn data(count: u32, seed: u32) -> Vec<f32> {
 
 fn options<'g>(graph: &Graph<'g>, cursor: Value<'g>) -> AttentionOptions<'g> {
     AttentionOptions {
+        bias: None,
         scale: Some(graph.knob(SCALE)),
         causal: true,
         origin: Some(cursor),
@@ -93,6 +94,7 @@ impl Decoder {
             keys,
             values,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
@@ -321,6 +323,7 @@ fn a_grouped_decode_reads_one_cache_for_every_query_head() {
         keys,
         values,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
@@ -471,6 +474,7 @@ fn a_windowed_decode_gradient_reaches_the_keys_a_ring_exposes() {
         keys,
         values,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),

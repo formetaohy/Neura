@@ -585,6 +585,7 @@ fn narrow_stack<'g>(graph: &Graph<'g>, element: Element, data: Shape) -> [Value<
         keys,
         keys,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: false,
             origin: None,

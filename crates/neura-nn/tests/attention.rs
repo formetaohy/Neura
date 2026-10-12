@@ -60,6 +60,7 @@ fn block(width: u32, heads: u32, key_heads: u32, input_heads: u32, causal: bool)
         },
         Element::Single,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(1.0 / (width as f32).sqrt())),
             causal,
             origin: None,
@@ -229,6 +230,7 @@ fn rotary_block() -> Block {
         },
         Element::Single,
         AttentionOptions {
+            bias: None,
             scale: None,
             causal: true,
             origin: None,

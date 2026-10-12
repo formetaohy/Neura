@@ -660,6 +660,7 @@ impl<'g> Graph<'g> {
                     let mut grad = TaskInfo::of(kind, op::NONE, out.id(), inputs);
                     grad.origin = task.origin;
                     grad.knob = task.knob;
+                    grad.bias = task.bias;
                     grad.slot = task.slot;
                     grad.reach = task.reach;
                     grad.segments = task.segments;

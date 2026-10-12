@@ -133,6 +133,10 @@ impl Ragged {
     }
 
     fn windowed(planes: u32, bound: u32, width: u32, reach: u32) -> Self {
+        Self::beside(planes, bound, width, reach, None)
+    }
+
+    fn beside(planes: u32, bound: u32, width: u32, reach: u32, bias: Option<f32>) -> Self {
         let graph: Graph<'static> = Graph::new();
         let lengths = graph.input(Shape::vector(planes), Element::Single);
         let ragged = graph.ragged(bound, lengths);
@@ -142,11 +146,13 @@ impl Ragged {
         );
         let query = graph.input(Shape::of([1, planes, 1, width]), Element::Single);
         let cursor = graph.input(Shape::of([1, planes, 1, 1]), Element::Single);
+        let bias = bias.map(|value| graph.fill(Shape::of([1, 1, 1, 1]), value));
         let out = graph.attention(
             query,
             cache,
             cache,
             AttentionOptions {
+                bias,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
@@ -244,6 +250,7 @@ fn device_counts_rule_the_key_spans() {
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
@@ -332,6 +339,7 @@ fn a_segmented_attention_names_an_offset_per_plane() {
             cache,
             cache,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: false,
                 origin: None,
@@ -359,6 +367,7 @@ fn a_causal_segmented_attention_walks_a_cursor() {
             cache,
             cache,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: None,
@@ -407,6 +416,7 @@ fn a_segmented_attention_walks_an_axis_a_device_authors() {
             cache,
             cache,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: false,
                 origin: None,
@@ -450,6 +460,7 @@ impl Planes {
             cache,
             cache,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
@@ -602,6 +613,7 @@ impl CountedPlanes {
             cache,
             cache,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
@@ -715,6 +727,7 @@ fn a_device_count_of_the_planes_narrows_what_the_prefix_closes() {
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(SCALE)),
             causal: true,
             origin: Some(cursor),
@@ -970,6 +983,7 @@ impl Trainable {
             keys,
             values,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal: true,
                 origin: Some(cursor),
@@ -1170,4 +1184,16 @@ fn a_plane_longer_than_a_workgroup_trains_every_key_of_it() {
     let trainable = Trainable::windowed(PLANES, 512, WIDTH, 0);
     let program = trainable.compile_narrow();
     trainable.step(&program, &[300.0, 70.0, 0.0, 5.0], 0);
+}
+
+#[test]
+fn a_bias_that_shifts_every_score_of_a_plane_alike_leaves_its_weights_as_they_were() {
+    let lengths = [3.0, 5.0, 2.0, 4.0];
+    let plain = Ragged::of(PLANES, BOUND, WIDTH);
+    let program = plain.compile();
+    let (expected, _) = plain.step(&program, &lengths, WIDTH);
+    let biased = Ragged::beside(PLANES, BOUND, WIDTH, 0, Some(1.5));
+    let program = biased.compile();
+    let (produced, _) = biased.step(&program, &lengths, WIDTH);
+    assert_close(&produced, &expected, 1e-5);
 }

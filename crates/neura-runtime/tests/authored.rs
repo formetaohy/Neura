@@ -62,6 +62,7 @@ fn build(graph: &Graph<'static>, bound: u32, batch: u32, layers: bool) -> Model 
             scaled,
             scaled,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: None,

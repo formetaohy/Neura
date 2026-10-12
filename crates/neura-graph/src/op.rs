@@ -490,6 +490,50 @@ impl<'g> Graph<'g> {
             .element(query)
             .promote(self.element(key))
             .promote(self.element(value));
+        let bias = attention.bias.map(|bias| self.own(bias));
+        if let Some(bias) = bias {
+            let bias_shape = self.shape(bias);
+            assert!(
+                !self.element(bias).quantized(),
+                "an attention bias shifts every score it is added to, and value {} reconstructs {} numbers by a quantum the scores beside it do not carry",
+                bias.id(),
+                self.element(bias).name(),
+            );
+            assert!(
+                !bias_shape.dynamic(),
+                "an attention bias walks the rows and keys a binding rules, and axis {} of {:?} walks a free extent where the device addresses it by the row and key every task walks",
+                (0..MAX_RANK)
+                    .find(|axis| bias_shape.free(*axis).is_some())
+                    .unwrap_or(0),
+                bias_shape.dims(),
+            );
+            assert!(
+                !self.tracked(&[bias]),
+                "an attention bias steers the scores it is added to without weighing them, and value {} is reached by a gradient; a bias that learns carries the row sum of every score gradient, and an attention hands those sums to the queries, keys and values it weighs",
+                bias.id(),
+            );
+            let scores = [
+                query_shape.dims()[0],
+                query_shape.dims()[1],
+                query_shape.dims()[2],
+                key_shape.dims()[2],
+            ];
+            for axis in 0..MAX_RANK {
+                let walked = bias_shape.dims()[axis as usize];
+                let packed_axis = (axis == 3 && segments.is_some()) || (axis == 2 && packed);
+                assert!(
+                    walked == 1 || (!packed_axis && walked == scores[axis as usize]),
+                    "an attention bias walks the scores of {:?}, and value {} walks {walked} numbers beside axis {axis} of {scores:?}{}",
+                    scores,
+                    bias.id(),
+                    if packed_axis {
+                        "; a packed axis holds the keys of every plane in the extent of one row, and a bias of that extent names no key of the plane its row stands in"
+                    } else {
+                        ""
+                    },
+                );
+            }
+        }
         let out = self.stored(
             Shape::from_axes(
                 [
@@ -546,6 +590,7 @@ impl<'g> Graph<'g> {
         task.origin = origin.map_or(NO_VALUE, |origin| origin.id());
         task.segments = segments.map_or(NO_VALUE, |offsets| offsets.id());
         task.queries = queries.map_or(NO_VALUE, |offsets| offsets.id());
+        task.bias = bias.map_or(NO_VALUE, |bias| bias.id());
         task.knob = scale.map_or(NO_VALUE, |scale| scale.id());
         task.slot = u32::from(attention.causal);
         task.reach = reach.unwrap_or(0);

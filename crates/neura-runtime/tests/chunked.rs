@@ -281,6 +281,7 @@ impl Chunked {
             key,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal,
                 origin: cursors,

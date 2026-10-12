@@ -215,6 +215,7 @@ fn packed_attention<'g>(
         cache,
         cache,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(1.0)),
             causal: true,
             origin: None,

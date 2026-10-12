@@ -184,6 +184,7 @@ fn a_static_operand_stands_beside_a_free_extent_of_its_own_bound() {
                 keys,
                 keys,
                 AttentionOptions {
+                    bias: None,
                     scale: Some(graph.knob(1.0)),
                     causal: false,
                     origin: None,

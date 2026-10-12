@@ -561,6 +561,7 @@ impl Plan {
                 knob: task.knob,
                 keep: task.keep,
                 section: task.section,
+                bias: task.bias,
             });
             if task.in_place
                 && task

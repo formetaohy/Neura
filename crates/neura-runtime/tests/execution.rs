@@ -1174,6 +1174,7 @@ fn one_pool_lets_a_plan_stage_every_body_it_runs() {
         projected,
         projected,
         neura_graph::AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal: true,
             origin: None,

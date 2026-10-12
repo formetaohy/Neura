@@ -69,6 +69,7 @@ pub(crate) struct Task {
     pub(crate) grid: u32,
     pub(crate) keep: u32,
     pub(crate) section: u32,
+    pub(crate) bias: u32,
 }
 
 impl Reads for Task {
@@ -94,6 +95,7 @@ impl Reads for Task {
             .chain(self.depends.iter().copied())
             .chain([self.segments])
             .chain([self.queries])
+            .chain([self.bias])
             .chain([self.knob])
             .filter(|value| *value != NO_VALUE)
     }
@@ -135,6 +137,7 @@ impl Task {
             grid: NO_VALUE,
             keep: unit.keep,
             section: 0,
+            bias: unit.bias,
         }
     }
 }
@@ -449,8 +452,12 @@ fn schedule_unit(
             };
             for (plane, first, count, split) in spans {
                 let walked = if segmented { keys[2] } else { count };
-                let mut task =
-                    Task::span(unit, first, count, attention_work(walked, keys[2], tile));
+                let mut task = Task::span(
+                    unit,
+                    first,
+                    count,
+                    attention_work(walked, keys[2], tile, unit.bias != NO_VALUE),
+                );
                 task.geometry = geometry;
                 task.split = split;
                 task.plane = plane;
@@ -734,10 +741,11 @@ fn spans_of(units: u32, per_task: u32) -> impl Iterator<Item = (u32, u32)> {
     spans(units, per_task)
 }
 
-fn attention_work(count: u32, tokens: u32, tile: AttentionTile) -> u64 {
+fn attention_work(count: u32, tokens: u32, tile: AttentionTile, bias: bool) -> u64 {
     let keys = tile.keys();
     let blocks = tokens.div_ceil(keys).max(1);
-    let walked = u64::from(count) * u64::from(keys) * u64::from(tile.width()) * u64::from(blocks);
+    let weighed = u64::from(tile.width()) + u64::from(bias);
+    let walked = u64::from(count) * u64::from(keys) * weighed * u64::from(blocks);
     let rows = u64::from(count) * u64::from(tile.width());
     let combined = match tile.groups() {
         1 => 0,
@@ -846,7 +854,7 @@ fn attention(
         attention_spans(tokens, planes, per_task, measure)
     };
     for (plane, first, count, split) in spans {
-        let work = attention_work(count, tokens, tile)
+        let work = attention_work(count, tokens, tile, unit.bias != NO_VALUE)
             .div_ceil(u64::from(sections))
             .max(1);
         for section in 0..sections {

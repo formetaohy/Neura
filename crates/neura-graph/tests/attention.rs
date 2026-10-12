@@ -14,6 +14,7 @@ fn windowed(reach: u32, causal: bool) -> Graph<'static> {
         key,
         value,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.5)),
             causal,
             origin: None,
@@ -62,6 +63,7 @@ fn an_attention_carries_the_scale_it_weighs_with() {
     let (query, key, value) = (tensor(), tensor(), tensor());
     let scale = graph.knob(0.5);
     let options = |scale| AttentionOptions {
+        bias: None,
         scale,
         causal: true,
         origin: None,
@@ -95,6 +97,7 @@ fn an_attention_refuses_a_scale_of_other_than_one_number() {
             key,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(shares),
                 causal: true,
                 origin: None,
@@ -104,4 +107,61 @@ fn an_attention_refuses_a_scale_of_other_than_one_number() {
             },
         );
     }));
+}
+
+fn biased() -> (
+    Graph<'static>,
+    neura_graph::Value<'static>,
+    neura_graph::Value<'static>,
+) {
+    let graph = Graph::new();
+    let tensor = || graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
+    let (query, key, value) = (tensor(), tensor(), tensor());
+    let bias = graph.resident(Shape::of([1, 1, 1, 4]), Element::Single);
+    let out = graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            bias: Some(bias),
+            scale: Some(graph.knob(0.5)),
+            causal: false,
+            origin: None,
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    (graph, bias, out)
+}
+
+#[test]
+fn an_attention_carries_the_bias_it_shifts_every_score_by() {
+    let (graph, bias, _) = biased();
+    let snapshot = graph.snapshot();
+    assert_eq!(snapshot.tasks()[0].kind, neura_abi::Kind::Attention);
+    assert_eq!(snapshot.tasks()[0].bias, bias.id());
+}
+
+#[test]
+fn every_gradient_of_a_biased_attention_shifts_the_scores_of_one_bias() {
+    let (graph, bias, out) = biased();
+    graph.backward(graph.sum(out));
+    let snapshot = graph.snapshot();
+    let mut walked = 0;
+    for task in snapshot.tasks() {
+        if !matches!(
+            task.kind,
+            neura_abi::Kind::Attention
+                | neura_abi::Kind::AttentionQueryGrad
+                | neura_abi::Kind::AttentionKeyGrad
+                | neura_abi::Kind::AttentionValueGrad
+        ) {
+            continue;
+        }
+        assert_eq!(task.bias, bias.id());
+        walked += 1;
+    }
+    assert_eq!(walked, 4);
 }

@@ -96,6 +96,20 @@ mod device {
         return at + keys * ((written - 1u32 - at) / keys);
     }
 
+    fn attention_bias(task: Task, head: u32, batch: u32, row: u32, column: u32) -> f32 {
+        if task.bias == NO_VALUE {
+            return 0.0;
+        }
+        let bias = values[task.bias];
+        return fetch(
+            bias,
+            head * bias.strides.x
+                + batch * bias.strides.y
+                + row * bias.strides.z
+                + column * bias.strides.w,
+        );
+    }
+
     fn attention_scale(task: Task, width: u32) -> f32 {
         if task.knob == NO_VALUE {
             return 1.0 / sqrt(f32(width));
@@ -396,7 +410,11 @@ mod device {
                     let key_at = block * ATTN_KEYS + first_key + slot;
                     let seen = visible(key_at, keys, written, position, task.reach, causal);
                     block_keys = block_keys + select(0u32, 1u32, seen);
-                    let weight = select(max_identity(), weights[slot] * scale, seen);
+                    let weight = select(
+                        max_identity(),
+                        weights[slot] * scale + attention_bias(task, plane.x, plane.y, row, key_at),
+                        seen,
+                    );
                     weights[slot] = weight;
                     block_largest = max(block_largest, weight);
                 }
@@ -887,7 +905,11 @@ mod device {
                     let key_at = block * ATTN_KEYS + column;
                     let weight = select(
                         0.0,
-                        softmax_exp(weights[slot] * scale - normalizer),
+                        softmax_exp(
+                            weights[slot] * scale
+                                + attention_bias(task, plane.x, plane.y, row, key_at)
+                                - normalizer,
+                        ),
                         visible(key_at, keys, written, position, task.reach, causal),
                     );
                     let scored = weight * (partial[slot] - row_dot) * scale;
@@ -1253,6 +1275,13 @@ mod device {
                                 0.0,
                                 softmax_exp(
                                     weights[at] * scale
+                                        + attention_bias(
+                                            task,
+                                            plane_head,
+                                            plane_batch,
+                                            at_row,
+                                            column,
+                                        )
                                         - fetch(
                                             statistic,
                                             statistic_plane + at_row * statistic.strides.z,
@@ -1521,6 +1550,13 @@ mod device {
                                 0.0,
                                 softmax_exp(
                                     weights[at] * scale
+                                        + attention_bias(
+                                            task,
+                                            plane_head,
+                                            plane_batch,
+                                            at_row,
+                                            column,
+                                        )
                                         - fetch(
                                             statistic,
                                             statistic_plane + at_row * statistic.strides.z,

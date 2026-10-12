@@ -231,6 +231,7 @@ impl Packed {
             keys,
             values,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(SCALE)),
                 causal,
                 origin: None,

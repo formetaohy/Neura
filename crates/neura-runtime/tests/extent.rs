@@ -102,6 +102,7 @@ fn attention_model(
         projected,
         projected,
         AttentionOptions {
+            bias: None,
             scale: Some(graph.knob(0.25)),
             causal: true,
             origin: None,
@@ -1074,6 +1075,7 @@ fn a_static_walk_beside_a_free_extent_walks_its_own_rows() {
             key,
             value,
             AttentionOptions {
+                bias: None,
                 scale: Some(graph.knob(0.5)),
                 causal: true,
                 origin: None,

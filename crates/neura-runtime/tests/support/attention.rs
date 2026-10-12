@@ -50,6 +50,35 @@ fn masked(shapes: Shapes, row: usize, column: usize) -> bool {
     true
 }
 
+#[derive(Clone, Copy)]
+pub struct Bias<'a> {
+    pub dims: [u32; 4],
+    pub data: &'a [f32],
+}
+
+#[derive(Clone, Copy)]
+pub struct Walked<'a> {
+    pub output: &'a [f32],
+    pub statistics: &'a [f32],
+    pub gradient: &'a [f32],
+    pub bias: Option<Bias<'a>>,
+}
+
+fn bias_of(bias: Option<Bias<'_>>, head: usize, batch: usize, row: usize, column: usize) -> f64 {
+    let Some(bias) = bias else {
+        return 0.0;
+    };
+    let dims = bias.dims.map(|dim| dim as usize);
+    let walked = [head, batch, row, column];
+    let mut stride = 1usize;
+    let mut address = 0usize;
+    for axis in (0..4).rev() {
+        address += if dims[axis] == 1 { 0 } else { walked[axis] } * stride;
+        stride *= dims[axis].max(1);
+    }
+    f64::from(bias.data[address])
+}
+
 fn score(
     shapes: Shapes,
     queries: &[f32],
@@ -74,6 +103,16 @@ pub fn attention_forward(
     keys: &[f32],
     values: &[f32],
 ) -> (Vec<f32>, Vec<f32>) {
+    attention_forward_beside(shapes, queries, keys, values, None)
+}
+
+pub fn attention_forward_beside(
+    shapes: Shapes,
+    queries: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    bias: Option<Bias<'_>>,
+) -> (Vec<f32>, Vec<f32>) {
     let width = shapes.width as usize;
     let mut out = vec![0.0f32; planes(shapes) * shapes.queries as usize * width];
     let mut statistics = vec![0.0f32; planes(shapes) * shapes.queries as usize];
@@ -83,7 +122,11 @@ pub fn attention_forward(
             let mut logits = Vec::with_capacity(shapes.keys as usize);
             for column in 0..shapes.keys as usize {
                 if masked(shapes, row, column) {
-                    logits.push(score(shapes, queries, keys, plane, source, row, column));
+                    let batch = shapes.batch as usize;
+                    logits.push(
+                        score(shapes, queries, keys, plane, source, row, column)
+                            + bias_of(bias, plane / batch, plane % batch, row, column),
+                    );
                 } else {
                     logits.push(f64::NEG_INFINITY);
                 }
@@ -117,6 +160,33 @@ pub fn attention_backward(
     statistics: &[f32],
     gradient: &[f32],
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    attention_backward_beside(
+        shapes,
+        queries,
+        keys,
+        values,
+        Walked {
+            output: out,
+            statistics,
+            gradient,
+            bias: None,
+        },
+    )
+}
+
+pub fn attention_backward_beside(
+    shapes: Shapes,
+    queries: &[f32],
+    keys: &[f32],
+    values: &[f32],
+    walked: Walked<'_>,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let Walked {
+        output: out,
+        statistics,
+        gradient,
+        bias,
+    } = walked;
     let width = shapes.width as usize;
     let mut query_grad = vec![0.0f32; queries.len()];
     let mut key_grad = vec![0.0f32; keys.len()];
@@ -132,7 +202,11 @@ pub fn attention_backward(
             for column in 0..shapes.keys as usize {
                 let other = (source * shapes.keys as usize + column) * width;
                 let weight = if masked(shapes, row, column) {
-                    (score(shapes, queries, keys, plane, source, row, column) - normalizer).exp()
+                    let batch = shapes.batch as usize;
+                    (score(shapes, queries, keys, plane, source, row, column)
+                        + bias_of(bias, plane / batch, plane % batch, row, column)
+                        - normalizer)
+                        .exp()
                 } else {
                     0.0
                 };
