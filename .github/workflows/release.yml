@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  check:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Publish GitHub Release
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Match the tag against the workspace version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          versions=$(cargo metadata --no-deps --format-version 1 | jq -r '[.packages[].version] | unique | join(" ")')
+          if [ "$versions" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace versions: $versions" >&2
+            exit 1
+          fi
+
+      - name: Generate notes from the commit log
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^")
+          {
+            echo "## Changes since $previous"
+            echo
+            git log --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s' "$previous..$GITHUB_REF_NAME"
+            echo
+            echo
+            echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_REF_NAME"
+          } > notes.md
+
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
