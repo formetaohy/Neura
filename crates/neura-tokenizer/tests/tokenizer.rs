@@ -131,7 +131,7 @@ fn a_piece_no_token_spells_is_refused() {
 fn a_tokenizer_that_is_not_byte_level_bpe_is_refused() {
     let bytes = build(
         &[
-            ("tokenizer.ggml.model", Meta::Text("llama")),
+            ("tokenizer.ggml.model", Meta::Text("bert")),
             ("tokenizer.ggml.tokens", Meta::Texts(&["a"])),
             ("tokenizer.ggml.token_type", Meta::Words(&[1])),
             ("tokenizer.ggml.merges", Meta::Texts(&[])),

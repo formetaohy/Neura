@@ -1,140 +1,165 @@
 use neura_template::{Message, Template, Value};
 
-const QWEN: &str = include_str!("fixtures/qwen35.jinja");
-
 fn refuses<T>(action: impl FnOnce() -> T) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
 }
 
-fn qwen() -> Template {
-    Template::parse(QWEN)
+fn transcript() -> Template {
+    Template::parse(include_str!("fixtures/transcript.jinja"))
 }
 
-fn message(role: &str, content: &str) -> Message {
-    Message::new(role, content)
+fn quiet() -> [(&'static str, Value); 1] {
+    [("answer_thinking", Value::Flag(false))]
 }
 
-fn generation() -> [(&'static str, Value); 2] {
-    [
-        ("add_generation_prompt", Value::Flag(true)),
-        ("enable_thinking", Value::Flag(false)),
-    ]
+fn loud() -> [(&'static str, Value); 1] {
+    [("answer_thinking", Value::Flag(true))]
 }
 
-fn tool_call() -> Value {
-    Value::List(vec![Value::Map(vec![(
-        "function".to_owned(),
-        Value::Map(vec![
-            ("name".to_owned(), Value::Text("get_weather".to_owned())),
-            (
-                "arguments".to_owned(),
-                Value::Map(vec![("city".to_owned(), Value::Text("Paris".to_owned()))]),
-            ),
-        ]),
-    )])])
-}
-
-fn weather_tool() -> Value {
-    let city = Value::Map(vec![("type".to_owned(), Value::Text("string".to_owned()))]);
-    let parameters = Value::Map(vec![
-        ("type".to_owned(), Value::Text("object".to_owned())),
-        (
-            "properties".to_owned(),
-            Value::Map(vec![("city".to_owned(), city)]),
-        ),
-        (
-            "required".to_owned(),
-            Value::List(vec![Value::Text("city".to_owned())]),
-        ),
-    ]);
-    let function = Value::Map(vec![
-        ("name".to_owned(), Value::Text("get_weather".to_owned())),
-        (
-            "description".to_owned(),
-            Value::Text("Get the weather".to_owned()),
-        ),
-        ("parameters".to_owned(), parameters),
-    ]);
-    Value::List(vec![Value::Map(vec![
-        ("type".to_owned(), Value::Text("function".to_owned())),
-        ("function".to_owned(), function),
-    ])])
+fn item(text: &str) -> Value {
+    Value::Map(vec![("text".to_owned(), Value::Text(text.to_owned()))])
 }
 
 #[test]
-fn a_question_draws_the_prompt_the_model_was_trained_on() {
-    let held = qwen().render(
-        &[message("user", "What is the capital of France?")],
-        &generation(),
-    );
-    assert_eq!(held, include_str!("fixtures/qwen35-single.txt"));
+fn a_question_renders_the_turn_it_asks() {
+    let held = transcript().render(&[Message::new("user", "what is the plan?")], &quiet());
+    assert_eq!(held, "tone: few\nuser 1: what is the plan?\naside (none) ",);
 }
 
 #[test]
-fn every_turn_of_a_conversation_draws_its_own_markers() {
-    let held = qwen().render(
+fn the_rules_and_the_earlier_turns_stand_on_their_own_lines() {
+    let held = transcript().render(
         &[
-            message("user", "Hello"),
-            message("assistant", "Hi there"),
-            message("user", "How are you?"),
+            Message::new("system", "the rules"),
+            Message::new("user", "who goes there?"),
         ],
-        &[
-            ("add_generation_prompt", Value::Flag(true)),
-            ("enable_thinking", Value::Flag(true)),
-        ],
+        &quiet(),
     );
-    assert_eq!(held, include_str!("fixtures/qwen35-turn.txt"));
+    assert_eq!(
+        held,
+        "tone: few\n<rules>the rules</rules>\nuser 2: who goes there?\naside (none) ",
+    );
+    let held = transcript().render(
+        &[
+            Message::new("user", "hello"),
+            Message::new("assistant", "hi"),
+            Message::new("user", "how are you?"),
+        ],
+        &loud(),
+    );
+    assert_eq!(
+        held,
+        "tone: many\nuser 1: hello\nhi\nuser 3: how are you?\naside ",
+    );
 }
 
 #[test]
-fn a_system_message_opens_the_prompt() {
-    let held = qwen().render(
+fn the_thought_of_an_answer_stays_out_of_its_turn() {
+    let held = transcript().render(
         &[
-            message("system", "You are a helpful assistant."),
-            message("user", "Hello"),
+            Message::new("user", "what is two plus two?"),
+            Message::new("assistant", "<thinking>\nadd them\n<<\nfour."),
+            Message::new("user", "thanks"),
         ],
-        &generation(),
+        &quiet(),
     );
-    assert_eq!(held, include_str!("fixtures/qwen35-system.txt"));
+    assert_eq!(
+        held,
+        "tone: many\nuser 1: what is two plus two?\nfour.\nuser 3: thanks\naside (none) ",
+    );
 }
 
 #[test]
-fn the_reasoning_of_an_earlier_answer_stays_out_of_the_prompt() {
-    let held = qwen().render(
+fn consecutive_notes_open_once_and_close_once() {
+    let held = transcript().render(
         &[
-            message("user", "What is 2+2?"),
-            message("assistant", "<think>\nLet me add.\n</think>\n\nFour."),
-            message("user", "Thanks"),
+            Message::new("user", "list them"),
+            Message::new("assistant", "sure"),
+            Message::new("note", "first"),
+            Message::new("note", "second"),
+            Message::new("user", "and then?"),
         ],
-        &generation(),
+        &quiet(),
     );
-    assert_eq!(held, include_str!("fixtures/qwen35-reasoning.txt"));
+    assert_eq!(
+        held,
+        "tone: many\nuser 1: list them\nsure\nnotes: firstsecond;\nuser 5: and then?\naside (none) ",
+    );
 }
 
 #[test]
-fn a_call_and_its_answer_walk_as_turns_of_their_own() {
-    let held = qwen().render(
-        &[
-            message("user", "Weather in Paris?"),
-            message("assistant", "").with("tool_calls", tool_call()),
-            message("tool", "18C and sunny"),
-        ],
-        &generation(),
+fn a_turn_reads_the_items_a_body_holds() {
+    let held = transcript().render(
+        &[Message::new(
+            "user",
+            Value::List(vec![
+                item("one"),
+                Value::Map(vec![("count".to_owned(), Value::Integer(3))]),
+                item("two"),
+            ]),
+        )],
+        &quiet(),
     );
-    assert_eq!(held, include_str!("fixtures/qwen35-tool.txt"));
+    assert_eq!(
+        held,
+        "tone: few\nuser 1: one{\"count\": 3}two\naside (none) "
+    );
 }
 
 #[test]
-fn the_tools_on_offer_stand_ahead_of_the_question() {
-    let held = qwen().render(
-        &[message("user", "Weather in Paris?")],
+fn the_thought_of_the_last_turn_stands_apart() {
+    let held = transcript().render(
         &[
-            ("add_generation_prompt", Value::Flag(true)),
-            ("enable_thinking", Value::Flag(false)),
-            ("tools", weather_tool()),
+            Message::new("user", "hello"),
+            Message::new("assistant", "hello").with("thought", "quietly"),
         ],
+        &loud(),
     );
-    assert_eq!(held, include_str!("fixtures/qwen35-tools.txt"));
+    assert_eq!(
+        held,
+        "tone: few\nuser 1: hello\naside[quietly] hello\naside ",
+    );
+}
+
+#[test]
+fn a_turn_of_no_content_leaves_its_line_empty() {
+    let held = transcript().render(
+        &[
+            Message::new("assistant", Value::Empty),
+            Message::new("user", "?"),
+        ],
+        &quiet(),
+    );
+    assert_eq!(held, "tone: few\n\nuser 2: ?\naside (none) ");
+}
+
+#[test]
+fn a_transcript_the_template_cannot_read_is_refused() {
+    assert!(refuses(|| transcript().render(&[], &quiet())));
+    assert!(refuses(
+        || transcript().render(&[Message::new("assistant", "hi")], &quiet())
+    ));
+    assert!(refuses(|| transcript().render(
+        &[Message::new("user", "hi"), Message::new("tool", "anywhere"),],
+        &quiet(),
+    )));
+    assert!(refuses(|| transcript().render(
+        &[Message::new(
+            "user",
+            Value::List(vec![Value::Map(vec![(
+                "picture".to_owned(),
+                Value::Text("a picture".to_owned()),
+            )])]),
+        )],
+        &quiet(),
+    )));
+    assert!(refuses(|| transcript().render(
+        &[Message::new(
+            "user",
+            Value::Map(vec![("count".to_owned(), Value::Integer(3))]),
+        )],
+        &quiet(),
+    )));
 }
 
 #[test]
@@ -147,7 +172,7 @@ fn a_branch_prints_the_arm_its_condition_picks() {
     );
     assert_eq!(
         template.render(&[], &[("other", Value::Flag(true))]),
-        "neither"
+        "neither",
     );
     assert_eq!(template.render(&[], &[]), "none");
 }
@@ -163,19 +188,11 @@ fn a_loop_walks_what_it_names_and_counts_itself() {
     let template = Template::parse(
         "{% for x in held %}{{ loop.previtem }}{{ x }}{{ loop.nextitem }}{% if loop.last %}!{% endif %}{% endfor %}",
     );
-    assert_eq!(
-        template.render(
-            &[],
-            &[(
-                "held",
-                Value::List(vec![
-                    Value::Text("a".to_owned()),
-                    Value::Text("b".to_owned()),
-                ]),
-            )],
-        ),
-        "abab!",
-    );
+    let held = Value::List(vec![
+        Value::Text("a".to_owned()),
+        Value::Text("b".to_owned()),
+    ]);
+    assert_eq!(template.render(&[], &[("held", held)]), "abab!");
 }
 
 #[test]
@@ -235,7 +252,7 @@ fn a_list_walks_backwards_through_a_slice() {
 #[test]
 fn the_condition_of_a_question_picks_between_two_texts() {
     let template = Template::parse("{{ 'yes' if held else 'no' }}");
-    assert_eq!(template.render(&[], &[("held", Value::Flag(true))]), "yes",);
+    assert_eq!(template.render(&[], &[("held", Value::Flag(true))]), "yes");
     assert_eq!(template.render(&[], &[]), "no");
 }
 
@@ -286,7 +303,7 @@ fn a_tag_this_renderer_reads_no_part_of_is_refused() {
     assert!(refuses(|| Template::parse("{{ held.untold() }}")
         .render(&[], &[("held", Value::Text("x".to_owned()))],)));
     assert!(
-        refuses(|| qwen().render(&[], &generation())),
-        "the template raises on a conversation that holds no message",
+        refuses(|| Template::parse("{{ raise_exception('no') }}").render(&[], &[])),
+        "a template raises through the same call every renderer reads",
     );
 }
