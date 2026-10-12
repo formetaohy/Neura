@@ -359,6 +359,17 @@ fn rounding_contract(backend: neura_gpu::Backend) {
                 quantized_contract(&runtime, *element, scale, &quantized_probes(scale));
             }
             Element::Int4 | Element::Fp4E2M1 => block_contract(&runtime, *element),
+            Element::Q4_0
+            | Element::Q4_1
+            | Element::Q5_0
+            | Element::Q5_1
+            | Element::Q8_0
+            | Element::Q2K
+            | Element::Q3K
+            | Element::Q4K
+            | Element::Q5K
+            | Element::Q6K
+            | Element::Mxfp4 => block_contract(&runtime, *element),
         }
     }
 }
@@ -423,14 +434,21 @@ fn block_contract(runtime: &Runtime, element: Element) {
     let weights = runtime.weights(&graph);
     let program = runtime.compile(&graph, &weights);
     let values = random(1200, 23);
+    let inputs = random(450, 17);
     runtime.write(&program, weight, &values);
-    runtime.write(&program, input, &random(450, 17));
+    runtime.write(&program, input, &inputs);
     runtime.run(&program);
+    let quantized = unpack(element, values.len(), &pack(element, 1.0, &values));
     assert_eq!(
         runtime.read(&program, weight),
-        unpack(element, values.len(), &pack(element, 1.0, &values)),
+        quantized,
         "a {} weight reads back the numbers its blocks place",
         element.name(),
+    );
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &quantized, 3, 150, 8),
+        1e-3,
     );
 }
 

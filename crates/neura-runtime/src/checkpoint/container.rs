@@ -67,7 +67,19 @@ impl Dtype {
             Element::Fp8E4M3 => Some(Self::Fp8E4M3),
             Element::Fp8E5M2 => Some(Self::Fp8E5M2),
             Element::Int8 => Some(Self::Int8),
-            Element::Int4 | Element::Fp4E2M1 => None,
+            Element::Int4
+            | Element::Fp4E2M1
+            | Element::Q4_0
+            | Element::Q4_1
+            | Element::Q5_0
+            | Element::Q5_1
+            | Element::Q8_0
+            | Element::Q2K
+            | Element::Q3K
+            | Element::Q4K
+            | Element::Q5K
+            | Element::Q6K
+            | Element::Mxfp4 => None,
         }
     }
 
@@ -131,7 +143,7 @@ impl Container {
                 entry.name,
             );
             let tight = tight_bytes(entry.element, entry.elements);
-            if entry.element.per_block() {
+            if entry.element.block().is_some() {
                 let quanta = entry.element.quanta(entry.elements);
                 files.push(Part {
                     name: entry.name.to_owned(),
@@ -140,13 +152,15 @@ impl Container {
                     word: entry.word,
                     bytes: tight,
                 });
-                files.push(Part {
-                    name: format!("{}{QUANTA_SUFFIX}", entry.name),
-                    dtype: Dtype::F32,
-                    shape: vec![quanta],
-                    word: entry.word + entry.element.payload_words(entry.elements),
-                    bytes: quanta * WORD_BYTES,
-                });
+                if quanta > 0 {
+                    files.push(Part {
+                        name: format!("{}{QUANTA_SUFFIX}", entry.name),
+                        dtype: Dtype::F32,
+                        shape: vec![quanta],
+                        word: entry.word + entry.element.payload_words(entry.elements),
+                        bytes: quanta * WORD_BYTES,
+                    });
+                }
                 metadata.push((
                     format!("{ELEMENT_PREFIX}{}", entry.name),
                     entry.element.name().to_owned(),
@@ -528,7 +542,7 @@ pub(crate) fn parse(
                 },
             );
         assert!(
-            element.per_block(),
+            element.block().is_some(),
             "tensor {} holds {} numbers a container stores by its element",
             tensor.name,
             element.name(),
@@ -543,7 +557,7 @@ pub(crate) fn parse(
                     .name()
                     .to_owned()),
         );
-        let packed = tight_bytes(element, elements);
+        let packed = element.payload_bytes(elements);
         assert!(
             tensor.payload.len() as u64 == packed,
             "tensor {} holds {} bytes where {elements} {} numbers pack {packed}",
@@ -551,12 +565,19 @@ pub(crate) fn parse(
             tensor.payload.len(),
             element.name(),
         );
+        if !element.sidecar() {
+            quantized.push((at, element, elements, None));
+            continue;
+        }
         let quanta_name = format!("{}{QUANTA_SUFFIX}", tensor.name);
         let quanta = tensors.get(*index.get(&quanta_name).unwrap_or_else(|| {
             panic!(
                 "tensor {} quantizes every {} numbers and the container holds no {quanta_name}",
                 tensor.name,
-                element.block(),
+                element
+                    .block()
+                    .expect("a block quantized tensor carries its block")
+                    .elements,
             )
         }));
         let quanta = quanta.unwrap_or_else(|| {
@@ -574,12 +595,12 @@ pub(crate) fn parse(
                     .name()
                     .to_owned()),
         );
-        quantized.push((at, element, elements, quanta.payload.clone()));
+        quantized.push((at, element, elements, Some(quanta.payload.clone())));
     }
     for (at, element, elements, quanta) in quantized {
         tensors[at].element = Some(element);
         tensors[at].elements = elements;
-        tensors[at].quanta = Some(quanta);
+        tensors[at].quanta = quanta;
     }
     (tensors, index)
 }
@@ -596,13 +617,7 @@ pub(crate) fn natural(shape: [u32; 4]) -> Vec<u64> {
 }
 
 pub(crate) fn tight_bytes(element: Element, elements: u64) -> u64 {
-    let bits = 32 / element.elements_per_word();
-    elements
-        .checked_mul(bits)
-        .unwrap_or_else(|| {
-            panic!("a tensor of {elements} numbers spans more bytes than a container indexes")
-        })
-        .div_ceil(8)
+    element.payload_bytes(elements)
 }
 
 fn find_element(name: &str) -> Option<Element> {

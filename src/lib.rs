@@ -1,4 +1,5 @@
 pub use neura_abi::{Element, Placement, Store};
+pub use neura_gguf as gguf;
 pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, ArtifactCache, Backend, DEFAULT_ARTIFACT_BYTES, Device,
     GpuRequest, GpuUnavailable, PowerPreference, Queue,
@@ -17,3 +18,4 @@ pub use neura_runtime::{
     Checkpoint, CheckpointFile, CheckpointTensor, DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES,
     DEFAULT_READBACK_SLOTS, MemoryRequest, Program, Readout, Run, Runtime, RuntimeRequest, Weights,
 };
+pub use neura_source::{Placed, Source};

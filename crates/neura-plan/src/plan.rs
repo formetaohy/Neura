@@ -1558,12 +1558,15 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
         for out in task.writes() {
             let out = &values[out as usize];
             assert!(
-                !out.element.per_block(),
-                "a {} task writes the block quantized tensor {}; a {} tensor reconstructs through the quantum its storage holds of every {} blocks, and only its host holds those",
+                out.element.block().is_none(),
+                "a {} task writes the block quantized tensor {}; a {} tensor reconstructs through the quantum its storage holds of every {} numbers, and only its host holds those",
                 task.kind.name(),
                 task.out,
                 out.element.name(),
-                out.element.block(),
+                out.element
+                    .block()
+                    .expect("a block quantized tensor carries its block")
+                    .elements,
             );
             if task.kind == Kind::Convert {
                 assert!(

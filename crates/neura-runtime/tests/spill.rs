@@ -284,7 +284,7 @@ fn carries_every_word_of_a_checkpoint(backend: Backend, directory: &Path) {
     let loaded = spilled(backend, directory);
     let loaded_graph = Graph::new();
     let loaded_session = training(&loaded_graph);
-    let weights = loaded.load_streamed(&loaded_graph, &container);
+    let weights = loaded.load(&loaded_graph, &container);
     let program = loaded.compile(&loaded_graph, &weights);
     let observed = parameters(&loaded, &program, &loaded_session);
     for (at, (expected, observed)) in expected.iter().zip(&observed).enumerate() {
@@ -310,7 +310,7 @@ fn carries_every_word_of_a_checkpoint(backend: Backend, directory: &Path) {
     let resting_data = resting_graph.input(Shape::matrix(BATCH, WIDTH), Element::Single);
     let resting_out = resting_graph.matmul(resting_data, resting_layers[0].0);
     resting_graph.retain(resting_out);
-    let resting_weights = resting.load_streamed(&resting_graph, &container);
+    let resting_weights = resting.load(&resting_graph, &container);
     let resting_program = resting.compile(&resting_graph, &resting_weights);
     let observed = resting.read(&resting_program, resting_layers[0].0).len();
     assert_eq!(
@@ -321,7 +321,7 @@ fn carries_every_word_of_a_checkpoint(backend: Backend, directory: &Path) {
 
     let overwritten = vec![0.0; (WIDTH * WIDTH) as usize];
     target.write(&seeded_program, target_session.layers[0].0, &overwritten);
-    target.restore_streamed(&seeded, &container);
+    target.restore(&seeded, &container);
     let restored = parameters(&target, &seeded_program, &target_session);
     for (at, (expected, observed)) in expected.iter().zip(&restored).enumerate() {
         assert!(
@@ -370,7 +370,7 @@ fn saves_the_container_it_streams(backend: Backend, directory: &Path) {
     let target = resident(backend);
     let target_graph = Graph::new();
     let target_session = training(&target_graph);
-    let target_weights = target.load_streamed(&target_graph, &container);
+    let target_weights = target.load(&target_graph, &container);
     let program = target.compile(&target_graph, &target_weights);
     let observed = parameters(&target, &program, &target_session);
     assert_eq!(expected.len(), observed.len());

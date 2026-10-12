@@ -682,7 +682,7 @@ impl<'g> Graph<'g> {
         );
         let element = self.element(value);
         assert!(
-            !element.narrow() && !element.per_block(),
+            !element.narrow() && element.block().is_none(),
             "{walks} sums the exact numbers it reads, and value {} holds {} storage",
             value.id(),
             element.name(),
@@ -832,7 +832,7 @@ impl<'g> Graph<'g> {
         element: Element,
     ) -> Value<'g> {
         assert!(
-            element.per_block(),
+            element.block().is_some(),
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
             element.name(),
         );
@@ -847,7 +847,7 @@ impl<'g> Graph<'g> {
         element: Element,
     ) -> Value<'g> {
         assert!(
-            element.per_block(),
+            element.block().is_some(),
             "a block quantized parameter of {} storage carries one quantum of every number, and a block quantized tensor declares the block its storage packs",
             element.name(),
         );
@@ -899,10 +899,13 @@ impl<'g> Graph<'g> {
         let value = self.own(value);
         let info = &self.state.borrow().values[value.id() as usize];
         assert!(
-            !info.element.per_block(),
-            "a {} tensor reconstructs through the quantum its storage holds of every {} blocks, and the tensor itself declares none",
+            info.element.block().is_none(),
+            "a {} tensor reconstructs through the quantum its storage holds of every {} numbers, and the tensor itself declares none",
             info.element.name(),
-            info.element.block(),
+            info.element
+                .block()
+                .expect("a block quantized tensor carries its block")
+                .elements,
         );
         info.scale
     }
@@ -1468,10 +1471,13 @@ impl<'g> Graph<'g> {
         tracked: bool,
     ) -> Value<'g> {
         assert!(
-            !element.per_block(),
+            element.block().is_none(),
             "a {} tensor is a weight whose storage packs the quantum of every {} numbers, and a task writes the numbers of a tensor it does not weigh; cast the weight into exact storage first",
             element.name(),
-            element.block(),
+            element
+                .block()
+                .expect("a block quantized tensor carries its block")
+                .elements,
         );
         self.declare(
             Declaration::of(shape, element, residency)

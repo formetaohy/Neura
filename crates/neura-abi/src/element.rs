@@ -9,6 +9,17 @@ pub enum Element {
     Fp8E4M3,
     Fp8E5M2,
     Fp4E2M1,
+    Q4_0,
+    Q4_1,
+    Q5_0,
+    Q5_1,
+    Q8_0,
+    Q2K,
+    Q3K,
+    Q4K,
+    Q5K,
+    Q6K,
+    Mxfp4,
 }
 
 pub const SINGLE: u32 = Element::Single as u32;
@@ -19,9 +30,31 @@ pub const INT4: u32 = Element::Int4 as u32;
 pub const FP8_E4M3: u32 = Element::Fp8E4M3 as u32;
 pub const FP8_E5M2: u32 = Element::Fp8E5M2 as u32;
 pub const FP4_E2M1: u32 = Element::Fp4E2M1 as u32;
+pub const Q4_0: u32 = Element::Q4_0 as u32;
+pub const Q4_1: u32 = Element::Q4_1 as u32;
+pub const Q5_0: u32 = Element::Q5_0 as u32;
+pub const Q5_1: u32 = Element::Q5_1 as u32;
+pub const Q8_0: u32 = Element::Q8_0 as u32;
+pub const Q2_K: u32 = Element::Q2K as u32;
+pub const Q3_K: u32 = Element::Q3K as u32;
+pub const Q4_K: u32 = Element::Q4K as u32;
+pub const Q5_K: u32 = Element::Q5K as u32;
+pub const Q6_K: u32 = Element::Q6K as u32;
+pub const MXFP4: u32 = Element::Mxfp4 as u32;
 
 pub const INT4_BLOCK: u32 = 128;
 pub const FP4_BLOCK: u32 = 32;
+pub const QUANT_BLOCK: u32 = 32;
+pub const SUPER_BLOCK: u32 = 256;
+pub const SUPER_SUB_BLOCK: u32 = 32;
+pub const SUPER_SMALL_BLOCK: u32 = 16;
+pub const SUPER_SCALE_BYTES: u32 = 12;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Block {
+    pub elements: u32,
+    pub bytes: u32,
+}
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct FloatFormat {
@@ -45,6 +78,17 @@ impl Element {
         Self::Fp8E4M3,
         Self::Fp8E5M2,
         Self::Fp4E2M1,
+        Self::Q4_0,
+        Self::Q4_1,
+        Self::Q5_0,
+        Self::Q5_1,
+        Self::Q8_0,
+        Self::Q2K,
+        Self::Q3K,
+        Self::Q4K,
+        Self::Q5K,
+        Self::Q6K,
+        Self::Mxfp4,
     ];
     pub const COUNT: u32 = Self::ALL.len() as u32;
 
@@ -68,6 +112,17 @@ impl Element {
             Self::Fp8E4M3 => "element::FP8_E4M3",
             Self::Fp8E5M2 => "element::FP8_E5M2",
             Self::Fp4E2M1 => "element::FP4_E2M1",
+            Self::Q4_0 => "element::Q4_0",
+            Self::Q4_1 => "element::Q4_1",
+            Self::Q5_0 => "element::Q5_0",
+            Self::Q5_1 => "element::Q5_1",
+            Self::Q8_0 => "element::Q8_0",
+            Self::Q2K => "element::Q2_K",
+            Self::Q3K => "element::Q3_K",
+            Self::Q4K => "element::Q4_K",
+            Self::Q5K => "element::Q5_K",
+            Self::Q6K => "element::Q6_K",
+            Self::Mxfp4 => "element::MXFP4",
         }
     }
 
@@ -81,7 +136,37 @@ impl Element {
             Self::Fp8E4M3 => "fp8e4m3",
             Self::Fp8E5M2 => "fp8e5m2",
             Self::Fp4E2M1 => "fp4e2m1",
+            Self::Q4_0 => "q4_0",
+            Self::Q4_1 => "q4_1",
+            Self::Q5_0 => "q5_0",
+            Self::Q5_1 => "q5_1",
+            Self::Q8_0 => "q8_0",
+            Self::Q2K => "q2_k",
+            Self::Q3K => "q3_k",
+            Self::Q4K => "q4_k",
+            Self::Q5K => "q5_k",
+            Self::Q6K => "q6_k",
+            Self::Mxfp4 => "mxfp4",
         }
+    }
+
+    pub const fn integral(self) -> bool {
+        matches!(
+            self,
+            Self::Int8
+                | Self::Int4
+                | Self::Q4_0
+                | Self::Q4_1
+                | Self::Q5_0
+                | Self::Q5_1
+                | Self::Q8_0
+                | Self::Q2K
+                | Self::Q3K
+                | Self::Q4K
+                | Self::Q5K
+                | Self::Q6K
+                | Self::Mxfp4
+        )
     }
 
     pub const fn elements_per_word(self) -> u64 {
@@ -90,52 +175,155 @@ impl Element {
             Self::Half | Self::Bfloat16 => 2,
             Self::Int8 | Self::Fp8E4M3 | Self::Fp8E5M2 => 4,
             Self::Int4 | Self::Fp4E2M1 => 8,
+            _ => panic!("a block lays out its own bytes, and its numbers carry no per word count"),
         }
     }
 
-    pub const fn payload_words(self, elements: u64) -> u64 {
-        elements.div_ceil(self.elements_per_word())
+    pub const fn bits_per_element(self) -> u32 {
+        32 / self.elements_per_word() as u32
+    }
+
+    pub const fn block(self) -> Option<Block> {
+        let block = match self {
+            Self::Int4 => Block {
+                elements: INT4_BLOCK,
+                bytes: INT4_BLOCK / 2,
+            },
+            Self::Fp4E2M1 => Block {
+                elements: FP4_BLOCK,
+                bytes: FP4_BLOCK / 2,
+            },
+            Self::Q4_0 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 2 + QUANT_BLOCK / 2,
+            },
+            Self::Q4_1 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 4 + QUANT_BLOCK / 2,
+            },
+            Self::Q5_0 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 2 + 4 + QUANT_BLOCK / 2,
+            },
+            Self::Q5_1 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 4 + 4 + QUANT_BLOCK / 2,
+            },
+            Self::Q8_0 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 2 + QUANT_BLOCK,
+            },
+            Self::Q2K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 4 + SUPER_BLOCK / SUPER_SMALL_BLOCK + SUPER_BLOCK / 4,
+            },
+            Self::Q3K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 2 + SUPER_BLOCK / 4 + SUPER_BLOCK / 8 + SUPER_SCALE_BYTES,
+            },
+            Self::Q4K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 4 + SUPER_SCALE_BYTES + SUPER_BLOCK / 2,
+            },
+            Self::Q5K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 4 + SUPER_SCALE_BYTES + SUPER_BLOCK / 2 + SUPER_BLOCK / 8,
+            },
+            Self::Q6K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 2 + SUPER_BLOCK / 2 + SUPER_BLOCK / 4 + SUPER_BLOCK / 16,
+            },
+            Self::Mxfp4 => Block {
+                elements: QUANT_BLOCK,
+                bytes: 1 + QUANT_BLOCK / 2,
+            },
+            _ => return None,
+        };
+        Some(block)
+    }
+
+    pub const fn sidecar(self) -> bool {
+        matches!(self, Self::Int4 | Self::Fp4E2M1)
+    }
+
+    pub const fn whole_blocks(self) -> bool {
+        self.block().is_some() && !self.sidecar()
+    }
+
+    pub const fn per_tensor(self) -> bool {
+        matches!(self, Self::Int8)
+    }
+
+    pub const fn quantized(self) -> bool {
+        matches!(
+            self,
+            Self::Int8
+                | Self::Int4
+                | Self::Fp4E2M1
+                | Self::Q4_0
+                | Self::Q4_1
+                | Self::Q5_0
+                | Self::Q5_1
+                | Self::Q8_0
+                | Self::Q2K
+                | Self::Q3K
+                | Self::Q4K
+                | Self::Q5K
+                | Self::Q6K
+                | Self::Mxfp4
+        )
+    }
+
+    pub const fn narrow(self) -> bool {
+        self.block().is_some() || self.elements_per_word() > 1
     }
 
     pub const fn quanta(self, elements: u64) -> u64 {
-        match self.block() {
-            0 if self.quantized() => 1,
-            0 => 0,
-            block => elements.div_ceil(block as u64),
+        match self {
+            Self::Int8 => 1,
+            Self::Int4 => elements.div_ceil(INT4_BLOCK as u64),
+            Self::Fp4E2M1 => elements.div_ceil(FP4_BLOCK as u64),
+            _ => 0,
         }
+    }
+
+    pub const fn payload_bytes(self, elements: u64) -> u64 {
+        if !self.whole_blocks() {
+            return (elements * self.bits_per_element() as u64).div_ceil(8);
+        }
+        let block = match self.block() {
+            Some(block) => block,
+            None => return (elements * self.bits_per_element() as u64).div_ceil(8),
+        };
+        elements.div_ceil(block.elements as u64) * block.bytes as u64
+    }
+
+    pub const fn payload_words(self, elements: u64) -> u64 {
+        self.payload_bytes(elements).div_ceil(crate::WORD_BYTES)
     }
 
     pub const fn storage_words(self, elements: u64) -> u64 {
         self.payload_words(elements) + self.quanta(elements)
     }
 
-    pub const fn word_span(self, first: u64, count: u64) -> (u64, u64) {
-        let per = self.elements_per_word();
-        (first / per, (first + count).div_ceil(per))
-    }
-
-    pub const fn narrow(self) -> bool {
-        self.elements_per_word() > 1
-    }
-
-    pub const fn quantized(self) -> bool {
-        matches!(self, Self::Int8 | Self::Int4 | Self::Fp4E2M1)
-    }
-
-    pub const fn block(self) -> u32 {
-        match self {
-            Self::Int4 => INT4_BLOCK,
-            Self::Fp4E2M1 => FP4_BLOCK,
-            _ => 0,
+    pub const fn byte_span(self, first: u64, count: u64) -> (u64, u64) {
+        match (self.whole_blocks(), self.block()) {
+            (true, Some(block)) => {
+                let per = block.elements as u64;
+                let bytes = block.bytes as u64;
+                (first / per * bytes, (first + count).div_ceil(per) * bytes)
+            }
+            _ => {
+                let per = self.elements_per_word();
+                let bytes = crate::WORD_BYTES;
+                (first / per * bytes, (first + count).div_ceil(per) * bytes)
+            }
         }
     }
 
-    pub const fn per_tensor(self) -> bool {
-        self.quantized() && self.block() == 0
-    }
-
-    pub const fn per_block(self) -> bool {
-        self.block() != 0
+    pub const fn word_span(self, first: u64, count: u64) -> (u64, u64) {
+        let (first, end) = self.byte_span(first, count);
+        (first / crate::WORD_BYTES, end.div_ceil(crate::WORD_BYTES))
     }
 
     pub const fn format(self) -> Option<FloatFormat> {
@@ -179,13 +367,17 @@ impl Element {
             (Self::Fp8E4M3 | Self::Fp8E5M2, _)
             | (_, Self::Fp8E4M3 | Self::Fp8E5M2)
             | (Self::Fp4E2M1, _)
-            | (_, Self::Fp4E2M1) => Self::Single,
-            (Self::Single, _) | (_, Self::Single) => Self::Single,
-            (Self::Int8 | Self::Int4, Self::Int8 | Self::Int4) => Self::Single,
-            (Self::Int8 | Self::Int4, other) | (other, Self::Int8 | Self::Int4) => other,
+            | (_, Self::Fp4E2M1)
+            | (Self::Single, _)
+            | (_, Self::Single) => Self::Single,
             (Self::Half, Self::Half) => Self::Half,
             (Self::Bfloat16, Self::Bfloat16) => Self::Bfloat16,
             (Self::Half, Self::Bfloat16) | (Self::Bfloat16, Self::Half) => Self::Single,
+            (first, second) => match (first.integral(), second.integral()) {
+                (true, true) => Self::Single,
+                (true, false) => second,
+                (false, _) => first,
+            },
         }
     }
 }

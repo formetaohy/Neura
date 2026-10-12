@@ -17,6 +17,7 @@ use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
 use neura_profile::{Budget, Geometry, MatmulTile, Profile};
+use neura_source::Source;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -33,13 +34,13 @@ pub struct Readout {
     lease: ReadbackLease,
     queue: Queue,
     submission: SubmissionIndex,
-    sources: Vec<Source>,
+    sources: Vec<Origin>,
     total: u64,
     refusal_at: u64,
     refusal_buffer: GpuBuffer,
 }
 
-enum Source {
+enum Origin {
     Device { span: Span, offset: u64, bytes: u64 },
     Host { span: Span, bytes: Vec<u8> },
 }
@@ -64,7 +65,7 @@ impl Readout {
         self.sources
             .into_iter()
             .map(|source| match source {
-                Source::Device {
+                Origin::Device {
                     span,
                     offset,
                     bytes: length,
@@ -76,7 +77,7 @@ impl Readout {
                         &bytes[start..start + length as usize],
                     )
                 }
-                Source::Host { span, bytes } => {
+                Origin::Host { span, bytes } => {
                     unpack(span.element, span.elements as usize, &bytes)
                 }
             })
@@ -264,31 +265,19 @@ impl Runtime {
         weights
     }
 
-    pub fn load(&self, graph: &Graph, checkpoint: &Checkpoint) -> Weights {
+    pub fn load(&self, graph: &Graph, source: &impl Source) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
         weights.store().load(
             self.context.queue(),
             layout.weights(),
             layout.state(),
-            checkpoint,
+            source,
         );
         weights
     }
 
-    pub fn load_streamed(&self, graph: &Graph, checkpoint: &CheckpointFile) -> Weights {
-        self.context.assert_alive();
-        let (weights, layout) = self.parameter_store(graph);
-        weights.store().load(
-            self.context.queue(),
-            layout.weights(),
-            layout.state(),
-            checkpoint,
-        );
-        weights
-    }
-
-    pub fn restore(&self, weights: &Weights, checkpoint: &Checkpoint) {
+    pub fn restore(&self, weights: &Weights, source: &impl Source) {
         self.context.assert_alive();
         assert!(
             weights.lives_on(&self.heap),
@@ -298,21 +287,7 @@ impl Runtime {
             self.context.queue(),
             weights.region(),
             weights.state(),
-            checkpoint,
-        );
-    }
-
-    pub fn restore_streamed(&self, weights: &Weights, checkpoint: &CheckpointFile) {
-        self.context.assert_alive();
-        assert!(
-            weights.lives_on(&self.heap),
-            "this weight store lives on the device heap of another runtime",
-        );
-        weights.store().load(
-            self.context.queue(),
-            weights.region(),
-            weights.state(),
-            checkpoint,
+            source,
         );
     }
 
@@ -788,7 +763,7 @@ impl Runtime {
                         table,
                     ));
                 }
-                sources.push(Source::Host { span, bytes });
+                sources.push(Origin::Host { span, bytes });
                 continue;
             }
             let payload = span.payload_bytes();
@@ -801,7 +776,7 @@ impl Runtime {
                 copies.push((span.offset + span.table_offset(), table, device_bytes));
                 device_bytes += table;
             }
-            sources.push(Source::Device {
+            sources.push(Origin::Device {
                 span,
                 offset: device_bytes - (payload + table),
                 bytes: payload + table,

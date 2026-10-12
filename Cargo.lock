@@ -137,12 +137,14 @@ version = "0.6.0"
 dependencies = [
  "flate2",
  "neura-abi",
+ "neura-gguf",
  "neura-gpu",
  "neura-graph",
  "neura-nn",
  "neura-plan",
  "neura-profile",
  "neura-runtime",
+ "neura-source",
 ]
 
 [[package]]
@@ -164,6 +166,14 @@ dependencies = [
  "neura-ast",
  "neura-macro",
  "neura-shader",
+]
+
+[[package]]
+name = "neura-gguf"
+version = "0.6.0"
+dependencies = [
+ "neura-abi",
+ "neura-source",
 ]
 
 [[package]]
@@ -262,6 +272,7 @@ dependencies = [
  "bytemuck",
  "neura-abi",
  "neura-compiler",
+ "neura-gguf",
  "neura-gpu",
  "neura-graph",
  "neura-kernel",
@@ -269,11 +280,19 @@ dependencies = [
  "neura-pointwise",
  "neura-precision",
  "neura-profile",
+ "neura-source",
 ]
 
 [[package]]
 name = "neura-shader"
 version = "0.6.0"
+
+[[package]]
+name = "neura-source"
+version = "0.6.0"
+dependencies = [
+ "neura-abi",
+]
 
 [[package]]
 name = "objc2"

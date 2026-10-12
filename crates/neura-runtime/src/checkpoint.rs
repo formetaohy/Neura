@@ -1,7 +1,8 @@
 pub(crate) use container::Container;
-use container::{Entry, LENGTH_BYTES, Reader, Tensor, parse, tight_bytes};
-use neura_abi::{Element, WORD_BYTES};
+use container::{Entry, LENGTH_BYTES, Reader, Tensor, parse};
+use neura_abi::Element;
 use neura_plan::Arena;
+use neura_source::{Placed, Source};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,6 +15,7 @@ mod container;
 mod json;
 
 const JSON_DEPTH_CEILING: usize = 32;
+const COPY_CHUNK: usize = 1 << 16;
 
 pub struct TensorView<'c> {
     pub element: Option<Element>,
@@ -59,32 +61,7 @@ impl Checkpoint {
             index,
         }
     }
-}
 
-fn header_of(bytes: &[u8]) -> (usize, &str) {
-    assert!(
-        bytes.len() >= LENGTH_BYTES,
-        "a container holds {} bytes where its length alone takes {LENGTH_BYTES}",
-        bytes.len(),
-    );
-    let length = u64::from_le_bytes(
-        bytes[..LENGTH_BYTES]
-            .try_into()
-            .expect("a container opens with a length word"),
-    ) as usize;
-    assert!(
-        length >= 2 && LENGTH_BYTES + length <= bytes.len(),
-        "a container of {} bytes declares a {length} byte header",
-        bytes.len(),
-    );
-    (
-        length,
-        std::str::from_utf8(&bytes[LENGTH_BYTES..LENGTH_BYTES + length])
-            .expect("a container header holds UTF-8"),
-    )
-}
-
-impl Checkpoint {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -112,114 +89,71 @@ impl Checkpoint {
     }
 }
 
-pub(crate) struct Placed {
-    pub(crate) element: Option<Element>,
-    pub(crate) elements: u64,
-    pub(crate) scale: f32,
-    pub(crate) payload: Range<usize>,
-    pub(crate) quanta: Option<Range<usize>>,
+fn header_of(bytes: &[u8]) -> (usize, &str) {
+    assert!(
+        bytes.len() >= LENGTH_BYTES,
+        "a container holds {} bytes where its length alone takes {LENGTH_BYTES}",
+        bytes.len(),
+    );
+    let length = u64::from_le_bytes(
+        bytes[..LENGTH_BYTES]
+            .try_into()
+            .expect("a container opens with a length word"),
+    ) as usize;
+    assert!(
+        length >= 2 && LENGTH_BYTES + length <= bytes.len(),
+        "a container of {} bytes declares a {length} byte header",
+        bytes.len(),
+    );
+    (
+        length,
+        std::str::from_utf8(&bytes[LENGTH_BYTES..LENGTH_BYTES + length])
+            .expect("a container header holds UTF-8"),
+    )
 }
 
-const COPY_CHUNK: usize = 1 << 16;
-
-pub(crate) trait Source {
-    fn placed(&self, name: &str) -> Option<Placed>;
-    fn payload(&self, range: Range<usize>, sink: &mut dyn FnMut(&[u8]));
-
-    fn pour(&self, weights: &Arena, state: &Arena, words: u64, write: &mut dyn FnMut(u64, &[u8])) {
-        for entry in weights.entries().iter().chain(state.entries()) {
-            let name = entry.name.as_deref().unwrap_or_else(|| {
-                panic!(
-                    "the tensor at word {} of {} carries no name, and a container names every tensor it holds; declare it with a named parameter or a named state",
-                    entry.word,
-                    entry.element.name(),
-                )
-            });
-            let placed = self.placed(name).unwrap_or_else(|| {
-                panic!(
-                    "this container holds no tensor named {name}, and the graph declares it at word {}",
-                    entry.word,
-                )
-            });
-            let element = placed.element.unwrap_or_else(|| {
-                panic!("this container holds {name} in a dtype this framework does not read")
-            });
-            assert!(
-                element == entry.element && placed.elements == entry.elements,
-                "this container holds {name} as {} numbers of {} where the graph declares {} numbers of {}",
-                placed.elements,
-                element.name(),
-                entry.elements,
-                entry.element.name(),
-            );
-            assert!(
-                placed.scale == entry.scale,
-                "this container quantizes {name} by {} where the graph quantizes by {}",
-                placed.scale,
-                entry.scale,
-            );
-            let at = entry.word * WORD_BYTES;
-            let payload = entry.element.payload_words(entry.elements) * WORD_BYTES;
-            let tight = tight_bytes(entry.element, entry.elements);
-            assert!(
-                at + payload <= words * WORD_BYTES,
-                "this graph declares {name} at word {} of a store of {words} words",
-                entry.word,
-            );
-            assert!(
-                placed.payload.len() as u64 >= tight,
-                "this container holds {} bytes of {name} where {} numbers of {} pack {tight}",
-                placed.payload.len(),
-                entry.elements,
-                entry.element.name(),
-            );
-            let range = placed.payload.start..placed.payload.start + tight as usize;
-            let mut copied = 0u64;
-            self.payload(range, &mut |chunk| {
-                write(at + copied, chunk);
-                copied += chunk.len() as u64;
-            });
-            if entry.element.per_tensor() {
-                write(at + payload, &entry.scale.to_bits().to_le_bytes());
-                continue;
-            }
-            if entry.element.per_block() {
-                let quanta = placed.quanta.unwrap_or_else(|| {
-                    panic!("this container holds no quanta beside the block quantized {name}")
-                });
-                let count = entry.element.quanta(entry.elements) * WORD_BYTES;
-                assert!(
-                    quanta.len() as u64 == count,
-                    "this container holds {} bytes of quanta of {name} where {} numbers of {} walk {count}",
-                    quanta.len(),
-                    entry.elements,
-                    entry.element.name(),
-                );
-                let mut copied = 0u64;
-                self.payload(quanta.clone(), &mut |chunk| {
-                    write(at + payload + copied, chunk);
-                    copied += chunk.len() as u64;
-                });
-            }
-        }
+fn placed_of(tensor: &Tensor) -> Placed {
+    let element = tensor.element.unwrap_or_else(|| {
+        panic!(
+            "a container holds the tensor {} in a dtype this framework does not read",
+            tensor.name,
+        )
+    });
+    Placed {
+        element,
+        elements: tensor.elements,
+        scale: tensor.scale,
+        payload_bytes: tensor.payload.len() as u64,
+        table_bytes: tensor
+            .quanta
+            .as_ref()
+            .map_or(0, |quanta| quanta.len() as u64),
     }
 }
 
 impl Source for Checkpoint {
     fn placed(&self, name: &str) -> Option<Placed> {
-        let tensor = &self.tensors[*self.index.get(name)?];
-        Some(Placed {
-            element: tensor.element,
-            elements: tensor.elements,
-            scale: tensor.scale,
-            payload: tensor.payload.clone(),
-            quanta: tensor.quanta.clone(),
-        })
+        let tensor = self.tensors.get(*self.index.get(name)?)?;
+        Some(placed_of(tensor))
     }
 
-    fn payload(&self, range: Range<usize>, sink: &mut dyn FnMut(&[u8])) {
-        for chunk in self.bytes[range].chunks(COPY_CHUNK) {
+    fn payload(&self, name: &str, sink: &mut dyn FnMut(&[u8])) {
+        let tensor = &self.tensors[*self.index.get(name).unwrap_or_else(|| {
+            panic!("this container holds no tensor named {name}");
+        })];
+        for chunk in self.bytes[tensor.payload.clone()].chunks(COPY_CHUNK) {
             sink(chunk);
+        }
+    }
+
+    fn table(&self, name: &str, sink: &mut dyn FnMut(&[u8])) {
+        let tensor = &self.tensors[*self.index.get(name).unwrap_or_else(|| {
+            panic!("this container holds no tensor named {name}");
+        })];
+        if let Some(quanta) = &tensor.quanta {
+            for chunk in self.bytes[quanta.clone()].chunks(COPY_CHUNK) {
+                sink(chunk);
+            }
         }
     }
 }
@@ -230,7 +164,7 @@ pub struct CheckpointTensor {
     pub elements: u64,
     pub scale: f32,
     pub payload_bytes: u64,
-    pub quanta_bytes: u64,
+    pub table_bytes: u64,
 }
 
 pub struct CheckpointFile {
@@ -303,7 +237,7 @@ impl CheckpointFile {
             elements: tensor.elements,
             scale: tensor.scale,
             payload_bytes: tensor.payload.len() as u64,
-            quanta_bytes: tensor
+            table_bytes: tensor
                 .quanta
                 .as_ref()
                 .map_or(0, |quanta| quanta.len() as u64),
@@ -312,6 +246,22 @@ impl CheckpointFile {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn stream(&self, range: Range<usize>, sink: &mut dyn FnMut(&[u8])) {
+        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut left = range.len();
+        let mut at = range.start;
+        let mut chunk = Vec::new();
+        while left > 0 {
+            let take = left.min(COPY_CHUNK);
+            chunk.resize(take, 0);
+            read_exact_at(&mut file, at as u64, &mut chunk, &self.path);
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            sink(&chunk);
+            at += take;
+            left -= take;
+        }
     }
 }
 
@@ -328,29 +278,23 @@ fn read_exact_at(file: &mut File, at: u64, bytes: &mut [u8], path: &Path) {
 
 impl Source for CheckpointFile {
     fn placed(&self, name: &str) -> Option<Placed> {
-        let tensor = &self.tensors[*self.index.get(name)?];
-        Some(Placed {
-            element: tensor.element,
-            elements: tensor.elements,
-            scale: tensor.scale,
-            payload: tensor.payload.clone(),
-            quanta: tensor.quanta.clone(),
-        })
+        let tensor = self.tensors.get(*self.index.get(name)?)?;
+        Some(placed_of(tensor))
     }
 
-    fn payload(&self, range: Range<usize>, sink: &mut dyn FnMut(&[u8])) {
-        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut left = range.len();
-        let mut at = range.start;
-        let mut chunk = Vec::new();
-        while left > 0 {
-            let take = left.min(COPY_CHUNK);
-            chunk.resize(take, 0);
-            read_exact_at(&mut file, at as u64, &mut chunk, &self.path);
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            sink(&chunk);
-            at += take;
-            left -= take;
+    fn payload(&self, name: &str, sink: &mut dyn FnMut(&[u8])) {
+        let tensor = &self.tensors[*self.index.get(name).unwrap_or_else(|| {
+            panic!("this container holds no tensor named {name}");
+        })];
+        self.stream(tensor.payload.clone(), sink);
+    }
+
+    fn table(&self, name: &str, sink: &mut dyn FnMut(&[u8])) {
+        let tensor = &self.tensors[*self.index.get(name).unwrap_or_else(|| {
+            panic!("this container holds no tensor named {name}");
+        })];
+        if let Some(quanta) = &tensor.quanta {
+            self.stream(quanta.clone(), sink);
         }
     }
 }

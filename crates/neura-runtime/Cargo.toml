@@ -12,13 +12,15 @@ workspace = true
 [dependencies]
 bytemuck = { workspace = true }
 neura-abi = { workspace = true }
-neura-pointwise = { workspace = true }
 neura-profile = { workspace = true }
 neura-precision = { workspace = true }
+neura-pointwise = { workspace = true }
 neura-graph = { workspace = true }
 neura-gpu = { workspace = true }
 neura-plan = { workspace = true }
+neura-source = { workspace = true }
 neura-kernel = { workspace = true }
 
 [dev-dependencies]
 neura-compiler = { workspace = true }
+neura-gguf = { workspace = true }

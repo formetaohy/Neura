@@ -135,7 +135,13 @@ fn a_four_bit_float_parameter_carries_the_block_its_storage_packs() {
     let weight =
         graph.block_quantized_parameter(Shape::matrix(64, 4), Init::Zero, Element::Fp4E2M1);
     assert_eq!(graph.element(weight), Element::Fp4E2M1);
-    assert_eq!(Element::Fp4E2M1.block(), 32);
+    assert_eq!(
+        Element::Fp4E2M1.block(),
+        Some(neura_abi::Block {
+            elements: 32,
+            bytes: 16,
+        }),
+    );
     assert!(
         refuses(|| {
             graph.block_quantized_parameter(Shape::matrix(64, 4), Init::Zero, Element::Int8);

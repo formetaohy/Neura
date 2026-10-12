@@ -4,9 +4,101 @@ use crate::spill::{Spill, SpillFile};
 use neura_abi::{NO_PAGE, PAGE_WORDS, WORD_BYTES, pages_of};
 use neura_gpu::{BufferUsages, GpuBuffer, GpuContext, Queue, Submission, SubmissionIndex};
 use neura_plan::Arena;
+use neura_source::Source;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+
+fn pour(
+    weights: &Arena,
+    state: &Arena,
+    words: u64,
+    source: &impl Source,
+    write: &mut dyn FnMut(u64, &[u8]),
+) {
+    for entry in weights.entries().iter().chain(state.entries()) {
+        let name = entry.name.as_deref().unwrap_or_else(|| {
+            panic!(
+                "the tensor at word {} of {} carries no name, and a source names every tensor it holds; declare it with a named parameter or a named state",
+                entry.word,
+                entry.element.name(),
+            )
+        });
+        let placed = source.placed(name).unwrap_or_else(|| {
+            panic!(
+                "this source holds no tensor named {name}, and the graph declares it at word {}",
+                entry.word,
+            )
+        });
+        assert!(
+            placed.element == entry.element && placed.elements == entry.elements,
+            "this source holds {name} as {} numbers of {} where the graph declares {} numbers of {}",
+            placed.elements,
+            placed.element.name(),
+            entry.elements,
+            entry.element.name(),
+        );
+        assert!(
+            placed.scale == entry.scale,
+            "this source quantizes {name} by {} where the graph quantizes by {}",
+            placed.scale,
+            entry.scale,
+        );
+        let payload = entry.element.payload_bytes(entry.elements);
+        let table = if entry.element.sidecar() {
+            entry.element.quanta(entry.elements) * WORD_BYTES
+        } else {
+            0
+        };
+        assert!(
+            placed.payload_bytes == payload,
+            "this source holds {} bytes of {name} where {} numbers of {} pack {payload}",
+            placed.payload_bytes,
+            entry.elements,
+            entry.element.name(),
+        );
+        assert!(
+            placed.table_bytes == table,
+            "this source holds {} bytes of quanta of {name} where {} numbers of {} walk {table}",
+            placed.table_bytes,
+            entry.elements,
+            entry.element.name(),
+        );
+        let at = entry.word * WORD_BYTES;
+        let tables = entry.element.payload_words(entry.elements) * WORD_BYTES;
+        assert!(
+            at + tables + table <= words * WORD_BYTES,
+            "this graph declares {name} at word {} of a store of {words} words",
+            entry.word,
+        );
+        let mut copied = 0u64;
+        source.payload(name, &mut |chunk| {
+            write(at + copied, chunk);
+            copied += chunk.len() as u64;
+        });
+        assert!(
+            copied == payload,
+            "this source hands {copied} bytes of {name} where {} numbers of {} pack {payload}",
+            entry.elements,
+            entry.element.name(),
+        );
+        if entry.element.per_tensor() {
+            write(at + tables, &entry.scale.to_bits().to_le_bytes());
+            continue;
+        }
+        if table > 0 {
+            let mut copied = 0u64;
+            source.table(name, &mut |chunk| {
+                write(at + tables + copied, chunk);
+                copied += chunk.len() as u64;
+            });
+            assert!(
+                copied == table,
+                "this source hands {copied} bytes of quanta of {name} where {table} bytes weigh it",
+            );
+        }
+    }
+}
 
 pub(crate) struct WeightStore {
     device: neura_gpu::Device,
@@ -766,16 +858,10 @@ impl WeightStore {
         }
     }
 
-    pub(crate) fn load(
-        &self,
-        queue: &Queue,
-        weights: &Arena,
-        state: &Arena,
-        source: &impl crate::checkpoint::Source,
-    ) {
+    pub(crate) fn load(&self, queue: &Queue, weights: &Arena, state: &Arena, source: &impl Source) {
         let Some(mirror) = &self.mirror else {
             let mut upload = Upload::of(self, queue);
-            source.pour(weights, state, self.words, &mut |at, bytes| {
+            pour(weights, state, self.words, source, &mut |at, bytes| {
                 upload.put(at, bytes);
             });
             upload.flush();
@@ -784,7 +870,7 @@ impl WeightStore {
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         self.materialize_all(&mut mirror, queue);
         mirror.vacuum();
-        source.pour(weights, state, self.words, &mut |at, bytes| {
+        pour(weights, state, self.words, source, &mut |at, bytes| {
             self.bounds(at / WORD_BYTES, bytes.len() as u64);
             mirror.backing.write(at, bytes);
         });

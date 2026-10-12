@@ -1,5 +1,7 @@
 use neura_abi::{Element, FP4_BLOCK, FloatFormat, INT4_BLOCK, WORD_BYTES};
 
+mod ggml;
+
 pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
     match element {
         Element::Single => bytemuck::cast_slice(values).to_vec(),
@@ -14,6 +16,17 @@ pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
         Element::Fp8E4M3 => words(values, |value| e4m3_bits(value) as u8),
         Element::Fp8E5M2 => words(values, |value| e5m2_bits(value) as u8),
         Element::Fp4E2M1 => fp4(values),
+        Element::Q4_0
+        | Element::Q4_1
+        | Element::Q5_0
+        | Element::Q5_1
+        | Element::Q8_0
+        | Element::Q2K
+        | Element::Q3K
+        | Element::Q4K
+        | Element::Q5K
+        | Element::Q6K
+        | Element::Mxfp4 => ggml::pack(element, values),
     }
 }
 
@@ -54,6 +67,17 @@ pub fn unpack(element: Element, elements: usize, bytes: &[u8]) -> Vec<f32> {
             .flat_map(|word| (0..4).map(move |lane| e5m2_value((word >> (8 * lane)) as u8)))
             .collect(),
         Element::Fp4E2M1 => fp4_values(elements, bytes),
+        Element::Q4_0
+        | Element::Q4_1
+        | Element::Q5_0
+        | Element::Q5_1
+        | Element::Q8_0
+        | Element::Q2K
+        | Element::Q3K
+        | Element::Q4K
+        | Element::Q5K
+        | Element::Q6K
+        | Element::Mxfp4 => ggml::unpack(element, elements, bytes),
     };
     values.truncate(elements);
     values

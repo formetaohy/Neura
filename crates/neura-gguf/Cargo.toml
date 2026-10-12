@@ -1,0 +1,14 @@
+[package]
+name = "neura-gguf"
+version.workspace = true
+edition.workspace = true
+description = "Reading GGUF files into the tensors a store fills"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
+neura-source = { workspace = true }

@@ -1,0 +1,13 @@
+[package]
+name = "neura-source"
+version.workspace = true
+edition.workspace = true
+description = "The tensors a store fills from: a named source of payload and quantum bytes"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+neura-abi = { workspace = true }
