@@ -29,17 +29,10 @@ jobs:
             exit 1
           fi
 
-      - name: Generate notes from the commit log
+      - name: Generate notes
         run: |
           previous=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^")
-          {
-            echo "## Changes since $previous"
-            echo
-            git log --no-merges --invert-grep --grep='^chore(release):' --pretty=format:'- %s' "$previous..$GITHUB_REF_NAME"
-            echo
-            echo
-            echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_REF_NAME"
-          } > notes.md
+          echo "**Full Changelog**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$previous...$GITHUB_REF_NAME" > notes.md
 
       - name: Create release
         run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
