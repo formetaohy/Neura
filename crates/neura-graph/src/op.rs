@@ -1267,10 +1267,16 @@ impl<'g> Graph<'g> {
         dims[3] = self.shape(table).dims()[3];
         let mut frees = self.shape(indices).frees();
         frees[3] = self.shape(table).free(3);
+        let held = self.element(table);
+        let exact = !held.quantized();
         let out = self.stored(
             Shape::from_axes(dims, frees),
-            self.element(table),
-            self.carries(self.element(table), &[table]),
+            if exact { held } else { Element::Single },
+            if exact {
+                self.carries(held, &[table])
+            } else {
+                1.0
+            },
             Residency::Derived,
             self.tracked(&[table]),
         );
