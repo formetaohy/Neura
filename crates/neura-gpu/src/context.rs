@@ -4,7 +4,7 @@ use crate::cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Capability, Limits, PowerPreference,
 };
-use crate::host::HostDevice;
+use crate::host::{HostDevice, HostIdentity};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
 use crate::pipeline::PipelineHandle;
@@ -137,8 +137,17 @@ pub struct Device {
     pub(crate) state: Arc<DeviceState>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum Origin {
+    Opened(GpuRequest),
+    Borrowed {
+        host: HostIdentity,
+        request: GpuRequest,
+    },
+}
+
 struct Registration {
-    request: GpuRequest,
+    origin: Origin,
     state: Weak<DeviceState>,
 }
 
@@ -158,16 +167,17 @@ impl Device {
             .lock()
             .expect("the shared device registry is never poisoned");
         registry.retain(|entry| entry.state.strong_count() > 0);
+        let origin = Origin::Opened(request.clone());
         if let Some(state) = registry
             .iter()
-            .filter(|entry| entry.request == *request)
+            .filter(|entry| entry.origin == origin)
             .find_map(|entry| entry.state.upgrade())
         {
             return Ok(Self { state });
         }
         let device = Self::open(request)?;
         registry.push(Registration {
-            request: request.clone(),
+            origin,
             state: Arc::downgrade(&device.state),
         });
         Ok(device)
@@ -175,14 +185,34 @@ impl Device {
 
     pub fn open(request: &GpuRequest) -> Result<Self, GpuUnavailable> {
         let artifacts = cache(request);
-        let (native, info, limits, capability) = native::open(request, artifacts.clone())?;
+        let (native, info, limits, capability) = native::open(request)?;
         Self::assemble(native, info, limits, capability, artifacts, request)
     }
 
     pub fn borrow(host: HostDevice<'_>, request: &GpuRequest) -> Result<Self, GpuUnavailable> {
+        let mut registry = DEVICE_REGISTRY
+            .lock()
+            .expect("the shared device registry is never poisoned");
+        registry.retain(|entry| entry.state.strong_count() > 0);
+        let origin = Origin::Borrowed {
+            host: host.identity(),
+            request: request.clone(),
+        };
+        if let Some(state) = registry
+            .iter()
+            .filter(|entry| entry.origin == origin)
+            .find_map(|entry| entry.state.upgrade())
+        {
+            return Ok(Self { state });
+        }
         let artifacts = cache(request);
-        let (native, info, limits, capability) = native::borrow(host, request, artifacts.clone())?;
-        Self::assemble(native, info, limits, capability, artifacts, request)
+        let (native, info, limits, capability) = native::borrow(host, request)?;
+        let device = Self::assemble(native, info, limits, capability, artifacts, request)?;
+        registry.push(Registration {
+            origin,
+            state: Arc::downgrade(&device.state),
+        });
+        Ok(device)
     }
 
     fn assemble(
@@ -237,6 +267,10 @@ impl Device {
     }
 }
 
+pub struct QueueLock<'a> {
+    _guard: native::NativeQueueGuard<'a>,
+}
+
 #[derive(Clone)]
 pub struct Queue {
     device: Device,
@@ -251,6 +285,12 @@ impl Queue {
 
     pub fn device(&self) -> &Device {
         &self.device
+    }
+
+    pub fn lock(&self) -> QueueLock<'_> {
+        QueueLock {
+            _guard: self.device.native().guard(),
+        }
     }
 
     pub(crate) fn write(&self, write: Write) {

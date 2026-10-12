@@ -16,7 +16,7 @@ use std::any::Any;
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
 use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::Dxc::*;
@@ -153,8 +153,20 @@ pub(crate) struct Device {
     clock: Arc<BufferResource>,
     frequency: u64,
     state: Mutex<QueueState>,
-    artifacts: ArtifactCache,
 }
+
+pub(crate) struct QueueGuard<'a> {
+    _state: MutexGuard<'a, QueueState>,
+}
+
+struct Lent {
+    device: usize,
+    native: Weak<Device>,
+    info: AdapterInfo,
+    limits: Limits,
+}
+
+static LENT: LazyLock<Mutex<Vec<Lent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 struct BufferResource {
     raw: ID3D12Resource,
@@ -447,7 +459,6 @@ fn select(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         let factory: IDXGIFactory1 =
@@ -469,7 +480,7 @@ impl Device {
                 }
             });
         };
-        let device = Self::assemble(candidate.device, artifacts)?;
+        let device = Self::assemble(candidate.device)?;
         Ok((
             device,
             candidate.info,
@@ -480,19 +491,39 @@ impl Device {
 
     pub(crate) fn borrow(
         raw: &ID3D12Device,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        let mut lent = LENT
+            .lock()
+            .expect("the borrowed D3D12 devices are never poisoned");
+        lent.retain(|entry| entry.native.strong_count() > 0);
+        let identity = Interface::as_raw(raw) as usize;
+        if let Some(entry) = lent.iter().find(|entry| entry.device == identity)
+            && let Some(device) = entry.native.upgrade()
+        {
+            return Ok((
+                device,
+                entry.info.clone(),
+                entry.limits,
+                Capability::default(),
+            ));
+        }
         compiler().map_err(|error| format!("loading the D3D12 compute compiler: {error}"))?;
         if !shader_model(raw) {
             return Err(DeviceFailure::reason("it runs no compute shader model 6.0"));
         }
         let info = describe_device(raw)?;
         let limits = limits(raw);
-        let device = Self::assemble(raw.clone(), artifacts)?;
+        let device = Self::assemble(raw.clone())?;
+        lent.push(Lent {
+            device: identity,
+            native: Arc::downgrade(&device),
+            info: info.clone(),
+            limits,
+        });
         Ok((device, info, limits, Capability::default()))
     }
 
-    fn assemble(raw: ID3D12Device, artifacts: ArtifactCache) -> Result<Arc<Device>, DeviceFailure> {
+    fn assemble(raw: ID3D12Device) -> Result<Arc<Device>, DeviceFailure> {
         let queue: ID3D12CommandQueue = unsafe {
             raw.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -557,21 +588,34 @@ impl Device {
             clock,
             frequency,
             state: Mutex::new(QueueState::default()),
-            artifacts,
         }))
     }
 
-    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+    pub(crate) fn guard(&self) -> QueueGuard<'_> {
+        QueueGuard {
+            _state: self
+                .state
+                .lock()
+                .expect("the D3D12 compute queue is never poisoned"),
+        }
+    }
+
+    pub(crate) fn compile(
+        &self,
+        pipeline: &Pipeline,
+        program: &ComputeProgram,
+        artifacts: &ArtifactCache,
+    ) {
         pipeline.resource.compiled.get_or_init(|| {
             let (source, entry, key) = hlsl(program);
-            if let Some(bytes) = self.artifacts.load(&key) {
+            if let Some(bytes) = artifacts.load(&key) {
                 if let Ok(compiled) = self.pipeline(pipeline, &bytes) {
                     return compiled;
                 }
-                self.artifacts.discard(&key);
+                artifacts.discard(&key);
             }
             let bytes = dxil(&source, &entry, program.label());
-            self.artifacts.store(&key, &bytes);
+            artifacts.store(&key, &bytes);
             self.pipeline(pipeline, &bytes).unwrap_or_else(|error| {
                 panic!(
                     "creating the D3D12 compute pipeline of {}: {error}",

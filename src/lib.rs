@@ -5,7 +5,7 @@ pub use neura_gguf as gguf;
 pub use neura_gpu as gpu;
 pub use neura_gpu::{
     AdapterId, AdapterInfo, AdapterPolicy, ArtifactCache, Backend, DEFAULT_ARTIFACT_BYTES, Device,
-    GpuRequest, GpuUnavailable, HostDevice, PowerPreference, Queue,
+    GpuRequest, GpuUnavailable, HostDevice, PowerPreference, Queue, QueueLock,
 };
 pub use neura_graph::{
     AttentionOptions, Fan, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,

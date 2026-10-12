@@ -9,6 +9,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 #[cfg(dx12_backend)]
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+#[cfg(dx12_backend)]
+use windows::core::Interface;
 
 #[cfg(vulkan_backend)]
 pub struct VulkanHost<'a> {
@@ -30,6 +32,16 @@ pub enum HostDevice<'a> {
     Metal(&'a Retained<ProtocolObject<dyn MTLDevice>>),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum HostIdentity {
+    #[cfg(vulkan_backend)]
+    Vulkan { device: u64, queue: u64 },
+    #[cfg(dx12_backend)]
+    Dx12(usize),
+    #[cfg(metal_backend)]
+    Metal(u64),
+}
+
 impl HostDevice<'_> {
     pub(crate) fn backend(&self) -> Backend {
         match self {
@@ -39,6 +51,20 @@ impl HostDevice<'_> {
             Self::Dx12(_) => Backend::Dx12,
             #[cfg(metal_backend)]
             Self::Metal(_) => Backend::Metal,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> HostIdentity {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(host) => HostIdentity::Vulkan {
+                device: vk::Handle::as_raw(host.device.handle()),
+                queue: vk::Handle::as_raw(host.queue),
+            },
+            #[cfg(dx12_backend)]
+            Self::Dx12(device) => HostIdentity::Dx12(Interface::as_raw(*device) as usize),
+            #[cfg(metal_backend)]
+            Self::Metal(device) => HostIdentity::Metal(device.registryID()),
         }
     }
 }

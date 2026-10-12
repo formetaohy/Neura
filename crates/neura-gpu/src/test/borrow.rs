@@ -16,6 +16,17 @@ fn request(backend: Backend) -> GpuRequest {
     }
 }
 
+fn cached(backend: Backend, name: &str) -> GpuRequest {
+    GpuRequest {
+        backend: Some(backend),
+        artifacts: Some(std::env::temp_dir().join(format!(
+            "neura-borrow-cache-{}-{backend:?}-{name}",
+            std::process::id(),
+        ))),
+        ..Default::default()
+    }
+}
+
 fn stranger(backend: Backend) -> AdapterId {
     match backend {
         Backend::Metal => AdapterId::MetalRegistry(u64::MAX),
@@ -85,6 +96,68 @@ fn borrowed_compute(backend: Backend) {
 fn a_borrowed_device_runs_compute() {
     for &backend in PREFERENCE {
         borrowed_compute(backend);
+    }
+}
+
+#[test]
+fn one_request_of_one_host_device_reaches_one_device() {
+    for &backend in PREFERENCE {
+        let owner = Owner::open(backend);
+        let first = borrow(&owner, backend);
+        let second = borrow(&owner, backend);
+        assert!(
+            first.same(&second),
+            "{backend:?} built two devices of one host device",
+        );
+    }
+}
+
+#[test]
+fn another_request_of_one_host_device_shares_its_queue() {
+    for &backend in PREFERENCE {
+        let owner = Owner::open(backend);
+        let first = borrow(&owner, backend);
+        let second = Device::borrow(owner.device(), &cached(backend, "second"))
+            .unwrap_or_else(|error| panic!("{backend:?} refused a second request: {error}"));
+        assert!(!first.same(&second));
+        assert!(
+            first.native().same(second.native()),
+            "{backend:?} lent two queues for one host device",
+        );
+    }
+}
+
+#[test]
+fn a_queue_lock_of_the_host_serializes_every_borrow() {
+    for &backend in PREFERENCE {
+        let owner = Owner::open(backend);
+        let holder = GpuContext::of_device(borrow(&owner, backend));
+        let peer = GpuContext::of_device(
+            Device::borrow(owner.device(), &cached(backend, "locked"))
+                .unwrap_or_else(|error| panic!("{backend:?} refused a second request: {error}")),
+        );
+        let lock = holder.queue().lock();
+        let queue = peer.queue().clone();
+        let (started, start) = std::sync::mpsc::channel();
+        let (done, finish) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                started.send(()).expect("a started worker");
+                queue.drain();
+                done.send(()).expect("a drained worker");
+            });
+            start.recv().expect("a started worker");
+            assert!(
+                finish
+                    .recv_timeout(std::time::Duration::from_millis(100))
+                    .is_err(),
+                "{backend:?} drained a queue under the lock of the host",
+            );
+            drop(lock);
+            finish
+                .recv_timeout(crate::readback::READBACK_TIMEOUT)
+                .expect("a drained queue");
+        });
     }
 }
 

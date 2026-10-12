@@ -19,7 +19,7 @@ pub use capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
     Limits, PowerPreference,
 };
-pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue};
+pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, Queue, QueueLock};
 pub use host::HostDevice;
 #[cfg(vulkan_backend)]
 pub use host::VulkanHost;

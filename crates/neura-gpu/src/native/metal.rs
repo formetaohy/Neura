@@ -26,7 +26,7 @@ use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,8 +108,21 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
-    artifacts: ArtifactCache,
 }
+
+pub(crate) struct QueueGuard<'a> {
+    _state: MutexGuard<'a, QueueState>,
+}
+
+struct Lent {
+    device: u64,
+    native: Weak<Device>,
+    info: AdapterInfo,
+    limits: Limits,
+    capability: Capability,
+}
+
+static LENT: LazyLock<Mutex<Vec<Lent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 struct BufferResource {
     raw: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -245,13 +258,11 @@ fn limits(device: &ProtocolObject<dyn MTLDevice>) -> Limits {
 fn assemble(
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    artifacts: ArtifactCache,
 ) -> Arc<Device> {
     Arc::new(Device {
         raw,
         queue,
         state: Mutex::new(QueueState::default()),
-        artifacts,
     })
 }
 
@@ -266,7 +277,6 @@ fn queue(
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let devices = mtl::MTLCopyAllDevices();
         let offered = devices
@@ -290,23 +300,44 @@ impl Device {
         let limits = limits(&raw);
         let capability = capability(&raw);
         let queue = queue(&raw)?;
-        Ok((assemble(raw, queue, artifacts), info, limits, capability))
+        Ok((assemble(raw, queue), info, limits, capability))
     }
 
     pub(crate) fn borrow(
         raw: &Retained<ProtocolObject<dyn MTLDevice>>,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        let mut lent = LENT
+            .lock()
+            .expect("the borrowed Metal devices are never poisoned");
+        lent.retain(|entry| entry.native.strong_count() > 0);
+        let identity = raw.registryID();
+        if let Some(entry) = lent.iter().find(|entry| entry.device == identity)
+            && let Some(device) = entry.native.upgrade()
+        {
+            return Ok((device, entry.info.clone(), entry.limits, entry.capability));
+        }
         let info = describe(raw);
         let limits = limits(raw);
         let capability = capability(raw);
         let queue = queue(raw)?;
-        Ok((
-            assemble(raw.clone(), queue, artifacts),
-            info,
+        let device = assemble(raw.clone(), queue);
+        lent.push(Lent {
+            device: identity,
+            native: Arc::downgrade(&device),
+            info: info.clone(),
             limits,
             capability,
-        ))
+        });
+        Ok((device, info, limits, capability))
+    }
+
+    pub(crate) fn guard(&self) -> QueueGuard<'_> {
+        QueueGuard {
+            _state: self
+                .state
+                .lock()
+                .expect("the Metal compute queue is never poisoned"),
+        }
     }
 
     fn allocate(&self, size: u64, shared: bool) -> Arc<BufferResource> {
@@ -342,7 +373,12 @@ impl Device {
         }
     }
 
-    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+    pub(crate) fn compile(
+        &self,
+        pipeline: &Pipeline,
+        program: &ComputeProgram,
+        artifacts: &ArtifactCache,
+    ) {
         pipeline.resource.compiled.get_or_init(|| {
             let ShaderTranslation::Msl { source, entry } = program.translate(Backend::Metal) else {
                 panic!("Metal accepts MSL compute programs");
@@ -358,7 +394,7 @@ impl Device {
                 .unwrap_or_else(|| panic!("{} has no Metal entry named {entry}", program.label()));
             let archive = Archive::of(
                 &self.raw,
-                &self.artifacts,
+                artifacts,
                 &fingerprint(&[source.as_bytes(), entry.as_bytes()]),
             );
             let descriptor = MTLComputePipelineDescriptor::new();
@@ -385,7 +421,7 @@ impl Device {
                             program.label()
                         );
                     };
-                    self.artifacts.discard(&archive.key);
+                    artifacts.discard(&archive.key);
                     descriptor.setBinaryArchives(None);
                     self.raw
                         .newComputePipelineStateWithDescriptor_options_reflection_error(
@@ -410,7 +446,7 @@ impl Device {
                     .is_ok()
                     && archive.raw.serializeToURL_error(&url).is_ok()
                 {
-                    self.artifacts.publish(&archive.key, &archive.staged);
+                    artifacts.publish(&archive.key, &archive.staged);
                 } else {
                     let _ = fs::remove_file(&archive.staged);
                 }

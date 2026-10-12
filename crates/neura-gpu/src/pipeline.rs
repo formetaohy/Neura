@@ -123,10 +123,11 @@ impl PipelineHandle {
     }
 
     pub fn compile(&self) {
-        self.slot
-            .device
-            .native()
-            .compile(&self.slot.native, &self.slot.program);
+        self.slot.device.native().compile(
+            &self.slot.native,
+            &self.slot.program,
+            self.slot.device.artifact_cache(),
+        );
     }
 
     pub(crate) fn first_dispatch(&self) -> bool {

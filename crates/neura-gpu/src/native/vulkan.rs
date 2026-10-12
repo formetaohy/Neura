@@ -17,7 +17,7 @@ use neura_shader::{ComputeProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
 struct InstanceOwner {
@@ -225,9 +225,23 @@ pub(crate) struct Device {
     ticks: f64,
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
-    artifacts: ArtifactCache,
     state: Mutex<QueueState>,
 }
+
+pub(crate) struct QueueGuard<'a> {
+    _state: MutexGuard<'a, QueueState>,
+}
+
+struct Lent {
+    device: vk::Device,
+    queue: vk::Queue,
+    native: Weak<Device>,
+    info: AdapterInfo,
+    limits: Limits,
+    capability: Capability,
+}
+
+static LENT: LazyLock<Mutex<Vec<Lent>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
 pub(crate) struct BufferResource {
     raw: ash::Device,
@@ -485,12 +499,7 @@ impl Facts {
         })
     }
 
-    fn assemble(
-        &self,
-        parts: Parts,
-        instance: Option<InstanceOwner>,
-        artifacts: ArtifactCache,
-    ) -> Arc<Device> {
+    fn assemble(&self, parts: Parts, instance: Option<InstanceOwner>) -> Arc<Device> {
         Arc::new(Device {
             raw: parts.raw,
             instance,
@@ -501,7 +510,6 @@ impl Facts {
             ticks: self.ticks,
             bits: self.bits,
             uuid: self.uuid,
-            artifacts,
             state: Mutex::new(QueueState::default()),
         })
     }
@@ -645,7 +653,6 @@ fn select(owner: &InstanceOwner, policy: AdapterPolicy) -> Result<Selection, Dev
 impl Device {
     pub(crate) fn open(
         policy: AdapterPolicy,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let entry = unsafe { Entry::load() }.map_err(|error| error.to_string())?;
         let owner = InstanceOwner::create(entry)?;
@@ -687,7 +694,7 @@ impl Device {
             match create(&owner.raw, physical, family, &facts) {
                 Ok(parts) => {
                     return Ok((
-                        facts.assemble(parts, Some(owner), artifacts),
+                        facts.assemble(parts, Some(owner)),
                         info,
                         facts.limits,
                         Capability {
@@ -707,8 +714,18 @@ impl Device {
 
     pub(crate) fn borrow(
         host: VulkanHost<'_>,
-        artifacts: ArtifactCache,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
+        let mut lent = LENT
+            .lock()
+            .expect("the borrowed Vulkan devices are never poisoned");
+        lent.retain(|entry| entry.native.strong_count() > 0);
+        if let Some(entry) = lent
+            .iter()
+            .find(|entry| entry.device == host.device.handle() && entry.queue == host.queue)
+            && let Some(device) = entry.native.upgrade()
+        {
+            return Ok((device, entry.info.clone(), entry.limits, entry.capability));
+        }
         let properties = unsafe { host.instance.get_physical_device_properties(host.physical) };
         let info = describe(&properties, device_type(properties.device_type));
         let facts = Facts::of(
@@ -737,25 +754,43 @@ impl Device {
             pool,
             stamps,
         };
-        let device = facts.assemble(parts, None, artifacts);
-        Ok((
-            device,
-            info,
-            facts.limits,
-            Capability {
-                cooperative_matrix: capability,
-            },
-        ))
+        let device = facts.assemble(parts, None);
+        let capability = Capability {
+            cooperative_matrix: capability,
+        };
+        lent.push(Lent {
+            device: host.device.handle(),
+            queue: host.queue,
+            native: Arc::downgrade(&device),
+            info: info.clone(),
+            limits: facts.limits,
+            capability,
+        });
+        Ok((device, info, facts.limits, capability))
     }
 
-    pub(crate) fn compile(&self, pipeline: &Pipeline, program: &ComputeProgram) {
+    pub(crate) fn guard(&self) -> QueueGuard<'_> {
+        QueueGuard {
+            _state: self
+                .state
+                .lock()
+                .expect("the Vulkan queue is never poisoned"),
+        }
+    }
+
+    pub(crate) fn compile(
+        &self,
+        pipeline: &Pipeline,
+        program: &ComputeProgram,
+        artifacts: &ArtifactCache,
+    ) {
         pipeline.resource.compiled.get_or_init(|| {
             let key = format!(
                 "vulkan/{}/{}.bin",
                 uuids(&self.uuid),
                 fingerprint(&[&bytes_of(program.spirv())]),
             );
-            let initial = self.artifacts.load(&key);
+            let initial = artifacts.load(&key);
             let pipeline_cache = pipeline_cache(&self.raw, initial.as_deref());
             let spirv = program.spirv();
             let module = unsafe {
@@ -798,7 +833,7 @@ impl Device {
                     )
                 },
             );
-            self.artifacts.store(&key, &data);
+            artifacts.store(&key, &data);
             unsafe { self.raw.destroy_pipeline_cache(pipeline_cache, None) };
             compiled
         });

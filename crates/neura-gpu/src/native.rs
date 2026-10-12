@@ -104,9 +104,17 @@ pub(crate) enum NativeGroup {
     Metal,
 }
 
+pub(crate) enum NativeQueueGuard<'a> {
+    #[cfg(vulkan_backend)]
+    Vulkan { _guard: vulkan::QueueGuard<'a> },
+    #[cfg(dx12_backend)]
+    Dx12 { _guard: dx12::QueueGuard<'a> },
+    #[cfg(metal_backend)]
+    Metal { _guard: metal::QueueGuard<'a> },
+}
+
 pub(crate) fn open(
     request: &GpuRequest,
-    artifacts: ArtifactCache,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), GpuUnavailable> {
     let order: &[Backend] = match &request.backend {
         Some(backend) if PREFERENCE.contains(backend) => std::slice::from_ref(backend),
@@ -122,7 +130,7 @@ pub(crate) fn open(
     let mut offered = Vec::new();
     let mut unsupported = None;
     for backend in order {
-        match candidate(*backend, request.adapter, &artifacts) {
+        match candidate(*backend, request.adapter) {
             Ok((device, info, limits, capability)) if limits.supports(&Limits::BASELINE) => {
                 return Ok((device, info, limits, capability));
             }
@@ -151,7 +159,6 @@ pub(crate) fn open(
 pub(crate) fn borrow(
     host: HostDevice<'_>,
     request: &GpuRequest,
-    artifacts: ArtifactCache,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), GpuUnavailable> {
     let backend = host.backend();
     if let Some(wanted) = request.backend
@@ -165,19 +172,19 @@ pub(crate) fn borrow(
     let (native, info, limits, capability) = match host {
         #[cfg(dx12_backend)]
         HostDevice::Dx12(raw) => {
-            dx12::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+            dx12::Device::borrow(raw).map(|(device, info, limits, capability)| {
                 (NativeDevice::Dx12(device), info, limits, capability)
             })
         }
         #[cfg(metal_backend)]
         HostDevice::Metal(raw) => {
-            metal::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+            metal::Device::borrow(raw).map(|(device, info, limits, capability)| {
                 (NativeDevice::Metal(device), info, limits, capability)
             })
         }
         #[cfg(vulkan_backend)]
         HostDevice::Vulkan(raw) => {
-            vulkan::Device::borrow(raw, artifacts).map(|(device, info, limits, capability)| {
+            vulkan::Device::borrow(raw).map(|(device, info, limits, capability)| {
                 (NativeDevice::Vulkan(device), info, limits, capability)
             })
         }
@@ -194,27 +201,22 @@ pub(crate) fn borrow(
 fn candidate(
     backend: Backend,
     policy: AdapterPolicy,
-    artifacts: &ArtifactCache,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), DeviceFailure> {
     match backend {
         #[cfg(dx12_backend)]
-        Backend::Dx12 => dx12::Device::open(policy, artifacts.clone()).map(
-            |(device, info, limits, capability)| {
-                (NativeDevice::Dx12(device), info, limits, capability)
-            },
-        ),
+        Backend::Dx12 => dx12::Device::open(policy).map(|(device, info, limits, capability)| {
+            (NativeDevice::Dx12(device), info, limits, capability)
+        }),
         #[cfg(metal_backend)]
-        Backend::Metal => metal::Device::open(policy, artifacts.clone()).map(
-            |(device, info, limits, capability)| {
-                (NativeDevice::Metal(device), info, limits, capability)
-            },
-        ),
+        Backend::Metal => metal::Device::open(policy).map(|(device, info, limits, capability)| {
+            (NativeDevice::Metal(device), info, limits, capability)
+        }),
         #[cfg(vulkan_backend)]
-        Backend::Vulkan => vulkan::Device::open(policy, artifacts.clone()).map(
-            |(device, info, limits, capability)| {
+        Backend::Vulkan => {
+            vulkan::Device::open(policy).map(|(device, info, limits, capability)| {
                 (NativeDevice::Vulkan(device), info, limits, capability)
-            },
-        ),
+            })
+        }
         _ => unreachable!("every backend of this build opens a candidate"),
     }
 }
@@ -233,22 +235,58 @@ impl NativePipeline {
 }
 
 impl NativeDevice {
-    pub(crate) fn compile(&self, pipeline: &NativePipeline, program: &ComputeProgram) {
+    pub(crate) fn compile(
+        &self,
+        pipeline: &NativePipeline,
+        program: &ComputeProgram,
+        artifacts: &ArtifactCache,
+    ) {
         match (self, pipeline) {
             #[cfg(vulkan_backend)]
             (Self::Vulkan(device), NativePipeline::Vulkan(pipeline)) => {
-                device.compile(pipeline, program)
+                device.compile(pipeline, program, artifacts)
             }
             #[cfg(dx12_backend)]
             (Self::Dx12(device), NativePipeline::Dx12(pipeline)) => {
-                device.compile(pipeline, program)
+                device.compile(pipeline, program, artifacts)
             }
             #[cfg(metal_backend)]
             (Self::Metal(device), NativePipeline::Metal(pipeline)) => {
-                device.compile(pipeline, program)
+                device.compile(pipeline, program, artifacts)
             }
             #[cfg(multiple_backends)]
             _ => panic!("a pipeline belongs to another backend"),
+        }
+    }
+
+    pub(crate) fn guard(&self) -> NativeQueueGuard<'_> {
+        match self {
+            #[cfg(vulkan_backend)]
+            Self::Vulkan(device) => NativeQueueGuard::Vulkan {
+                _guard: device.guard(),
+            },
+            #[cfg(dx12_backend)]
+            Self::Dx12(device) => NativeQueueGuard::Dx12 {
+                _guard: device.guard(),
+            },
+            #[cfg(metal_backend)]
+            Self::Metal(device) => NativeQueueGuard::Metal {
+                _guard: device.guard(),
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            #[cfg(vulkan_backend)]
+            (Self::Vulkan(first), Self::Vulkan(second)) => Arc::ptr_eq(first, second),
+            #[cfg(dx12_backend)]
+            (Self::Dx12(first), Self::Dx12(second)) => Arc::ptr_eq(first, second),
+            #[cfg(metal_backend)]
+            (Self::Metal(first), Self::Metal(second)) => Arc::ptr_eq(first, second),
+            #[cfg(multiple_backends)]
+            _ => false,
         }
     }
 
