@@ -35,8 +35,12 @@ fn main() {
         path, config.layers, config.hidden, config.heads, config.head_width, context,
     );
 
-    let tokens = tokenizer.encode(&chat(&prompt));
-    println!("prompt: {prompt}");
+    let prompt = match prompt.strip_prefix("raw:") {
+        Some(held) => held.to_owned(),
+        None => chat(&prompt),
+    };
+    let tokens = tokenizer.encode(&prompt);
+    println!("prompt: {prompt:?}");
     println!("tokens: {} ", tokens.len());
 
     let runtime = Runtime::open(RuntimeRequest {
