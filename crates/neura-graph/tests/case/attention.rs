@@ -57,6 +57,31 @@ fn an_attention_that_reaches_back_over_keys_hands_them_to_every_task() {
 }
 
 #[test]
+fn an_attention_weights_every_key_of_a_cursor_it_seats_without_a_mask() {
+    let graph = Graph::new();
+    let tensor = || graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);
+    let (query, key, value) = (tensor(), tensor(), tensor());
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    graph.attention(
+        query,
+        key,
+        value,
+        AttentionOptions {
+            bias: None,
+            scale: None,
+            causal: false,
+            origin: Some(cursor),
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    let snapshot = graph.snapshot();
+    assert_eq!(snapshot.tasks()[0].origin, cursor.id());
+    assert_eq!(snapshot.tasks()[0].slot, 0);
+}
+
+#[test]
 fn an_attention_carries_the_scale_it_weighs_with() {
     let graph = Graph::new();
     let tensor = || graph.parameter(Shape::of([1, 1, 4, 2]), Init::Zero, Element::Single);

@@ -53,6 +53,16 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
             ),
         ];
         compiler.specialize(
+            "template_attention_key_walk",
+            &format!("attention_key_walk_{suffix}"),
+            &constants,
+        );
+        compiler.specialize(
+            "template_attention_key_start",
+            &format!("attention_key_start_{suffix}"),
+            &constants,
+        );
+        compiler.specialize(
             "template_stage_attention",
             &format!("stage_attention_{suffix}"),
             &constants,
@@ -175,6 +185,48 @@ mod device {
             ),
             at + origin,
             reach,
+        );
+    }
+
+    fn attention_rows_stand_in_their_keys(task: Task) -> bool {
+        return task.slot == 1u32 && task.origin == NO_VALUE && task.queries == NO_VALUE;
+    }
+
+    fn template_attention_key_start(task: Task, row: u32) -> u32 {
+        let back = task.reach - 1u32;
+        let window = select(
+            0u32,
+            row - min(row, back),
+            task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
+        );
+        return window / ATTN_KEYS;
+    }
+
+    fn template_attention_key_walk(
+        lid: u32,
+        task: Task,
+        keys: u32,
+        tokens: u32,
+        row: u32,
+        rows: u32,
+        origin: u32,
+        causal: bool,
+    ) -> u32 {
+        let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
+        if lid == 0u32 {
+            claim[ATTN_CLAIM_WALKED] = select(
+                blocks,
+                (origin + tokens + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                causal && task.origin != NO_VALUE,
+            );
+        }
+        return min(
+            select(
+                blocks,
+                (row + rows + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                attention_rows_stand_in_their_keys(task),
+            ),
+            workgroup_uniform_load(&claim[ATTN_CLAIM_WALKED]),
         );
     }
 
@@ -319,30 +371,10 @@ mod device {
         }
         let position = origin + row;
         let written = origin + tokens;
-        let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
-        let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        if lid == 0u32 {
-            claim[ATTN_CLAIM_WALKED] = select(
-                (written + ATTN_KEYS - 1u32) / ATTN_KEYS,
-                blocks,
-                task.origin == NO_VALUE,
-            );
-        }
-        let walked = min(
-            select(
-                blocks,
-                (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-                reached,
-            ),
-            workgroup_uniform_load(&claim[ATTN_CLAIM_WALKED]),
+        let walked = template_attention_key_walk(
+            lid, task, keys, tokens, plane.z, task.count, origin, causal,
         );
-        let back = task.reach - 1u32;
-        let window = select(
-            0u32,
-            plane.z - min(plane.z, back),
-            task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
-        );
-        let first_block = window / ATTN_KEYS;
+        let first_block = template_attention_key_start(task, plane.z);
         let sections = task.splits;
         let span = walked - first_block;
         let first_walk = first_block + span * task.section / sections;
@@ -743,30 +775,10 @@ mod device {
         }
         let position = origin + row;
         let written = origin + tokens;
-        let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
-        let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        if lid == 0u32 {
-            claim[ATTN_CLAIM_WALKED] = select(
-                (written + ATTN_KEYS - 1u32) / ATTN_KEYS,
-                blocks,
-                task.origin == NO_VALUE,
-            );
-        }
-        let walked = min(
-            select(
-                blocks,
-                (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-                reached,
-            ),
-            workgroup_uniform_load(&claim[ATTN_CLAIM_WALKED]),
+        let walked = template_attention_key_walk(
+            lid, task, keys, tokens, plane.z, task.count, origin, causal,
         );
-        let back = task.reach - 1u32;
-        let window = select(
-            0u32,
-            plane.z - min(plane.z, back),
-            task.reach > 0u32 && task.origin == NO_VALUE && task.queries == NO_VALUE,
-        );
-        let first_block = window / ATTN_KEYS;
+        let first_block = template_attention_key_start(task, plane.z);
         let sections = task.splits;
         let span = walked - first_block;
         let first_walk = first_block + span * task.section / sections;
@@ -1093,7 +1105,7 @@ mod device {
         let first = select(
             0u32,
             plane.z / ATTN_KEYS,
-            causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
+            attention_rows_stand_in_their_keys(task),
         );
         let first_step = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;
@@ -1457,7 +1469,7 @@ mod device {
         let first = select(
             0u32,
             plane.z / ATTN_KEYS,
-            causal && task.origin == NO_VALUE && task.queries == NO_VALUE,
+            attention_rows_stand_in_their_keys(task),
         );
         let first_step = group * ATTN_KEY_GROUP;
         let start_depth = slice * ATTN_SLICE;

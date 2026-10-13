@@ -281,6 +281,141 @@ fn an_attention_reads_queries_and_keys_of_different_lengths() {
     );
 }
 
+fn cursor_graph(shapes: Shapes) -> (Graph, Value, Value, Value, Value, Value) {
+    let graph = Graph::new();
+    let tensor = |heads: u32, tokens: u32| {
+        graph.parameter(
+            Shape::of([heads, shapes.batch, tokens, shapes.width]),
+            Init::Zero,
+            Element::Single,
+        )
+    };
+    let queries = tensor(shapes.heads, shapes.queries);
+    let keys = tensor(shapes.key_heads, shapes.keys);
+    let values = tensor(shapes.key_heads, shapes.keys);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let out = graph.attention(
+        queries,
+        keys,
+        values,
+        AttentionOptions {
+            bias: None,
+            scale: Some(graph.knob(shapes.scale)),
+            causal: shapes.causal,
+            origin: Some(cursor),
+            segments: None,
+            reach: (shapes.reach > 0).then_some(shapes.reach),
+            query_segments: None,
+        },
+    );
+    graph.retain(out);
+    (graph, queries, keys, values, cursor, out)
+}
+
+fn cursor_shapes() -> Shapes {
+    Shapes {
+        heads: 1,
+        key_heads: 1,
+        batch: 1,
+        queries: 4,
+        keys: 64,
+        width: 8,
+        causal: false,
+        origin: 8,
+        reach: 0,
+        scale: 0.5,
+    }
+}
+
+#[test]
+fn a_maskless_attention_weighs_every_key_a_cursor_sits_inside() {
+    run_cursor_forward(cursor_shapes());
+    run_cursor_forward(Shapes {
+        heads: 4,
+        batch: 4,
+        ..cursor_shapes()
+    });
+}
+
+fn run_cursor_forward(shapes: Shapes) {
+    let runtime = open();
+    let (graph, queries, keys, values, cursor, out) = cursor_graph(shapes);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let queries_data = data(
+        shapes.heads * shapes.batch * shapes.queries * shapes.width,
+        17,
+    );
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.write(&program, cursor, &[shapes.origin as f32]);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    let (expected, _) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+    assert_close(&produced, &expected, 1e-5);
+}
+
+#[test]
+fn a_maskless_cursor_gradient_reaches_every_key_it_weighs() {
+    run_cursor_backward(cursor_shapes());
+}
+
+fn run_cursor_backward(shapes: Shapes) {
+    let runtime = open();
+    let (graph, queries, keys, values, cursor, out) = cursor_graph(shapes);
+    let loss = graph.sum(out);
+    let gradients = graph.backward(loss);
+    let query_grad = gradients.of(queries);
+    let key_grad = gradients.of(keys);
+    let value_grad = gradients.of(values);
+    graph.retain(query_grad);
+    graph.retain(key_grad);
+    graph.retain(value_grad);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let queries_data = data(
+        shapes.heads * shapes.batch * shapes.queries * shapes.width,
+        17,
+    );
+    let keys_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        29,
+    );
+    let values_data = data(
+        shapes.key_heads * shapes.batch * shapes.keys * shapes.width,
+        43,
+    );
+    runtime.write(&program, queries, &queries_data);
+    runtime.write(&program, keys, &keys_data);
+    runtime.write(&program, values, &values_data);
+    runtime.write(&program, cursor, &[shapes.origin as f32]);
+    runtime.run(&program);
+    let (out_data, statistics) = attention_forward(shapes, &queries_data, &keys_data, &values_data);
+    let gradient = vec![1.0f32; out_data.len()];
+    let (expected_query, expected_key, expected_value) = attention_backward(
+        shapes,
+        &queries_data,
+        &keys_data,
+        &values_data,
+        &out_data,
+        &statistics,
+        &gradient,
+    );
+    let produced = runtime.read_many(&program, &[query_grad, key_grad, value_grad]);
+    assert_close(&produced[0], &expected_query, 1e-5);
+    assert_close(&produced[1], &expected_key, 1e-5);
+    assert_close(&produced[2], &expected_value, 1e-5);
+}
+
 #[test]
 fn an_attention_wider_than_one_task_walks_every_row_of_its_block() {
     let shapes = Shapes {
