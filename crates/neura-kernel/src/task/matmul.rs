@@ -8,6 +8,13 @@ pub(crate) fn install(compiler: &mut Compiler) {
 pub(crate) fn install_tiles(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
     compiler.constant("MATMUL_RUN", neura_profile::STREAMED_DEPTH);
+    compiler.constant("FOLDED_LANES", neura_profile::FOLDED_LANES);
+    compiler.constant("FOLDED_SHIFT", neura_profile::FOLDED_LANES.trailing_zeros());
+    compiler.constant(
+        "FOLDED_PARTIALS",
+        u32::try_from(neura_profile::folded_stage_words())
+            .expect("a staged left fits one device word"),
+    );
     if let Some(cooperative) = geometry.cooperative() {
         let fragment = cooperative.fragment();
         compiler.constant("COOPMAT_ROWS", fragment.rows());
@@ -27,6 +34,14 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
             ("MATMUL_DEPTH", tile.depth()),
         ];
         match tile.strategy() {
+            MatmulStrategy::Folded => {
+                constants.push(("MATMUL_FOLDS", tile.folds()));
+                compiler.specialize(
+                    "template_run_matmul_folded",
+                    &format!("run_matmul_{suffix}"),
+                    &constants,
+                );
+            }
             MatmulStrategy::Staged => {
                 constants.extend([
                     ("MATMUL_LEFT_STRIDE", tile.left_stride()),
@@ -151,6 +166,117 @@ mod device {
             );
             scratch[SCRATCH_MATMUL_RIGHT + right_slot + step * MATMUL_COLUMNS + seat] =
                 select(0.0, fetch(right, address), inside);
+        }
+    }
+
+    fn template_run_matmul_folded(task: Task, lid: u32) {
+        let left = values[task.a];
+        let right = values[task.b];
+        let output = values[task.out];
+        let rows = left.dims.z;
+        let depth = left.dims.w;
+        let columns = right.dims.w;
+        let plane_columns = max(left.dims.y, right.dims.y);
+        let planes = max(left.dims.x, right.dims.x) * plane_columns;
+        let row_blocks = (rows + MATMUL_ROWS - 1u32) / MATMUL_ROWS;
+        let column_blocks = (columns + MATMUL_COLUMNS - 1u32) / MATMUL_COLUMNS;
+        let depth_blocks = (depth + MATMUL_DEPTH - 1u32) / MATMUL_DEPTH;
+        let tiles_per_plane = row_blocks * column_blocks;
+        let first_block = (task.slot * depth_blocks) / task.splits;
+        let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
+        let walked = (last_block - first_block) * MATMUL_DEPTH;
+        let lane = lid % FOLDED_LANES;
+        let warp = lid / FOLDED_LANES;
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let plane = tile / tiles_per_plane;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
+            let within = tile % tiles_per_plane;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
+            for slot in stride(lid, walked, WORKGROUP_SIZE) {
+                let at = first_block * MATMUL_DEPTH + slot;
+                let inside = base_row < row_bound && at < depth;
+                let address = select(
+                    0u32,
+                    left_plane + base_row * left.strides.z + at * left.strides.w,
+                    inside,
+                );
+                scratch[slot + (slot >> FOLDED_SHIFT)] = select(0.0, fetch(left, address), inside);
+            }
+            workgroup_barrier();
+            for fold in unroll(0u32, MATMUL_FOLDS, 1u32) {
+                let column = base_column + warp * MATMUL_FOLDS + fold;
+                let inside = base_row < row_bound && column < columns;
+                let mut acc = 0.0;
+                for step in stride(lane, last_block - first_block, FOLDED_LANES) {
+                    let at = (first_block + step) * MATMUL_DEPTH;
+                    let last = min(at + MATMUL_DEPTH, depth) - at;
+                    acc = acc
+                        + dot_staged(
+                            right,
+                            left,
+                            right_plane + at * right.strides.z + column * right.strides.w,
+                            step * (MATMUL_DEPTH + 1u32),
+                            last,
+                            inside,
+                        );
+                }
+                scratch[FOLDED_PARTIALS
+                    + lane * (MATMUL_COLUMNS + 1u32)
+                    + warp * MATMUL_FOLDS
+                    + fold] = acc;
+            }
+            workgroup_barrier();
+            if lid < MATMUL_COLUMNS {
+                let mut total = 0.0;
+                for other in unroll(0u32, FOLDED_LANES, 1u32) {
+                    total =
+                        total + scratch[FOLDED_PARTIALS + other * (MATMUL_COLUMNS + 1u32) + lid];
+                }
+                let column = base_column + lid;
+                if base_row < row_bound && column < columns {
+                    let index = base_row * columns + column;
+                    publish(
+                        output,
+                        out_plane + index,
+                        chained(
+                            task,
+                            uvec4(plane_row, plane_column, chain_row + base_row, column),
+                            total,
+                        ),
+                    );
+                }
+            }
         }
     }
 

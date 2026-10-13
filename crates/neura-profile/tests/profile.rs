@@ -212,9 +212,12 @@ fn a_geometry_declares_only_the_tiles_its_plan_walks() {
         let all = walked(profile);
         let walked = &all[..2];
         let geometry = Geometry::of(profile.workgroup(), profile.shared_bytes(), walked, &[]);
+        let plain = walked
+            .iter()
+            .filter(|(_, tile)| matches!(tile, MatmulTile::Staged(_) | MatmulTile::Streamed(_)));
         let (left, right) = (
-            walked.iter().map(|(_, tile)| tile.left_stage()).max(),
-            walked.iter().map(|(_, tile)| tile.right_stage()).max(),
+            plain.clone().map(|(_, tile)| tile.left_stage()).max(),
+            plain.map(|(_, tile)| tile.right_stage()).max(),
         );
         assert_eq!(geometry.workgroup(), profile.workgroup());
         assert_eq!(geometry.walked(), walked);
@@ -227,10 +230,15 @@ fn a_geometry_declares_only_the_tiles_its_plan_walks() {
             geometry.staging_bytes() < profile.staging_bytes(),
             "a plan that walks the narrow tiles of {profile:?} stages the panels of the wide ones",
         );
+        let folded = walked
+            .iter()
+            .filter(|(_, tile)| matches!(tile, MatmulTile::Folded(_)))
+            .map(|(_, tile)| tile.shared_bytes() / WORD_BYTES)
+            .max();
         assert_eq!(
             geometry.scratch_bytes(&[Kind::Matmul]),
-            geometry.staging_bytes(),
-            "a pool reserves exactly the panels a product stages",
+            (2 * (left.unwrap_or(0) + right.unwrap_or(0))).max(folded.unwrap_or(0)) * WORD_BYTES,
+            "a pool reserves exactly the panels a product stages and the fold it walks",
         );
         assert!(
             geometry.workgroup_bytes(&[Kind::Matmul]) <= profile.shared_bytes(),
@@ -445,21 +453,15 @@ fn a_profile_offers_a_streamed_tile_for_the_narrowest_product() {
                 .any(|tile| tile.strategy() == MatmulStrategy::Staged && tile.shared_bytes() > 0),
             "{profile:?} offers no product that stages its operands",
         );
-        let left = profile
+        let plain = profile
             .tiles()
             .iter()
-            .map(|tile| tile.left_stage())
-            .max()
-            .expect("a profile offers a tile");
-        let right = profile
-            .tiles()
-            .iter()
-            .map(|tile| tile.right_stage())
-            .max()
-            .expect("a profile offers a tile");
+            .filter(|tile| matches!(tile, MatmulTile::Staged(_) | MatmulTile::Streamed(_)));
+        let left = plain.clone().map(|tile| tile.left_stage()).max();
+        let right = plain.map(|tile| tile.right_stage()).max();
         assert_eq!(
             profile.staging_bytes(),
-            2 * (left + right) * WORD_BYTES,
+            2 * (left.unwrap_or(0) + right.unwrap_or(0)) * WORD_BYTES,
             "a profile counts the staging of the tiles it does not carry",
         );
     }

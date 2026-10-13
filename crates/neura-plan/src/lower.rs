@@ -375,6 +375,10 @@ impl Plan {
         self.values[value as usize].shape
     }
 
+    fn stride(&self, value: u32, axis: u32) -> u32 {
+        self.values[value as usize].strides[axis as usize]
+    }
+
     fn geometry(&self, tile: MatmulTile) -> u32 {
         self.tiles
             .iter()
@@ -1535,11 +1539,17 @@ fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Produc
     if !plan.products.contains(&product) {
         plan.products.push(product);
     }
-    let tile = chosen
-        .iter()
-        .find(|(shape, _)| *shape == product)
-        .map(|(_, tile)| *tile)
-        .unwrap_or_else(|| product.planned(profile));
+    let tile = folded_walk(
+        plan,
+        unit,
+        product,
+        profile,
+        chosen
+            .iter()
+            .find(|(shape, _)| *shape == product)
+            .map(|(_, tile)| *tile)
+            .unwrap_or_else(|| product.planned(profile)),
+    );
     assert!(
         profile.tiles().contains(&tile),
         "a plan walks {tile:?} for {product:?} where its profile offers {:?}",
@@ -1647,11 +1657,17 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product
     if !plan.products.contains(&product) {
         plan.products.push(product);
     }
-    let tile = chosen
-        .iter()
-        .find(|(shape, _)| *shape == product)
-        .map(|(_, tile)| *tile)
-        .unwrap_or_else(|| product.planned(profile));
+    let tile = folded_walk(
+        plan,
+        unit,
+        product,
+        profile,
+        chosen
+            .iter()
+            .find(|(shape, _)| *shape == product)
+            .map(|(_, tile)| *tile)
+            .unwrap_or_else(|| product.planned(profile)),
+    );
     assert!(
         profile.tiles().contains(&tile),
         "a plan walks {tile:?} for {product:?} where its profile offers {:?}",
@@ -1700,6 +1716,19 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product
         task.split = split;
         plan.tasks.push(task);
     }
+}
+
+fn folded_walk(
+    plan: &Plan,
+    unit: &TaskInfo,
+    product: Product,
+    profile: Profile,
+    tile: MatmulTile,
+) -> MatmulTile {
+    if matches!(tile, MatmulTile::Folded(_)) && plan.stride(unit.inputs[0], 3) != 1 {
+        return product.streamed(profile);
+    }
+    tile
 }
 
 fn reduce(plan: &mut Plan, unit: &TaskInfo, target: u32) {

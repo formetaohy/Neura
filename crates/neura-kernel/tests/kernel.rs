@@ -890,14 +890,29 @@ fn a_device_program_carries_only_the_tiles_its_plan_walks() {
         program.spirv().len() < whole.spirv().len(),
         "a plan that walks two tiles of {profile:?} compiles the module of the whole menu",
     );
-    assert!(
-        workgroup_bytes(&program) < workgroup_bytes(&whole),
-        "a plan that walks two tiles of {profile:?} declares the pool of the whole menu",
-    );
     assert_eq!(
         workgroup_bytes(&program),
         geometry.workgroup_bytes(Kind::ALL),
         "a device program declares the pool of the tiles its plan walks",
+    );
+    let plain = menu
+        .iter()
+        .filter(|(_, tile)| matches!(tile, MatmulTile::Staged(_) | MatmulTile::Streamed(_)))
+        .take(2)
+        .copied()
+        .collect::<Vec<_>>();
+    let light = Kernel::assemble(
+        &[Kind::Matmul],
+        &[Element::Single],
+        Geometry::of(profile.workgroup(), profile.shared_bytes(), &plain, &[]),
+        false,
+        Banks::SINGLE,
+        false,
+        layout(),
+    );
+    assert!(
+        workgroup_bytes(&light.program()) < workgroup_bytes(&whole),
+        "a plan that walks two staged tiles of {profile:?} declares the pool of the whole menu",
     );
 }
 

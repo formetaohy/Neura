@@ -5,22 +5,50 @@ const _: () = assert!(
     neura_profile::STREAMED_DEPTH == neura_abi::SUPER_SUB_BLOCK,
     "a block quantized operand shares its quanta over a run of the reduction, and a streamed tile walks one run",
 );
+const _: () = assert!(
+    neura_profile::FOLDED_LANES == neura_profile::STREAMED_DEPTH,
+    "a folded tile hands one lane every number of the run a streamed tile walks",
+);
+
+pub(crate) const HEAP: &str = "heap";
+pub(crate) const STAGED: &str = "staged";
 
 pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     device::define(compiler);
+    left::define(compiler);
+    for generic in [
+        "template_dot_element",
+        "template_dot_q8_0",
+        "template_dot_q4_k",
+        "template_dot_q5_k",
+        "template_dot_q6_k",
+    ] {
+        let name = generic.trim_start_matches("template_");
+        for family in [HEAP, STAGED] {
+            compiler.specialize(generic, &format!("{name}_{family}"), &[]);
+        }
+    }
+    compiler.select("generic_dot_by_element", "dot_by_element");
+    compiler.select("generic_dot_by_element", "dot_staged_by_element");
+    dispatch(compiler, elements, "dot_by_element", HEAP);
+    dispatch(compiler, elements, "dot_staged_by_element", STAGED);
+    compiler.select("dot_by_element", "dot");
+    compiler.select("dot_staged_by_element", "dot_staged");
+}
+
+fn dispatch(compiler: &mut Compiler, elements: &[Element], by_element: &str, family: &str) {
     for element in elements.iter().copied() {
         compiler.insert_case(
-            "dot_by_element",
+            by_element,
             ast::Arm {
                 pattern: ast::Pattern::Integer(element.code()),
                 body: vec![ast::Statement::Return(Some(ast::Expression::call(
-                    dot_of(element),
+                    dot_of(element, family),
                     dot_arguments(),
                 )))],
             },
         );
     }
-    compiler.select("dot_by_element", "dot");
 }
 
 fn dot_arguments() -> Vec<ast::Expression> {
@@ -30,19 +58,31 @@ fn dot_arguments() -> Vec<ast::Expression> {
         .collect()
 }
 
-fn dot_of(element: Element) -> &'static str {
-    match element {
-        Element::Q8_0 => "dot_q8_0",
-        Element::Q4K => "dot_q4_k",
-        Element::Q5K => "dot_q5_k",
-        Element::Q6K => "dot_q6_k",
-        _ => "dot_element",
+fn dot_of(element: Element, family: &str) -> String {
+    let format = match element {
+        Element::Q8_0 => "q8_0",
+        Element::Q4K => "q4_k",
+        Element::Q5K => "q5_k",
+        Element::Q6K => "q6_k",
+        _ => "element",
+    };
+    format!("dot_{format}_{family}")
+}
+
+#[neura_compiler::module]
+mod left {
+    fn left_heap(left: Value, address: u32) -> f32 {
+        return fetch(left, address);
+    }
+
+    fn left_staged(left: Value, address: u32) -> f32 {
+        return scratch[address];
     }
 }
 
 #[neura_compiler::module]
 mod device {
-    fn dot_by_element(
+    fn generic_dot_by_element(
         right: Value,
         left: Value,
         right_at: u32,
@@ -58,7 +98,7 @@ mod device {
         }
     }
 
-    fn dot_element(
+    fn template_dot_element(
         right: Value,
         left: Value,
         right_at: u32,
@@ -72,13 +112,13 @@ mod device {
             let right_address = select(0u32, right_at + at * right.strides.z, keep);
             let left_address = select(0u32, left_at + at * left.strides.w, keep);
             total = total
-                + select(0.0, fetch(left, left_address), keep)
+                + select(0.0, template_left(left, left_address), keep)
                     * select(0.0, fetch(right, right_address), keep);
         }
         return total;
     }
 
-    fn dot_q8_0(
+    fn template_dot_q8_0(
         right: Value,
         left: Value,
         right_at: u32,
@@ -98,16 +138,16 @@ mod device {
                     let byte = (packed >> (lane * 8u32)) & 0xffu32;
                     let left_address = select(0u32, left_at + at * left.strides.w, keep);
                     total = total
-                        + select(0.0, fetch(left, left_address), keep)
+                        + select(0.0, template_left(left, left_address), keep)
                             * select(0.0, ggml_signed(byte) * scale, keep);
                 }
             }
             return total;
         }
-        return dot_element(right, left, right_at, left_at, last, valid);
+        return template_dot_element(right, left, right_at, left_at, last, valid);
     }
 
-    fn dot_q4_k(
+    fn template_dot_q4_k(
         right: Value,
         left: Value,
         right_at: u32,
@@ -136,16 +176,16 @@ mod device {
                     let quant = (packed >> (lane * 8u32 + shift)) & 0xfu32;
                     let left_address = select(0u32, left_at + at * left.strides.w, keep);
                     total = total
-                        + select(0.0, fetch(left, left_address), keep)
+                        + select(0.0, template_left(left, left_address), keep)
                             * select(0.0, scale * f32(quant) - min, keep);
                 }
             }
             return total;
         }
-        return dot_element(right, left, right_at, left_at, last, valid);
+        return template_dot_element(right, left, right_at, left_at, last, valid);
     }
 
-    fn dot_q5_k(
+    fn template_dot_q5_k(
         right: Value,
         left: Value,
         right_at: u32,
@@ -178,16 +218,16 @@ mod device {
                     let quant = nibble | (bit << 4u32);
                     let left_address = select(0u32, left_at + at * left.strides.w, keep);
                     total = total
-                        + select(0.0, fetch(left, left_address), keep)
+                        + select(0.0, template_left(left, left_address), keep)
                             * select(0.0, scale * f32(quant) - min, keep);
                 }
             }
             return total;
         }
-        return dot_element(right, left, right_at, left_at, last, valid);
+        return template_dot_element(right, left, right_at, left_at, last, valid);
     }
 
-    fn dot_q6_k(
+    fn template_dot_q6_k(
         right: Value,
         left: Value,
         right_at: u32,
@@ -222,12 +262,12 @@ mod device {
                     let weight = select(lower, upper, at >= SUPER_SMALL_BLOCK);
                     let left_address = select(0u32, left_at + at * left.strides.w, keep);
                     total = total
-                        + select(0.0, fetch(left, left_address), keep)
+                        + select(0.0, template_left(left, left_address), keep)
                             * select(0.0, weight * (f32(quant) - 32.0), keep);
                 }
             }
             return total;
         }
-        return dot_element(right, left, right_at, left_at, last, valid);
+        return template_dot_element(right, left, right_at, left_at, last, valid);
     }
 }

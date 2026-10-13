@@ -318,6 +318,76 @@ pub enum MatmulStrategy {
     Staged,
     Streamed,
     Cooperative,
+    Folded,
+}
+
+pub const FOLDED_LANES: u32 = neura_abi::SUPER_SUB_BLOCK;
+pub const FOLDED_STAGE: u32 = 1024;
+pub const FOLDED_FOLDS: u32 = 8;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct FoldedTile {
+    rows: u32,
+    warps: u32,
+    folds: u32,
+    depth: u32,
+    lanes: u32,
+}
+
+impl FoldedTile {
+    pub fn new(rows: u32, warps: u32, folds: u32, depth: u32) -> Self {
+        assert!(
+            rows > 0 && warps > 0 && folds > 0 && depth > 0,
+            "a folded tile spans no element",
+        );
+        assert_eq!(
+            depth, FOLDED_LANES,
+            "a folded tile walks {depth} numbers of the reduction per lane where its lanes walk {FOLDED_LANES}",
+        );
+        Self {
+            rows,
+            warps,
+            folds,
+            depth,
+            lanes: FOLDED_LANES,
+        }
+    }
+
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    pub const fn columns(self) -> u32 {
+        self.warps * self.folds
+    }
+
+    pub const fn warps(self) -> u32 {
+        self.warps
+    }
+
+    pub const fn folds(self) -> u32 {
+        self.folds
+    }
+
+    pub const fn depth(self) -> u32 {
+        self.depth
+    }
+
+    pub const fn lanes(self) -> u32 {
+        self.lanes
+    }
+}
+
+pub const fn folded_stage_words() -> u64 {
+    FOLDED_STAGE as u64 + (FOLDED_STAGE / FOLDED_LANES) as u64
+}
+
+pub const fn folded_partials(columns: u32) -> u64 {
+    columns as u64 * (FOLDED_LANES as u64 + 1)
+}
+
+pub const fn folded_splits(depth: u32) -> u32 {
+    depth.div_ceil(FOLDED_STAGE)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -542,6 +612,7 @@ pub enum MatmulTile {
     Staged(PlainTile),
     Streamed(PlainTile),
     Cooperative(CooperativeTile),
+    Folded(FoldedTile),
 }
 
 impl MatmulTile {
@@ -586,6 +657,9 @@ impl MatmulTile {
             MatmulStrategy::Cooperative => panic!(
                 "a cooperative tile divides the fragments of its device among subgroups instead of registers",
             ),
+            MatmulStrategy::Folded => panic!(
+                "a folded tile walks its reduction along the lanes of a warp instead of the panels of a workgroup",
+            ),
         }
     }
 
@@ -593,11 +667,16 @@ impl MatmulTile {
         Self::Cooperative(tile)
     }
 
+    pub const fn folded(tile: FoldedTile) -> Self {
+        Self::Folded(tile)
+    }
+
     pub const fn strategy(self) -> MatmulStrategy {
         match self {
             Self::Staged(_) => MatmulStrategy::Staged,
             Self::Streamed(_) => MatmulStrategy::Streamed,
             Self::Cooperative(_) => MatmulStrategy::Cooperative,
+            Self::Folded(_) => MatmulStrategy::Folded,
         }
     }
 
@@ -605,6 +684,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.rows(),
             Self::Cooperative(tile) => tile.rows(),
+            Self::Folded(tile) => tile.rows(),
         }
     }
 
@@ -612,6 +692,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.columns(),
             Self::Cooperative(tile) => tile.columns(),
+            Self::Folded(tile) => tile.columns(),
         }
     }
 
@@ -619,6 +700,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.depth(),
             Self::Cooperative(tile) => tile.depth(),
+            Self::Folded(tile) => tile.depth(),
         }
     }
 
@@ -626,6 +708,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.thread_rows(),
             Self::Cooperative(tile) => tile.subgroup_rows(),
+            Self::Folded(tile) => tile.lanes(),
         }
     }
 
@@ -633,6 +716,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.thread_columns(),
             Self::Cooperative(tile) => tile.subgroup_columns(),
+            Self::Folded(tile) => tile.warps(),
         }
     }
 
@@ -640,6 +724,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.threads(),
             Self::Cooperative(tile) => tile.threads(),
+            Self::Folded(tile) => tile.warps() * tile.lanes(),
         }
     }
 
@@ -647,6 +732,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.registers(),
             Self::Cooperative(tile) => tile.registers(),
+            Self::Folded(tile) => tile.rows(),
         }
     }
 
@@ -654,6 +740,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.operands(),
             Self::Cooperative(_) => 0,
+            Self::Folded(tile) => tile.rows(),
         }
     }
 
@@ -661,6 +748,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.register_rows(),
             Self::Cooperative(_) => panic!("a cooperative tile accumulates across a subgroup"),
+            Self::Folded(tile) => tile.rows(),
         }
     }
 
@@ -668,6 +756,7 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.register_columns(),
             Self::Cooperative(_) => panic!("a cooperative tile accumulates across a subgroup"),
+            Self::Folded(_) => 1,
         }
     }
 
@@ -680,6 +769,7 @@ impl MatmulTile {
             Self::Staged(tile) => tile.depth() + 1,
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.left_stride(),
+            Self::Folded(_) => 1,
         }
     }
 
@@ -688,6 +778,7 @@ impl MatmulTile {
             Self::Staged(tile) => tile.rows() as u64 * (tile.depth() + 1) as u64,
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.left_stage(),
+            Self::Folded(_) => folded_stage_words(),
         }
     }
 
@@ -696,6 +787,7 @@ impl MatmulTile {
             Self::Staged(tile) => tile.depth() as u64 * tile.columns() as u64,
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.right_stage(),
+            Self::Folded(tile) => folded_partials(tile.columns()),
         }
     }
 
@@ -709,6 +801,9 @@ impl MatmulTile {
     pub const fn shared_bytes(self) -> u64 {
         match self {
             Self::Cooperative(tile) => tile.half_bytes(),
+            Self::Folded(tile) => {
+                (folded_stage_words() + folded_partials(tile.columns())) * WORD_BYTES
+            }
             _ => 2 * (self.left_stage() + self.right_stage()) * WORD_BYTES,
         }
     }
@@ -773,6 +868,13 @@ impl MatmulTile {
         match self {
             Self::Cooperative(tile) => tile.copy(),
             _ => 0,
+        }
+    }
+
+    pub const fn folds(self) -> u32 {
+        match self {
+            Self::Folded(tile) => tile.folds(),
+            _ => panic!("only a folded tile hands every warp a run of columns"),
         }
     }
 }
@@ -871,8 +973,13 @@ const fn resident_registers(workgroup: u32, resident: u32) -> u32 {
 }
 
 const fn scratch_budget(workgroup: u32, staging: u64, copy: u64) -> u64 {
+    scratch_of(workgroup, staging, 0, copy)
+}
+
+const fn scratch_of(workgroup: u32, staging: u64, folded: u64, copy: u64) -> u64 {
     let floor = SCRATCH_WORDS_PER_THREAD * workgroup as u64 * WORD_BYTES;
     let widest = if staging > floor { staging } else { floor };
+    let widest = if folded > widest { folded } else { widest };
     if copy > widest {
         copy + CLAIM_BYTES
     } else {
@@ -915,6 +1022,7 @@ impl Profile {
         let mut fragment = None;
         let mut left_stage = 0u64;
         let mut right_stage = 0u64;
+        let mut folded = 0u64;
         let mut panels = 0u64;
         let mut copy = 0u64;
         let mut index = 0;
@@ -949,6 +1057,11 @@ impl Profile {
                 if here > copy {
                     copy = here;
                 }
+            } else if matches!(tile, MatmulTile::Folded(_)) {
+                let here = tile.shared_bytes();
+                if here > folded {
+                    folded = here;
+                }
             } else {
                 if tile.left_stage() > left_stage {
                     left_stage = tile.left_stage();
@@ -964,7 +1077,7 @@ impl Profile {
         Self {
             workgroup,
             registers,
-            shared_bytes: scratch_budget(workgroup, staging, copy) + panels,
+            shared_bytes: scratch_of(workgroup, staging, folded, copy) + panels,
             tiles: entries,
             count: tiles.len() as u8,
         }
@@ -994,6 +1107,15 @@ impl Profile {
                 left_stage = left_stage.max(tile.left_stage());
                 right_stage = right_stage.max(tile.right_stage());
             }
+            if let Some(tile) = folded_tile(workgroup, pool) {
+                tiles.push(MatmulTile::folded(tile));
+            }
+            let folded = tiles
+                .iter()
+                .filter(|tile| matches!(tile, MatmulTile::Folded(_)))
+                .map(|tile| tile.shared_bytes())
+                .max()
+                .unwrap_or(0);
             if let Some(fragment) = cooperative {
                 tiles.extend(cooperative_tiles(
                     workgroup,
@@ -1001,6 +1123,7 @@ impl Profile {
                     fragment,
                     left_stage,
                     right_stage,
+                    folded,
                 ));
             }
             if tiles.is_empty() {
@@ -1080,7 +1203,10 @@ impl Profile {
         let mut right = 0u64;
         let mut index = 0;
         while index < self.count as usize {
-            if !matches!(self.tiles[index], MatmulTile::Cooperative(_)) {
+            if matches!(
+                self.tiles[index],
+                MatmulTile::Staged(_) | MatmulTile::Streamed(_)
+            ) {
                 if self.tiles[index].left_stage() > left {
                     left = self.tiles[index].left_stage();
                 }
@@ -1108,6 +1234,22 @@ impl Profile {
         }
         panels
     }
+}
+
+fn folded_tile(workgroup: u32, pool: u64) -> Option<FoldedTile> {
+    let warps = workgroup / FOLDED_LANES;
+    if warps == 0 {
+        return None;
+    }
+    let room = (pool.saturating_sub(CLAIM_BYTES) / WORD_BYTES).saturating_sub(folded_stage_words());
+    let folds = u64::from(FOLDED_FOLDS).min(room / u64::from(warps * (FOLDED_LANES + 1)));
+    let folds = u32::try_from(folds).expect("a folded tile folds fewer columns than a word holds");
+    if folds == 0 {
+        return None;
+    }
+    let tile = FoldedTile::new(1, warps, folds, FOLDED_LANES);
+    let held = scratch_of(workgroup, 0, MatmulTile::folded(tile).shared_bytes(), 0) <= pool;
+    held.then_some(tile)
 }
 
 fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
@@ -1195,6 +1337,7 @@ fn cooperative_tiles(
     fragment: CooperativeMatrix,
     left_stage: u64,
     right_stage: u64,
+    folded: u64,
 ) -> Vec<MatmulTile> {
     if !workgroup.is_multiple_of(fragment.subgroup()) {
         return Vec::new();
@@ -1214,7 +1357,14 @@ fn cooperative_tiles(
                     stage,
                 );
                 if !carries_registers(workgroup, tile.registers())
-                    || !cooperative_fits(workgroup, shared_bytes, left_stage, right_stage, tile)
+                    || !cooperative_fits(
+                        workgroup,
+                        shared_bytes,
+                        left_stage,
+                        right_stage,
+                        folded,
+                        tile,
+                    )
                 {
                     break;
                 }
@@ -1252,6 +1402,7 @@ fn cooperative_fits(
     shared_bytes: u64,
     left_stage: u64,
     right_stage: u64,
+    folded: u64,
     tile: CooperativeTile,
 ) -> bool {
     let staging = scratch_budget(
@@ -1259,6 +1410,7 @@ fn cooperative_fits(
         2 * (left_stage + right_stage) * WORD_BYTES,
         tile.copy() * WORD_BYTES,
     );
+    let staging = if folded > staging { folded } else { staging };
     staging + tile.half_bytes() <= shared_bytes
 }
 
@@ -1300,6 +1452,7 @@ pub struct Geometry {
     attention: Vec<AttentionTile>,
     left_stage: u64,
     right_stage: u64,
+    folded: u64,
     half_stage: u64,
     copy: u64,
 }
@@ -1321,12 +1474,15 @@ impl Geometry {
         );
         let mut left_stage = 0u64;
         let mut right_stage = 0u64;
+        let mut folded = 0u64;
         let mut half_stage = 0u64;
         let mut copy = 0u64;
         for (_, tile) in walked {
             if let MatmulTile::Cooperative(cooperative) = tile {
                 half_stage = half_stage.max(cooperative.half_panels());
                 copy = copy.max(cooperative.copy());
+            } else if matches!(tile, MatmulTile::Folded(_)) {
+                folded = folded.max(tile.shared_bytes());
             } else {
                 left_stage = left_stage.max(tile.left_stage());
                 right_stage = right_stage.max(tile.right_stage());
@@ -1339,6 +1495,7 @@ impl Geometry {
             attention: attention.to_vec(),
             left_stage,
             right_stage,
+            folded,
             half_stage,
             copy,
         }
@@ -1380,9 +1537,9 @@ impl Geometry {
 
     fn module_scratch(&self, module: DeviceModule) -> u32 {
         match module {
-            DeviceModule::MatmulTiles => {
-                (2 * (self.left_stage + self.right_stage)).max(self.copy) as u32
-            }
+            DeviceModule::MatmulTiles => (2 * (self.left_stage + self.right_stage))
+                .max(self.folded / WORD_BYTES)
+                .max(self.copy) as u32,
             DeviceModule::MatmulWeight => (self.left_stage + self.right_stage) as u32,
             DeviceModule::Attention => self.attention_scratch_words(),
             DeviceModule::Reduce => self.workgroup,
