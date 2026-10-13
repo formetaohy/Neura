@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 description = "GPU-driven deep learning framework for games"
 license = "MIT"
@@ -23,26 +23,26 @@ objc2-foundation = "0.3"
 objc2-metal = "0.3"
 windows = "0.62"
 libloading = "0.8"
-neura-abi = { version = "0.7.0", path = "crates/neura-abi" }
-neura-compiler = { version = "0.7.0", path = "crates/neura-compiler" }
-neura-ast = { version = "0.7.0", path = "crates/neura-ast" }
-neura-macro = { version = "0.7.0", path = "crates/neura-macro" }
-neura-pointwise = { version = "0.7.0", path = "crates/neura-pointwise" }
-neura-profile = { version = "0.7.0", path = "crates/neura-profile" }
-neura-precision = { version = "0.7.0", path = "crates/neura-precision" }
-neura-graph = { version = "0.7.0", path = "crates/neura-graph" }
-neura-shader = { version = "0.7.0", path = "crates/neura-shader" }
-neura-kernel = { version = "0.7.0", path = "crates/neura-kernel" }
-neura-gpu = { version = "0.7.0", path = "crates/neura-gpu" }
-neura-plan = { version = "0.7.0", path = "crates/neura-plan" }
-neura-runtime = { version = "0.7.0", path = "crates/neura-runtime" }
-neura-source = { version = "0.7.0", path = "crates/neura-source" }
-neura-gguf = { version = "0.7.0", path = "crates/neura-gguf" }
-neura-nn = { version = "0.7.0", path = "crates/neura-nn" }
-neura-tokenizer = { version = "0.7.0", path = "crates/neura-tokenizer" }
-neura-template = { version = "0.7.0", path = "crates/neura-template" }
-neura-decoder = { version = "0.7.0", path = "crates/neura-decoder" }
-neura-generate = { version = "0.7.0", path = "crates/neura-generate" }
+neura-abi = { version = "0.7.1", path = "crates/neura-abi" }
+neura-compiler = { version = "0.7.1", path = "crates/neura-compiler" }
+neura-ast = { version = "0.7.1", path = "crates/neura-ast" }
+neura-macro = { version = "0.7.1", path = "crates/neura-macro" }
+neura-pointwise = { version = "0.7.1", path = "crates/neura-pointwise" }
+neura-profile = { version = "0.7.1", path = "crates/neura-profile" }
+neura-precision = { version = "0.7.1", path = "crates/neura-precision" }
+neura-graph = { version = "0.7.1", path = "crates/neura-graph" }
+neura-shader = { version = "0.7.1", path = "crates/neura-shader" }
+neura-kernel = { version = "0.7.1", path = "crates/neura-kernel" }
+neura-gpu = { version = "0.7.1", path = "crates/neura-gpu" }
+neura-plan = { version = "0.7.1", path = "crates/neura-plan" }
+neura-runtime = { version = "0.7.1", path = "crates/neura-runtime" }
+neura-source = { version = "0.7.1", path = "crates/neura-source" }
+neura-gguf = { version = "0.7.1", path = "crates/neura-gguf" }
+neura-nn = { version = "0.7.1", path = "crates/neura-nn" }
+neura-tokenizer = { version = "0.7.1", path = "crates/neura-tokenizer" }
+neura-template = { version = "0.7.1", path = "crates/neura-template" }
+neura-decoder = { version = "0.7.1", path = "crates/neura-decoder" }
+neura-generate = { version = "0.7.1", path = "crates/neura-generate" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
