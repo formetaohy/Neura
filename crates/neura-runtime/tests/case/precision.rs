@@ -357,7 +357,8 @@ fn rounding_contract(backend: neura_gpu::Backend) {
             }
             Element::Int4 | Element::Fp4E2M1 => block_contract(&runtime, *element),
             Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => {
-                block_contract(&runtime, *element)
+                block_contract(&runtime, *element);
+                narrow_block_contract(&runtime, *element);
             }
         }
     }
@@ -437,6 +438,40 @@ fn block_contract(runtime: &Runtime, element: Element) {
     assert_close(
         &runtime.read(&program, product),
         &matmul_reference(&inputs, &quantized, 3, 150, 8),
+        1e-3,
+    );
+}
+
+fn narrow_block_contract(runtime: &Runtime, element: Element) {
+    let graph = Graph::new();
+    let weight = graph.block_quantized_parameter(
+        Shape::matrix(8, 160),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        element,
+    );
+    let input = graph.input(Shape::matrix(1, 160), Element::Single);
+    let product = graph.matmul(input, graph.permute(weight, [0, 1, 3, 2]));
+    graph.retain(product);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(8 * 160, 23);
+    let inputs = random(160, 17);
+    runtime.write(&program, weight, &values);
+    runtime.write(&program, input, &inputs);
+    runtime.run(&program);
+    let quantized = unpack(element, values.len(), &pack(element, 1.0, &values));
+    let mut floor = vec![0.0f32; quantized.len()];
+    for row in 0..8usize {
+        for column in 0..160usize {
+            floor[column * 8 + row] = quantized[row * 160 + column];
+        }
+    }
+    assert_close(
+        &runtime.read(&program, product),
+        &matmul_reference(&inputs, &floor, 1, 160, 8),
         1e-3,
     );
 }

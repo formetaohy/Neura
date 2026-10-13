@@ -842,6 +842,7 @@ const COOPERATIVE_MENU: usize = 6;
 const POOL_BYTES: u64 = 21 << 10;
 const BLOCKINGS_PER_GRID: usize = 2;
 const DEPTH: u32 = 8;
+pub const STREAMED_DEPTH: u32 = neura_abi::SUPER_SUB_BLOCK;
 pub const CLAIM_WORDS: u32 = 4;
 pub const CLAIM_BYTES: u64 = CLAIM_WORDS as u64 * WORD_BYTES;
 const SCRATCH_WORDS_PER_THREAD: u64 = 2;
@@ -928,6 +929,13 @@ impl Profile {
                 "a {workgroup} thread workgroup of {tile:?} spends {} registers a thread where its profile offers {registers}",
                 tile.registers() + tile.operands(),
             );
+            if tile.strategy() == MatmulStrategy::Streamed {
+                assert_eq!(
+                    tile.depth(),
+                    STREAMED_DEPTH,
+                    "a streamed tile walks a run of {STREAMED_DEPTH} elements of the reduction at a stride, and {tile:?} walks another run",
+                );
+            }
             if let MatmulTile::Cooperative(cooperative) = tile {
                 assert!(
                     *fragment.get_or_insert(cooperative.fragment()) == cooperative.fragment(),
@@ -975,7 +983,7 @@ impl Profile {
                     MatmulStrategy::Streamed,
                     rows,
                     columns,
-                    DEPTH,
+                    STREAMED_DEPTH,
                     rows,
                     columns,
                 ));

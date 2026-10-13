@@ -1,6 +1,7 @@
 use neura_abi::{Kind, WORD_BYTES};
 use neura_profile::{
     AttentionTile, Budget, CooperativeMatrix, Geometry, MatmulStrategy, MatmulTile, Profile,
+    STREAMED_DEPTH,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -192,6 +193,16 @@ fn a_profile_refuses_a_pool_one_workgroup_cannot_carry() {
     }));
     assert!(refuses(|| {
         let _ = Budget::of(1024, 8 << 10);
+    }));
+    assert!(refuses(|| {
+        let _ = Profile::of(&[MatmulTile::new(
+            MatmulStrategy::Streamed,
+            1,
+            256,
+            STREAMED_DEPTH / 2,
+            1,
+            256,
+        )]);
     }));
 }
 
@@ -396,7 +407,7 @@ fn a_matmul_tile_refuses_a_geometry_its_workgroup_cannot_carry() {
 
 #[test]
 fn a_streamed_tile_carries_no_operand_through_shared_memory() {
-    let tile = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, 8, 1, 256);
+    let tile = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, STREAMED_DEPTH, 1, 256);
     assert_eq!(tile.strategy(), MatmulStrategy::Streamed);
     assert_eq!(tile.left_stage(), 0);
     assert_eq!(tile.right_stage(), 0);

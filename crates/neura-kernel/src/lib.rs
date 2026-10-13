@@ -1,4 +1,5 @@
 mod authored;
+mod dot;
 mod fetch;
 mod pointwise;
 mod scheduler;
@@ -322,6 +323,7 @@ impl Kernel {
         scheduler::install(&mut compiler);
         substrate::install(&mut compiler, banks, paged);
         fetch::install(&mut compiler, elements);
+        dot::install(&mut compiler, elements);
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
         for module in DeviceModule::ALL {

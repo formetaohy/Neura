@@ -2,7 +2,9 @@ use neura_abi::Element;
 use neura_gpu::{Backend, PREFERENCE};
 use neura_graph::{Graph, Shape, Value};
 use neura_plan::Product;
-use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile};
+use neura_profile::{
+    CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile, STREAMED_DEPTH,
+};
 use neura_runtime::{Program, Runtime};
 
 use crate::support;
@@ -151,7 +153,7 @@ fn a_grouped_product_walks_a_segment_longer_than_its_tile() {
 #[test]
 fn a_grouped_product_walks_a_segment_the_tiles_a_short_bound_leaves() {
     let grouped = Grouped::of(1, 12, 8, 4);
-    let tile = MatmulTile::new(MatmulStrategy::Streamed, 4, 4, 8, 1, 4);
+    let tile = MatmulTile::new(MatmulStrategy::Streamed, 4, 4, STREAMED_DEPTH, 1, 4);
     let profile = Profile::of(&[tile]);
     let program = grouped.chosen(profile, &[(Product::of(1, 12, 4, 8), tile)]);
     let produced = grouped.step(&program, &[5.0]);
@@ -410,7 +412,7 @@ fn a_grouped_product_weighs_the_rows_of_a_cooperative_tile() {
         (2, 2),
         fragment.depth(),
     ));
-    let streamed = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, 8, 1, 256);
+    let streamed = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, STREAMED_DEPTH, 1, 256);
     let profile = Profile::of(&[streamed, tile]);
     let grouped = Grouped::over(runtime, 3, 12, 4, 5);
     let program = grouped.chosen(profile, &[(Product::of(1, 12, 5, 4), tile)]);

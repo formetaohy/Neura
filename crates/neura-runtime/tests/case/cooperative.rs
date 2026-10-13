@@ -1,7 +1,9 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
 use neura_plan::Product;
-use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile};
+use neura_profile::{
+    CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile, STREAMED_DEPTH,
+};
 use neura_runtime::Runtime;
 
 use crate::support::input;
@@ -57,7 +59,14 @@ fn cooperative_tiles(runtime: &Runtime) -> Option<Vec<MatmulTile>> {
 }
 
 fn cooperative_profile(tile: MatmulTile) -> Profile {
-    let streamed = MatmulTile::new(MatmulStrategy::Streamed, 1, WORKGROUP, 8, 1, WORKGROUP);
+    let streamed = MatmulTile::new(
+        MatmulStrategy::Streamed,
+        1,
+        WORKGROUP,
+        STREAMED_DEPTH,
+        1,
+        WORKGROUP,
+    );
     Profile::of(&[streamed, tile])
 }
 

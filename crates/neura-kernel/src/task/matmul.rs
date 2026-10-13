@@ -7,6 +7,7 @@ pub(crate) fn install(compiler: &mut Compiler) {
 
 pub(crate) fn install_tiles(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
+    compiler.constant("MATMUL_RUN", neura_profile::STREAMED_DEPTH);
     if let Some(cooperative) = geometry.cooperative() {
         let fragment = cooperative.fragment();
         compiler.constant("COOPMAT_ROWS", fragment.rows());
@@ -346,39 +347,22 @@ mod device {
             }
             let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
             for block in stride(first_block, last_block, 1u32) {
-                for step in stride(
-                    block * MATMUL_DEPTH,
-                    min((block + 1u32) * MATMUL_DEPTH, depth),
-                    1u32,
-                ) {
-                    let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
-                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
-                        let at = base_row + thread_row + row;
-                        let inside = at < row_bound;
-                        let address = select(
-                            0u32,
-                            left_plane + at * left.strides.z + step * left.strides.w,
-                            inside,
-                        );
-                        left_registers[row] = select(0.0, fetch(left, address), inside);
-                    }
-                    let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
+                let step = block * MATMUL_DEPTH;
+                let last = min((block + 1u32) * MATMUL_DEPTH, depth) - step;
+                for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                    let at_row = base_row + thread_row + row;
                     for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
-                        let at = base_column + thread_column + column;
-                        let inside = at < columns;
-                        let address = select(
-                            0u32,
-                            right_plane + step * right.strides.z + at * right.strides.w,
-                            inside,
-                        );
-                        right_registers[column] = select(0.0, fetch(right, address), inside);
-                    }
-                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
-                        for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
-                            let register = row * MATMUL_REGISTER_COLUMNS + column;
-                            acc[register] =
-                                acc[register] + left_registers[row] * right_registers[column];
-                        }
+                        let at_column = base_column + thread_column + column;
+                        let register = row * MATMUL_REGISTER_COLUMNS + column;
+                        acc[register] = acc[register]
+                            + dot(
+                                right,
+                                left,
+                                right_plane + step * right.strides.z + at_column * right.strides.w,
+                                left_plane + at_row * left.strides.z + step * left.strides.w,
+                                last,
+                                at_row < row_bound && at_column < columns,
+                            );
                     }
                 }
             }
