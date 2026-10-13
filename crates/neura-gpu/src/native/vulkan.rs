@@ -230,7 +230,6 @@ pub(crate) struct Device {
     uuid: [u8; vk::UUID_SIZE],
     state: Mutex<QueueState>,
     pub(crate) gate: Arc<Gate>,
-    advance: Option<HostAdvance>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
@@ -513,8 +512,7 @@ impl Facts {
             bits: self.bits,
             uuid: self.uuid,
             state: Mutex::new(QueueState::default()),
-            gate: Gate::of(parts.advance.clone()),
-            advance: parts.advance,
+            gate: Gate::of(parts.advance),
             _keep_alive: parts.keep_alive,
         })
     }
@@ -733,6 +731,7 @@ impl Device {
             .find(|entry| entry.device == host.device.handle() && entry.queue == host.queue)
             && let Some(device) = entry.native.upgrade()
         {
+            device.gate.advancing(advance);
             return Ok((device, entry.info.clone(), entry.limits, entry.capability));
         }
         let properties = unsafe { host.instance.get_physical_device_properties(host.physical) };
@@ -1316,7 +1315,7 @@ impl Device {
             index,
             timeout,
         );
-        match &self.advance {
+        match self.gate.advance() {
             None => unsafe {
                 self.raw.wait_for_fences(
                     &[fence],

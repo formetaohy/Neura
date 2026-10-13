@@ -10,7 +10,7 @@ use crate::capability::{
     Limits,
 };
 use crate::gate::Gate;
-use crate::host::HostAdvance;
+use crate::host::{HostAdvance, metal_identity};
 use crate::submission::{Command, Write};
 use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};
 use objc2::rc::Retained;
@@ -111,12 +111,11 @@ pub(crate) struct Device {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
     pub(crate) gate: Arc<Gate>,
-    advance: Option<HostAdvance>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 struct Lent {
-    device: u64,
+    device: usize,
     native: Weak<Device>,
     info: AdapterInfo,
     limits: Limits,
@@ -266,8 +265,7 @@ fn assemble(
         raw,
         queue,
         state: Mutex::new(QueueState::default()),
-        gate: Gate::of(advance.clone()),
-        advance,
+        gate: Gate::of(advance),
         _keep_alive: keep_alive,
     })
 }
@@ -318,10 +316,11 @@ impl Device {
             .lock()
             .expect("the borrowed Metal devices are never poisoned");
         lent.retain(|entry| entry.native.strong_count() > 0);
-        let identity = raw.registryID();
+        let identity = metal_identity(raw);
         if let Some(entry) = lent.iter().find(|entry| entry.device == identity)
             && let Some(device) = entry.native.upgrade()
         {
+            device.gate.advancing(advance);
             return Ok((device, entry.info.clone(), entry.limits, entry.capability));
         }
         let info = describe(raw);
@@ -750,7 +749,7 @@ impl Device {
             if started.elapsed() >= timeout {
                 return Err("waiting for Metal compute work timed out".to_owned());
             }
-            if let Some(advance) = &self.advance {
+            if let Some(advance) = self.gate.advance() {
                 advance.advance();
             }
             std::thread::sleep(Duration::from_micros(250));

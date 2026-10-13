@@ -9,7 +9,7 @@ pub struct QueueLock {
 pub(crate) struct Gate {
     held: Mutex<Option<(ThreadId, usize)>>,
     ready: Condvar,
-    advance: Option<HostAdvance>,
+    advance: Mutex<Option<HostAdvance>>,
 }
 
 impl Gate {
@@ -17,8 +17,19 @@ impl Gate {
         Arc::new(Self {
             held: Mutex::new(None),
             ready: Condvar::new(),
-            advance,
+            advance: Mutex::new(advance),
         })
+    }
+
+    pub(crate) fn advancing(&self, advance: Option<HostAdvance>) {
+        *self.advance.lock().unwrap_or_else(PoisonError::into_inner) = advance;
+    }
+
+    pub(crate) fn advance(&self) -> Option<HostAdvance> {
+        self.advance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn take(self: &Arc<Self>) -> QueueLock {
@@ -33,7 +44,7 @@ impl Gate {
             };
         }
         while held.is_some() {
-            held = match &self.advance {
+            held = match self.advance() {
                 None => self
                     .ready
                     .wait(held)

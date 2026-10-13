@@ -24,7 +24,7 @@ pub use context::{Device, GpuContext, GpuRequest, GpuUnavailable, LimitsPolicy, 
 pub use gate::QueueLock;
 #[cfg(vulkan_backend)]
 pub use host::VulkanHost;
-pub use host::{HostAdvance, HostDevice};
+pub use host::{HostAdvance, HostDevice, HostIdentity};
 pub use library::WARM_PROGRAMS;
 pub use pipeline::{BindGroup, Binding, PipelineHandle};
 pub use readback::{READBACK_TIMEOUT, Readback, ReadbackLease};

@@ -3,6 +3,8 @@ use crate::{
     GpuRequest, GpuUnavailable, HostDevice, PREFERENCE, Submission,
 };
 use neura_compiler::{Read, ReadWrite, kernel};
+use std::any::Any;
+use std::sync::Arc;
 
 #[kernel(workgroup_size = 64)]
 fn double(lid: u32, input: Read<u32>, output: ReadWrite<u32>) {
@@ -191,6 +193,55 @@ fn a_host_advance_runs_while_a_guest_waits_for_the_host_queue() {
                 .expect("a host advanced while a guest waited for its queue");
             drop(lock);
         });
+    }
+}
+
+#[test]
+fn a_borrow_holds_what_its_host_hands_over() {
+    for &backend in PREFERENCE {
+        let owner = Arc::new(Owner::open(backend));
+        let watcher = Arc::downgrade(&owner);
+        let keep_alive: Arc<dyn Any + Send + Sync> = owner.clone();
+        let device = Device::borrow(owner.device().holding(keep_alive), &cached(backend, "held"))
+            .unwrap_or_else(|error| panic!("{backend:?} refused a held request: {error}"));
+        drop(owner);
+        assert!(
+            watcher.upgrade().is_some(),
+            "{backend:?} dropped what a host handed over while its device was borrowed",
+        );
+        GpuContext::of_device(device.clone()).drain();
+        drop(device);
+        assert!(
+            watcher.upgrade().is_none(),
+            "{backend:?} held what a host handed over after its borrowed device was dropped",
+        );
+    }
+}
+
+#[test]
+fn a_borrow_follows_the_identity_of_its_host_device() {
+    for &backend in PREFERENCE {
+        let first = Owner::open(backend);
+        let second = Owner::open(backend);
+        let one = borrow(&first, backend);
+        let other = borrow(&second, backend);
+        let same_host = first.device().identity() == second.device().identity();
+        if backend == Backend::Vulkan {
+            assert!(
+                !same_host,
+                "Vulkan opened one device for two hosts of its own",
+            );
+        }
+        assert_eq!(
+            one.same(&other),
+            same_host,
+            "{backend:?} borrowed apart from the identity of its host device",
+        );
+        assert_eq!(
+            one.native().same(other.native()),
+            same_host,
+            "{backend:?} lent apart from the identity of its host device",
+        );
     }
 }
 
@@ -392,6 +443,16 @@ impl VulkanOwner {
             queue_family: self.queue_family,
             cooperative_matrix: self.cooperative_matrix,
         })
+    }
+}
+
+#[cfg(vulkan_backend)]
+impl Drop for VulkanOwner {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_device(None);
+            self.instance.destroy_instance(None);
+        }
     }
 }
 

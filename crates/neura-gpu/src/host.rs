@@ -17,6 +17,11 @@ use windows::core::Interface;
 
 pub(crate) const HOST_SLICE: Duration = Duration::from_millis(1);
 
+#[cfg(metal_backend)]
+pub(crate) fn metal_identity(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> usize {
+    Retained::as_ptr(device).cast::<()>() as usize
+}
+
 #[cfg(vulkan_backend)]
 pub struct VulkanHost<'a> {
     pub entry: &'a ash::Entry,
@@ -113,27 +118,39 @@ impl<'a> HostDevice<'a> {
         }
     }
 
-    pub(crate) fn identity(&self) -> HostIdentity {
+    pub fn identity(&self) -> HostIdentity {
         match &self.kind {
             #[cfg(vulkan_backend)]
-            HostKind::Vulkan(host) => HostIdentity::Vulkan {
-                device: vk::Handle::as_raw(host.device.handle()),
-                queue: vk::Handle::as_raw(host.queue),
-            },
+            HostKind::Vulkan(host) => HostIdentity::of(
+                Backend::Vulkan,
+                vk::Handle::as_raw(host.device.handle()),
+                vk::Handle::as_raw(host.queue),
+            ),
             #[cfg(dx12_backend)]
-            HostKind::Dx12(device) => HostIdentity::Dx12(Interface::as_raw(*device) as usize),
+            HostKind::Dx12(device) => {
+                HostIdentity::of(Backend::Dx12, Interface::as_raw(*device) as usize as u64, 0)
+            }
             #[cfg(metal_backend)]
-            HostKind::Metal(device) => HostIdentity::Metal(device.registryID()),
+            HostKind::Metal(device) => {
+                HostIdentity::of(Backend::Metal, metal_identity(device) as u64, 0)
+            }
         }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum HostIdentity {
-    #[cfg(vulkan_backend)]
-    Vulkan { device: u64, queue: u64 },
-    #[cfg(dx12_backend)]
-    Dx12(usize),
-    #[cfg(metal_backend)]
-    Metal(u64),
+pub struct HostIdentity {
+    backend: Backend,
+    device: u64,
+    queue: u64,
+}
+
+impl HostIdentity {
+    pub(crate) fn of(backend: Backend, device: u64, queue: u64) -> Self {
+        Self {
+            backend,
+            device,
+            queue,
+        }
+    }
 }

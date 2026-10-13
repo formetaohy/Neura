@@ -99,6 +99,7 @@ impl Run {
     }
 }
 
+#[derive(Clone)]
 pub struct MemoryRequest {
     pub readback_bytes: u64,
     pub readback_slots: usize,

@@ -156,7 +156,6 @@ pub(crate) struct Device {
     frequency: u64,
     state: Mutex<QueueState>,
     pub(crate) gate: Arc<Gate>,
-    advance: Option<HostAdvance>,
     _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
@@ -503,6 +502,7 @@ impl Device {
         if let Some(entry) = lent.iter().find(|entry| entry.device == identity)
             && let Some(device) = entry.native.upgrade()
         {
+            device.gate.advancing(advance);
             return Ok((
                 device,
                 entry.info.clone(),
@@ -595,8 +595,7 @@ impl Device {
             clock,
             frequency,
             state: Mutex::new(QueueState::default()),
-            gate: Gate::of(advance.clone()),
-            advance,
+            gate: Gate::of(advance),
             _keep_alive: keep_alive,
         }))
     }
@@ -1072,7 +1071,7 @@ impl Device {
             timeout,
         );
         let millis = |span: Duration| span.as_millis().min(u128::from(u32::MAX - 1)) as u32;
-        match &self.advance {
+        match self.gate.advance() {
             None => {
                 let result = unsafe { WaitForSingleObject(self.event.0, millis(timeout)) };
                 if result != WAIT_OBJECT_0 {
