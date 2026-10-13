@@ -79,6 +79,76 @@ fn a_matmul_matches_a_cpu_reference() {
 }
 
 #[test]
+fn a_product_stages_a_transposed_operand_the_way_its_storage_walks() {
+    let runtime = open();
+    for (rows, depth, columns) in [(64u32, 96u32, 64u32), (96, 64, 128)] {
+        let graph = Graph::new();
+        let held = graph.parameter(Shape::matrix(depth, rows), Init::Zero, Element::Single);
+        let left = graph.permute(held, [0, 1, 3, 2]);
+        let right = graph.parameter(Shape::matrix(depth, columns), Init::Zero, Element::Single);
+        let out = graph.matmul(left, right);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        assert!(
+            program
+                .matmul_geometries()
+                .iter()
+                .any(|(tile, _)| tile.strategy() == MatmulStrategy::Staged),
+            "a product of {rows} by {columns} with a depth of {depth} walks the panels a staged tile stages",
+        );
+        let held_data = random(depth * rows, 11);
+        let right_data = random(depth * columns, 29);
+        runtime.write(&program, held, &held_data);
+        runtime.write(&program, right, &right_data);
+        runtime.run(&program);
+        let mut transposed = vec![0.0f32; (rows * depth) as usize];
+        for step in 0..depth {
+            for row in 0..rows {
+                transposed[(row * depth + step) as usize] = held_data[(step * rows + row) as usize];
+            }
+        }
+        assert_close(
+            &runtime.read(&program, out),
+            &matmul_reference(&transposed, &right_data, rows, depth, columns),
+            1e-4,
+        );
+    }
+    for (rows, depth, columns) in [(64u32, 96u32, 64u32), (96, 64, 128)] {
+        let graph = Graph::new();
+        let left = graph.parameter(Shape::matrix(rows, depth), Init::Zero, Element::Single);
+        let held = graph.parameter(Shape::matrix(columns, depth), Init::Zero, Element::Single);
+        let right = graph.permute(held, [0, 1, 3, 2]);
+        let out = graph.matmul(left, right);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        assert!(
+            program
+                .matmul_geometries()
+                .iter()
+                .any(|(tile, _)| tile.strategy() == MatmulStrategy::Staged),
+            "a product of {rows} by {columns} with a depth of {depth} walks the panels a staged tile stages",
+        );
+        let left_data = random(rows * depth, 13);
+        let held_data = random(columns * depth, 31);
+        runtime.write(&program, left, &left_data);
+        runtime.write(&program, held, &held_data);
+        runtime.run(&program);
+        let mut transposed = vec![0.0f32; (depth * columns) as usize];
+        for column in 0..columns {
+            for step in 0..depth {
+                transposed[(step * columns + column) as usize] =
+                    held_data[(column * depth + step) as usize];
+            }
+        }
+        assert_close(
+            &runtime.read(&program, out),
+            &matmul_reference(&left_data, &transposed, rows, depth, columns),
+            1e-4,
+        );
+    }
+}
+
+#[test]
 fn a_product_that_splits_its_depth_matches_a_cpu_reference() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(4, 512), Init::Zero, Element::Single);

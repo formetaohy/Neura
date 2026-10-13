@@ -120,9 +120,10 @@ mod device {
         columns: u32,
     ) {
         let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
+        let left_across = left.strides.z < left.strides.w;
         for unit in stride(lid, MATMUL_ROWS * MATMUL_DEPTH, WORKGROUP_SIZE) {
-            let row = unit / MATMUL_DEPTH;
-            let column = unit % MATMUL_DEPTH;
+            let row = select(unit / MATMUL_DEPTH, unit % MATMUL_ROWS, left_across);
+            let column = select(unit % MATMUL_DEPTH, unit / MATMUL_ROWS, left_across);
             let at_row = base_row + row;
             let at_column = base_depth + column;
             let inside = at_row < rows && at_column < depth;
@@ -135,16 +136,19 @@ mod device {
                 select(0.0, fetch(left, address), inside);
         }
         let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
+        let right_across = right.strides.z < right.strides.w;
         for unit in stride(lid, MATMUL_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
-            let row = base_depth + unit / MATMUL_COLUMNS;
-            let column = base_column + unit % MATMUL_COLUMNS;
+            let step = select(unit / MATMUL_COLUMNS, unit % MATMUL_DEPTH, right_across);
+            let seat = select(unit % MATMUL_COLUMNS, unit / MATMUL_DEPTH, right_across);
+            let row = base_depth + step;
+            let column = base_column + seat;
             let inside = row < depth && column < columns;
             let address = select(
                 0u32,
                 right_plane + row * right.strides.z + column * right.strides.w,
                 inside,
             );
-            scratch[SCRATCH_MATMUL_RIGHT + right_slot + unit] =
+            scratch[SCRATCH_MATMUL_RIGHT + right_slot + step * MATMUL_COLUMNS + seat] =
                 select(0.0, fetch(right, address), inside);
         }
     }
@@ -440,9 +444,10 @@ mod cooperative {
         columns: u32,
     ) {
         let left_slot = buffer * MATMUL_ROWS * MATMUL_STAGE_DEPTH;
+        let left_across = left.strides.z < left.strides.w;
         for unit in stride(lid, MATMUL_ROWS * MATMUL_STAGE_DEPTH, WORKGROUP_SIZE) {
-            let row = unit / MATMUL_STAGE_DEPTH;
-            let column = unit % MATMUL_STAGE_DEPTH;
+            let row = select(unit / MATMUL_STAGE_DEPTH, unit % MATMUL_ROWS, left_across);
+            let column = select(unit % MATMUL_STAGE_DEPTH, unit / MATMUL_ROWS, left_across);
             let at_row = base_row + row;
             let at_column = base_depth + column;
             let inside = at_row < rows && at_column < depth;
@@ -455,16 +460,28 @@ mod cooperative {
                 f16(select(0.0, fetch(left, address), inside));
         }
         let right_slot = SCRATCH_COOPERATIVE_RIGHT + buffer * MATMUL_STAGE_DEPTH * MATMUL_COLUMNS;
+        let right_across = right.strides.z < right.strides.w;
         for unit in stride(lid, MATMUL_STAGE_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
-            let row = base_depth + unit / MATMUL_COLUMNS;
-            let column = base_column + unit % MATMUL_COLUMNS;
+            let step = select(
+                unit / MATMUL_COLUMNS,
+                unit % MATMUL_STAGE_DEPTH,
+                right_across,
+            );
+            let seat = select(
+                unit % MATMUL_COLUMNS,
+                unit / MATMUL_STAGE_DEPTH,
+                right_across,
+            );
+            let row = base_depth + step;
+            let column = base_column + seat;
             let inside = row < depth && column < columns;
             let address = select(
                 0u32,
                 right_plane + row * right.strides.z + column * right.strides.w,
                 inside,
             );
-            scratch_half[right_slot + unit] = f16(select(0.0, fetch(right, address), inside));
+            scratch_half[right_slot + step * MATMUL_COLUMNS + seat] =
+                f16(select(0.0, fetch(right, address), inside));
         }
     }
 
