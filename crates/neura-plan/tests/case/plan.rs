@@ -5,7 +5,8 @@ use neura_abi::{
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_pointwise as op;
 use neura_profile::{
-    AttentionTile, Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
+    AttentionTile, Budget, CooperativeMatrix, CooperativeTile, FOLDED_LANES, FoldedTile,
+    MatmulStrategy, MatmulTile, Profile, STREAMED_DEPTH,
 };
 
 const DEVICE: Budget = Budget::of(1024, 48 << 10);
@@ -23,11 +24,12 @@ fn wide() -> Profile {
 fn every_profile() -> Vec<Profile> {
     Profile::derive(DEVICE, None)
 }
-use neura_plan::{DEFAULT_ENCODING_BYTES, Layout, Plan, Product};
+use neura_plan::{Contiguous, DEFAULT_ENCODING_BYTES, Layout, Plan, Product, Weight};
 use std::mem::size_of;
 
 const ALIGNMENT: u64 = 256;
 const PLACEMENT: Placement = Placement::new(1 << 16, 1 << 18);
+const WEIGHT: Weight = Weight::of(Element::Single, Contiguous::Output);
 
 fn plan(graph: &Graph) -> Plan {
     plan_with(graph, narrow())
@@ -1984,7 +1986,7 @@ fn a_product_shortlists_the_tile_of_every_strategy_its_profile_offers() {
         16,
     ));
     let profile = Profile::of(&[staged, cooperative]);
-    let product = Product::of(1, 128, 128, 8);
+    let product = Product::of(1, 128, 128, 8, WEIGHT);
     assert_eq!(product.planned(profile), staged);
     assert_eq!(product.gathered(profile), Some(cooperative));
     assert_eq!(product.shortlist(profile), vec![staged, cooperative]);
@@ -1995,6 +1997,45 @@ fn a_product_shortlists_the_tile_of_every_strategy_its_profile_offers() {
 }
 
 #[test]
+fn a_narrow_product_walks_the_axis_its_weight_is_stored_by() {
+    let streamed = MatmulTile::new(MatmulStrategy::Streamed, 1, 256, STREAMED_DEPTH, 1, 256);
+    let folded = MatmulTile::folded(FoldedTile::new(1, 8, 4, FOLDED_LANES));
+    let profile = Profile::of(&[streamed, folded]);
+    let by_reduction = Product::of(
+        1,
+        1,
+        4096,
+        1024,
+        Weight::of(Element::Q4K, Contiguous::Reduction),
+    );
+    let by_output = Product::of(
+        1,
+        1,
+        4096,
+        1024,
+        Weight::of(Element::Single, Contiguous::Output),
+    );
+    assert_eq!(
+        by_reduction.planned(profile),
+        folded,
+        "a weight stored by its reduction reaches a warp through the lanes of a folded tile",
+    );
+    assert_eq!(
+        by_output.planned(profile),
+        streamed,
+        "a weight stored by its columns reaches a warp through the lanes of a streamed tile",
+    );
+    assert!(
+        by_output.shortlist(profile) == vec![streamed],
+        "an output stored weight shortlists the folded tile that reads its columns at a stride",
+    );
+    assert!(
+        by_reduction.shortlist(profile) == vec![folded, streamed],
+        "a reduction stored weight shortlists the streamed tile that reads its reduction at a stride",
+    );
+}
+
+#[test]
 fn a_plan_walks_the_tile_a_measured_choice_names() {
     let graph = Graph::new();
     let left = graph.parameter(Shape::matrix(64, 32), Init::Zero, Element::Single);
@@ -2002,7 +2043,7 @@ fn a_plan_walks_the_tile_a_measured_choice_names() {
     let out = graph.matmul(left, right);
     graph.retain(out);
     let profile = wide();
-    let product = Product::of(1, 64, 64, 32);
+    let product = Product::of(1, 64, 64, 32, WEIGHT);
     let planned = product.planned(profile);
     let chosen = *profile
         .tiles()
@@ -2051,7 +2092,7 @@ fn a_plan_refuses_a_measured_tile_its_profile_does_not_offer() {
                 &graph,
                 ALIGNMENT,
                 profile,
-                &[(Product::of(1, 64, 64, 32), foreign)],
+                &[(Product::of(1, 64, 64, 32, WEIGHT), foreign)],
                 DEFAULT_ENCODING_BYTES,
                 0,
             );

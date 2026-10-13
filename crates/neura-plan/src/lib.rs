@@ -16,7 +16,7 @@ mod span;
 pub use layout::{Arena, Layout, Seed};
 pub use pages::WeightPages;
 pub use plan::{Encoding, Plan, Quantum, Span};
-pub use product::Product;
+pub use product::{Contiguous, Product, Weight};
 pub use region::TableRows;
 pub use remembered::DEFAULT_ENCODING_BYTES;
 

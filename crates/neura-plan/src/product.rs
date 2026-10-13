@@ -1,3 +1,4 @@
+use neura_abi::Element;
 use neura_profile::{
     FOLDED_LANES, FOLDED_STAGE, MatmulStrategy, MatmulTile, Profile, folded_splits,
 };
@@ -8,12 +9,41 @@ pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
 const NARROW_ROWS: u32 = 2;
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
-const STREAMED_TRAFFIC_WEIGHT: u128 = 16;
-const FOLDED_TRAFFIC_WEIGHT: u128 = 4;
+const COALESCED_TRAFFIC_WEIGHT: u128 = 4;
+const STRIDED_TRAFFIC_WEIGHT: u128 = 16;
 const FOLDED_STAGE_WEIGHT: u128 = 8;
 const COOPERATIVE_STAGE_INSTRUCTIONS: u128 = 3;
 const COOPERATIVE_TENSOR_INSTRUCTIONS: u128 = 1;
 const COOPERATIVE_COPY_INSTRUCTIONS: u128 = 3;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Contiguous {
+    Reduction,
+    Output,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct Weight {
+    element: Element,
+    contiguous: Contiguous,
+}
+
+impl Weight {
+    pub const fn of(element: Element, contiguous: Contiguous) -> Self {
+        Self {
+            element,
+            contiguous,
+        }
+    }
+
+    pub const fn element(self) -> Element {
+        self.element
+    }
+
+    pub const fn contiguous(self) -> Contiguous {
+        self.contiguous
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Product {
@@ -21,10 +51,11 @@ pub struct Product {
     rows: u32,
     columns: u32,
     depth: u32,
+    weight: Weight,
 }
 
 impl Product {
-    pub fn of(planes: u32, rows: u32, columns: u32, depth: u32) -> Self {
+    pub fn of(planes: u32, rows: u32, columns: u32, depth: u32, weight: Weight) -> Self {
         assert!(
             planes > 0 && rows > 0 && columns > 0 && depth > 0,
             "a product of {planes} planes, {rows} rows, {columns} columns and {depth} of depth spans no element",
@@ -34,7 +65,12 @@ impl Product {
             rows,
             columns,
             depth,
+            weight,
         }
+    }
+
+    pub const fn weight(self) -> Weight {
+        self.weight
     }
 
     pub const fn planes(self) -> u32 {
@@ -54,19 +90,25 @@ impl Product {
     }
 
     pub fn planned(self, profile: Profile) -> MatmulTile {
-        self.cheapest(profile, |tile| {
-            !matches!(
-                tile.strategy(),
-                MatmulStrategy::Cooperative | MatmulStrategy::Folded
-            )
-        })
-        .or_else(|| {
-            self.cheapest(profile, |tile| {
-                tile.strategy() != MatmulStrategy::Cooperative
+        self.narrow_walk(profile)
+            .or_else(|| {
+                self.cheapest(profile, |tile| {
+                    tile.strategy() != MatmulStrategy::Cooperative
+                })
             })
-        })
-        .or_else(|| self.cheapest_any(profile, |_| true))
-        .expect("a profile offers no tile for a product")
+            .or_else(|| self.cheapest_any(profile, |_| true))
+            .expect("a profile offers no tile for a product")
+    }
+
+    fn narrow_walk(self, profile: Profile) -> Option<MatmulTile> {
+        if !self.narrow(profile) {
+            return None;
+        }
+        let strategy = match self.weight.contiguous {
+            Contiguous::Reduction => MatmulStrategy::Folded,
+            Contiguous::Output => MatmulStrategy::Streamed,
+        };
+        self.cheapest(profile, |tile| tile.strategy() == strategy)
     }
 
     pub fn gathered(self, profile: Profile) -> Option<MatmulTile> {
@@ -112,7 +154,7 @@ impl Product {
     fn other_narrow(self, profile: Profile, planned: MatmulTile) -> Option<MatmulTile> {
         let wanted = match planned.strategy() {
             MatmulStrategy::Folded => MatmulStrategy::Streamed,
-            MatmulStrategy::Streamed if self.narrow(profile) => MatmulStrategy::Folded,
+            MatmulStrategy::Streamed => MatmulStrategy::Folded,
             _ => return None,
         };
         self.cheapest(profile, |tile| tile.strategy() == wanted)
@@ -172,7 +214,9 @@ impl Product {
         match tile.strategy() {
             MatmulStrategy::Staged => !self.narrow(profile),
             MatmulStrategy::Streamed | MatmulStrategy::Cooperative => true,
-            MatmulStrategy::Folded => self.narrow(profile),
+            MatmulStrategy::Folded => {
+                self.narrow(profile) && self.weight.contiguous == Contiguous::Reduction
+            }
         }
     }
 
@@ -213,7 +257,7 @@ impl Product {
                 let bands = rows.div_ceil(block_rows);
                 let reads = u128::from(self.planes)
                     * (bands * depth * columns + columns.div_ceil(block_columns) * depth * rows);
-                STREAMED_LOAD_WEIGHT * work * operands / registers + STREAMED_TRAFFIC_WEIGHT * reads
+                STREAMED_LOAD_WEIGHT * work * operands / registers + self.traffic(reads)
             }
             MatmulStrategy::Folded => {
                 let registers = u128::from(tile.registers());
@@ -222,7 +266,7 @@ impl Product {
                 let reads = u128::from(self.planes)
                     * (bands * depth * columns + columns.div_ceil(block_columns) * depth * rows);
                 STREAMED_LOAD_WEIGHT * work * operands / registers
-                    + FOLDED_TRAFFIC_WEIGHT * reads
+                    + COALESCED_TRAFFIC_WEIGHT * reads
                     + FOLDED_STAGE_WEIGHT
                         * (tiles * depth.min(u128::from(FOLDED_STAGE))
                             + tiles * u128::from(FOLDED_LANES))
@@ -241,5 +285,13 @@ impl Product {
             }
         };
         cost.div_ceil((tiles * splits).min(u128::from(profile.workgroups())))
+    }
+
+    fn traffic(self, reads: u128) -> u128 {
+        let weight = match self.weight.contiguous {
+            Contiguous::Output => COALESCED_TRAFFIC_WEIGHT,
+            Contiguous::Reduction => STRIDED_TRAFFIC_WEIGHT,
+        };
+        weight * reads
     }
 }

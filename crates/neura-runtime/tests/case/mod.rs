@@ -20,6 +20,7 @@ mod hazard;
 mod interop;
 mod memory;
 mod moe;
+mod narrow;
 mod noise;
 mod op;
 mod paging;

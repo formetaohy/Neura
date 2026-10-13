@@ -383,7 +383,7 @@ pub const fn folded_stage_words() -> u64 {
 }
 
 pub const fn folded_partials(columns: u32) -> u64 {
-    columns as u64 * (FOLDED_LANES as u64 + 1)
+    FOLDED_LANES as u64 * (columns as u64 + 1)
 }
 
 pub const fn folded_splits(depth: u32) -> u32 {

@@ -1008,7 +1008,7 @@ impl Device {
         };
         unsafe { self.clock.raw.Map(0, Some(&range), Some(&raw mut mapped)) }
             .unwrap_or_else(|error| panic!("mapping the D3D12 timestamp readback: {error}"));
-        let stamps = unsafe { std::slice::from_raw_parts(mapped.cast::<u64>(), 2) };
+        let stamps = unsafe { std::slice::from_raw_parts(mapped.cast::<u64>().add(slot * 2), 2) };
         let seconds = stamps[1].wrapping_sub(stamps[0]) as f64 / self.frequency as f64;
         unsafe { self.clock.raw.Unmap(0, None) };
         seconds

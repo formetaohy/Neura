@@ -2,6 +2,7 @@ pub mod attention;
 pub mod backend;
 pub mod convolution;
 pub mod decision;
+pub mod gguf;
 pub mod input;
 pub mod pooling;
 pub mod reference;

@@ -1,7 +1,7 @@
 use super::{Program, Runtime, Weights, resident_weight_slots};
 use neura_abi::{Element, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::{Layout, Plan, Product};
+use neura_plan::{Contiguous, Layout, Plan, Product};
 use neura_profile::{MatmulTile, Profile};
 
 const TILE_WARMUP: u32 = 1;
@@ -277,11 +277,23 @@ fn product_graph(product: Product) -> Graph {
         Init::Zero,
         Element::Single,
     );
-    let right = graph.parameter(
-        Shape::of([product.planes(), 1, product.depth(), product.columns()]),
-        Init::Zero,
-        Element::Single,
-    );
+    let right = match product.weight().contiguous() {
+        Contiguous::Reduction => {
+            let shape = Shape::of([product.planes(), 1, product.columns(), product.depth()]);
+            let weight = match product.weight().element().block() {
+                Some(_) => {
+                    graph.block_quantized_parameter(shape, Init::Zero, product.weight().element())
+                }
+                None => graph.parameter(shape, Init::Zero, product.weight().element()),
+            };
+            graph.permute(weight, [0, 1, 3, 2])
+        }
+        Contiguous::Output => graph.parameter(
+            Shape::of([product.planes(), 1, product.depth(), product.columns()]),
+            Init::Zero,
+            product.weight().element(),
+        ),
+    };
     graph.retain(graph.matmul(left, right));
     graph
 }

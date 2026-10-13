@@ -1,5 +1,5 @@
 use crate::access::Reads;
-use crate::product::{PARTIALS_CEILING, Product, SPLITS_CEILING};
+use crate::product::{Contiguous, PARTIALS_CEILING, Product, SPLITS_CEILING, Weight};
 use crate::span::{self, Measure, Split};
 use neura_abi::{
     CANDIDATES, CHOICE_STREAM, Kind, MAX_RANK, NO_VALUE, PAGE_WORDS, StepFields, StepRecord,
@@ -377,6 +377,16 @@ impl Plan {
 
     fn stride(&self, value: u32, axis: u32) -> u32 {
         self.values[value as usize].strides[axis as usize]
+    }
+
+    fn weight(&self, value: u32) -> Weight {
+        let info = &self.values[value as usize];
+        let contiguous = if info.strides[2] == 1 {
+            Contiguous::Reduction
+        } else {
+            Contiguous::Output
+        };
+        Weight::of(info.element, contiguous)
     }
 
     fn geometry(&self, tile: MatmulTile) -> u32 {
@@ -1535,7 +1545,7 @@ fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Produc
     let out = plan.shape(unit.out).dims();
     let (rows, columns) = (out[2], out[3]);
     let depth = left[3];
-    let product = Product::of(1, rows, columns, depth);
+    let product = Product::of(1, rows, columns, depth, plan.weight(unit.inputs[1]));
     if !plan.products.contains(&product) {
         plan.products.push(product);
     }
@@ -1613,7 +1623,13 @@ fn matmul_weight_grad(
     let left = plan.shape(unit.inputs[0]).dims();
     let output = plan.shape(unit.out).dims();
     let (segments, depth, columns) = (output[0], output[2], output[3]);
-    let product = Product::of(segments, depth, columns, left[2]);
+    let product = Product::of(
+        segments,
+        depth,
+        columns,
+        left[2],
+        plan.weight(unit.inputs[1]),
+    );
     if !plan.products.contains(&product) {
         plan.products.push(product);
     }
@@ -1653,7 +1669,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product
     let (rows, columns) = (dims[2], dims[3]);
     let depth = plan.shape(unit.inputs[0]).dims()[3];
     let planes = dims[0] * dims[1];
-    let product = Product::of(planes, rows, columns, depth);
+    let product = Product::of(planes, rows, columns, depth, plan.weight(unit.inputs[1]));
     if !plan.products.contains(&product) {
         plan.products.push(product);
     }

@@ -26,6 +26,29 @@ fn copy_seconds(context: &GpuContext, bytes: u64) -> f64 {
     fastest
 }
 
+fn pair_seconds(context: &GpuContext) -> (f64, f64) {
+    let device = context.device();
+    let queue = context.queue();
+    let usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+    let heavy_source = GpuBuffer::new(device, "heavy source", 64 << 20, usage);
+    let heavy_target = GpuBuffer::new(device, "heavy target", 64 << 20, usage);
+    let light_source = GpuBuffer::new(device, "light source", 4 << 10, usage);
+    let light_target = GpuBuffer::new(device, "light target", 4 << 10, usage);
+    let mut heavy = f64::MAX;
+    let mut light = f64::MAX;
+    for _ in 0..12 {
+        let mut submission = Submission::new(device, "heavy copy");
+        submission.copy(&heavy_source, 0, &heavy_target, 0, 64 << 20);
+        let heavy_index = submission.submit(queue);
+        let mut submission = Submission::new(device, "light copy");
+        submission.copy(&light_source, 0, &light_target, 0, 4 << 10);
+        let light_index = submission.submit(queue);
+        heavy = heavy.min(queue.seconds(heavy_index));
+        light = light.min(queue.seconds(light_index));
+    }
+    (heavy, light)
+}
+
 #[test]
 fn every_platform_backend_times_the_copy_it_ran() {
     for &backend in PREFERENCE {
@@ -37,8 +60,20 @@ fn every_platform_backend_times_the_copy_it_ran() {
             "{backend:?} timed a 64 MiB copy at {heavy} seconds and a 4 KiB copy at {light}",
         );
         assert!(
-            heavy >= light,
-            "{backend:?} timed a 64 MiB copy at {heavy} seconds and a 4 KiB copy at {light}",
+            heavy > 4.0 * light,
+            "{backend:?} timed a 64 MiB copy at {heavy} seconds beside the {light} seconds of a 4 KiB copy, and a submission reports the copy it ran",
+        );
+    }
+}
+
+#[test]
+fn every_platform_backend_times_a_copy_beside_a_pending_one() {
+    for &backend in PREFERENCE {
+        let context = context(backend);
+        let (heavy, light) = pair_seconds(&context);
+        assert!(
+            heavy > 4.0 * light,
+            "{backend:?} timed a 64 MiB copy beside a pending 4 KiB copy at {heavy} against {light} seconds, and a queue reports the submission that holds each timestamp",
         );
     }
 }

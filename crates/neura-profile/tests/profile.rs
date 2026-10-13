@@ -1,7 +1,7 @@
 use neura_abi::{Kind, WORD_BYTES};
 use neura_profile::{
-    AttentionTile, Budget, CooperativeMatrix, Geometry, MatmulStrategy, MatmulTile, Profile,
-    STREAMED_DEPTH,
+    AttentionTile, Budget, CooperativeMatrix, FOLDED_LANES, FoldedTile, Geometry, MatmulStrategy,
+    MatmulTile, Profile, STREAMED_DEPTH, folded_stage_words,
 };
 use std::panic::AssertUnwindSafe;
 
@@ -551,4 +551,26 @@ fn an_attention_row_spends_row_slices_instead_of_registers() {
         loose.width(),
         "a register budget narrows the threads that carry a row, not the row",
     );
+}
+
+#[test]
+fn a_folded_tile_reserves_every_partial_its_lanes_write() {
+    for (warps, columns) in [
+        (4u32, 4u32),
+        (4, 8),
+        (8, 8),
+        (8, 16),
+        (8, 32),
+        (8, 64),
+        (8, 128),
+    ] {
+        let folds = columns / warps;
+        let tile = MatmulTile::folded(FoldedTile::new(1, warps, folds, FOLDED_LANES));
+        let needed = folded_stage_words() as u64 + FOLDED_LANES as u64 * (u64::from(columns) + 1);
+        assert!(
+            tile.shared_bytes() / WORD_BYTES >= needed,
+            "a folded tile of {columns} columns reserves {} words where its lanes write {needed} of them",
+            tile.shared_bytes() / WORD_BYTES,
+        );
+    }
 }

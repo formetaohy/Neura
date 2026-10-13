@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
-use neura_plan::Product;
+use neura_plan::{Contiguous, Product, Weight};
 use neura_profile::{
     CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile, STREAMED_DEPTH,
 };
@@ -131,7 +131,13 @@ fn a_product_shortlists_one_tile_of_every_strategy_its_profile_offers() {
         return;
     };
     let profile = cooperative_profile(tile);
-    let product = Product::of(1, 512, 512, 512);
+    let product = Product::of(
+        1,
+        512,
+        512,
+        512,
+        Weight::of(Element::Single, Contiguous::Output),
+    );
     let shortlist = product.shortlist(profile);
     assert_eq!(shortlist.len(), 2, "a product shortlists two tiles");
     assert!(
@@ -166,7 +172,13 @@ fn a_product_walks_the_cooperative_tile_a_measured_choice_names() {
     let right = graph.parameter(Shape::matrix(64, 96), Init::Zero, Element::Single);
     let out = graph.matmul(left, right);
     let weights = runtime.weights(&graph);
-    let product = Product::of(1, 96, 96, 64);
+    let product = Product::of(
+        1,
+        96,
+        96,
+        64,
+        Weight::of(Element::Single, Contiguous::Output),
+    );
     let gathered = runtime.compile_chosen(
         &graph,
         &weights,
