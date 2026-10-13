@@ -9,7 +9,8 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
     Limits,
 };
-use crate::host::VulkanHost;
+use crate::gate::Gate;
+use crate::host::{HOST_SLICE, HostAdvance, VulkanHost};
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use ash::{Entry, Instance, vk};
@@ -17,8 +18,8 @@ use neura_shader::{ComputeProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 struct InstanceOwner {
     entry: Entry,
@@ -52,6 +53,8 @@ struct Parts {
     queue: vk::Queue,
     pool: vk::CommandPool,
     stamps: vk::QueryPool,
+    advance: Option<HostAdvance>,
+    keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -226,10 +229,9 @@ pub(crate) struct Device {
     bits: u32,
     uuid: [u8; vk::UUID_SIZE],
     state: Mutex<QueueState>,
-}
-
-pub(crate) struct QueueGuard<'a> {
-    _state: MutexGuard<'a, QueueState>,
+    pub(crate) gate: Arc<Gate>,
+    advance: Option<HostAdvance>,
+    _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 struct Lent {
@@ -511,6 +513,9 @@ impl Facts {
             bits: self.bits,
             uuid: self.uuid,
             state: Mutex::new(QueueState::default()),
+            gate: Gate::of(parts.advance.clone()),
+            advance: parts.advance,
+            _keep_alive: parts.keep_alive,
         })
     }
 }
@@ -584,6 +589,8 @@ fn create(
             queue,
             pool,
             stamps,
+            advance: None,
+            keep_alive: None,
         }),
         Err(reason) => {
             unsafe { raw.destroy_device(None) };
@@ -714,6 +721,8 @@ impl Device {
 
     pub(crate) fn borrow(
         host: VulkanHost<'_>,
+        advance: Option<HostAdvance>,
+        keep_alive: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let mut lent = LENT
             .lock()
@@ -753,6 +762,8 @@ impl Device {
             queue: host.queue,
             pool,
             stamps,
+            advance,
+            keep_alive,
         };
         let device = facts.assemble(parts, None);
         let capability = Capability {
@@ -767,15 +778,6 @@ impl Device {
             capability,
         });
         Ok((device, info, facts.limits, capability))
-    }
-
-    pub(crate) fn guard(&self) -> QueueGuard<'_> {
-        QueueGuard {
-            _state: self
-                .state
-                .lock()
-                .expect("the Vulkan queue is never poisoned"),
-        }
     }
 
     pub(crate) fn compile(
@@ -1162,8 +1164,10 @@ impl Device {
         .unwrap_or_else(|error| panic!("closing a Vulkan compute submission: {error:?}"));
         let buffers = [command];
         let submits = [vk::SubmitInfo::default().command_buffers(&buffers)];
+        let turn = self.gate.take();
         unsafe { self.raw.queue_submit(self.queue, &submits, frame.fence) }
             .unwrap_or_else(|error| panic!("submitting Vulkan compute work: {error:?}"));
+        drop(turn);
         index
     }
 
@@ -1312,18 +1316,43 @@ impl Device {
             index,
             timeout,
         );
-        unsafe {
-            self.raw.wait_for_fences(
-                &[fence],
-                true,
-                timeout.as_nanos().min(u64::MAX as u128) as u64,
-            )
+        match &self.advance {
+            None => unsafe {
+                self.raw.wait_for_fences(
+                    &[fence],
+                    true,
+                    timeout.as_nanos().min(u64::MAX as u128) as u64,
+                )
+            }
+            .map_err(|error| format!("waiting for Vulkan compute work: {error:?}"))?,
+            Some(advance) => {
+                let started = Instant::now();
+                loop {
+                    let slice = HOST_SLICE.min(timeout.saturating_sub(started.elapsed()));
+                    match unsafe {
+                        self.raw.wait_for_fences(
+                            &[fence],
+                            true,
+                            slice.as_nanos().min(u64::MAX as u128) as u64,
+                        )
+                    } {
+                        Ok(()) => break,
+                        Err(vk::Result::TIMEOUT) if started.elapsed() < timeout => {
+                            advance.advance()
+                        }
+                        Err(vk::Result::TIMEOUT) => {
+                            return Err("waiting for Vulkan compute work timed out".to_owned());
+                        }
+                        Err(error) => {
+                            return Err(format!("waiting for Vulkan compute work: {error:?}"));
+                        }
+                    }
+                }
+            }
         }
-        .map_err(|error| format!("waiting for Vulkan compute work: {error:?}"))?;
         self.retire(state);
         Ok(())
     }
-
     fn release(&self) {
         let state = self
             .state

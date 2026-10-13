@@ -9,7 +9,8 @@ use crate::backend::{Backend, PREFERENCE};
 use crate::cache::ArtifactCache;
 use crate::capability::{AdapterInfo, AdapterPolicy, BufferUsages, Capability, Limits};
 use crate::context::{GpuRequest, GpuUnavailable};
-use crate::host::HostDevice;
+use crate::gate::Gate;
+use crate::host::{HostDevice, HostKind};
 use crate::pipeline::BoundBuffer;
 use crate::submission::{Command, Write};
 use neura_shader::ComputeProgram;
@@ -104,15 +105,6 @@ pub(crate) enum NativeGroup {
     Metal,
 }
 
-pub(crate) enum NativeQueueGuard<'a> {
-    #[cfg(vulkan_backend)]
-    Vulkan { _guard: vulkan::QueueGuard<'a> },
-    #[cfg(dx12_backend)]
-    Dx12 { _guard: dx12::QueueGuard<'a> },
-    #[cfg(metal_backend)]
-    Metal { _guard: metal::QueueGuard<'a> },
-}
-
 pub(crate) fn open(
     request: &GpuRequest,
 ) -> Result<(NativeDevice, AdapterInfo, Limits, Capability), GpuUnavailable> {
@@ -169,25 +161,27 @@ pub(crate) fn borrow(
             host: backend,
         });
     }
-    let (native, info, limits, capability) = match host {
+    let advance = host.advance();
+    let keep_alive = host.hold;
+    let (native, info, limits, capability) = match host.kind {
         #[cfg(dx12_backend)]
-        HostDevice::Dx12(raw) => {
-            dx12::Device::borrow(raw).map(|(device, info, limits, capability)| {
+        HostKind::Dx12(raw) => dx12::Device::borrow(raw, advance, keep_alive).map(
+            |(device, info, limits, capability)| {
                 (NativeDevice::Dx12(device), info, limits, capability)
-            })
-        }
+            },
+        ),
         #[cfg(metal_backend)]
-        HostDevice::Metal(raw) => {
-            metal::Device::borrow(raw).map(|(device, info, limits, capability)| {
+        HostKind::Metal(raw) => metal::Device::borrow(raw, advance, keep_alive).map(
+            |(device, info, limits, capability)| {
                 (NativeDevice::Metal(device), info, limits, capability)
-            })
-        }
+            },
+        ),
         #[cfg(vulkan_backend)]
-        HostDevice::Vulkan(raw) => {
-            vulkan::Device::borrow(raw).map(|(device, info, limits, capability)| {
+        HostKind::Vulkan(raw) => vulkan::Device::borrow(raw, advance, keep_alive).map(
+            |(device, info, limits, capability)| {
                 (NativeDevice::Vulkan(device), info, limits, capability)
-            })
-        }
+            },
+        ),
     }
     .map_err(|failure| failure.unusable(backend))?;
     if let AdapterPolicy::Identity(wanted) = request.adapter
@@ -259,20 +253,14 @@ impl NativeDevice {
         }
     }
 
-    pub(crate) fn guard(&self) -> NativeQueueGuard<'_> {
+    pub(crate) fn gate(&self) -> Arc<Gate> {
         match self {
             #[cfg(vulkan_backend)]
-            Self::Vulkan(device) => NativeQueueGuard::Vulkan {
-                _guard: device.guard(),
-            },
+            Self::Vulkan(device) => Arc::clone(&device.gate),
             #[cfg(dx12_backend)]
-            Self::Dx12(device) => NativeQueueGuard::Dx12 {
-                _guard: device.guard(),
-            },
+            Self::Dx12(device) => Arc::clone(&device.gate),
             #[cfg(metal_backend)]
-            Self::Metal(device) => NativeQueueGuard::Metal {
-                _guard: device.guard(),
-            },
+            Self::Metal(device) => Arc::clone(&device.gate),
         }
     }
 

@@ -132,31 +132,64 @@ fn a_queue_lock_of_the_host_serializes_every_borrow() {
     for &backend in PREFERENCE {
         let owner = Owner::open(backend);
         let holder = GpuContext::of_device(borrow(&owner, backend));
+        let lock = holder.queue().lock();
         let peer = GpuContext::of_device(
             Device::borrow(owner.device(), &cached(backend, "locked"))
                 .unwrap_or_else(|error| panic!("{backend:?} refused a second request: {error}")),
         );
-        let lock = holder.queue().lock();
+        let device = peer.device().clone();
+        let buffer = GpuBuffer::new(&device, "a locked clear", 256, BufferUsages::COPY_DST);
         let queue = peer.queue().clone();
         let (started, start) = std::sync::mpsc::channel();
         let (done, finish) = std::sync::mpsc::channel();
         std::thread::scope(|scope| {
             scope.spawn(move || {
                 started.send(()).expect("a started worker");
-                queue.drain();
-                done.send(()).expect("a drained worker");
+                let mut submission = Submission::new(&device, "a locked clear");
+                submission.clear(&buffer, 0, 256);
+                submission.submit(&queue);
+                done.send(()).expect("a submitted worker");
             });
             start.recv().expect("a started worker");
             assert!(
                 finish
                     .recv_timeout(std::time::Duration::from_millis(100))
                     .is_err(),
-                "{backend:?} drained a queue under the lock of the host",
+                "{backend:?} submitted to a host queue under the lock of the host",
             );
             drop(lock);
             finish
                 .recv_timeout(crate::readback::READBACK_TIMEOUT)
-                .expect("a drained queue");
+                .expect("a submitted worker");
+        });
+    }
+}
+
+#[test]
+fn a_host_advance_runs_while_a_guest_waits_for_the_host_queue() {
+    for &backend in PREFERENCE {
+        let owner = Owner::open(backend);
+        let (advanced, ran) = std::sync::mpsc::channel();
+        let device = Device::borrow(
+            owner.device().advancing(crate::HostAdvance::of(move || {
+                let _ = advanced.send(());
+            })),
+            &cached(backend, "advancing"),
+        )
+        .unwrap_or_else(|error| panic!("{backend:?} refused a progressing request: {error}"));
+        let context = GpuContext::of_device(device.clone());
+        let lock = context.queue().lock();
+        let buffer = GpuBuffer::new(&device, "an advanced clear", 256, BufferUsages::COPY_DST);
+        let queue = context.queue().clone();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut submission = Submission::new(&device, "an advanced clear");
+                submission.clear(&buffer, 0, 256);
+                submission.submit(&queue);
+            });
+            ran.recv_timeout(crate::readback::READBACK_TIMEOUT)
+                .expect("a host advanced while a guest waited for its queue");
+            drop(lock);
         });
     }
 }
@@ -248,9 +281,9 @@ impl Owner {
             #[cfg(vulkan_backend)]
             Self::Vulkan(owner) => owner.device(),
             #[cfg(dx12_backend)]
-            Self::Dx12(device) => HostDevice::Dx12(device),
+            Self::Dx12(device) => HostDevice::dx12(device),
             #[cfg(metal_backend)]
-            Self::Metal(device) => HostDevice::Metal(device),
+            Self::Metal(device) => HostDevice::metal(device),
         }
     }
 }
@@ -350,7 +383,7 @@ impl VulkanOwner {
     }
 
     fn device(&self) -> HostDevice<'_> {
-        HostDevice::Vulkan(crate::VulkanHost {
+        HostDevice::vulkan(crate::VulkanHost {
             entry: &self.entry,
             instance: &self.instance,
             physical: self.physical,

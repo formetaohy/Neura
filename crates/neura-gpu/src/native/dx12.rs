@@ -9,6 +9,8 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, DeviceType, Limits,
     PowerPreference,
 };
+use crate::gate::Gate;
+use crate::host::{HOST_SLICE, HostAdvance};
 use crate::submission::{Command, Write};
 use libloading::Library;
 use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, ShaderTranslation};
@@ -16,8 +18,8 @@ use std::any::Any;
 use std::ffi::c_void;
 use std::mem::{ManuallyDrop, size_of};
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::Dxc::*;
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, ID3DBlob};
@@ -153,10 +155,9 @@ pub(crate) struct Device {
     clock: Arc<BufferResource>,
     frequency: u64,
     state: Mutex<QueueState>,
-}
-
-pub(crate) struct QueueGuard<'a> {
-    _state: MutexGuard<'a, QueueState>,
+    pub(crate) gate: Arc<Gate>,
+    advance: Option<HostAdvance>,
+    _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 struct Lent {
@@ -480,7 +481,7 @@ impl Device {
                 }
             });
         };
-        let device = Self::assemble(candidate.device)?;
+        let device = Self::assemble(candidate.device, None, None)?;
         Ok((
             device,
             candidate.info,
@@ -491,6 +492,8 @@ impl Device {
 
     pub(crate) fn borrow(
         raw: &ID3D12Device,
+        advance: Option<HostAdvance>,
+        keep_alive: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let mut lent = LENT
             .lock()
@@ -513,7 +516,7 @@ impl Device {
         }
         let info = describe_device(raw)?;
         let limits = limits(raw);
-        let device = Self::assemble(raw.clone())?;
+        let device = Self::assemble(raw.clone(), advance, keep_alive)?;
         lent.push(Lent {
             device: identity,
             native: Arc::downgrade(&device),
@@ -523,7 +526,11 @@ impl Device {
         Ok((device, info, limits, Capability::default()))
     }
 
-    fn assemble(raw: ID3D12Device) -> Result<Arc<Device>, DeviceFailure> {
+    fn assemble(
+        raw: ID3D12Device,
+        advance: Option<HostAdvance>,
+        keep_alive: Option<Arc<dyn Any + Send + Sync>>,
+    ) -> Result<Arc<Device>, DeviceFailure> {
         let queue: ID3D12CommandQueue = unsafe {
             raw.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -588,16 +595,10 @@ impl Device {
             clock,
             frequency,
             state: Mutex::new(QueueState::default()),
+            gate: Gate::of(advance.clone()),
+            advance,
+            _keep_alive: keep_alive,
         }))
-    }
-
-    pub(crate) fn guard(&self) -> QueueGuard<'_> {
-        QueueGuard {
-            _state: self
-                .state
-                .lock()
-                .expect("the D3D12 compute queue is never poisoned"),
-        }
     }
 
     pub(crate) fn compile(
@@ -932,9 +933,11 @@ impl Device {
         let command: ID3D12CommandList = list
             .cast()
             .expect("a compute command list is a D3D12 command list");
+        let turn = self.gate.take();
         unsafe { self.queue.ExecuteCommandLists(&[Some(command)]) };
         unsafe { self.queue.Signal(&self.fence, index) }
             .unwrap_or_else(|error| panic!("signaling D3D12 compute completion: {error}"));
+        drop(turn);
         index
     }
 
@@ -1068,16 +1071,30 @@ impl Device {
             index,
             timeout,
         );
-        let result = unsafe {
-            WaitForSingleObject(
-                self.event.0,
-                timeout.as_millis().min(u128::from(u32::MAX - 1)) as u32,
-            )
-        };
-        if result != WAIT_OBJECT_0 {
-            return Err(format!(
-                "waiting for D3D12 compute work failed or timed out: {result:?}"
-            ));
+        let millis = |span: Duration| span.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+        match &self.advance {
+            None => {
+                let result = unsafe { WaitForSingleObject(self.event.0, millis(timeout)) };
+                if result != WAIT_OBJECT_0 {
+                    return Err(format!(
+                        "waiting for D3D12 compute work failed or timed out: {result:?}"
+                    ));
+                }
+            }
+            Some(advance) => {
+                let started = Instant::now();
+                loop {
+                    let slice = HOST_SLICE.min(timeout.saturating_sub(started.elapsed()));
+                    if unsafe { WaitForSingleObject(self.event.0, millis(slice)) } == WAIT_OBJECT_0
+                    {
+                        break;
+                    }
+                    if started.elapsed() >= timeout {
+                        return Err("waiting for D3D12 compute work failed or timed out".to_owned());
+                    }
+                    advance.advance();
+                }
+            }
         }
         self.device_error()?;
         self.retire(state);

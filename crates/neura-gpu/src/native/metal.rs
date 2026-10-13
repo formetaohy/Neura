@@ -9,6 +9,8 @@ use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, BufferUsages, Capability, CooperativeMatrix, DeviceType,
     Limits,
 };
+use crate::gate::Gate;
+use crate::host::HostAdvance;
 use crate::submission::{Command, Write};
 use neura_shader::{ComputeProgram, MAX_BINDING_BYTES, METAL_SIZE_BUFFER_SLOT, ShaderTranslation};
 use objc2::rc::Retained;
@@ -26,7 +28,7 @@ use std::cmp::Reverse;
 use std::fs;
 use std::path::PathBuf;
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,10 +110,9 @@ pub(crate) struct Device {
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     state: Mutex<QueueState>,
-}
-
-pub(crate) struct QueueGuard<'a> {
-    _state: MutexGuard<'a, QueueState>,
+    pub(crate) gate: Arc<Gate>,
+    advance: Option<HostAdvance>,
+    _keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 struct Lent {
@@ -258,11 +259,16 @@ fn limits(device: &ProtocolObject<dyn MTLDevice>) -> Limits {
 fn assemble(
     raw: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    advance: Option<HostAdvance>,
+    keep_alive: Option<Arc<dyn Any + Send + Sync>>,
 ) -> Arc<Device> {
     Arc::new(Device {
         raw,
         queue,
         state: Mutex::new(QueueState::default()),
+        gate: Gate::of(advance.clone()),
+        advance,
+        _keep_alive: keep_alive,
     })
 }
 
@@ -300,11 +306,13 @@ impl Device {
         let limits = limits(&raw);
         let capability = capability(&raw);
         let queue = queue(&raw)?;
-        Ok((assemble(raw, queue), info, limits, capability))
+        Ok((assemble(raw, queue, None, None), info, limits, capability))
     }
 
     pub(crate) fn borrow(
         raw: &Retained<ProtocolObject<dyn MTLDevice>>,
+        advance: Option<HostAdvance>,
+        keep_alive: Option<Arc<dyn Any + Send + Sync>>,
     ) -> Result<(Arc<Self>, AdapterInfo, Limits, Capability), DeviceFailure> {
         let mut lent = LENT
             .lock()
@@ -320,7 +328,7 @@ impl Device {
         let limits = limits(raw);
         let capability = capability(raw);
         let queue = queue(raw)?;
-        let device = assemble(raw.clone(), queue);
+        let device = assemble(raw.clone(), queue, advance, keep_alive);
         lent.push(Lent {
             device: identity,
             native: Arc::downgrade(&device),
@@ -329,15 +337,6 @@ impl Device {
             capability,
         });
         Ok((device, info, limits, capability))
-    }
-
-    pub(crate) fn guard(&self) -> QueueGuard<'_> {
-        QueueGuard {
-            _state: self
-                .state
-                .lock()
-                .expect("the Metal compute queue is never poisoned"),
-        }
     }
 
     fn allocate(&self, size: u64, shared: bool) -> Arc<BufferResource> {
@@ -610,7 +609,9 @@ impl Device {
                 }
             }
         }
+        let turn = self.gate.take();
         command.commit();
+        drop(turn);
         frame.command = Some(command);
         index
     }
@@ -748,6 +749,9 @@ impl Device {
             }
             if started.elapsed() >= timeout {
                 return Err("waiting for Metal compute work timed out".to_owned());
+            }
+            if let Some(advance) = &self.advance {
+                advance.advance();
             }
             std::thread::sleep(Duration::from_micros(250));
         }

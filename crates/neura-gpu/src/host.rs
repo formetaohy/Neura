@@ -7,10 +7,15 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 #[cfg(metal_backend)]
 use objc2_metal::MTLDevice;
+use std::any::Any;
+use std::sync::Arc;
+use std::time::Duration;
 #[cfg(dx12_backend)]
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 #[cfg(dx12_backend)]
 use windows::core::Interface;
+
+pub(crate) const HOST_SLICE: Duration = Duration::from_millis(1);
 
 #[cfg(vulkan_backend)]
 pub struct VulkanHost<'a> {
@@ -23,13 +28,104 @@ pub struct VulkanHost<'a> {
     pub cooperative_matrix: bool,
 }
 
-pub enum HostDevice<'a> {
+#[derive(Clone)]
+pub struct HostAdvance(Arc<dyn Fn() + Send + Sync>);
+
+impl HostAdvance {
+    pub fn of(advance: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(advance))
+    }
+
+    pub(crate) fn advance(&self) {
+        (self.0)()
+    }
+}
+
+pub struct HostDevice<'a> {
+    pub(crate) kind: HostKind<'a>,
+    pub(crate) advance: Option<HostAdvance>,
+    pub(crate) hold: Option<Arc<dyn Any + Send + Sync>>,
+}
+
+pub(crate) enum HostKind<'a> {
     #[cfg(vulkan_backend)]
     Vulkan(VulkanHost<'a>),
     #[cfg(dx12_backend)]
     Dx12(&'a ID3D12Device),
     #[cfg(metal_backend)]
     Metal(&'a Retained<ProtocolObject<dyn MTLDevice>>),
+}
+
+impl<'a> HostDevice<'a> {
+    #[cfg(vulkan_backend)]
+    pub fn vulkan(host: VulkanHost<'a>) -> Self {
+        Self {
+            kind: HostKind::Vulkan(host),
+            advance: None,
+            hold: None,
+        }
+    }
+
+    #[cfg(dx12_backend)]
+    pub fn dx12(device: &'a ID3D12Device) -> Self {
+        Self {
+            kind: HostKind::Dx12(device),
+            advance: None,
+            hold: None,
+        }
+    }
+
+    #[cfg(metal_backend)]
+    pub fn metal(device: &'a Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
+        Self {
+            kind: HostKind::Metal(device),
+            advance: None,
+            hold: None,
+        }
+    }
+
+    pub fn advancing(self, advance: HostAdvance) -> Self {
+        Self {
+            advance: Some(advance),
+            ..self
+        }
+    }
+
+    pub fn holding(self, hold: Arc<dyn Any + Send + Sync>) -> Self {
+        Self {
+            hold: Some(hold),
+            ..self
+        }
+    }
+
+    pub(crate) fn advance(&self) -> Option<HostAdvance> {
+        self.advance.clone()
+    }
+
+    pub(crate) fn backend(&self) -> Backend {
+        match &self.kind {
+            #[cfg(vulkan_backend)]
+            HostKind::Vulkan(_) => Backend::Vulkan,
+            #[cfg(dx12_backend)]
+            HostKind::Dx12(_) => Backend::Dx12,
+            #[cfg(metal_backend)]
+            HostKind::Metal(_) => Backend::Metal,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> HostIdentity {
+        match &self.kind {
+            #[cfg(vulkan_backend)]
+            HostKind::Vulkan(host) => HostIdentity::Vulkan {
+                device: vk::Handle::as_raw(host.device.handle()),
+                queue: vk::Handle::as_raw(host.queue),
+            },
+            #[cfg(dx12_backend)]
+            HostKind::Dx12(device) => HostIdentity::Dx12(Interface::as_raw(*device) as usize),
+            #[cfg(metal_backend)]
+            HostKind::Metal(device) => HostIdentity::Metal(device.registryID()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -40,31 +136,4 @@ pub(crate) enum HostIdentity {
     Dx12(usize),
     #[cfg(metal_backend)]
     Metal(u64),
-}
-
-impl HostDevice<'_> {
-    pub(crate) fn backend(&self) -> Backend {
-        match self {
-            #[cfg(vulkan_backend)]
-            Self::Vulkan(_) => Backend::Vulkan,
-            #[cfg(dx12_backend)]
-            Self::Dx12(_) => Backend::Dx12,
-            #[cfg(metal_backend)]
-            Self::Metal(_) => Backend::Metal,
-        }
-    }
-
-    pub(crate) fn identity(&self) -> HostIdentity {
-        match self {
-            #[cfg(vulkan_backend)]
-            Self::Vulkan(host) => HostIdentity::Vulkan {
-                device: vk::Handle::as_raw(host.device.handle()),
-                queue: vk::Handle::as_raw(host.queue),
-            },
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => HostIdentity::Dx12(Interface::as_raw(*device) as usize),
-            #[cfg(metal_backend)]
-            Self::Metal(device) => HostIdentity::Metal(device.registryID()),
-        }
-    }
 }

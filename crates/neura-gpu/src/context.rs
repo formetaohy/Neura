@@ -4,6 +4,7 @@ use crate::cache::{ArtifactCache, DEFAULT_ARTIFACT_BYTES};
 use crate::capability::{
     AdapterId, AdapterInfo, AdapterPolicy, Capability, Limits, PowerPreference,
 };
+use crate::gate::QueueLock;
 use crate::host::{HostDevice, HostIdentity};
 use crate::library::PipelineLibrary;
 use crate::native::{self, NativeDevice};
@@ -267,10 +268,6 @@ impl Device {
     }
 }
 
-pub struct QueueLock<'a> {
-    _guard: native::NativeQueueGuard<'a>,
-}
-
 #[derive(Clone)]
 pub struct Queue {
     device: Device,
@@ -287,10 +284,8 @@ impl Queue {
         &self.device
     }
 
-    pub fn lock(&self) -> QueueLock<'_> {
-        QueueLock {
-            _guard: self.device.native().guard(),
-        }
+    pub fn lock(&self) -> QueueLock {
+        self.device.native().gate().take()
     }
 
     pub(crate) fn write(&self, write: Write) {
