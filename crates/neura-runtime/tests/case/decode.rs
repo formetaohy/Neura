@@ -187,6 +187,41 @@ fn a_decode_step_reads_the_keys_its_cursor_reaches() {
 }
 
 #[test]
+fn a_causal_attention_reads_no_key_beyond_the_blocks_its_cursor_reaches() {
+    const HELD: u32 = 64;
+    const POISON: u32 = 32;
+    let runtime = open();
+    let graph: Graph = Graph::new();
+    let keys = graph.resident(Shape::of([1, 1, HELD, WIDTH]), Element::Single);
+    let values = graph.resident(Shape::of([1, 1, HELD, WIDTH]), Element::Single);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let slot = graph.input(Shape::scalar(), Element::Single);
+    let row = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    let query = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    graph.write_into(keys, slot, row);
+    graph.write_into(values, slot, row);
+    let out = graph.attention(query, keys, values, options(&graph, cursor));
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let written = data(WIDTH, 29);
+    let asked = data(WIDTH, 41);
+    let mut cache = data(HELD * WIDTH, 17);
+    for at in POISON..HELD {
+        cache[(at * WIDTH) as usize..((at + 1) * WIDTH) as usize].fill(f32::NAN);
+    }
+    runtime.write(&program, keys, &cache);
+    runtime.write(&program, values, &cache);
+    runtime.write(&program, cursor, &[0.0]);
+    runtime.write(&program, slot, &[0.0]);
+    runtime.write(&program, row, &written);
+    runtime.write(&program, query, &asked);
+    runtime.run(&program);
+    let produced = runtime.read(&program, out);
+    assert_close(&produced, &written, 1e-4);
+}
+
+#[test]
 fn a_decode_gradient_reaches_the_keys_a_cursor_exposes() {
     let runtime = open();
     let graph: Graph = Graph::new();

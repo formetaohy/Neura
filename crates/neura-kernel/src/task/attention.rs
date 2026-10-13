@@ -7,6 +7,7 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
         return;
     }
     compiler.constant("ATTN_REDUCTIONS", AttentionTile::REDUCTIONS);
+    compiler.constant("ATTN_CLAIM_WALKED", 3u32);
     for (index, tile) in geometry.attention().iter().enumerate() {
         let suffix = index.to_string();
         let constants = [
@@ -320,10 +321,20 @@ mod device {
         let written = origin + tokens;
         let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let walked = select(
-            blocks,
-            (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-            reached,
+        if lid == 0u32 {
+            claim[ATTN_CLAIM_WALKED] = select(
+                (written + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                blocks,
+                task.origin == NO_VALUE,
+            );
+        }
+        let walked = min(
+            select(
+                blocks,
+                (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                reached,
+            ),
+            workgroup_uniform_load(&claim[ATTN_CLAIM_WALKED]),
         );
         let back = task.reach - 1u32;
         let window = select(
@@ -734,10 +745,20 @@ mod device {
         let written = origin + tokens;
         let reached = causal && task.origin == NO_VALUE && task.queries == NO_VALUE;
         let blocks = (keys + ATTN_KEYS - 1u32) / ATTN_KEYS;
-        let walked = select(
-            blocks,
-            (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
-            reached,
+        if lid == 0u32 {
+            claim[ATTN_CLAIM_WALKED] = select(
+                (written + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                blocks,
+                task.origin == NO_VALUE,
+            );
+        }
+        let walked = min(
+            select(
+                blocks,
+                (plane.z + task.count + ATTN_KEYS - 1u32) / ATTN_KEYS,
+                reached,
+            ),
+            workgroup_uniform_load(&claim[ATTN_CLAIM_WALKED]),
         );
         let back = task.reach - 1u32;
         let window = select(
