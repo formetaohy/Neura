@@ -7,13 +7,22 @@ on:
     branches: [main]
   workflow_call:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
-  check:
-    name: Check & Test
+  quality:
+    name: Format & Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,36 +34,109 @@ jobs:
 
       - name: Cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Install software Vulkan driver
-        run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
-
-      - name: Install native backend targets
-        run: rustup target add x86_64-pc-windows-msvc x86_64-apple-darwin aarch64-apple-ios aarch64-linux-android
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Lint
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
-      - name: Check Linux compute backend
-        run: cargo check --workspace --all-targets --all-features
+  backend:
+    name: ${{ matrix.platform }} Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            target: x86_64-pc-windows-msvc
+          - platform: macOS
+            target: x86_64-apple-darwin
+          - platform: iOS
+            target: aarch64-apple-ios
+          - platform: Android
+            target: aarch64-linux-android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Check Windows compute backend
-        run: cargo check --workspace --all-targets --all-features --target x86_64-pc-windows-msvc
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
-      - name: Check macOS compute backend
-        run: cargo check --workspace --all-targets --all-features --target x86_64-apple-darwin
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Check iOS compute backend
-        run: cargo check --workspace --all-targets --all-features --target aarch64-apple-ios
+      - name: Check native backend
+        run: cargo check --workspace --all-targets --all-features --locked --target ${{ matrix.target }}
 
-      - name: Check Android compute backend
-        run: cargo check --workspace --all-targets --all-features --target aarch64-linux-android
+  test:
+    name: CPU & GPU Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Cache Vulkan artifacts
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/neura-cache
+          key: ${{ runner.os }}-vulkan-${{ hashFiles('Cargo.lock', 'crates/**/*.rs') }}
+          restore-keys: ${{ runner.os }}-vulkan-
+
+      - name: Install software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libvulkan1 mesa-vulkan-drivers
 
       - name: Test
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features --locked
+        env:
+          XDG_CACHE_HOME: ${{ runner.temp }}/neura-cache
 
-      - name: Build every target in release
-        run: cargo build --workspace --all-targets --all-features --release
+  build:
+    name: Release Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build release library and application
+        run: cargo build --workspace --lib --bins --examples --all-features --release --locked
+
+  check:
+    name: Check & Test
+    needs: [quality, backend, test, build]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to pass
+        run: |
+          test "${{ needs.quality.result }}" = success
+          test "${{ needs.backend.result }}" = success
+          test "${{ needs.test.result }}" = success
+          test "${{ needs.build.result }}" = success

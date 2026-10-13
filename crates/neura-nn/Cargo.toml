@@ -6,6 +6,10 @@ description = "Layers, losses and optimizers over the Neura graph"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 
@@ -14,4 +18,5 @@ neura-abi = { workspace = true }
 neura-graph = { workspace = true }
 
 [dev-dependencies]
+neura-gpu = { workspace = true }
 neura-runtime = { workspace = true }

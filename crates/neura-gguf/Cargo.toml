@@ -6,6 +6,10 @@ description = "Reading GGUF files into the tensors a store fills"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

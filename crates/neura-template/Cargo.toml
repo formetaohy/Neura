@@ -6,6 +6,10 @@ description = "Rendering the chat template a gguf names"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

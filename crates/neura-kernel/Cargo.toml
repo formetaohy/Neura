@@ -6,6 +6,10 @@ description = "The device kernel: bindings, scheduler entry and the body of ever
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

@@ -1,0 +1,419 @@
+use neura_abi::{Element, Kind, TaskRecord, strategy};
+use neura_graph::{Graph, Shape, Value};
+use neura_plan::{DEFAULT_ENCODING_BYTES, Plan};
+use neura_runtime::Runtime;
+
+use crate::support;
+use crate::support::backend;
+use crate::support::input;
+
+use backend::open_with;
+use input::random;
+use support::{assert_close, open};
+
+fn top_k_reference(values: &[f32], rows: u32, columns: u32, keep: u32) -> (Vec<f32>, Vec<f32>) {
+    let mut kept_values = Vec::new();
+    let mut kept_indices = Vec::new();
+    for row in 0..rows as usize {
+        let source = &values[row * columns as usize..(row + 1) * columns as usize];
+        let mut order = (0..columns as usize).collect::<Vec<_>>();
+        order.sort_by(
+            |left, right| match source[*right].partial_cmp(&source[*left]) {
+                Some(order) => order.then(left.cmp(right)),
+                None => std::cmp::Ordering::Equal,
+            },
+        );
+        for index in &order[..keep as usize] {
+            kept_values.push(source[*index]);
+            kept_indices.push(*index as f32);
+        }
+    }
+    (kept_values, kept_indices)
+}
+
+struct Selecting {
+    graph: Graph,
+    value: Value,
+    kept_values: Value,
+    kept_indices: Value,
+}
+
+impl Selecting {
+    fn of(rows: u32, columns: u32, keep: u32, element: Element) -> Self {
+        let graph = Graph::new();
+        let value = graph.input(Shape::matrix(rows, columns), element);
+        let (kept_values, kept_indices) = graph.top_k(value, keep);
+        graph.retain(kept_values);
+        graph.retain(kept_indices);
+        Self {
+            graph,
+            value,
+            kept_values,
+            kept_indices,
+        }
+    }
+
+    fn run(
+        &self,
+        runtime: &Runtime,
+        data: &[f32],
+        keep: u32,
+        rows: u32,
+        columns: u32,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let weights = runtime.weights(&self.graph);
+        let program = runtime.compile(&self.graph, &weights);
+        runtime.write(&program, self.value, data);
+        runtime.run(&program);
+        let (expected_values, expected_indices) = top_k_reference(data, rows, columns, keep);
+        let mut produced = runtime.read_many(&program, &[self.kept_values, self.kept_indices]);
+        assert_close(&produced[0], &expected_values, 1e-6);
+        assert_eq!(produced[1], expected_indices);
+        (produced.remove(0), produced.remove(0))
+    }
+}
+
+#[test]
+fn a_top_k_hands_back_the_largest_numbers_of_a_row_and_where_they_stood() {
+    let runtime = open();
+    let (rows, columns, keep) = (40u32, 64u32, 3u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let data = random(rows * columns, 11);
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    for row in 0..rows as usize {
+        let kept = &indices[row * keep as usize..(row + 1) * keep as usize];
+        let mut sorted = kept.to_vec();
+        sorted.sort_by(|left, right| left.partial_cmp(right).expect("a class"));
+        sorted.dedup();
+        assert_eq!(sorted.len(), keep as usize, "row {row} kept a class twice");
+        for pair in values[row * keep as usize..(row + 1) * keep as usize].windows(2) {
+            assert!(
+                pair[0] >= pair[1],
+                "row {row} walks its candidates out of order: {pair:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn a_row_whose_largest_numbers_stand_in_one_share_keeps_every_one_of_them() {
+    let runtime = open();
+    let (rows, columns, keep) = (2u32, 2048u32, 8u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let share = 5usize;
+    for rank in 0..keep as usize {
+        data[share + rank * 256] = 100.0 + rank as f32;
+    }
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        &indices[..keep as usize],
+        &[1797.0, 1541.0, 1285.0, 1029.0, 773.0, 517.0, 261.0, 5.0],
+        "the numbers of one strided share stand in one thread's hands",
+    );
+    assert_close(
+        &values[..keep as usize],
+        &[107.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_top_k_keeps_the_smaller_class_of_a_tie() {
+    let runtime = open();
+    let (rows, columns, keep) = (4u32, 9u32, 4u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    for row in 0..rows as usize {
+        for column in 0..columns as usize {
+            data[row * columns as usize + column] = ((column + row) % 3) as f32;
+        }
+    }
+    data[3] = 2.0;
+    data[7] = 2.0;
+    data[8] = 2.0;
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        &indices[..keep as usize],
+        [2.0, 3.0, 5.0, 7.0],
+        "a tie keeps the smaller class first",
+    );
+    assert_close(&values[..keep as usize], &[2.0, 2.0, 2.0, 2.0], 1e-6);
+}
+
+#[test]
+fn a_narrow_row_ranks_through_one_thread() {
+    let runtime = open();
+    let (rows, columns, keep) = (4096u32, 64u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    let records = plan
+        .tasks()
+        .as_chunks::<{ std::mem::size_of::<TaskRecord>() }>();
+    let mut covered = 0u32;
+    for record in records.0 {
+        let task = bytemuck::pod_read_unaligned::<TaskRecord>(record);
+        if Kind::of(task.kind) != Kind::TopK {
+            continue;
+        }
+        assert_eq!(
+            task.geometry,
+            strategy::THREAD_ROW,
+            "a row of {columns} numbers ranks through one thread, not with a whole workgroup",
+        );
+        covered += task.count;
+    }
+    assert_eq!(covered, rows, "every row is ranked exactly once");
+    let data = random(rows * columns, 61);
+    selecting.run(&runtime, &data, keep, rows, columns);
+}
+
+#[test]
+fn a_top_k_of_one_is_the_largest_number_of_every_row() {
+    let runtime = open();
+    let (rows, columns) = (37u32, 32u32);
+    let graph = Graph::new();
+    let value = graph.input(Shape::matrix(rows, columns), Element::Single);
+    let (kept_values, kept_indices) = graph.top_k(value, 1);
+    let largest = graph.argmax(value);
+    graph.retain(kept_values);
+    graph.retain(kept_indices);
+    graph.retain(largest);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let data = random(rows * columns, 23);
+    runtime.write(&program, value, &data);
+    runtime.run(&program);
+    let produced = runtime.read_many(&program, &[kept_values, kept_indices, largest]);
+    let (expected_values, expected_indices) = top_k_reference(&data, rows, columns, 1);
+    assert_close(&produced[0], &expected_values, 1e-6);
+    assert_eq!(produced[1], expected_indices);
+    assert_eq!(
+        produced[1], produced[2],
+        "a top k of one keeps the class an argmax names",
+    );
+}
+
+#[test]
+fn a_starved_top_k_parts_the_numbers_of_a_row_between_its_column_sections() {
+    let runtime = open();
+    let (rows, columns, keep) = (1u32, 8192u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        plan.kinds().contains(&Kind::TopKFold),
+        "one row of {columns} numbers starves the column sections of one task",
+    );
+    assert!(
+        program.tensor_bytes() < 1 << 20,
+        "a split top k of {columns} numbers holds {} bytes",
+        program.tensor_bytes(),
+    );
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let mut expected = Vec::new();
+    for rank in 0..keep as usize {
+        let column = rank * 200 + 5;
+        data[column] = 100.0 + rank as f32;
+        expected.push(column as f32);
+    }
+    expected.reverse();
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        indices, expected,
+        "every column section hands the fold the numbers it holds",
+    );
+    let largest = (0..keep)
+        .map(|rank| 100.0 + rank as f32)
+        .rev()
+        .collect::<Vec<_>>();
+    assert_close(&values, &largest, 1e-6);
+}
+
+#[test]
+fn a_starved_top_k_keeps_the_candidates_a_row_holds_in_one_column_section() {
+    let runtime = open();
+    let (rows, columns, keep) = (1u32, 8192u32, 8u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = vec![0.0f32; (rows * columns) as usize];
+    let held = 40usize;
+    for rank in 0..keep as usize {
+        data[held + rank * 3] = 100.0 + rank as f32;
+    }
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert_eq!(
+        &indices[..keep as usize],
+        &[61.0, 58.0, 55.0, 52.0, 49.0, 46.0, 43.0, 40.0],
+        "the candidates of one section stand in the order a fold merges them",
+    );
+    assert_close(
+        &values[..keep as usize],
+        &[107.0, 106.0, 105.0, 104.0, 103.0, 102.0, 101.0, 100.0],
+        1e-6,
+    );
+}
+
+#[test]
+fn a_top_k_that_already_fills_the_device_walks_whole_rows() {
+    let runtime = open();
+    let (rows, columns, keep) = (256u32, 8192u32, 40u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let program = runtime.compile(&selecting.graph, &weights);
+    let plan = Plan::of(
+        &selecting.graph,
+        runtime.alignment(),
+        program.profile(),
+        DEFAULT_ENCODING_BYTES,
+    );
+    assert!(
+        !plan.kinds().contains(&Kind::TopKFold),
+        "{rows} rows already fill the device, and a top k of them holds no fold",
+    );
+}
+
+#[test]
+fn a_top_k_of_every_column_sorts_every_row() {
+    let runtime = open();
+    let (rows, columns) = (6u32, 60u32);
+    let selecting = Selecting::of(rows, columns, columns, Element::Single);
+    let data = random(rows * columns, 31);
+    let (values, _) = selecting.run(&runtime, &data, columns, rows, columns);
+    for row in 0..rows as usize {
+        let mut expected = data[row * columns as usize..(row + 1) * columns as usize].to_vec();
+        expected.sort_by(|left, right| right.partial_cmp(left).expect("a number"));
+        assert_close(
+            &values[row * columns as usize..(row + 1) * columns as usize],
+            &expected,
+            1e-6,
+        );
+    }
+}
+
+#[test]
+fn a_row_wider_than_the_workgroup_keeps_its_largest_numbers() {
+    let runtime = open();
+    let (rows, columns, keep) = (5u32, 1000u32, 8u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let mut data = random(rows * columns, 43);
+    data[3 * columns as usize + 501] = 100.0;
+    data[3 * columns as usize + 999] = 100.0;
+    let (values, indices) = selecting.run(&runtime, &data, keep, rows, columns);
+    let kept = &indices[3 * keep as usize..4 * keep as usize];
+    assert_eq!(
+        &kept[..2],
+        [501.0, 999.0],
+        "a wide row keeps the two maxima it holds",
+    );
+    assert!(
+        values[3 * keep as usize..4 * keep as usize]
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1]),
+        "a wide row walks its candidates from the largest on",
+    );
+}
+
+#[test]
+fn a_narrow_row_keeps_the_numbers_it_holds() {
+    let runtime = open();
+    let (rows, columns, keep) = (12u32, 17u32, 5u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Half);
+    let data = random(rows * columns, 47)
+        .into_iter()
+        .map(|value| (value * 8.0).round() / 8.0)
+        .collect::<Vec<_>>();
+    let (values, _) = selecting.run(&runtime, &data, keep, rows, columns);
+    assert!(
+        values.iter().all(|value| (value * 8.0).fract() == 0.0),
+        "half precision keeps the numbers it was handed",
+    );
+}
+
+#[test]
+fn every_profile_keeps_the_same_candidates() {
+    let runtime = open();
+    let (rows, columns, keep) = (64u32, 128u32, 4u32);
+    let selecting = Selecting::of(rows, columns, keep, Element::Single);
+    let weights = runtime.weights(&selecting.graph);
+    let data = random(rows * columns, 53);
+    let (expected_values, expected_indices) = top_k_reference(&data, rows, columns, keep);
+    for profile in runtime.profiles() {
+        let program = runtime.compile_with(&selecting.graph, &weights, profile);
+        runtime.write(&program, selecting.value, &data);
+        runtime.run(&program);
+        let produced =
+            runtime.read_many(&program, &[selecting.kept_values, selecting.kept_indices]);
+        assert_close(&produced[0], &expected_values, 1e-6);
+        assert_eq!(
+            produced[1], expected_indices,
+            "profile {profile:?} kept another class"
+        );
+    }
+}
+
+#[test]
+fn a_top_k_keeps_the_columns_a_binding_holds() {
+    let runtime = open();
+    let graph = Graph::new();
+    let tokens = graph.free(32);
+    let value = graph.input(Shape::of([2, 32, 4]).freed(&[(2, tokens)]), Element::Single);
+    let (kept_values, kept_indices) = graph.top_k(value, 2);
+    graph.retain(kept_values);
+    graph.retain(kept_indices);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let row = [0.25f32, -0.5, 0.75, 0.0];
+    let data = (0..64).flat_map(|_| row).collect::<Vec<_>>();
+    let mut kept = Vec::new();
+    for bound in [32u32, 8] {
+        runtime.bind(&program, &[bound]);
+        runtime.write(&program, value, &data[..bound as usize * 8]);
+        runtime.run(&program);
+        let mut produced = runtime.read_many(&program, &[kept_values, kept_indices]);
+        kept.push((produced.remove(0), produced.remove(0)));
+    }
+    let (kept_wide, indices_wide) = (&kept[0].0, &kept[0].1);
+    let (kept_narrow, indices_narrow) = (&kept[1].0, &kept[1].1);
+    assert_eq!(kept_wide.len(), 2 * 32 * 2);
+    assert_eq!(kept_narrow.len(), 2 * 8 * 2);
+    for plane in 0..2usize {
+        for token in 0..8usize {
+            let narrow = plane * 8 * 2 + token * 2;
+            let wide = plane * 32 * 2 + token * 2;
+            assert_close(
+                &kept_narrow[narrow..narrow + 2],
+                &kept_wide[wide..wide + 2],
+                1e-6,
+            );
+            assert_eq!(
+                &indices_narrow[narrow..narrow + 2],
+                &indices_wide[wide..wide + 2],
+                "plane {plane} kept other classes when the binding named eight tokens",
+            );
+        }
+    }
+}
+
+#[test]
+fn every_platform_backend_keeps_the_largest_numbers_of_a_row() {
+    for &backend in neura_gpu::PREFERENCE {
+        let runtime = open_with(backend);
+        let (rows, columns, keep) = (17u32, 300u32, 6u32);
+        let selecting = Selecting::of(rows, columns, keep, Element::Single);
+        let data = random(rows * columns, 59);
+        selecting.run(&runtime, &data, keep, rows, columns);
+    }
+}

@@ -6,6 +6,9 @@ description = "Graph lowering, wave scheduling and device plan encoding"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true
 

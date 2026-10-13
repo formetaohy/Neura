@@ -6,6 +6,10 @@ description = "Tensor graph construction, differentiation and shape semantics"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

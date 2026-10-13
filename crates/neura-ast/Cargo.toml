@@ -6,5 +6,9 @@ description = "The abstract syntax tree of the Rust device DSL"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true

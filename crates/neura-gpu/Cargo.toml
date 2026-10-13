@@ -6,6 +6,9 @@ description = "Native compute devices, memory, pipelines and submissions"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+doctest = false
+
 [lints]
 workspace = true
 

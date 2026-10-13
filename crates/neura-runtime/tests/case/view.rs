@@ -1,0 +1,288 @@
+use neura_abi::Element;
+use neura_graph::{Graph, Init, Shape, Window};
+
+use crate::support;
+use crate::support::convolution;
+use crate::support::input;
+use crate::support::reference;
+
+use convolution::conv2d_reference;
+use input::random;
+use reference::matmul_reference;
+use support::{assert_close, open};
+
+fn refuses(action: impl FnOnce()) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err()
+}
+
+#[test]
+fn a_convolution_flows_into_a_product_through_a_reshape() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 2, 4, 4]), Element::Single);
+    let filter = graph.parameter(Shape::of([3, 2, 2, 2]), Init::Zero, Element::Single);
+    let weight = graph.parameter(Shape::matrix(27, 5), Init::Zero, Element::Single);
+    let features = graph.conv2d(input, filter, Window::sliding([2, 2]));
+    let rows = graph.reshape(features, Shape::matrix(1, 27));
+    let logits = graph.matmul(rows, weight);
+    graph.retain(logits);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let input_values = random(32, 3);
+    let filter_values = random(24, 5);
+    let weight_values = random(135, 7);
+    runtime.write(&program, input, &input_values);
+    runtime.write(&program, filter, &filter_values);
+    runtime.write(&program, weight, &weight_values);
+    runtime.run(&program);
+    let features_values = conv2d_reference(
+        &input_values,
+        &filter_values,
+        [1, 2, 4, 4],
+        3,
+        Window::sliding([2, 2]),
+    );
+    let expected = matmul_reference(&features_values, &weight_values, 1, 27, 5);
+    assert_close(&runtime.read(&program, logits), &expected, 1e-4);
+}
+
+#[test]
+fn a_view_that_its_storage_addresses_row_by_row_reads_back_as_that_storage() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([2, 3, 4, 4]), Element::Single);
+    let doubled = graph.mul(input, input);
+    let flattened = graph.reshape(doubled, Shape::matrix(2, 48));
+    graph.retain(flattened);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(96, 11);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let expected = values.iter().map(|value| value * value).collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, flattened), &expected, 1e-6);
+    assert_close(&runtime.read(&program, doubled), &expected, 1e-6);
+}
+
+#[test]
+fn a_permuted_view_reads_back_through_the_axes_it_names() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 3, 5]), Element::Single);
+    let squared = graph.mul(input, input);
+    let turned = graph.permute(squared, [0, 1, 3, 2]);
+    let rows = graph.sum_rows(turned);
+    graph.retain(rows);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(15, 13);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let mut expected = [0.0f32; 5];
+    for column in 0..5 {
+        for row in 0..3 {
+            let value = values[row * 5 + column];
+            expected[column] += value * value;
+        }
+    }
+    assert_close(&runtime.read(&program, rows), &expected, 1e-5);
+    assert!(
+        refuses(|| {
+            let _ = runtime.read(&program, turned);
+        }),
+        "a permuted view was read back as the storage it walks",
+    );
+}
+
+#[test]
+fn a_head_plane_view_walks_the_numbers_of_the_tensor_it_splits() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 4, 6]), Element::Single);
+    let squared = graph.mul(input, input);
+    let planes = graph.reshape(squared, Shape::of([1, 4, 2, 3]));
+    let heads = graph.permute(planes, [2, 0, 1, 3]);
+    let summed = graph.sum_rows(heads);
+    graph.retain(summed);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let values = random(24, 5);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 8];
+    for head in 0..2usize {
+        for row in 0..4usize {
+            for depth in 0..3usize {
+                let value = values[row * 6 + head * 3 + depth];
+                expected[head * 4 + row] += value * value;
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, summed), &expected, 1e-5);
+}
+
+#[test]
+fn a_gradient_walks_back_through_a_head_plane_view() {
+    let runtime = open();
+    let graph = Graph::new();
+    let dense = graph.parameter(Shape::of([1, 4, 6]), Init::Zero, Element::Single);
+    let planes = graph.reshape(dense, Shape::of([1, 4, 2, 3]));
+    let heads = graph.permute(planes, [2, 0, 1, 3]);
+    let factor = graph.input(Shape::of([2, 1, 4, 3]), Element::Single);
+    let loss = graph.sum(graph.mul(heads, factor));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(dense));
+    let store = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &store);
+    let factors = random(24, 31);
+    runtime.write(&program, factor, &factors);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..4usize {
+        for head in 0..2usize {
+            for depth in 0..3usize {
+                expected[row * 6 + head * 3 + depth] = factors[(head * 4 + row) * 3 + depth];
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(dense)),
+        &expected,
+        1e-6,
+    );
+}
+
+#[test]
+fn a_gradient_walks_back_through_a_reshape() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(4, 2), Init::Zero, Element::Single);
+    let observations = graph.input(Shape::matrix(4, 2), Element::Single);
+    let loss = graph.sum(graph.mul(
+        graph.reshape(weight, Shape::vector(8)),
+        graph.reshape(observations, Shape::vector(8)),
+    ));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations_values = random(8, 17);
+    runtime.write(&program, observations, &observations_values);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &observations_values,
+        1e-6,
+    );
+}
+
+#[test]
+fn a_gradient_walks_back_through_a_permutation() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::matrix(2, 5), Init::Zero, Element::Single);
+    let observations = graph.input(Shape::matrix(5, 2), Element::Single);
+    let loss = graph.sum(graph.mul(graph.permute(weight, [0, 1, 3, 2]), observations));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let observations_values = random(10, 19);
+    runtime.write(&program, observations, &observations_values);
+    runtime.run(&program);
+    let turned = (0..10)
+        .map(|index| {
+            let row = index / 5;
+            let column = index % 5;
+            observations_values[column * 2 + row]
+        })
+        .collect::<Vec<_>>();
+    assert_close(&runtime.read(&program, gradients.of(weight)), &turned, 1e-6);
+}
+
+#[test]
+fn a_gradient_of_a_permuted_view_folds_the_axis_it_broadcast() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let bias = graph.input(Shape::of([3, 2, 5, 4]), Element::Single);
+    let turned = graph.permute(weight, [1, 0, 2, 3]);
+    let loss = graph.sum(graph.mul(turned, bias));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let bias_values = random(120, 23);
+    runtime.write(&program, bias, &bias_values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..2usize {
+        for plane in 0..3usize {
+            for column in 0..4usize {
+                let mut total = 0.0;
+                for depth in 0..5usize {
+                    total += bias_values[((plane * 2 + row) * 5 + depth) * 4 + column];
+                }
+                expected[(row * 3 + plane) * 4 + column] = total;
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &expected,
+        1e-5,
+    );
+}
+
+#[test]
+fn a_gradient_of_a_reshaped_view_folds_the_axis_it_broadcast() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let bias = graph.input(Shape::of([2, 3, 4, 5]), Element::Single);
+    let walked = graph.reshape(weight, Shape::of([2, 3, 4, 1]));
+    let loss = graph.sum(graph.mul(walked, bias));
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let bias_values = random(120, 29);
+    runtime.write(&program, bias, &bias_values);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 24];
+    for row in 0..2usize {
+        for plane in 0..3usize {
+            for column in 0..4usize {
+                let mut total = 0.0;
+                for depth in 0..5usize {
+                    total += bias_values[((row * 3 + plane) * 4 + column) * 5 + depth];
+                }
+                expected[(row * 3 + plane) * 4 + column] = total;
+            }
+        }
+    }
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &expected,
+        1e-5,
+    );
+}
+
+#[test]
+fn a_gradient_of_a_permuted_view_spread_over_a_shape_folds_every_axis_it_spread() {
+    let runtime = open();
+    let graph = Graph::new();
+    let weight = graph.parameter(Shape::of([2, 3, 1, 4]), Init::Zero, Element::Single);
+    let spread = graph.broadcast_to(graph.permute(weight, [1, 0, 2, 3]), Shape::of([3, 2, 5, 4]));
+    let loss = graph.sum(spread);
+    let gradients = graph.backward(loss);
+    graph.retain(gradients.of(weight));
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.run(&program);
+    assert_close(
+        &runtime.read(&program, gradients.of(weight)),
+        &[5.0; 24],
+        1e-5,
+    );
+}

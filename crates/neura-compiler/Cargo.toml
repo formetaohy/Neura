@@ -6,6 +6,10 @@ description = "Device frontend: lowers the Rust device DSL into shader modules"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

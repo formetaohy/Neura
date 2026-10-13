@@ -250,6 +250,7 @@ name = "neura-nn"
 version = "0.7.1"
 dependencies = [
  "neura-abi",
+ "neura-gpu",
  "neura-graph",
  "neura-runtime",
 ]

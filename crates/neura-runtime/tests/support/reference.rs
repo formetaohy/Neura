@@ -6,14 +6,14 @@ pub fn matmul_reference(
     columns: u32,
 ) -> Vec<f32> {
     let mut out = vec![0.0f32; (rows * columns) as usize];
-    for row in 0..rows {
-        for column in 0..columns {
-            let mut total = 0.0f32;
-            for step in 0..depth {
-                total +=
-                    left[(row * depth + step) as usize] * right[(step * columns + column) as usize];
+    for row in 0..rows as usize {
+        let target = &mut out[row * columns as usize..(row + 1) * columns as usize];
+        for step in 0..depth as usize {
+            let value = left[row * depth as usize + step];
+            let source = &right[step * columns as usize..(step + 1) * columns as usize];
+            for (output, operand) in target.iter_mut().zip(source) {
+                *output += value * operand;
             }
-            out[(row * columns + column) as usize] = total;
         }
     }
     out

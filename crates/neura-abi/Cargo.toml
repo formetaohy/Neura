@@ -6,6 +6,10 @@ description = "Device records, element formats and task codes shared by host and
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

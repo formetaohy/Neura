@@ -1,4 +1,13 @@
+pub mod attention;
+pub mod backend;
+pub mod convolution;
+pub mod decision;
+pub mod input;
+pub mod pooling;
+pub mod reference;
 pub mod shared;
+pub mod softmax;
+pub mod transpose;
 
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 

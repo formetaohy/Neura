@@ -6,6 +6,10 @@ description = "Byte level bpe over the vocabulary a gguf holds"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
 

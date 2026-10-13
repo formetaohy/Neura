@@ -132,15 +132,17 @@ pub fn attention_forward_beside(
                 }
             }
             let largest = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let total = logits
-                .iter()
-                .map(|logit| (logit - largest).exp())
-                .sum::<f64>();
+            for logit in &mut logits {
+                *logit = (*logit - largest).exp();
+            }
+            let total = logits.iter().sum::<f64>();
             statistics[plane * shapes.queries as usize + row] = (largest + total.ln()) as f32;
+            for weight in &mut logits {
+                *weight /= total;
+            }
             for depth in 0..width {
                 let mut sum = 0.0f64;
-                for (column, logit) in logits.iter().enumerate() {
-                    let weight = (logit - largest).exp() / total;
+                for (column, weight) in logits.iter().enumerate() {
                     let at = (source * shapes.keys as usize + column) * width + depth;
                     sum += weight * f64::from(values[at]);
                 }

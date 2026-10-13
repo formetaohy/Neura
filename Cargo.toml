@@ -59,6 +59,10 @@ description.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 neura-abi = { workspace = true }
 neura-decoder = { workspace = true }
@@ -85,4 +89,5 @@ opt-level = 3
 debug-assertions = false
 
 [profile.test]
-opt-level = 3
+opt-level = 1
+debug = 0

@@ -6,5 +6,9 @@ description = "Device shader modules, their native writers and the compiled comp
 license.workspace = true
 repository.workspace = true
 
+[lib]
+test = false
+doctest = false
+
 [lints]
 workspace = true
