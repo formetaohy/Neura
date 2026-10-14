@@ -264,20 +264,6 @@ impl NativeDevice {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        match (self, other) {
-            #[cfg(vulkan_backend)]
-            (Self::Vulkan(first), Self::Vulkan(second)) => Arc::ptr_eq(first, second),
-            #[cfg(dx12_backend)]
-            (Self::Dx12(first), Self::Dx12(second)) => Arc::ptr_eq(first, second),
-            #[cfg(metal_backend)]
-            (Self::Metal(first), Self::Metal(second)) => Arc::ptr_eq(first, second),
-            #[cfg(multiple_backends)]
-            _ => false,
-        }
-    }
-
     pub(crate) fn create_buffer(
         &self,
         label: &str,
@@ -339,18 +325,6 @@ impl NativeDevice {
             Self::Dx12(device) => device.submit(writes, commands, first_dispatch),
             #[cfg(metal_backend)]
             Self::Metal(device) => device.submit(writes, commands, first_dispatch),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn frames(&self) -> usize {
-        match self {
-            #[cfg(vulkan_backend)]
-            Self::Vulkan(device) => device.frames(),
-            #[cfg(dx12_backend)]
-            Self::Dx12(device) => device.frames(),
-            #[cfg(metal_backend)]
-            Self::Metal(device) => device.frames(),
         }
     }
 

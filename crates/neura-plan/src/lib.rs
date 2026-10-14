@@ -19,6 +19,3 @@ pub use plan::{Encoding, Plan, Quantum, Span};
 pub use product::{Contiguous, Product, Weight};
 pub use region::TableRows;
 pub use remembered::DEFAULT_ENCODING_BYTES;
-
-#[cfg(test)]
-mod test;

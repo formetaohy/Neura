@@ -615,15 +615,6 @@ impl Device {
         index
     }
 
-    #[cfg(test)]
-    pub(crate) fn frames(&self) -> usize {
-        self.state
-            .lock()
-            .expect("the Metal compute queue is never poisoned")
-            .frames
-            .len()
-    }
-
     fn acquire(&self, state: &mut QueueState) -> usize {
         if let Some(slot) = state
             .frames

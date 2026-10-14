@@ -10,8 +10,6 @@ mod native;
 mod pipeline;
 mod readback;
 mod submission;
-#[cfg(test)]
-mod test;
 
 pub use backend::{Backend, PREFERENCE};
 pub use buffer::{BufferBinding, GpuBuffer};

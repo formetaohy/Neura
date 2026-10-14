@@ -16,7 +16,3 @@ workspace = true
 [dependencies]
 neura-abi = { workspace = true }
 neura-graph = { workspace = true }
-
-[dev-dependencies]
-neura-gpu = { workspace = true }
-neura-runtime = { workspace = true }

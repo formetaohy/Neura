@@ -207,9 +207,7 @@ version = "0.7.3"
 dependencies = [
  "ash",
  "bitflags",
- "bytemuck",
  "libloading",
- "neura-compiler",
  "neura-shader",
  "objc2",
  "objc2-foundation",
@@ -250,9 +248,7 @@ name = "neura-nn"
 version = "0.7.3"
 dependencies = [
  "neura-abi",
- "neura-gpu",
  "neura-graph",
- "neura-runtime",
 ]
 
 [[package]]
@@ -297,8 +293,6 @@ version = "0.7.3"
 dependencies = [
  "bytemuck",
  "neura-abi",
- "neura-compiler",
- "neura-decoder",
  "neura-gguf",
  "neura-gpu",
  "neura-graph",
