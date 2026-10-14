@@ -3874,3 +3874,27 @@ fn a_plan_slices_the_row_of_an_attention_down_to_the_registers_its_profile_offer
         rungs.last().expect("a rung").registers(),
     );
 }
+
+#[test]
+fn a_narrow_row_write_copies_the_words_it_holds_in_place() {
+    let graph = Graph::new();
+    let state = graph.resident(Shape::matrix(8, 128), Element::Q8_0);
+    let indices = graph.input(Shape::matrix(4, 1), Element::Single);
+    let updates = graph.input(Shape::matrix(4, 128), Element::Single);
+    graph.write_into(state, indices, graph.block_quantize(updates, Element::Q8_0));
+    let plan = plan(&graph);
+    let tasks = tasks(&plan);
+    assert_eq!(
+        kinds(&plan),
+        vec![Kind::Convert, Kind::ScatterWrite],
+        "a row written into q8_0 storage is packed by a convert and copied into the state, with no image of the state beside it",
+    );
+    let write = &tasks[1];
+    assert_eq!(write.a, state.id());
+    assert_eq!(write.b, indices.id());
+    assert_eq!(write.c, tasks[0].out);
+    assert_eq!(write.out, state.id());
+    assert_eq!(write.first, 0);
+    assert_eq!(write.count, 4);
+    assert_eq!(write.in_place, 1);
+}

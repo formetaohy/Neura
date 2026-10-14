@@ -720,7 +720,7 @@ impl Graph {
 
     pub fn resident(&self, shape: Shape, element: Element) -> Value {
         assert!(
-            !element.quantized(),
+            !element.quantized() || element.packs_on_device(),
             "a resident tensor of {} storage is declared with the quantum it reconstructs by, and a resident tensor carries none; quantize the tensor that reads it instead",
             element.name(),
         );
@@ -845,6 +845,30 @@ impl Graph {
     pub fn quantize(&self, value: Value, scale: f32) -> Value {
         let value = self.own(value);
         let out = self.quantized(self.shape(value), scale);
+        self.push(TaskInfo::of(
+            Kind::Unary,
+            op::IDENTITY,
+            out.id(),
+            [value.id(), NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE],
+        ));
+        out
+    }
+
+    pub fn block_quantize(&self, value: Value, element: Element) -> Value {
+        let value = self.own(value);
+        assert!(
+            element.packs_on_device(),
+            "a device packs the numbers of a tensor into the {} storage of a block it scales itself, and {} storage holds the quantum its host measures",
+            element.name(),
+            element.name(),
+        );
+        let out = self.stored(
+            self.shape(value),
+            element,
+            1.0,
+            Residency::Derived,
+            self.tracked(&[value]),
+        );
         self.push(TaskInfo::of(
             Kind::Unary,
             op::IDENTITY,
@@ -1449,7 +1473,7 @@ impl Graph {
         tracked: bool,
     ) -> Value {
         assert!(
-            element.block().is_none(),
+            element.block().is_none() || element.packs_on_device(),
             "a {} tensor is a weight whose storage packs the quantum of every {} numbers, and a task writes the numbers of a tensor it does not weigh; cast the weight into exact storage first",
             element.name(),
             element

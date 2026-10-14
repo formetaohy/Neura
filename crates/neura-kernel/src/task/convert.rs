@@ -3,11 +3,9 @@ use neura_compiler::{Compiler, ast};
 
 pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     device::define(compiler);
-    for element in elements
-        .iter()
-        .copied()
-        .filter(|element| element.narrow() && element.block().is_none())
-    {
+    for element in elements.iter().copied().filter(|element| {
+        element.narrow() && (element.block().is_none() || element.packs_on_device())
+    }) {
         let name = match element.format() {
             Some(format) => {
                 let name = format!("run_convert_{}", element.name());
@@ -38,9 +36,13 @@ fn convert_of(element: Element) -> &'static str {
         Element::Half => "run_convert_half",
         Element::Bfloat16 => "run_convert_bfloat16",
         Element::Int8 => "run_convert_int8",
+        Element::Q8_0 => "run_convert_q8_0",
         Element::Single => panic!("a single precision tensor holds one element per word"),
-        Element::Int4 | Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => {
-            panic!("a block quantized tensor is written by its host")
+        Element::Int4 | Element::Q4K | Element::Q5K | Element::Q6K => {
+            panic!(
+                "{} storage packs numbers a device cannot quantize, and its host lays the block out",
+                element.name(),
+            )
         }
         Element::Fp8E4M3 | Element::Fp8E5M2 => panic!(
             "{} storage walks a float grid, and its convert is specialized from the grid the ABI declares",
@@ -348,6 +350,84 @@ mod device {
                 ),
             );
         }
+    }
+
+    fn run_convert_q8_0(task: Task, lid: u32) {
+        let output = values[task.out];
+        let source = values[task.a];
+        let dims = output.dims;
+        let elements = dims.x * dims.y * dims.z * dims.w;
+        let blocks = ceil_div(elements, Q8_0_BLOCK);
+        let words = ceil_div(blocks * Q8_0_BYTES, 4u32);
+        let held = 2u32 * Q8_0_BYTES / 4u32;
+        let pairs = ceil_div(blocks, 2u32);
+        let first = task.first / held;
+        let last = min(ceil_div(task.first + task.count, held), pairs);
+        for pair in stride(first + lid, last, WORKGROUP_SIZE) {
+            let lower = q8_0_quantum(task, source, output, 2u32 * pair);
+            let upper = select(
+                lower,
+                q8_0_quantum(task, source, output, 2u32 * pair + 1u32),
+                2u32 * pair + 1u32 < blocks,
+            );
+            let lower_bits = half_bits(lower);
+            let upper_bits = half_bits(upper);
+            let opening = pair * held;
+            let closing = min(opening + held, words);
+            for word in stride(opening, closing, 1u32) {
+                let mut packed = 0u32;
+                for within in unroll(0u32, 4u32, 1u32) {
+                    let offset = (word - opening) * 4u32 + within;
+                    let second = offset >= Q8_0_BYTES;
+                    let inside = offset - select(0u32, Q8_0_BYTES, second);
+                    let bits = select(lower_bits, upper_bits, second);
+                    let quantum = select(lower, upper, second);
+                    let mut byte = (bits >> (inside * 8u32)) & 0xffu32;
+                    if inside >= 2u32 {
+                        let block = 2u32 * pair + select(0u32, 1u32, second);
+                        byte = q8_0_code(
+                            q8_0_element(task, source, output, block * Q8_0_BLOCK + inside - 2u32),
+                            quantum,
+                        );
+                    }
+                    packed = packed | (byte << (within * 8u32));
+                }
+                publish_word(output, word, packed);
+            }
+        }
+    }
+
+    fn q8_0_quantum(task: Task, source: Value, output: Value, block: u32) -> f32 {
+        let mut size = 0.0;
+        for within in stride(0u32, Q8_0_BLOCK, 1u32) {
+            size = max(
+                size,
+                abs(q8_0_element(
+                    task,
+                    source,
+                    output,
+                    block * Q8_0_BLOCK + within,
+                )),
+            );
+        }
+        return size / 127.0;
+    }
+
+    fn q8_0_element(task: Task, source: Value, output: Value, element: u32) -> f32 {
+        let dims = output.dims;
+        let elements = dims.x * dims.y * dims.z * dims.w;
+        let inside = element < elements;
+        let at = walked_at(task.geometry, min(element, elements - 1u32), dims);
+        return select(0.0, convert_at(task, source, at), inside);
+    }
+
+    fn q8_0_code(value: f32, quantum: f32) -> u32 {
+        let inverse = select(0.0, 1.0 / quantum, quantum != 0.0);
+        let scaled = value * inverse;
+        let rounded = trunc(scaled + select(-0.5, 0.5, scaled >= 0.0));
+        let clamped = min(max(rounded, -127.0), 127.0);
+        let magnitude = u32(abs(clamped));
+        return select(magnitude, 256u32 - magnitude, clamped < 0.0);
     }
 
     fn run_convert(task: Task, lid: u32) {

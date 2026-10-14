@@ -191,3 +191,35 @@ fn a_block_quantized_tensor_is_a_weight_and_nothing_else() {
         "a weight materializes into exact storage before the numbers it holds feed an op",
     );
 }
+
+#[test]
+fn a_block_quantize_names_the_blocks_a_device_packs() {
+    let graph = Graph::new();
+    let data = graph.input(Shape::matrix(4, 128), Element::Single);
+    let packed = graph.block_quantize(data, Element::Q8_0);
+    assert_eq!(graph.element(packed), Element::Q8_0);
+    assert_eq!(graph.shape(packed), graph.shape(data));
+    assert_eq!(
+        graph.element(graph.permute(packed, [0, 1, 3, 2])),
+        Element::Q8_0,
+        "a view walks the blocks a device packed",
+    );
+    for element in [
+        Element::Single,
+        Element::Half,
+        Element::Bfloat16,
+        Element::Int8,
+        Element::Int4,
+        Element::Q4K,
+        Element::Q5K,
+        Element::Q6K,
+    ] {
+        assert!(
+            refuses(|| {
+                graph.block_quantize(data, element);
+            }),
+            "a device quantizes numbers into the blocks q8_0 packs, and {} storage is laid out by its host",
+            element.name(),
+        );
+    }
+}

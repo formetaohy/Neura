@@ -210,7 +210,20 @@ fn strides_one_number_a_step_at_every_binding(info: &ValueInfo) -> bool {
 }
 
 fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
-    values[task.out as usize].element.narrow()
+    let out = &values[task.out as usize];
+    if !out.element.narrow() {
+        return false;
+    }
+    if task.kind != Kind::ScatterWrite || out.element.sidecar() {
+        return true;
+    }
+    let updates = &values[task.inputs[2] as usize];
+    let width = out.shape.dims()[neura_abi::MAX_RANK as usize - 1];
+    updates.element != out.element
+        || !out
+            .element
+            .payload_bytes(u64::from(width))
+            .is_multiple_of(neura_abi::WORD_BYTES)
 }
 
 fn schedule_narrow(

@@ -429,7 +429,7 @@ fn install(
         DeviceModule::Choice => task::choice::install(compiler, geometry),
         DeviceModule::Select => task::select::install(compiler),
         DeviceModule::Conv => task::conv::install(compiler),
-        DeviceModule::Scatter => task::scatter::install(compiler),
+        DeviceModule::Scatter => task::scatter::install(compiler, elements),
         DeviceModule::Layout => task::layout::install(compiler),
         DeviceModule::Pool => task::pool::install(compiler),
         DeviceModule::Convert => task::convert::install(compiler, elements),

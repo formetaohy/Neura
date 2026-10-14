@@ -29,6 +29,7 @@ mod pooling;
 mod precision;
 mod precompile;
 mod predicate;
+mod quantize;
 mod ragged;
 mod ragged_sum;
 mod rate;

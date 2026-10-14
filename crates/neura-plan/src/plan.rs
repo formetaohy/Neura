@@ -1558,7 +1558,7 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
         for out in task.writes() {
             let out = &values[out as usize];
             assert!(
-                out.element.block().is_none(),
+                out.element.block().is_none() || out.element.packs_on_device(),
                 "a {} task writes the block quantized tensor {}; a {} tensor reconstructs through the quantum its storage holds of every {} numbers, and only its host holds those",
                 task.kind.name(),
                 task.out,
@@ -1591,6 +1591,41 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
                         out.shape.dims(),
                     );
                 }
+                continue;
+            }
+            if task.kind == Kind::ScatterWrite && out.element.narrow() {
+                let updates = &values[task.inputs[2] as usize];
+                assert!(
+                    !out.element.sidecar(),
+                    "a scatter copies the {} words of a row into {}, and {} storage keeps the quantum of every {} numbers in a table of its own",
+                    out.element.name(),
+                    task.out,
+                    out.element.name(),
+                    out.element
+                        .block()
+                        .expect("a sidecar tensor carries its block")
+                        .elements,
+                );
+                assert_eq!(
+                    updates.element,
+                    out.element,
+                    "a scatter copies the words of a {} row into the {} tensor {}, and a row of {} storage walks its own bytes",
+                    updates.element.name(),
+                    out.element.name(),
+                    task.out,
+                    out.element.name(),
+                );
+                let width = out.shape.dims()[neura_abi::MAX_RANK as usize - 1];
+                assert!(
+                    out.element
+                        .payload_bytes(u64::from(width))
+                        .is_multiple_of(neura_abi::WORD_BYTES),
+                    "a scatter copies the {} words of a row of {width} numbers into {}, and a row of {} storage spans {} bytes",
+                    out.element.name(),
+                    task.out,
+                    out.element.name(),
+                    out.element.payload_bytes(u64::from(width)),
+                );
                 continue;
             }
             assert!(

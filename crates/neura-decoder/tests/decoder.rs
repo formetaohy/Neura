@@ -98,3 +98,36 @@ fn a_decoder_hands_out_the_token_it_chooses() {
         0
     )));
 }
+
+#[test]
+fn a_narrow_cache_holds_the_keys_and_values_the_device_writes() {
+    let graph = Graph::new();
+    let single = Cache::new(&graph, 2, 4, 8);
+    assert_eq!(single.element(), Element::Single);
+    for element in [Element::Q8_0, Element::Half, Element::Bfloat16] {
+        let cache = Cache::narrow(&graph, 2, 64, 8, element);
+        assert_eq!(cache.element(), element);
+        let [keys, values] = cache.states();
+        assert_eq!(graph.shape(keys).dims(), [2, 1, 8, 64]);
+        assert_eq!(graph.element(keys), element);
+        assert_eq!(graph.element(values), element);
+    }
+    assert!(
+        refuses(|| {
+            Cache::narrow(&graph, 2, 33, 8, Element::Half);
+        }),
+        "a cache takes a written row in whole words, and a row of 33 half numbers spans 66 bytes",
+    );
+    for element in [Element::Int8, Element::Int4, Element::Q4K, Element::Q6K] {
+        assert!(
+            refuses(|| {
+                Cache::narrow(&graph, 2, 32, 8, element);
+            }),
+            "a cache holds the keys a device writes in place, and {} storage is laid out by its host",
+            element.name(),
+        );
+    }
+    assert!(refuses(|| {
+        Cache::narrow(&graph, 2, 32, 8, Element::Q8_0);
+    }));
+}

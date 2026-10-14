@@ -1,7 +1,7 @@
 use crate::access::Reads;
 use crate::lower::{Task, softmax_words};
 use crate::span::{Extents, Split};
-use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE};
+use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE, WORD_BYTES};
 use neura_graph::{Shape, ValueInfo};
 use neura_profile::MatmulTile;
 
@@ -1105,9 +1105,7 @@ fn convert<W: Walk, V: Values>(
     narrowed: &mut Narrowed<'_>,
 ) {
     let out = task.out();
-    let stride = values.element(out).elements_per_word();
-    let first = u64::from(first) * stride;
-    let count = u64::from(count) * stride;
+    let (first, count) = walked_elements(values.element(out), first, count);
     narrowed.write(out, Region::run(first, count));
     for value in task.reads() {
         let region = if walks_its_range(values, value, out) {
@@ -1117,6 +1115,20 @@ fn convert<W: Walk, V: Values>(
         };
         narrowed.read(value, region);
     }
+}
+
+fn walked_elements(element: Element, first: u32, count: u32) -> (u64, u64) {
+    let Some(block) = element.block() else {
+        let stride = element.elements_per_word();
+        return (u64::from(first) * stride, u64::from(count) * stride);
+    };
+    let bytes = u64::from(block.bytes);
+    let elements = u64::from(block.elements);
+    let opening = u64::from(first) * WORD_BYTES;
+    let closing = (u64::from(first) + u64::from(count)) * WORD_BYTES;
+    let first = opening / bytes * elements;
+    let end = closing.div_ceil(bytes) * elements;
+    (first, end - first)
 }
 
 fn rope<W: Walk, V: Values>(values: &V, task: &W, first: u32, count: u32, narrowed: &mut Narrowed) {

@@ -192,6 +192,10 @@ impl Element {
         )
     }
 
+    pub const fn packs_on_device(self) -> bool {
+        matches!(self, Self::Q8_0)
+    }
+
     pub const fn narrow(self) -> bool {
         self.block().is_some() || self.elements_per_word() > 1
     }
