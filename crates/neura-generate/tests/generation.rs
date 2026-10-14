@@ -1,15 +1,18 @@
 use neura_abi::Element;
-use neura_decoder::Decoder;
-use neura_generate::Generator;
+use neura_decoder::{Cache, Decoder};
+use neura_generate::{Generator, Phase};
 use neura_gguf::Gguf;
-use neura_graph::{Graph, Shape};
-use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
+use neura_graph::{Graph, Shape, Value};
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest, Weights};
 use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
 
 #[path = "support/mod.rs"]
 mod support;
 
 use support::{Meta, build};
+
+const CLASSES: u32 = 8;
+const CAPACITY: u32 = 16;
 
 struct PerCharacter;
 
@@ -49,33 +52,62 @@ fn runtime() -> Runtime {
     .expect("a device that runs the tests")
 }
 
-fn generate(context: u32, wanted: usize) -> (usize, String, bool) {
+fn model(graph: &Graph, rows: u32) -> (Value, Value, Value) {
+    let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
+    let held = graph.one_hot(token, CLASSES);
+    cache.write(graph, cursor, held, held);
+    let seen = graph.sum_axis(cache.states()[0], 2);
+    let logits = graph.broadcast_to(seen, Shape::of([1, 1, rows, CLASSES]));
+    (token, cursor, logits)
+}
+
+fn phase(runtime: &Runtime, weights: &Weights, rows: u32) -> Phase {
     let graph = Graph::new();
-    let token = graph.input(Shape::matrix(1, 1), Element::Single);
-    let position = graph.input(Shape::matrix(1, 1), Element::Single);
-    let logits = graph.one_hot(position, 8);
-    let decoder = Decoder::greedy(&graph, token, position, logits, [], 3);
+    let (token, cursor, logits) = model(&graph, rows);
+    let decoder = Decoder::greedy(&graph, token, cursor, logits, 3);
+    runtime.rebind(weights, &graph);
+    let program = runtime.compile(&graph, weights);
+    Phase::new(program, decoder)
+}
+
+fn generate(prompt: &[u32], context: u32, wanted: usize, chunk: u32) -> (usize, String, bool) {
     let runtime = runtime();
-    let weights = runtime.weights(&graph);
-    let program = runtime.compile(&graph, &weights);
+    let probe = Graph::new();
+    let _ = model(&probe, 1);
+    let weights = runtime.weights(&probe);
+    let prefill = phase(&runtime, &weights, chunk);
+    let decode = phase(&runtime, &weights, 1);
     let tokenizer = tokenizer();
-    let mut generator = Generator::new(runtime, program, decoder, &tokenizer, context);
+    let mut generator = Generator::new(runtime, prefill, decode, &tokenizer, context);
     let mut text = String::new();
-    let report = generator.run(&[0], wanted, |held| text.push_str(held));
+    let report = generator.run(prompt, wanted, |held| text.push_str(held));
     (report.produced(), text, report.reached_context())
 }
 
 #[test]
-fn a_generator_walks_a_prompt_into_the_tokens_that_follow() {
-    assert_eq!(generate(16, 5), (3, "0012".to_owned(), false));
+fn a_generator_prefills_a_prompt_in_the_chunks_its_model_takes() {
+    let walked = generate(&[0, 1, 1, 2, 1], 16, 5, 1);
+    assert_eq!(walked, (5, "0112111111".to_owned(), false));
+    for chunk in [2, 3, 4, 8] {
+        assert_eq!(
+            generate(&[0, 1, 1, 2, 1], 16, 5, chunk),
+            walked,
+            "a prefill of {chunk} rows answers with the tokens a row at a time answers with",
+        );
+    }
 }
 
 #[test]
 fn a_generator_stops_at_the_token_count_it_was_asked_for() {
-    assert_eq!(generate(16, 2), (2, "001".to_owned(), false));
+    assert_eq!(
+        generate(&[0, 1, 1, 2, 1], 16, 2, 3),
+        (2, "0112111".to_owned(), false),
+    );
 }
 
 #[test]
 fn a_generator_stops_at_the_context_it_holds() {
-    assert_eq!(generate(3, 5), (2, "001".to_owned(), true));
+    assert_eq!(generate(&[0], 3, 5, 2), (2, "000".to_owned(), true));
 }

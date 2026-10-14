@@ -30,6 +30,7 @@ mod pooling;
 mod precision;
 mod precompile;
 mod predicate;
+mod prefill;
 mod quantize;
 mod ragged;
 mod ragged_sum;

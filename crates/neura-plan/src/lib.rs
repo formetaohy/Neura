@@ -13,7 +13,7 @@ mod remembered;
 mod schedule;
 mod span;
 
-pub use layout::{Arena, Layout, Seed};
+pub use layout::{Arena, Entry, Layout, Seed};
 pub use pages::WeightPages;
 pub use plan::{Encoding, Plan, Quantum, Span};
 pub use product::{Contiguous, Product, Weight};

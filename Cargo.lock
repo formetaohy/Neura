@@ -298,6 +298,7 @@ dependencies = [
  "bytemuck",
  "neura-abi",
  "neura-compiler",
+ "neura-decoder",
  "neura-gguf",
  "neura-gpu",
  "neura-graph",

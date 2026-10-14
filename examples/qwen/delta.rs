@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
-use neura::decoder::{flatten, heads, l2, matrix, rms, softplus, vector};
+use neura::decoder::{heads, joined, l2, matrix, rms, softplus, vector};
 use neura::gguf::Archive;
-use neura::{Element, Graph, Shape, Value};
+use neura::{Element, Graph, Init, Shape, Value};
 
 pub(crate) struct Delta {
     norm: Value,
@@ -23,10 +23,17 @@ pub(crate) struct Delta {
     heads: u32,
     width: u32,
     kernel: u32,
+    rows: u32,
 }
 
 impl Delta {
-    pub(crate) fn new(graph: &Graph, source: &impl Archive, config: &Config, layer: u32) -> Self {
+    pub(crate) fn new(
+        graph: &Graph,
+        source: &impl Archive,
+        config: &Config,
+        layer: u32,
+        rows: u32,
+    ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.linear_width;
         let held = config.linear_width_total();
@@ -61,12 +68,14 @@ impl Delta {
             bias: vector(graph, source, &at("ssm_dt.bias"), config.linear_heads),
             output_norm: vector(graph, source, &at("ssm_norm.weight"), width),
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
-            conv_state: graph.resident(
+            conv_state: graph.state(
                 Shape::of([1, 1, config.conv_kernel - 1, mixed]),
+                Init::Zero,
                 Element::Single,
             ),
-            state: graph.resident(
+            state: graph.state(
                 Shape::of([config.linear_heads, 1, width, width]),
+                Init::Zero,
                 Element::Single,
             ),
             floor: graph.fill(Shape::scalar(), config.floor),
@@ -74,11 +83,8 @@ impl Delta {
             heads: config.linear_heads,
             width,
             kernel: config.conv_kernel,
+            rows,
         }
-    }
-
-    pub(crate) fn states(&self) -> [Value; 2] {
-        [self.conv_state, self.state]
     }
 
     pub(crate) fn forward(&self, graph: &Graph, hidden: Value) -> Value {
@@ -91,9 +97,23 @@ impl Delta {
                 .collect::<Vec<Value>>(),
             2,
         );
-        let convolved = graph
-            .silu(graph.sum_axis(graph.mul(window, graph.permute(self.conv, [0, 1, 3, 2])), 2));
-        graph.copy_into(self.conv_state, graph.slice(window, 2, 1, self.kernel - 1));
+        let taps = graph.permute(self.conv, [0, 1, 3, 2]);
+        let mut convolved = None;
+        for tap in 0..self.kernel {
+            let held = graph.mul(
+                graph.slice(window, 2, tap, self.rows),
+                graph.slice(taps, 2, tap, 1),
+            );
+            convolved = Some(match convolved {
+                Some(sum) => graph.add(sum, held),
+                None => held,
+            });
+        }
+        let convolved = graph.silu(convolved.expect("a convolution walks the taps of its kernel"));
+        graph.copy_into(
+            self.conv_state,
+            graph.slice(window, 2, self.rows, self.kernel - 1),
+        );
         let held = self.heads * self.width;
         let query = graph.mul(
             l2(
@@ -142,21 +162,32 @@ impl Delta {
             graph.add(alpha, heads(graph, self.bias, self.heads, 1)),
         );
         let decay = graph.exp(graph.mul(heads(graph, self.decay, self.heads, 1), paced));
-        let decayed = graph.mul(self.state, decay);
-        let memory = graph.matmul(key, decayed);
-        let delta = graph.mul(graph.sub(value, memory), beta);
-        let grown = graph.add(
-            decayed,
-            graph.matmul(graph.permute(key, [0, 1, 3, 2]), delta),
-        );
-        graph.copy_into(self.state, grown);
-        let attended = graph.matmul(query, grown);
+        let mut state = self.state;
+        let mut attended = Vec::with_capacity(self.rows as usize);
+        for row in 0..self.rows {
+            let query = graph.slice(query, 2, row, 1);
+            let key = graph.slice(key, 2, row, 1);
+            let value = graph.slice(value, 2, row, 1);
+            let beta = graph.slice(beta, 2, row, 1);
+            let decay = graph.slice(decay, 2, row, 1);
+            let decayed = graph.mul(state, decay);
+            let memory = graph.matmul(key, decayed);
+            let delta = graph.mul(graph.sub(value, memory), beta);
+            let grown = graph.add(
+                decayed,
+                graph.matmul(graph.permute(key, [0, 1, 3, 2]), delta),
+            );
+            attended.push(graph.matmul(query, grown));
+            state = grown;
+        }
+        graph.copy_into(self.state, state);
+        let attended = graph.concat(&attended, 2);
         let gated = graph.mul(
             rms(graph, attended, self.output_norm, self.floor),
             graph.silu(heads(graph, gate, self.heads, self.width)),
         );
         let projected = graph.matmul(
-            flatten(graph, gated),
+            joined(graph, gated, self.heads),
             graph.permute(self.output, [0, 1, 3, 2]),
         );
         self.mlp

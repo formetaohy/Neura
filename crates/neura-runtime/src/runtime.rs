@@ -12,7 +12,7 @@ use neura_gpu::{
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::{Banks, Kernel, binding_count};
-use neura_plan::{Layout, Plan, Product, Span};
+use neura_plan::{Layout, Plan, Product, Seed, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
@@ -266,13 +266,14 @@ impl Runtime {
     pub fn weights(&self, graph: &Graph) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
-        self.seed(&layout, &weights);
+        self.seed(layout.seeds(), &weights);
         weights
     }
 
     pub fn load(&self, graph: &Graph, source: &impl Source) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
+        self.seed(layout.state_seeds(), &weights);
         weights.store().load(
             self.context.queue(),
             layout.weights(),
@@ -347,10 +348,10 @@ impl Runtime {
             .map(|directory| self.spill.get_or_init(|| Spill::of(directory)))
     }
 
-    fn seed(&self, layout: &Layout, weights: &Weights) {
+    fn seed(&self, seeds: &[Seed], weights: &Weights) {
         let queue = self.context.queue();
         let mut entropy = ENTROPY_SEED;
-        for seed in layout.seeds() {
+        for seed in seeds {
             let values = seed.init().samples(seed.elements(), &mut entropy);
             weights.store().put(
                 queue,
@@ -580,7 +581,7 @@ impl Runtime {
     fn scratch_weights(&self, graph: &Graph) -> Weights {
         self.context.assert_alive();
         let (scratch, layout) = self.parameter_store(graph);
-        self.seed(&layout, &scratch);
+        self.seed(layout.seeds(), &scratch);
         scratch
     }
 

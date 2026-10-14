@@ -27,4 +27,5 @@ neura-kernel = { workspace = true }
 
 [dev-dependencies]
 neura-compiler = { workspace = true }
+neura-decoder = { workspace = true }
 neura-gguf = { workspace = true }

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
 use crate::ops::interleaved;
-use neura::decoder::{Cache, flatten, heads, matrix, partial, rms, vector};
+use neura::decoder::{Cache, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
 use neura::{Graph, Shape, Value};
 
@@ -31,6 +31,7 @@ impl Attention {
         config: &Config,
         layer: u32,
         context: u32,
+        rows: u32,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.head_width;
@@ -66,7 +67,7 @@ impl Attention {
             ),
             query_norm: vector(graph, source, &at("attn_q_norm.weight"), width),
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
-            cache: Cache::new(graph, config.key_heads, width, context),
+            cache: Cache::new(graph, config.key_heads, width, context, rows),
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
             floor: graph.fill(Shape::scalar(), config.floor),
             base: graph.fill(Shape::scalar(), config.rope_base),
@@ -78,11 +79,7 @@ impl Attention {
         }
     }
 
-    pub(crate) fn states(&self) -> [Value; 2] {
-        self.cache.states()
-    }
-
-    pub(crate) fn forward(&self, graph: &Graph, hidden: Value, position: Value) -> Value {
+    pub(crate) fn forward(&self, graph: &Graph, hidden: Value, cursor: Value) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let packed = graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2]));
         let query = interleaved(graph, packed, self.heads, self.width, 0);
@@ -102,22 +99,22 @@ impl Attention {
         let query = partial(
             graph,
             rms(graph, query, self.query_norm, self.floor),
-            position,
+            cursor,
             self.base,
             self.rope,
         );
         let key = partial(
             graph,
             rms(graph, key, self.key_norm, self.floor),
-            position,
+            cursor,
             self.base,
             self.rope,
         );
-        self.cache.write(graph, position, key, value);
-        let attended = self.cache.attend(graph, query, position, self.scale);
+        self.cache.write(graph, cursor, key, value);
+        let attended = self.cache.attend(graph, query, cursor, self.scale);
         let gated = graph.mul(
-            flatten(graph, attended),
-            graph.sigmoid(flatten(graph, gate)),
+            joined(graph, attended, self.heads),
+            graph.sigmoid(joined(graph, gate, self.heads)),
         );
         let projected = graph.matmul(gated, graph.permute(self.output, [0, 1, 3, 2]));
         self.mlp

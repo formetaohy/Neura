@@ -50,84 +50,68 @@ fn a_vector_reads_the_width_the_file_weighs() {
 }
 
 #[test]
-fn a_cache_walks_the_heads_of_the_keys_it_holds() {
+fn a_cache_takes_the_rows_of_every_chunk_it_holds() {
     let graph = Graph::new();
-    let cache = Cache::new(&graph, 2, 4, 8);
+    let cache = Cache::new(&graph, 2, 4, 8, 3);
     let [keys, values] = cache.states();
     assert_eq!(graph.shape(keys).dims(), [2, 1, 8, 4]);
     assert_eq!(graph.shape(values).dims(), [2, 1, 8, 4]);
-    let position = graph.input(Shape::matrix(1, 1), Element::Single);
-    let query = graph.fill(Shape::of([2, 1, 1, 4]), 1.0);
+    assert_eq!(cache.rows(), 3);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let chunk = graph.fill(Shape::of([2, 1, 3, 4]), 1.0);
     let scale = graph.knob(0.5);
     cache.write(
         &graph,
-        position,
-        query,
-        graph.fill(Shape::of([2, 1, 1, 4]), 0.0),
+        cursor,
+        chunk,
+        graph.fill(Shape::of([2, 1, 3, 4]), 0.0),
     );
     assert_eq!(
         graph
-            .shape(cache.attend(&graph, query, position, scale))
+            .shape(cache.attend(&graph, chunk, cursor, scale))
             .dims(),
-        [2, 1, 1, 4],
+        [2, 1, 3, 4],
     );
-    let wide = graph.fill(Shape::of([3, 1, 1, 4]), 0.0);
-    assert!(refuses(|| cache.write(&graph, position, wide, wide)));
-}
-
-#[test]
-fn a_decoder_hands_out_the_token_it_chooses() {
-    let graph = Graph::new();
-    let cache = Cache::new(&graph, 2, 4, 8);
-    let token = graph.input(Shape::matrix(1, 1), Element::Single);
-    let position = graph.input(Shape::matrix(1, 1), Element::Single);
-    let logits = graph.fill(Shape::of([1, 1, 1, 8]), 0.0);
-    let decoder = Decoder::greedy(&graph, token, position, logits, cache.states(), 7);
-    assert_eq!(graph.shape(decoder.chosen()).dims(), [1, 1, 1, 1]);
-    assert_eq!(decoder.token().id(), token.id());
-    assert_eq!(decoder.position().id(), position.id());
-    assert_eq!(decoder.states().len(), 2);
-    assert_eq!(decoder.end(), 7);
-    let wide = graph.input(Shape::matrix(2, 1), Element::Single);
-    assert!(refuses(|| Decoder::greedy(
-        &graph,
-        wide,
-        position,
-        logits,
-        [],
-        0
-    )));
-}
-
-#[test]
-fn a_narrow_cache_holds_the_keys_and_values_the_device_writes() {
-    let graph = Graph::new();
-    let single = Cache::new(&graph, 2, 4, 8);
-    assert_eq!(single.element(), Element::Single);
-    for element in [Element::Q8_0, Element::Half, Element::Bfloat16] {
-        let cache = Cache::narrow(&graph, 2, 64, 8, element);
-        assert_eq!(cache.element(), element);
-        let [keys, values] = cache.states();
-        assert_eq!(graph.shape(keys).dims(), [2, 1, 8, 64]);
-        assert_eq!(graph.element(keys), element);
-        assert_eq!(graph.element(values), element);
-    }
-    assert!(
-        refuses(|| {
-            Cache::narrow(&graph, 2, 33, 8, Element::Half);
-        }),
-        "a cache takes a written row in whole words, and a row of 33 half numbers spans 66 bytes",
-    );
-    for element in [Element::Int8, Element::Int4, Element::Q4K, Element::Q6K] {
-        assert!(
-            refuses(|| {
-                Cache::narrow(&graph, 2, 32, 8, element);
-            }),
-            "a cache holds the keys a device writes in place, and {} storage is laid out by its host",
-            element.name(),
-        );
-    }
+    let row = graph.fill(Shape::of([2, 1, 1, 4]), 0.0);
+    assert!(refuses(|| cache.write(&graph, cursor, row, chunk)));
     assert!(refuses(|| {
-        Cache::narrow(&graph, 2, 32, 8, Element::Q8_0);
+        cache.write(
+            &graph,
+            cursor,
+            chunk,
+            graph.fill(Shape::of([3, 1, 3, 4]), 0.0),
+        )
     }));
+    assert!(refuses(|| cache.attend(&graph, row, cursor, scale)));
+    assert!(refuses(|| {
+        cache.attend(
+            &graph,
+            graph.fill(Shape::of([2, 1, 3, 3]), 0.0),
+            cursor,
+            scale,
+        )
+    }));
+    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 9)));
+    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 0)));
+}
+
+#[test]
+fn a_decoder_chooses_the_token_of_every_row_it_reads() {
+    let graph = Graph::new();
+    let token = graph.input(Shape::of([1, 1, 3, 1]), Element::Single);
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let logits = graph.fill(Shape::of([1, 1, 3, 8]), 0.0);
+    let decoder = Decoder::greedy(&graph, token, cursor, logits, 7);
+    assert_eq!(decoder.rows(), 3);
+    assert_eq!(graph.shape(decoder.chosen()).dims(), [1, 1, 3, 1]);
+    assert_eq!(decoder.token().id(), token.id());
+    assert_eq!(decoder.cursor().id(), cursor.id());
+    assert_eq!(decoder.end(), 7);
+    let single = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    assert!(refuses(|| Decoder::greedy(
+        &graph, single, cursor, logits, 7
+    )));
+    let wide = graph.input(Shape::of([1, 1, 3, 2]), Element::Single);
+    assert!(refuses(|| Decoder::greedy(&graph, wide, cursor, logits, 7)));
+    assert!(refuses(|| Decoder::greedy(&graph, token, token, logits, 7)));
 }

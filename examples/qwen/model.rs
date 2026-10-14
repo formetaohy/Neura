@@ -18,13 +18,19 @@ enum Layer {
 }
 
 impl Model {
-    pub fn new(graph: &Graph, source: &impl Archive, config: &Config, context: u32) -> Self {
+    pub fn new(
+        graph: &Graph,
+        source: &impl Archive,
+        config: &Config,
+        context: u32,
+        rows: u32,
+    ) -> Self {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
-                    Layer::Attend(Attention::new(graph, source, config, layer, context))
+                    Layer::Attend(Attention::new(graph, source, config, layer, context, rows))
                 } else {
-                    Layer::Delta(Delta::new(graph, source, config, layer))
+                    Layer::Delta(Delta::new(graph, source, config, layer, rows))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -42,22 +48,11 @@ impl Model {
         }
     }
 
-    pub fn states(&self) -> Vec<Value> {
-        let mut states = Vec::new();
-        for layer in &self.layers {
-            match layer {
-                Layer::Attend(attend) => states.extend(attend.states()),
-                Layer::Delta(delta) => states.extend(delta.states()),
-            }
-        }
-        states
-    }
-
-    pub fn step(&self, graph: &Graph, token: Value, position: Value) -> Value {
+    pub fn step(&self, graph: &Graph, token: Value, cursor: Value) -> Value {
         let mut hidden = graph.gather(self.embedding, token);
         for layer in &self.layers {
             hidden = match layer {
-                Layer::Attend(attend) => attend.forward(graph, hidden, position),
+                Layer::Attend(attend) => attend.forward(graph, hidden, cursor),
                 Layer::Delta(delta) => delta.forward(graph, hidden),
             };
         }

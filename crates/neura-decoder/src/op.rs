@@ -20,7 +20,17 @@ pub fn softplus(graph: &Graph, value: Value) -> Value {
     graph.select(graph.greater(value, threshold), value, raised)
 }
 
-pub fn flatten(graph: &Graph, value: Value) -> Value {
-    let elements = graph.shape(value).elements();
-    graph.reshape(value, Shape::of([1, 1, 1, elements]))
+pub fn joined(graph: &Graph, value: Value, count: u32) -> Value {
+    let shape = graph.shape(value);
+    assert_eq!(
+        shape.dims()[0],
+        count,
+        "a join lays the {count} heads of a chunk beside each other, and {:?} holds {} planes",
+        shape.dims(),
+        shape.dims()[0],
+    );
+    let parts = (0..count)
+        .map(|head| graph.slice(value, 0, head, 1))
+        .collect::<Vec<Value>>();
+    graph.concat(&parts, 3)
 }

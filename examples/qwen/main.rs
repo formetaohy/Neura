@@ -10,13 +10,14 @@ mod tokenizer;
 use config::Config;
 use model::Model;
 use neura::decoder::Decoder;
-use neura::generate::Generator;
+use neura::generate::{Generator, Phase};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::{Element, Graph, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
 use tokenizer::Tokenizer;
 
+const CHUNK: u32 = 8;
 const CONTEXT: u32 = 1024;
 const READBACK: u64 = 8 << 20;
 const HEAP: u64 = 2 << 30;
@@ -65,31 +66,55 @@ fn main() {
         ..Default::default()
     })
     .expect("a device that runs the model");
-    let graph = Graph::new();
-    let model = Model::new(&graph, &source, &config, context);
-    let token = graph.input(Shape::matrix(1, 1), Element::Single);
-    let position = graph.input(Shape::matrix(1, 1), Element::Single);
-    let logits = model.step(&graph, token, position);
-    let decoder = Decoder::greedy(
-        &graph,
-        token,
-        position,
-        logits,
-        model.states(),
+    let chunk = CHUNK.min(context);
+
+    let prefill = Graph::new();
+    let prefill_model = Model::new(&prefill, &source, &config, context, chunk);
+    let prefill_token = prefill.input(Shape::of([1, 1, chunk, 1]), Element::Single);
+    let prefill_cursor = prefill.input(Shape::scalar(), Element::Single);
+    let prefill_logits = prefill_model.step(&prefill, prefill_token, prefill_cursor);
+    let prefill_decoder = Decoder::greedy(
+        &prefill,
+        prefill_token,
+        prefill_cursor,
+        prefill_logits,
         tokenizer.end_of_turn(),
     );
-    let weights = runtime.load(&graph, &source);
-    let program = runtime.compile(&graph, &weights);
+    let weights = runtime.load(&prefill, &source);
+    let prefill = runtime.compile(&prefill, &weights);
+
+    let decode = Graph::new();
+    let decode_model = Model::new(&decode, &source, &config, context, 1);
+    let decode_token = decode.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let decode_cursor = decode.input(Shape::scalar(), Element::Single);
+    let decode_logits = decode_model.step(&decode, decode_token, decode_cursor);
+    let decode_decoder = Decoder::greedy(
+        &decode,
+        decode_token,
+        decode_cursor,
+        decode_logits,
+        tokenizer.end_of_turn(),
+    );
+    runtime.rebind(&weights, &decode);
+    let decode = runtime.compile(&decode, &weights);
+
     println!(
         "plan: {:.1}MB of tensors, {:.1}MB of device memory",
-        program.tensor_bytes() as f64 / (1 << 20) as f64,
-        program.device_bytes() as f64 / (1 << 20) as f64,
+        prefill.tensor_bytes() as f64 / (1 << 20) as f64,
+        prefill.device_bytes() as f64 / (1 << 20) as f64,
     );
 
-    let mut generator = Generator::new(runtime, program, decoder, tokenizer.engine(), context);
+    let mut generator = Generator::new(
+        runtime,
+        Phase::new(prefill, prefill_decoder),
+        Phase::new(decode, decode_decoder),
+        tokenizer.engine(),
+        context,
+    );
     let report = generator.run(&tokens, wanted, |held| print!("{held}"));
     println!(
-        "\n{} tokens in {:.2}s ({:.1} tokens/s)",
+        "
+{} tokens in {:.2}s ({:.1} tokens/s)",
         report.produced(),
         report.seconds(),
         report.produced() as f64 / report.seconds(),

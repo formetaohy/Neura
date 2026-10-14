@@ -136,6 +136,7 @@ pub struct Layout {
     state: Arena,
     tensors: Arena,
     seeds: Vec<Seed>,
+    state_seeds: Vec<Seed>,
 }
 
 impl Layout {
@@ -162,34 +163,38 @@ impl Layout {
             alignment,
             0,
         );
-        let seeds = values
-            .iter()
-            .enumerate()
-            .filter(|(id, info)| {
-                info.storage as usize == *id
-                    && matches!(info.residency, Residency::Parameter | Residency::State)
-            })
-            .map(|(id, info)| {
-                let (word, element, scale) = match info.residency {
-                    Residency::State => state.placement(id as u32),
-                    _ => weights.placement(id as u32),
-                };
-                Seed {
-                    word,
-                    element,
-                    scale,
-                    elements: info.shape.elements(),
-                    init: info
-                        .seed
-                        .expect("a stored tensor carries the sampler it was declared with"),
-                }
-            })
-            .collect();
+        let seed_of = |id: usize, info: &ValueInfo| {
+            let (word, element, scale) = match info.residency {
+                Residency::State => state.placement(id as u32),
+                _ => weights.placement(id as u32),
+            };
+            Seed {
+                word,
+                element,
+                scale,
+                elements: info.shape.elements(),
+                init: info
+                    .seed
+                    .expect("a stored tensor carries the sampler it was declared with"),
+            }
+        };
+        let walked = |wanted: fn(&ValueInfo) -> bool| {
+            values
+                .iter()
+                .enumerate()
+                .filter(|(id, info)| info.storage as usize == *id && wanted(info))
+                .map(|(id, info)| seed_of(id, info))
+                .collect::<Vec<Seed>>()
+        };
+        let seeds =
+            walked(|info| matches!(info.residency, Residency::Parameter | Residency::State));
+        let state_seeds = walked(|info| info.residency == Residency::State);
         Self {
             weights,
             state,
             tensors,
             seeds,
+            state_seeds,
         }
     }
 
@@ -211,6 +216,10 @@ impl Layout {
 
     pub fn seeds(&self) -> &[Seed] {
         &self.seeds
+    }
+
+    pub fn state_seeds(&self) -> &[Seed] {
+        &self.state_seeds
     }
 
     pub(crate) fn address(&self, storage: u32, residency: Residency, arena: &[u64]) -> u64 {

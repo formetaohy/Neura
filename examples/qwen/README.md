@@ -13,5 +13,8 @@ greedily, and generation ends at the end of turn or at the token count.
 
 `Qwen3.5-0.8B-Q4_K_M.gguf` and the other mainstream quants of that model (Q4_K_M, Q5_K_M, Q6_K,
 Q8_0) load as they are, without repacking on the host. The example runs a context of `min(1024, the
-model's own)` and keeps the kv caches, convolution states and gated delta net states resident on the
-device, so generation costs one submission per token.
+model's own)` and weighs the model twice over one store: a prefill program that takes eight rows of
+a chunk and a decode program that takes one, sharing the weights, the kv caches, the convolution
+states and the gated delta net states every row advances. The prompt walks through the prefill
+program a full chunk at a time, and the rows a prompt leaves over, together with every token it
+answers with, walk through the decode program one row at a time.

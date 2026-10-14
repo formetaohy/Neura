@@ -1,92 +1,73 @@
-use neura_abi::{Element, WORD_BYTES};
-use neura_graph::{AttentionOptions, Graph, Shape, Value};
+use neura_abi::Element;
+use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
 
 pub struct Cache {
     keys: Value,
     values: Value,
+    seat: Value,
     heads: u32,
     width: u32,
     capacity: u32,
-    element: Element,
+    rows: u32,
 }
 
 impl Cache {
-    pub fn new(graph: &Graph, heads: u32, width: u32, capacity: u32) -> Self {
-        Self::narrow(graph, heads, width, capacity, Element::Single)
-    }
-
-    pub fn narrow(graph: &Graph, heads: u32, width: u32, capacity: u32, element: Element) -> Self {
+    pub fn new(graph: &Graph, heads: u32, width: u32, capacity: u32, rows: u32) -> Self {
         assert!(
             heads > 0 && width > 0,
             "a cache of {heads} heads of {width} numbers holds no key",
         );
-        assert!(capacity > 0, "a cache of {capacity} positions holds no key",);
-        let quantized = element.block().is_some();
+        assert!(capacity > 0, "a cache of {capacity} positions holds no key");
         assert!(
-            (!quantized || element.packs_on_device())
-                && (element.narrow() || element == Element::Single),
-            "a cache of {} storage holds the keys a device writes in place, and the {} storage of a cache walks one number per word or the words a device packs",
-            element.name(),
-            element.name(),
+            rows > 0 && rows <= capacity,
+            "a cache of {capacity} positions takes {rows} rows at a time, and a chunk of more rows than the cache holds walks past the slots it fills",
         );
-        let rows = Shape::of([heads, 1, capacity, width]);
-        for at in rows.dims() {
-            assert!(
-                at > 0,
-                "a cache of {:?} walks no number on an axis its shape leaves empty",
-                rows.dims(),
-            );
-        }
-        assert!(
-            element.payload_words(u64::from(width)) * WORD_BYTES
-                == element.payload_bytes(u64::from(width)),
-            "a cache takes a written row in whole words, and a row of {width} {} numbers spans {} bytes",
-            element.name(),
-            element.payload_bytes(u64::from(width)),
-        );
+        let held = Shape::of([heads, 1, capacity, width]);
         Self {
-            keys: graph.resident(rows, element),
-            values: graph.resident(rows, element),
+            keys: graph.state(held, Init::Zero, Element::Single),
+            values: graph.state(held, Init::Zero, Element::Single),
+            seat: crate::layout::seat(graph, heads, capacity, rows),
             heads,
             width,
             capacity,
-            element,
+            rows,
         }
-    }
-
-    pub fn element(&self) -> Element {
-        self.element
     }
 
     pub fn states(&self) -> [Value; 2] {
         [self.keys, self.values]
     }
 
-    pub fn write(&self, graph: &Graph, position: Value, keys: Value, values: Value) {
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    pub fn write(&self, graph: &Graph, cursor: Value, keys: Value, values: Value) {
         for (held, what) in [(keys, "key"), (values, "value")] {
             assert_eq!(
                 graph.shape(held).dims(),
-                [self.heads, 1, 1, self.width],
-                "a {what} of {} heads of {} numbers walks {:?} where a cache of {} positions holds it",
+                [self.heads, 1, self.rows, self.width],
+                "a {what} of {} heads of {} numbers walks {:?} where a cache of {} positions takes {} rows of a chunk",
                 self.heads,
                 self.width,
                 graph.shape(held).dims(),
                 self.capacity,
+                self.rows,
             );
         }
-        let rows = crate::layout::seat(graph, position, self.heads, self.capacity);
+        let slots = graph.add(self.seat, cursor);
         for (held, stored) in [(keys, self.keys), (values, self.values)] {
-            let packed = match self.element {
-                Element::Single => held,
-                block if block.block().is_some() => graph.block_quantize(held, block),
-                narrow => graph.cast(held, narrow),
-            };
-            graph.write_into(stored, rows, packed);
+            graph.write_into(stored, slots, held);
         }
     }
 
-    pub fn attend(&self, graph: &Graph, query: Value, position: Value, scale: Value) -> Value {
+    pub fn attend(&self, graph: &Graph, query: Value, cursor: Value, scale: Value) -> Value {
         let shape = graph.shape(query).dims();
+        assert_eq!(
+            shape[2], self.rows,
+            "a query of {} rows weighs the keys a cache of {} rows writes, and {:?} walks another count",
+            shape[2], self.rows, shape,
+        );
         assert_eq!(
             shape[3], self.width,
             "a query of {} numbers walks {shape:?} where the cache it reads holds keys of {} numbers",
@@ -105,7 +86,7 @@ impl Cache {
             AttentionOptions {
                 scale: Some(scale),
                 causal: true,
-                origin: Some(position),
+                origin: Some(cursor),
                 segments: None,
                 reach: None,
                 query_segments: None,
