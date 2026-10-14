@@ -27,21 +27,21 @@ pub fn mse_loss(graph: &Graph, prediction: Value, target: Value) -> Value {
     mean(graph, graph.mul(difference, difference))
 }
 
-pub fn cross_entropy(graph: &Graph, logits: Value, target: Value) -> Value {
+pub fn cross_entropy(graph: &Graph, logits: Value, classes: Value) -> Value {
     let shape = graph.shape(logits);
     assert_eq!(
-        shape,
-        graph.shape(target),
-        "a cross entropy weighs every class of a row by the target it holds for that class",
+        graph.shape(classes).dims(),
+        [shape.dims()[0], shape.dims()[1], shape.dims()[2], 1],
+        "a cross entropy weighs the class every row chose, and {:?} holds {} numbers per row of {:?}",
+        graph.shape(classes).dims(),
+        graph.shape(classes).dims()[3],
+        shape.dims(),
     );
-    let log_probability = graph.log_softmax(logits);
-    let weighted = graph.mul(target, log_probability);
-    graph.neg(mean_rows(graph, graph.sum_rows(weighted)))
+    graph.neg(mean_rows(graph, graph.class_log_softmax(logits, classes)))
 }
 
 pub fn policy_loss(graph: &Graph, logits: Value, action: Value, advantage: Value) -> Value {
     let shape = graph.shape(logits);
-    let classes = shape.dims()[3];
     let rows = shape.rows();
     assert_eq!(
         graph.shape(action).elements(),
@@ -61,9 +61,6 @@ pub fn policy_loss(graph: &Graph, logits: Value, action: Value, advantage: Value
         weights.dims(),
         weights.elements(),
     );
-    let taken = graph.mul(graph.one_hot(action, classes), graph.log_softmax(logits));
-    graph.neg(mean_rows(
-        graph,
-        graph.sum_rows(graph.mul(advantage, taken)),
-    ))
+    let taken = graph.class_log_softmax(logits, action);
+    graph.neg(mean_rows(graph, graph.mul(advantage, taken)))
 }

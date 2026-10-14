@@ -1042,6 +1042,62 @@ impl Graph {
         self.rowwise(Kind::LogSoftmax, value)
     }
 
+    pub fn class_log_softmax(&self, logits: Value, classes: Value) -> Value {
+        let logits = self.own(logits);
+        let classes = self.own(classes);
+        self.index_list(classes);
+        assert!(
+            self.contiguous(logits),
+            "a class log softmax folds a row of a tensor stored row by row, and value {} is a view",
+            logits.id(),
+        );
+        let shape = self.shape(logits);
+        assert!(
+            shape.dims()[3] > 0 && shape.free(3).is_none(),
+            "a class log softmax weighs every class a row holds, and axis 3 of {:?} walks free extent {:?}",
+            shape.dims(),
+            shape.free(3).unwrap_or_default(),
+        );
+        let held = self.shape(classes);
+        for axis in 0..3 {
+            assert!(
+                held.dims()[axis as usize] == shape.dims()[axis as usize]
+                    && held.free(axis) == shape.free(axis),
+                "a class log softmax weighs one class of every row it folds, and axis {axis} of {:?} walks {} numbers where {shape:?} walks {}",
+                held.dims(),
+                held.dims()[axis as usize],
+                shape.dims()[axis as usize],
+            );
+        }
+        let folded = Shape::from_axes(
+            [shape.dims()[0], shape.dims()[1], shape.dims()[2], 1],
+            [shape.free(0), shape.free(1), shape.free(2), None],
+        );
+        let out = self.fresh(
+            folded,
+            Element::Single,
+            Residency::Derived,
+            self.tracked(&[logits]),
+        );
+        let statistic = self.fresh(folded, Element::Single, Residency::Derived, false);
+        let mut task = TaskInfo::of(
+            Kind::ClassLogSoftmax,
+            op::NONE,
+            out.id(),
+            [
+                logits.id(),
+                classes.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.extra = statistic.id();
+        self.push(task);
+        out
+    }
+
     pub fn argmax(&self, value: Value) -> Value {
         let value = self.own(value);
         self.choice(Kind::Argmax, value, [NO_VALUE, NO_VALUE, NO_VALUE])

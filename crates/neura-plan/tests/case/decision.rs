@@ -1628,3 +1628,67 @@ fn a_softmax_that_already_fills_the_device_walks_whole_rows() {
         }
     }
 }
+
+#[test]
+fn a_starved_class_log_softmax_parts_a_row_between_its_column_sections() {
+    let columns = 8192u32;
+    let graph = Graph::new();
+    let logits = graph.parameter(Shape::matrix(1, columns), Init::Zero, Element::Single);
+    let classes = graph.input(Shape::matrix(1, 1), Element::Single);
+    let chosen = graph.class_log_softmax(logits, classes);
+    let loss = graph.sum(chosen);
+    let gradients = graph.backward(loss);
+    let gradient = gradients.of(logits);
+    graph.retain(loss);
+    graph.retain(gradient);
+    for profile in [narrow(), wide()] {
+        let plan = plan_with(&graph, profile);
+        assert!(plan.kinds().contains(&Kind::ClassLogSoftmaxFold));
+        assert!(plan.kinds().contains(&Kind::ClassLogSoftmaxGrad));
+        let all = tasks(&plan);
+        let chunks = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::ClassLogSoftmax && task.out != chosen.id())
+            .collect::<Vec<_>>();
+        let folds = all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::ClassLogSoftmaxFold)
+            .collect::<Vec<_>>();
+        let sections = columns / 1024;
+        assert_eq!(
+            chunks.len() as u32,
+            sections,
+            "one row of {columns} numbers parts its columns between {sections} tasks",
+        );
+        assert_eq!(folds.len(), 1, "one row folds its column sections once");
+        assert_eq!(folds[0].a, chunks[0].out);
+        assert_eq!(folds[0].b, logits.id());
+        assert_eq!(folds[0].c, classes.id());
+        assert_eq!(folds[0].out, chosen.id());
+        assert_ne!(
+            folds[0].extra, NO_VALUE,
+            "a fold publishes the normalizer every gradient reads",
+        );
+        assert_eq!(folds[0].splits, sections);
+        for task in &chunks {
+            assert_eq!(task.splits, sections);
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.extra, NO_VALUE);
+            assert_eq!(task.first, 0);
+            assert_eq!(task.count, 1);
+        }
+        for (section, task) in chunks.iter().enumerate() {
+            assert_eq!(task.section as usize, section);
+            assert_ne!(task.out, chosen.id());
+        }
+        for task in all
+            .iter()
+            .filter(|task| Kind::of(task.kind) == Kind::ClassLogSoftmaxGrad)
+        {
+            assert_eq!(task.a, logits.id());
+            assert_eq!(task.b, classes.id());
+            assert_eq!(task.d, folds[0].extra);
+            assert_eq!(task.out, gradient.id());
+        }
+    }
+}

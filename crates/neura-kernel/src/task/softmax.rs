@@ -412,6 +412,232 @@ mod device {
         }
     }
 
+    fn chosen_class(task: Task, classes: Value, row: u32, columns: u32, subject: u32) -> u32 {
+        return whole_index(fetch(classes, row), columns, subject, refusal::INDEX);
+    }
+
+    fn class_log_softmax_row_by_thread(
+        task: Task,
+        source: Value,
+        classes: Value,
+        output: Value,
+        statistic: Value,
+        row: u32,
+        columns: u32,
+    ) {
+        let maximum = row_max_by_thread(source, row, columns);
+        let normalizer = maximum + positive_log(row_mass_by_thread(source, row, columns, maximum));
+        let chosen = fetch(
+            source,
+            row * columns + chosen_class(task, classes, row, columns, kind::CLASS_LOG_SOFTMAX),
+        );
+        publish(output, row, chosen - normalizer);
+        publish(statistic, row, normalizer);
+    }
+
+    fn class_log_softmax_grad_span(
+        task: Task,
+        source: Value,
+        classes: Value,
+        gradient: Value,
+        statistic: Value,
+        output: Value,
+        row: u32,
+        columns: u32,
+        opening: u32,
+        closing: u32,
+        step: u32,
+    ) {
+        let normalizer = fetch(statistic, row);
+        let held = fetch(gradient, row);
+        let chosen = chosen_class(task, classes, row, columns, kind::CLASS_LOG_SOFTMAX_GRAD);
+        let row_at = coordinates(row * output.dims.w, output.dims);
+        for column in stride(opening, closing, step) {
+            let at = row_at + uvec4(0u32, 0u32, 0u32, column);
+            let probability = softmax_exp(fetch(source, row * columns + column) - normalizer);
+            publish(
+                output,
+                row * output.dims.w + column,
+                chained(
+                    task,
+                    at,
+                    held * (select(0.0, 1.0, column == chosen) - probability),
+                ),
+            );
+        }
+    }
+
+    fn run_class_log_softmax(task: Task, lid: u32) {
+        let source = values[task.a];
+        let classes = values[task.b];
+        let output = values[task.out];
+        let columns = source.dims.w;
+        if columns == 0u32 {
+            return;
+        }
+        let sections = task.splits;
+        let first = section_first(columns, sections, task.section);
+        let last = section_last(columns, sections, task.section);
+        if sections > 1u32 {
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                section_stats(task, lid, source, row, columns, first, last);
+                workgroup_barrier();
+            }
+            return;
+        }
+        let statistic = values[task.extra];
+        match task.geometry {
+            strategy::THREAD_ROW => {
+                for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+                    class_log_softmax_row_by_thread(
+                        task, source, classes, output, statistic, row, columns,
+                    );
+                }
+            }
+            strategy::WORKGROUP_ROW => {
+                for row in stride(task.first, task.first + task.count, 1u32) {
+                    let mut local_max = max_identity();
+                    for column in stride(lid, columns, WORKGROUP_SIZE) {
+                        local_max = max(local_max, fetch(source, row * columns + column));
+                    }
+                    let row_max = workgroup_max(lid, local_max);
+                    let mut local_sum = 0.0;
+                    for column in stride(lid, columns, WORKGROUP_SIZE) {
+                        local_sum = local_sum
+                            + softmax_exp(fetch(source, row * columns + column) - row_max);
+                    }
+                    let row_sum = workgroup_sum(lid, local_sum);
+                    if lid == 0u32 {
+                        let normalizer = row_max + positive_log(row_sum);
+                        let chosen = fetch(
+                            source,
+                            row * columns
+                                + chosen_class(
+                                    task,
+                                    classes,
+                                    row,
+                                    columns,
+                                    kind::CLASS_LOG_SOFTMAX,
+                                ),
+                        );
+                        publish(output, row, chosen - normalizer);
+                        publish(statistic, row, normalizer);
+                    }
+                    workgroup_barrier();
+                }
+            }
+            _ => refuse(kind::CLASS_LOG_SOFTMAX, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn run_class_log_softmax_fold(task: Task, lid: u32) {
+        let stats = values[task.a];
+        let source = values[task.b];
+        let classes = values[task.c];
+        let output = values[task.out];
+        let statistic = values[task.extra];
+        let columns = source.dims.w;
+        let sections = task.splits;
+        let step = (sections + WORKGROUP_SIZE - 1u32) / WORKGROUP_SIZE;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let base = row * 2u32 * sections;
+            let mut local_max = max_identity();
+            for at in stride(0u32, step, 1u32) {
+                let other = lid * step + at;
+                if other < sections {
+                    local_max = max(local_max, fetch(stats, base + 2u32 * other));
+                }
+            }
+            let row_max = workgroup_max(lid, local_max);
+            let mut local_sum = 0.0;
+            for at in stride(0u32, step, 1u32) {
+                let other = lid * step + at;
+                if other < sections {
+                    let held = fetch(stats, base + 2u32 * other);
+                    local_sum = local_sum
+                        + fetch(stats, base + 2u32 * other + 1u32) * softmax_exp(held - row_max);
+                }
+            }
+            let row_sum = workgroup_sum(lid, local_sum);
+            if lid == 0u32 {
+                let normalizer = row_max + positive_log(row_sum);
+                let chosen = fetch(
+                    source,
+                    row * columns
+                        + chosen_class(task, classes, row, columns, kind::CLASS_LOG_SOFTMAX_FOLD),
+                );
+                publish(output, row, chosen - normalizer);
+                publish(statistic, row, normalizer);
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn run_class_log_softmax_grad(task: Task, lid: u32) {
+        let source = values[task.a];
+        let classes = values[task.b];
+        let gradient = values[task.c];
+        let statistic = values[task.d];
+        let output = values[task.out];
+        let columns = source.dims.w;
+        if columns == 0u32 {
+            return;
+        }
+        let sections = task.splits;
+        let first = section_first(columns, sections, task.section);
+        let last = section_last(columns, sections, task.section);
+        if sections > 1u32 {
+            for row in stride(task.first, task.first + task.count, 1u32) {
+                class_log_softmax_grad_span(
+                    task,
+                    source,
+                    classes,
+                    gradient,
+                    statistic,
+                    output,
+                    row,
+                    columns,
+                    first + lid,
+                    last,
+                    WORKGROUP_SIZE,
+                );
+            }
+            return;
+        }
+        match task.geometry {
+            strategy::THREAD_ROW => {
+                for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+                    class_log_softmax_grad_span(
+                        task, source, classes, gradient, statistic, output, row, columns, 0u32,
+                        columns, 1u32,
+                    );
+                }
+            }
+            strategy::WORKGROUP_ROW => {
+                for row in stride(task.first, task.first + task.count, 1u32) {
+                    class_log_softmax_grad_span(
+                        task,
+                        source,
+                        classes,
+                        gradient,
+                        statistic,
+                        output,
+                        row,
+                        columns,
+                        lid,
+                        columns,
+                        WORKGROUP_SIZE,
+                    );
+                }
+            }
+            _ => refuse(
+                kind::CLASS_LOG_SOFTMAX_GRAD,
+                refusal::GEOMETRY,
+                task.geometry,
+            ),
+        }
+    }
+
     fn run_softmax_fold(task: Task, lid: u32) {
         let stats = values[task.a];
         let folded = values[task.out];

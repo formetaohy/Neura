@@ -16,6 +16,8 @@ const REDUCTION_CEILING: u32 = 65536;
 const SOFTMAX_ROW_CEILING: u32 = 8;
 const SOFTMAX_FORWARD_PASSES: u64 = 3;
 const SOFTMAX_GRADIENT_PASSES: u64 = 2;
+const CLASS_LOG_SOFTMAX_FORWARD_PASSES: u64 = 2;
+const CLASS_LOG_SOFTMAX_GRADIENT_PASSES: u64 = 1;
 const SOFTMAX_FORWARD_ROUND_ELEMENTS: u64 = 3125;
 const SOFTMAX_GRADIENT_ROUND_ELEMENTS: u64 = 2000;
 const SOFTMAX_WORKGROUP_ROW: u64 = 7;
@@ -497,6 +499,9 @@ fn schedule_unit(
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(plan, unit, profile);
         }
+        Kind::ClassLogSoftmax | Kind::ClassLogSoftmaxGrad => {
+            class_log_softmax(plan, unit, profile);
+        }
         Kind::Argmax | Kind::Categorical => choice(plan, unit, profile, target),
         Kind::Sample => sample(plan, unit, profile),
         Kind::TopK => top_k(plan, unit, profile),
@@ -565,6 +570,11 @@ fn schedule_unit(
         }
         Kind::SoftmaxFold | Kind::SoftmaxGradFold => {
             panic!("a fold of row statistics comes from the softmax whose columns are split")
+        }
+        Kind::ClassLogSoftmaxFold => {
+            panic!(
+                "a fold of row statistics comes from the class log softmax whose columns are split"
+            )
         }
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
@@ -1087,6 +1097,14 @@ fn softmax_body(unit: &TaskInfo, rows: u32, columns: u32, profile: Profile) -> u
         Kind::SoftmaxGrad | Kind::LogSoftmaxGrad => {
             (SOFTMAX_GRADIENT_PASSES, SOFTMAX_GRADIENT_ROUND_ELEMENTS)
         }
+        Kind::ClassLogSoftmax => (
+            CLASS_LOG_SOFTMAX_FORWARD_PASSES,
+            SOFTMAX_FORWARD_ROUND_ELEMENTS,
+        ),
+        Kind::ClassLogSoftmaxGrad => (
+            CLASS_LOG_SOFTMAX_GRADIENT_PASSES,
+            SOFTMAX_GRADIENT_ROUND_ELEMENTS,
+        ),
         _ => panic!(
             "a {} task walks no row of the softmax family",
             unit.kind.name(),
@@ -1172,6 +1190,116 @@ fn softmax_sectioned(
     }
 }
 
+fn class_log_softmax(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let out = plan.shape(unit.out);
+    let rows = out.rows();
+    let columns = plan.shape(unit.inputs[0]).columns();
+    let sections = softmax_sections(plan, unit, rows, columns, profile);
+    if sections > 1 {
+        match unit.kind {
+            Kind::ClassLogSoftmax => {
+                class_log_softmax_sectioned(plan, unit, rows, columns, sections, profile)
+            }
+            _ => class_log_softmax_grad_sectioned(plan, unit, rows, columns, sections, profile),
+        }
+        return;
+    }
+    let geometry = softmax_body(unit, rows, columns, profile);
+    let target = device_workgroups(profile);
+    let per_task = match geometry {
+        strategy::THREAD_ROW => choice_rows_per_task(rows, target),
+        _ => softmax_rows_per_task(rows, target),
+    };
+    let measure = measured(plan, unit.out, Measure::Rows);
+    for (first, count, split) in span::chunks(rows, per_task, measure) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(columns));
+        task.geometry = geometry;
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn class_log_softmax_sectioned(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let words = softmax_words(unit.kind);
+    let stats = plan.publish(Shape::of([1, 1, rows, words * sections]));
+    let measure = measured(plan, unit.out, Measure::Rows);
+    let spans = span::chunks(
+        rows,
+        softmax_rows_per_task(rows, device_workgroups(profile)),
+        measure,
+    );
+    let band = columns.div_ceil(sections);
+    for (first, count, split) in spans.iter().copied() {
+        for section in 0..sections {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(band) * 2);
+            task.out = stats;
+            task.extra = NO_VALUE;
+            task.splits = sections;
+            task.section = section;
+            task.chain.clear();
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+    for (first, count, split) in spans {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(sections) * u64::from(words),
+        );
+        task.kind = Kind::ClassLogSoftmaxFold;
+        task.inputs = [
+            stats,
+            unit.inputs[0],
+            unit.inputs[1],
+            NO_VALUE,
+            NO_VALUE,
+            NO_VALUE,
+        ];
+        task.splits = sections;
+        task.section = 0;
+        task.origin = NO_VALUE;
+        task.prelude.clear();
+        task.chain.clear();
+        task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn class_log_softmax_grad_sectioned(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    rows: u32,
+    columns: u32,
+    sections: u32,
+    profile: Profile,
+) {
+    let measure = measured(plan, unit.out, Measure::Rows);
+    let spans = span::chunks(
+        rows,
+        softmax_rows_per_task(rows, device_workgroups(profile)),
+        measure,
+    );
+    let band = columns.div_ceil(sections);
+    for (first, count, split) in spans {
+        for section in 0..sections {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(band));
+            task.splits = sections;
+            task.section = section;
+            task.split = split;
+            plan.tasks.push(task);
+        }
+    }
+}
+
 fn softmax_sections(
     plan: &Plan,
     unit: &TaskInfo,
@@ -1208,7 +1336,7 @@ fn softmax_sealed(plan: &Plan, unit: &TaskInfo) -> bool {
 
 pub(crate) fn softmax_words(kind: Kind) -> u32 {
     match kind {
-        Kind::Softmax | Kind::LogSoftmax => 2,
+        Kind::Softmax | Kind::LogSoftmax | Kind::ClassLogSoftmax => 2,
         _ => 1,
     }
 }

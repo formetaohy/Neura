@@ -109,7 +109,7 @@ fn session(graph: &Graph, model: &Model, rows: u32, columns: u32) -> Session {
         Element::Single,
     );
     let logits = model.logits(graph, images, batch);
-    let loss = cross_entropy(graph, logits, graph.one_hot(labels, CLASSES));
+    let loss = cross_entropy(graph, logits, labels);
     graph.retain(logits);
     graph.retain(loss);
     Session {

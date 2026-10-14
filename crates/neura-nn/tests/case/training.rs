@@ -212,16 +212,14 @@ fn moments_track_each_parameter_once() {
 
 fn actions(samples: u32) -> (Vec<f32>, Vec<f32>) {
     let mut observations = Vec::with_capacity(samples as usize * 2);
-    let mut targets = Vec::with_capacity(samples as usize * 3);
+    let mut targets = Vec::with_capacity(samples as usize);
     for sample in 0..samples {
         let action = sample % 3;
         let angle = action as f32 * core::f32::consts::TAU / 3.0;
         let reach = 0.9 + 0.05 * (sample % 5) as f32;
         observations.push(angle.cos() * reach);
         observations.push(angle.sin() * reach);
-        for class in 0..3 {
-            targets.push(f32::from(class == action));
-        }
+        targets.push(action as f32);
     }
     (observations, targets)
 }
@@ -251,7 +249,7 @@ fn a_network_learns_the_action_it_was_shown() {
         Element::Single,
     );
     let observations = graph.input(Shape::matrix(24, 2), Element::Single);
-    let targets = graph.input(Shape::matrix(24, 3), Element::Single);
+    let targets = graph.input(Shape::matrix(24, 1), Element::Single);
     let logits = model.forward(&graph, observations);
     graph.retain(logits);
     let loss = cross_entropy(&graph, logits, targets);
@@ -389,9 +387,9 @@ struct LossFamily {
     gradient: Value,
 }
 
-fn loss_family(graph: &Graph, shape: Shape, cross: bool) -> LossFamily {
+fn loss_family(graph: &Graph, shape: Shape, target_shape: Shape, cross: bool) -> LossFamily {
     let logits = graph.gradient_input(shape, Element::Single);
-    let target = graph.input(shape, Element::Single);
+    let target = graph.input(target_shape, Element::Single);
     let loss = if cross {
         cross_entropy(graph, logits, target)
     } else {
@@ -414,16 +412,30 @@ fn a_loss_weighs_the_lengths_a_binding_holds() {
         let graph = Graph::new();
         let rows = graph.free(8);
         let dynamic = Shape::of([1, 1, 8, 4]).freed(&[(2, rows)]);
-        let family = loss_family(&graph, dynamic, cross);
+        let target = if cross {
+            Shape::of([1, 1, 8, 1]).freed(&[(2, rows)])
+        } else {
+            dynamic
+        };
+        let family = loss_family(&graph, dynamic, target, cross);
         let store = runtime.weights(&graph);
         let program = runtime.compile(&graph, &store);
         for live in [8u32, 5, 1] {
             let graph = Graph::new();
-            let fixed = loss_family(&graph, Shape::of([1, 1, live, 4]), cross);
+            let fixed = loss_family(
+                &graph,
+                Shape::of([1, 1, live, 4]),
+                Shape::of([1, 1, live, if cross { 1 } else { 4 }]),
+                cross,
+            );
             let store = runtime.weights(&graph);
             let reference = runtime.compile(&graph, &store);
             let logits = data(live * 4, 41);
-            let target = data(live * 4, 43);
+            let target = if cross {
+                (0..live).map(|at| (at % 4) as f32).collect::<Vec<_>>()
+            } else {
+                data(live * 4, 43)
+            };
             runtime.write(&reference, fixed.logits, &logits);
             runtime.write(&reference, fixed.target, &target);
             runtime.run(&reference);

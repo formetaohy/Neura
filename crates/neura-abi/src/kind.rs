@@ -349,6 +349,30 @@ kinds! {
         chain: true,
         origin: false,
     };
+    ClassLogSoftmax CLASS_LOG_SOFTMAX = "class_log_softmax" {
+        entry: "run_class_log_softmax",
+        modules: [Reduce, Softmax],
+        geometry: Strategy,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    ClassLogSoftmaxFold CLASS_LOG_SOFTMAX_FOLD = "class_log_softmax_fold" {
+        entry: "run_class_log_softmax_fold",
+        modules: [Reduce, Softmax],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
+    ClassLogSoftmaxGrad CLASS_LOG_SOFTMAX_GRAD = "class_log_softmax_grad" {
+        entry: "run_class_log_softmax_grad",
+        modules: [Reduce, Softmax],
+        geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
     Argmax ARGMAX = "argmax" {
         entry: "run_argmax",
         modules: [Reduce, Choice],

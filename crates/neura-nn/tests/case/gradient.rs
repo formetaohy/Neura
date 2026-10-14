@@ -356,7 +356,7 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
     let runtime = open();
     let graph = Graph::new();
     let logits = graph.parameter(Shape::matrix(4, 3), Init::Zero, Element::Single);
-    let targets = graph.input(Shape::matrix(4, 3), Element::Single);
+    let targets = graph.input(Shape::matrix(4, 1), Element::Single);
     let loss = cross_entropy(&graph, logits, targets);
     let gradients = graph.backward(loss);
     graph.retain(gradients.of(logits));
@@ -368,12 +368,7 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
         2.0, -0.5, -1.25, //
         0.0, 0.0, 0.0,
     ];
-    let targets_data = vec![
-        1.0, 0.0, 0.0, //
-        0.0, 1.0, 0.0, //
-        0.0, 0.0, 1.0, //
-        1.0, 0.0, 0.0,
-    ];
+    let targets_data = vec![0.0, 1.0, 2.0, 0.0];
     runtime.write(&program, logits, &logits_data);
     runtime.write(&program, targets, &targets_data);
     runtime.run(&program);
@@ -385,9 +380,10 @@ fn the_cross_entropy_gradient_of_a_logit_is_its_probability_less_its_target() {
             .iter()
             .map(|value| (value - largest).exp())
             .sum::<f32>();
-        for column in 0..3 {
-            let probability = (known[column] - largest).exp() / total;
-            expected.push((probability - targets_data[row * 3 + column]) / 4.0);
+        for (column, held) in known.iter().enumerate() {
+            let probability = (held - largest).exp() / total;
+            let chosen = f32::from(targets_data[row] as u32 == column as u32);
+            expected.push((probability - chosen) / 4.0);
         }
     }
     let analytic = runtime.read(&program, gradients.of(logits));

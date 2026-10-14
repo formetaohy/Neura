@@ -603,6 +603,33 @@ impl Graph {
                     self.row_gradient(Kind::LogSoftmaxGrad, task, source, gradient, grads);
                 }
             }
+            Kind::ClassLogSoftmax => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    let source = self.own(source);
+                    let gradient = self.own(gradient);
+                    let out = self.fresh(
+                        self.shape(source),
+                        Element::Single,
+                        Residency::Derived,
+                        true,
+                    );
+                    self.push(TaskInfo::of(
+                        Kind::ClassLogSoftmaxGrad,
+                        op::NONE,
+                        out.id(),
+                        [
+                            source.id(),
+                            task.inputs[1],
+                            gradient.id(),
+                            task.extra,
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    ));
+                    self.accumulate(grads, source, out);
+                }
+            }
             Kind::SumChunk | Kind::SumAxis => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
@@ -833,6 +860,8 @@ impl Graph {
             | Kind::RopeGrad
             | Kind::SoftmaxGrad
             | Kind::LogSoftmaxGrad
+            | Kind::ClassLogSoftmaxFold
+            | Kind::ClassLogSoftmaxGrad
             | Kind::AttentionQueryGrad
             | Kind::AttentionKeyGrad
             | Kind::AttentionValueGrad

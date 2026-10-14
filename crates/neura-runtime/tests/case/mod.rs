@@ -18,6 +18,7 @@ mod gguf;
 mod gradient;
 mod hazard;
 mod interop;
+mod loss;
 mod memory;
 mod moe;
 mod narrow;

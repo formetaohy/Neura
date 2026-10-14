@@ -534,6 +534,16 @@ fn narrow<W: Walk, V: Values>(
         Kind::SoftmaxFold | Kind::SoftmaxGradFold => {
             softmax_fold(values, task, first, count, &mut narrowed)
         }
+        Kind::ClassLogSoftmax if task.splits() > 1 => {
+            softmax_section(values, task, first, count, &mut narrowed)
+        }
+        Kind::ClassLogSoftmax => class_log_softmax(values, task, first, count, &mut narrowed),
+        Kind::ClassLogSoftmaxGrad => {
+            class_log_softmax_grad(values, task, first, count, &mut narrowed)
+        }
+        Kind::ClassLogSoftmaxFold => {
+            class_log_softmax_fold(values, task, first, count, &mut narrowed)
+        }
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
@@ -1247,6 +1257,100 @@ fn softmax_apply<W: Walk, V: Values>(
             Region::Whole
         };
         narrowed.read(value, region);
+    }
+}
+
+fn class_log_softmax<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3]);
+    let rows = u64::from(first);
+    let count = u64::from(count);
+    narrowed.write(task.out(), Region::run(rows, count));
+    let statistic = task.extra();
+    if statistic != NO_VALUE {
+        narrowed.write(statistic, Region::run(rows, count));
+    }
+    for value in task.reads() {
+        let region = if walks_its_range(values, value, task.out()) {
+            Region::run(rows, count)
+        } else if walks_its_range(values, value, source) {
+            Region::band(rows * columns, columns, columns, count)
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
+}
+
+fn class_log_softmax_grad<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let source = task.input(0);
+    let columns = u64::from(values.dims(source)[3]);
+    let sections = u64::from(task.splits().max(1));
+    let section = u64::from(task.section());
+    let first_column = columns * section / sections;
+    let width = columns * (section + 1) / sections - first_column;
+    let rows = u64::from(first);
+    let count = u64::from(count);
+    narrowed.write(
+        task.out(),
+        Region::band(rows * columns + first_column, width, columns, count),
+    );
+    for value in task.reads() {
+        let region = if value == source || walks_its_range(values, value, task.out()) {
+            Region::band(rows * columns + first_column, width, columns, count)
+        } else if values.dims(value)[3] == 1 {
+            Region::run(rows, count)
+        } else {
+            Region::Whole
+        };
+        narrowed.read(value, region);
+    }
+}
+
+fn class_log_softmax_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if count == 0 {
+        return;
+    }
+    let stats = task.input(0);
+    let source = task.input(1);
+    let words = u64::from(values.dims(stats)[3]);
+    let columns = u64::from(values.dims(source)[3]);
+    let rows = u64::from(first);
+    let count = u64::from(count);
+    narrowed.read(stats, Region::run(rows * words, count * words));
+    narrowed.read(
+        source,
+        Region::band(rows * columns, columns, columns, count),
+    );
+    narrowed.read(task.input(2), Region::run(rows, count));
+    narrowed.write(task.out(), Region::run(rows, count));
+    let statistic = task.extra();
+    if statistic != NO_VALUE {
+        narrowed.write(statistic, Region::run(rows, count));
     }
 }
 

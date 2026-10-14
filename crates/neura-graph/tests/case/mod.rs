@@ -1,4 +1,5 @@
 mod attention;
+mod class_log_softmax;
 mod dilation;
 mod extent;
 mod freeze;

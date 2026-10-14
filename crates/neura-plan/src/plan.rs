@@ -1519,6 +1519,8 @@ fn carried_kinds(tasks: &[Task]) -> Vec<Kind> {
                     && tasks
                         .iter()
                         .any(|task| task.kind == Kind::AttentionQueryGrad))
+                || (*kind == Kind::ClassLogSoftmaxFold
+                    && tasks.iter().any(|task| task.kind == Kind::ClassLogSoftmax))
         })
         .collect()
 }
@@ -1968,6 +1970,9 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::SoftmaxGrad
             | Kind::LogSoftmax
             | Kind::LogSoftmaxGrad
+            | Kind::ClassLogSoftmax
+            | Kind::ClassLogSoftmaxGrad
+            | Kind::ClassLogSoftmaxFold
             | Kind::Argmax
             | Kind::Categorical
             | Kind::Sample
