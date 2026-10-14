@@ -128,14 +128,58 @@ mod device {
     ) -> f32 {
         if right.strides.z == 1u32 && right_at % Q8_0_BLOCK == 0u32 {
             let base = (right_at / Q8_0_BLOCK) * Q8_0_BYTES;
-            let scale = ggml_half(right, base);
+            let start = base >> 2u32;
+            let held0 = ggml_raw(right, start);
+            let held1 = ggml_raw(right, start + 1u32);
+            let held2 = ggml_raw(right, start + 2u32);
+            let held3 = ggml_raw(right, start + 3u32);
+            let held4 = ggml_raw(right, start + 4u32);
+            let held5 = ggml_raw(right, start + 5u32);
+            let held6 = ggml_raw(right, start + 6u32);
+            let held7 = ggml_raw(right, start + 7u32);
+            let held8 = ggml_raw(right, start + 8u32);
+            let pair = unpack2x16float(held0);
+            let scale = select(pair.x, pair.y, (base & 2u32) == 2u32);
+            let odd = (base & 2u32) == 0u32;
+            let payload0 = select(held1, (held0 >> 16u32) | (held1 << 16u32), odd);
+            let payload1 = select(held2, (held1 >> 16u32) | (held2 << 16u32), odd);
+            let payload2 = select(held3, (held2 >> 16u32) | (held3 << 16u32), odd);
+            let payload3 = select(held4, (held3 >> 16u32) | (held4 << 16u32), odd);
+            let payload4 = select(held5, (held4 >> 16u32) | (held5 << 16u32), odd);
+            let payload5 = select(held6, (held5 >> 16u32) | (held6 << 16u32), odd);
+            let payload6 = select(held7, (held6 >> 16u32) | (held7 << 16u32), odd);
+            let payload7 = select(held8, (held7 >> 16u32) | (held8 << 16u32), odd);
             let mut total = 0.0;
             for word in unroll(0u32, SUPER_SUB_BLOCK / 4u32, 1u32) {
-                let packed = ggml_word(right, base + 2u32 + word * 4u32);
+                let worded = select(
+                    select(
+                        select(
+                            select(
+                                select(
+                                    select(
+                                        select(payload0, payload1, word == 1u32),
+                                        payload2,
+                                        word == 2u32,
+                                    ),
+                                    payload3,
+                                    word == 3u32,
+                                ),
+                                payload4,
+                                word == 4u32,
+                            ),
+                            payload5,
+                            word == 5u32,
+                        ),
+                        payload6,
+                        word == 6u32,
+                    ),
+                    payload7,
+                    word == 7u32,
+                );
                 for lane in unroll(0u32, 4u32, 1u32) {
                     let at = word * 4u32 + lane;
                     let keep = valid && at < last;
-                    let byte = (packed >> (lane * 8u32)) & 0xffu32;
+                    let byte = (worded >> (lane * 8u32)) & 0xffu32;
                     let left_address = select(0u32, left_at + at * left.strides.w, keep);
                     total = total
                         + select(0.0, template_left(left, left_address), keep)
@@ -242,17 +286,109 @@ mod device {
             let group = (within % 128u32) / SUPER_SUB_BLOCK;
             let nibble_shift = select(0u32, 4u32, group >= 2u32);
             let bit_shift = 2u32 * group;
-            let byte = base + 192u32 + side * 8u32 + group * 2u32;
-            let width = ggml_half(right, base + 208u32);
-            let lower = width * ggml_signed(ggml_byte(right, byte));
-            let upper = width * ggml_signed(ggml_byte(right, byte + 1u32));
+            let scale = base + 192u32 + side * 8u32 + group * 2u32;
+            let held_scale = ggml_raw(right, scale >> 2u32);
+            let scale_half = (scale & 2u32) == 2u32;
+            let held_width = ggml_raw(right, (base + 208u32) >> 2u32);
+            let pair = unpack2x16float(held_width);
+            let width = select(pair.x, pair.y, (base & 2u32) == 2u32);
+            let lower = width
+                * ggml_signed(select(
+                    held_scale & 0xffu32,
+                    (held_scale >> 16u32) & 0xffu32,
+                    scale_half,
+                ));
+            let upper = width
+                * ggml_signed(select(
+                    (held_scale >> 8u32) & 0xffu32,
+                    (held_scale >> 24u32) & 0xffu32,
+                    scale_half,
+                ));
+            let low_start = (base + side * 64u32 + (group % 2u32) * 32u32) >> 2u32;
+            let high_start = (base + 128u32 + side * 32u32) >> 2u32;
+            let low0 = ggml_raw(right, low_start);
+            let low1 = ggml_raw(right, low_start + 1u32);
+            let low2 = ggml_raw(right, low_start + 2u32);
+            let low3 = ggml_raw(right, low_start + 3u32);
+            let low4 = ggml_raw(right, low_start + 4u32);
+            let low5 = ggml_raw(right, low_start + 5u32);
+            let low6 = ggml_raw(right, low_start + 6u32);
+            let low7 = ggml_raw(right, low_start + 7u32);
+            let low8 = ggml_raw(right, low_start + 8u32);
+            let high0 = ggml_raw(right, high_start);
+            let high1 = ggml_raw(right, high_start + 1u32);
+            let high2 = ggml_raw(right, high_start + 2u32);
+            let high3 = ggml_raw(right, high_start + 3u32);
+            let high4 = ggml_raw(right, high_start + 4u32);
+            let high5 = ggml_raw(right, high_start + 5u32);
+            let high6 = ggml_raw(right, high_start + 6u32);
+            let high7 = ggml_raw(right, high_start + 7u32);
+            let high8 = ggml_raw(right, high_start + 8u32);
+            let odd = (base & 2u32) == 2u32;
+            let nibble0 = select(low0, (low0 >> 16u32) | (low1 << 16u32), odd);
+            let nibble1 = select(low1, (low1 >> 16u32) | (low2 << 16u32), odd);
+            let nibble2 = select(low2, (low2 >> 16u32) | (low3 << 16u32), odd);
+            let nibble3 = select(low3, (low3 >> 16u32) | (low4 << 16u32), odd);
+            let nibble4 = select(low4, (low4 >> 16u32) | (low5 << 16u32), odd);
+            let nibble5 = select(low5, (low5 >> 16u32) | (low6 << 16u32), odd);
+            let nibble6 = select(low6, (low6 >> 16u32) | (low7 << 16u32), odd);
+            let nibble7 = select(low7, (low7 >> 16u32) | (low8 << 16u32), odd);
+            let bits0 = select(high0, (high0 >> 16u32) | (high1 << 16u32), odd);
+            let bits1 = select(high1, (high1 >> 16u32) | (high2 << 16u32), odd);
+            let bits2 = select(high2, (high2 >> 16u32) | (high3 << 16u32), odd);
+            let bits3 = select(high3, (high3 >> 16u32) | (high4 << 16u32), odd);
+            let bits4 = select(high4, (high4 >> 16u32) | (high5 << 16u32), odd);
+            let bits5 = select(high5, (high5 >> 16u32) | (high6 << 16u32), odd);
+            let bits6 = select(high6, (high6 >> 16u32) | (high7 << 16u32), odd);
+            let bits7 = select(high7, (high7 >> 16u32) | (high8 << 16u32), odd);
             let mut total = 0.0;
             for word in unroll(0u32, SUPER_SUB_BLOCK / 4u32, 1u32) {
-                let low = ggml_word(
-                    right,
-                    base + side * 64u32 + (group % 2u32) * 32u32 + word * 4u32,
+                let low = select(
+                    select(
+                        select(
+                            select(
+                                select(
+                                    select(
+                                        select(nibble0, nibble1, word == 1u32),
+                                        nibble2,
+                                        word == 2u32,
+                                    ),
+                                    nibble3,
+                                    word == 3u32,
+                                ),
+                                nibble4,
+                                word == 4u32,
+                            ),
+                            nibble5,
+                            word == 5u32,
+                        ),
+                        nibble6,
+                        word == 6u32,
+                    ),
+                    nibble7,
+                    word == 7u32,
                 );
-                let high = ggml_word(right, base + 128u32 + side * 32u32 + word * 4u32);
+                let high = select(
+                    select(
+                        select(
+                            select(
+                                select(
+                                    select(select(bits0, bits1, word == 1u32), bits2, word == 2u32),
+                                    bits3,
+                                    word == 3u32,
+                                ),
+                                bits4,
+                                word == 4u32,
+                            ),
+                            bits5,
+                            word == 5u32,
+                        ),
+                        bits6,
+                        word == 6u32,
+                    ),
+                    bits7,
+                    word == 7u32,
+                );
                 for lane in unroll(0u32, 4u32, 1u32) {
                     let at = word * 4u32 + lane;
                     let keep = valid && at < last;

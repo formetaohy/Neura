@@ -183,11 +183,8 @@ mod device {
         return (word >> ((at & 3u32) * 8u32)) & 0xffu32;
     }
 
-    fn ggml_word(value: Value, at: u32) -> u32 {
-        let shift = (at & 3u32) * 8u32;
-        let low = bitcast_u32(peek(word_of(value, at >> 2u32))) >> shift;
-        let high = bitcast_u32(peek(word_of(value, (at >> 2u32) + 1u32))) << (32u32 - shift);
-        return select(low | high, low, shift == 0u32);
+    fn ggml_raw(value: Value, word: u32) -> u32 {
+        return bitcast_u32(peek(word_of(value, word)));
     }
 
     fn ggml_half(value: Value, at: u32) -> f32 {
