@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_decoder::{Cache, Decoder, matrix, vector};
+use neura_decoder::{Cache, matrix, vector};
 use neura_gguf::Gguf;
 use neura_graph::{Graph, Shape};
 
@@ -93,25 +93,4 @@ fn a_cache_takes_the_rows_of_every_chunk_it_holds() {
     }));
     assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 9)));
     assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 0)));
-}
-
-#[test]
-fn a_decoder_chooses_the_token_of_every_row_it_reads() {
-    let graph = Graph::new();
-    let token = graph.input(Shape::of([1, 1, 3, 1]), Element::Single);
-    let cursor = graph.input(Shape::scalar(), Element::Single);
-    let logits = graph.fill(Shape::of([1, 1, 3, 8]), 0.0);
-    let decoder = Decoder::greedy(&graph, token, cursor, logits, 7);
-    assert_eq!(decoder.rows(), 3);
-    assert_eq!(graph.shape(decoder.chosen()).dims(), [1, 1, 3, 1]);
-    assert_eq!(decoder.token().id(), token.id());
-    assert_eq!(decoder.cursor().id(), cursor.id());
-    assert_eq!(decoder.end(), 7);
-    let single = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
-    assert!(refuses(|| Decoder::greedy(
-        &graph, single, cursor, logits, 7
-    )));
-    let wide = graph.input(Shape::of([1, 1, 3, 2]), Element::Single);
-    assert!(refuses(|| Decoder::greedy(&graph, wide, cursor, logits, 7)));
-    assert!(refuses(|| Decoder::greedy(&graph, token, token, logits, 7)));
 }

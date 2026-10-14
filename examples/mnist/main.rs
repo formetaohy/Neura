@@ -156,7 +156,6 @@ fn main() {
 
     let weights = runtime.weights(&training);
     let learning = runtime.compile(&training, &weights);
-    runtime.rebind(&weights, &inference);
     let inferring = runtime.compile(&inference, &weights);
     report::program("training graph", &learning);
     report::program("inference graph", &inferring);

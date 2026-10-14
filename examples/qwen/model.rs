@@ -9,6 +9,7 @@ pub struct Model {
     embedding: Value,
     output_norm: Value,
     floor: Value,
+    rows: u32,
     layers: Vec<Layer>,
 }
 
@@ -44,6 +45,7 @@ impl Model {
             ),
             output_norm: vector(graph, source, "output_norm.weight", config.hidden),
             floor: graph.fill(Shape::scalar(), config.floor),
+            rows,
             layers,
         }
     }
@@ -57,6 +59,7 @@ impl Model {
             };
         }
         let normed = rms(graph, hidden, self.output_norm, self.floor);
-        graph.matmul(normed, graph.permute(self.embedding, [0, 1, 3, 2]))
+        let last = graph.slice(normed, 2, self.rows - 1, 1);
+        graph.matmul(last, graph.permute(self.embedding, [0, 1, 3, 2]))
     }
 }

@@ -9,11 +9,10 @@ mod tokenizer;
 
 use config::Config;
 use model::Model;
-use neura::decoder::Decoder;
-use neura::generate::{Generator, Phase};
+use neura::generate::{Family, Generator, Step};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
-use neura::{Element, Graph, MemoryRequest, Runtime, RuntimeRequest, Shape};
+use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
 use tokenizer::Tokenizer;
 
@@ -68,47 +67,27 @@ fn main() {
     .expect("a device that runs the model");
     let chunk = CHUNK.min(context);
 
-    let prefill = Graph::new();
-    let prefill_model = Model::new(&prefill, &source, &config, context, chunk);
-    let prefill_token = prefill.input(Shape::of([1, 1, chunk, 1]), Element::Single);
-    let prefill_cursor = prefill.input(Shape::scalar(), Element::Single);
-    let prefill_logits = prefill_model.step(&prefill, prefill_token, prefill_cursor);
-    let prefill_decoder = Decoder::greedy(
-        &prefill,
-        prefill_token,
-        prefill_cursor,
-        prefill_logits,
-        tokenizer.end_of_turn(),
-    );
-    let weights = runtime.load(&prefill, &source);
-    let prefill = runtime.compile(&prefill, &weights);
-
-    let decode = Graph::new();
-    let decode_model = Model::new(&decode, &source, &config, context, 1);
-    let decode_token = decode.input(Shape::of([1, 1, 1, 1]), Element::Single);
-    let decode_cursor = decode.input(Shape::scalar(), Element::Single);
-    let decode_logits = decode_model.step(&decode, decode_token, decode_cursor);
-    let decode_decoder = Decoder::greedy(
-        &decode,
-        decode_token,
-        decode_cursor,
-        decode_logits,
-        tokenizer.end_of_turn(),
-    );
-    runtime.rebind(&weights, &decode);
-    let decode = runtime.compile(&decode, &weights);
-
-    println!(
-        "plan: {:.1}MB of tensors, {:.1}MB of device memory",
-        prefill.tensor_bytes() as f64 / (1 << 20) as f64,
-        prefill.device_bytes() as f64 / (1 << 20) as f64,
+    let family = Family::of(
+        &runtime,
+        |graph| runtime.load(graph, &source),
+        chunk,
+        |graph, rows| {
+            let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+            let cursor = graph.input(Shape::scalar(), Element::Single);
+            let model = Model::new(graph, &source, &config, context, rows);
+            Step {
+                token,
+                cursor,
+                logits: model.step(graph, token, cursor),
+            }
+        },
     );
 
     let mut generator = Generator::new(
         runtime,
-        Phase::new(prefill, prefill_decoder),
-        Phase::new(decode, decode_decoder),
+        family,
         tokenizer.engine(),
+        tokenizer.end_of_turn(),
         context,
     );
     let report = generator.run(&tokens, wanted, |held| print!("{held}"));

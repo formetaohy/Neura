@@ -13,8 +13,10 @@ greedily, and generation ends at the end of turn or at the token count.
 
 `Qwen3.5-0.8B-Q4_K_M.gguf` and the other mainstream quants of that model (Q4_K_M, Q5_K_M, Q6_K,
 Q8_0) load as they are, without repacking on the host. The example runs a context of `min(1024, the
-model's own)` and weighs the model twice over one store: a prefill program that takes eight rows of
-a chunk and a decode program that takes one, sharing the weights, the kv caches, the convolution
-states and the gated delta net states every row advances. The prompt walks through the prefill
-program a full chunk at a time, and the rows a prompt leaves over, together with every token it
-answers with, walk through the decode program one row at a time.
+model's own)` and builds the model once over one store as a family of two programs: a fill program
+that walks eight rows of a chunk at a time, and an answer program that walks one row and chooses
+the token that follows it, sharing the weights, the kv caches, the convolution states and the
+gated delta net states every row advances. A prompt walks through the fill program while more
+than a chunk of it remains; the rows it leaves over, together with every token it answers with,
+walk through the answer program one row at a time, so the choice the generation follows always
+stands in the one place that program writes it.

@@ -1,9 +1,9 @@
 use neura_abi::Element;
-use neura_decoder::{Cache, Decoder};
-use neura_generate::{Generator, Phase};
+use neura_decoder::Cache;
+use neura_generate::{Family, Generator, Step};
 use neura_gguf::Gguf;
-use neura_graph::{Graph, Shape, Value};
-use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest, Weights};
+use neura_graph::Shape;
+use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
 
 #[path = "support/mod.rs"]
@@ -13,6 +13,7 @@ use support::{Meta, build};
 
 const CLASSES: u32 = 8;
 const CAPACITY: u32 = 16;
+const END: u32 = 3;
 
 struct PerCharacter;
 
@@ -52,35 +53,31 @@ fn runtime() -> Runtime {
     .expect("a device that runs the tests")
 }
 
-fn model(graph: &Graph, rows: u32) -> (Value, Value, Value) {
-    let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
-    let cursor = graph.input(Shape::scalar(), Element::Single);
-    let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
-    let held = graph.one_hot(token, CLASSES);
-    cache.write(graph, cursor, held, held);
-    let seen = graph.sum_axis(cache.states()[0], 2);
-    let logits = graph.broadcast_to(seen, Shape::of([1, 1, rows, CLASSES]));
-    (token, cursor, logits)
-}
-
-fn phase(runtime: &Runtime, weights: &Weights, rows: u32) -> Phase {
-    let graph = Graph::new();
-    let (token, cursor, logits) = model(&graph, rows);
-    let decoder = Decoder::greedy(&graph, token, cursor, logits, 3);
-    runtime.rebind(weights, &graph);
-    let program = runtime.compile(&graph, weights);
-    Phase::new(program, decoder)
+fn family(runtime: &Runtime, chunk: u32) -> Family {
+    Family::of(
+        runtime,
+        |graph| runtime.weights(graph),
+        chunk,
+        |graph, rows| {
+            let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+            let cursor = graph.input(Shape::scalar(), Element::Single);
+            let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
+            let held = graph.one_hot(token, CLASSES);
+            cache.write(graph, cursor, held, held);
+            Step {
+                token,
+                cursor,
+                logits: graph.sum_axis(cache.states()[0], 2),
+            }
+        },
+    )
 }
 
 fn generate(prompt: &[u32], context: u32, wanted: usize, chunk: u32) -> (usize, String, bool) {
     let runtime = runtime();
-    let probe = Graph::new();
-    let _ = model(&probe, 1);
-    let weights = runtime.weights(&probe);
-    let prefill = phase(&runtime, &weights, chunk);
-    let decode = phase(&runtime, &weights, 1);
+    let family = family(&runtime, chunk);
     let tokenizer = tokenizer();
-    let mut generator = Generator::new(runtime, prefill, decode, &tokenizer, context);
+    let mut generator = Generator::new(runtime, family, &tokenizer, END, context);
     let mut text = String::new();
     let report = generator.run(prompt, wanted, |held| text.push_str(held));
     (report.produced(), text, report.reached_context())

@@ -1,3 +1,3 @@
 mod generator;
 
-pub use generator::{Generator, Phase, Report};
+pub use generator::{Family, Generator, Report, Step};

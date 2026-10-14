@@ -361,26 +361,6 @@ impl Runtime {
         }
     }
 
-    pub fn rebind(&self, weights: &Weights, graph: &Graph) {
-        self.context.assert_alive();
-        let layout = Layout::of(graph, self.alignment);
-        assert_eq!(
-            layout.weights(),
-            weights.region(),
-            "this weight store of {} tensors holds {} bytes where the graph asks for {} tensors and {} bytes; a store rebinds only onto a graph that declares the very same model parameters in the very same order",
-            weights.tensors(),
-            weights.bytes(),
-            layout.weights().tensors(),
-            layout.weights().bytes(),
-        );
-        assert!(
-            layout.state().tensors() == 0 || layout.state() == weights.state(),
-            "this graph trains with {} tensors of state where the store carries {}; a store rebinds only onto a graph that trains with the state it holds",
-            layout.state().tensors(),
-            weights.state().tensors(),
-        );
-    }
-
     pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
         self.compile_with(graph, weights, self.default_profile())
     }

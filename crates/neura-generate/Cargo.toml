@@ -2,7 +2,7 @@
 name = "neura-generate"
 version.workspace = true
 edition.workspace = true
-description = "Driving a decoder program into the text it answers with"
+description = "Compiling one model into the programs a generation walks, and driving them into text"
 license.workspace = true
 repository.workspace = true
 
@@ -14,11 +14,11 @@ doctest = false
 workspace = true
 
 [dependencies]
-neura-decoder = { workspace = true }
+neura-graph = { workspace = true }
 neura-runtime = { workspace = true }
 neura-tokenizer = { workspace = true }
 
 [dev-dependencies]
-neura-gguf = { workspace = true }
-neura-graph = { workspace = true }
 neura-abi = { workspace = true }
+neura-decoder = { workspace = true }
+neura-gguf = { workspace = true }
