@@ -65,19 +65,21 @@ mod device {
             let segment = segments[ticket];
             let first = max(segment.first, from);
             let last = min(segment.first + segment.count, to);
-            for index in stride(first, last, 1u32) {
+            if first < last {
                 if lid == 0u32 {
                     gate(segment.wave);
                 }
                 storage_barrier();
-                let task = tasks[index];
-                run_task(task, lid);
-                if task.patch != NO_VALUE {
-                    storage_barrier();
-                    patch(task.patch, lid);
+                for index in stride(first, last, 1u32) {
+                    let task = tasks[index];
+                    run_task(task, lid);
+                    if task.patch != NO_VALUE {
+                        workgroup_barrier();
+                        patch(task.patch, lid);
+                    }
+                    workgroup_barrier();
+                    finish(segment.wave, lid);
                 }
-                storage_barrier();
-                finish(segment.wave, lid);
             }
         }
     }
