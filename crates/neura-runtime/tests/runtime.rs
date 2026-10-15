@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_gguf::Gguf;
-use neura_graph::{AttentionOptions, Graph, Init, Shape, Window};
+use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_precision::{pack, unpack};
 use support::attention::{Shapes, attention_forward};
 use support::convolution::conv2d_reference;
@@ -408,4 +408,68 @@ fn a_convolution_walks_the_window_it_is_handed() {
         .map(|(index, value)| (value + bias_values[index / (rows * columns) % channels]).max(0.0))
         .collect::<Vec<_>>();
     assert_close(&runtime.read(&program, activated), &expected, 1e-4);
+}
+
+#[test]
+fn a_cache_scores_every_head_of_the_chunk_it_holds() {
+    const HEADS: u32 = 4;
+    const KEY_HEADS: u32 = 1;
+    const WIDTH: u32 = 256;
+    const CAPACITY: u32 = 64;
+    const ROWS: u32 = 8;
+    let runtime = open();
+    let graph = Graph::new();
+    let cursor = graph.input(Shape::scalar(), Element::Single);
+    let values = graph.input(Shape::of([KEY_HEADS, 1, ROWS, WIDTH]), Element::Single);
+    let keys = graph.fill(Shape::of([KEY_HEADS, 1, ROWS, WIDTH]), 0.0);
+    let queries = graph.fill(Shape::of([HEADS, 1, ROWS, WIDTH]), 0.0);
+    let held = Shape::of([KEY_HEADS, 1, CAPACITY, WIDTH]);
+    let cache_keys = graph.state(held, Init::Zero, Element::Single);
+    let cache_values = graph.state(held, Init::Zero, Element::Single);
+    let heads = (0..KEY_HEADS)
+        .map(|head| graph.fill(Shape::scalar(), (head * CAPACITY) as f32))
+        .collect::<Vec<Value>>();
+    let rows = (0..ROWS)
+        .map(|row| graph.fill(Shape::scalar(), row as f32))
+        .collect::<Vec<Value>>();
+    let seats = graph.add(
+        graph.concat(&heads, 0),
+        graph.add(graph.concat(&rows, 2), cursor),
+    );
+    graph.write_into(cache_keys, seats, keys);
+    graph.write_into(cache_values, seats, values);
+    let attended = graph.attention(
+        queries,
+        cache_keys,
+        cache_values,
+        AttentionOptions {
+            bias: None,
+            scale: Some(graph.knob(1.0)),
+            causal: true,
+            origin: Some(cursor),
+            segments: None,
+            reach: None,
+            query_segments: None,
+        },
+    );
+    graph.retain(attended);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, cursor, &[0.0]);
+    let values_data = random(KEY_HEADS * ROWS * WIDTH, 53);
+    runtime.write(&program, values, &values_data);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; (HEADS * ROWS * WIDTH) as usize];
+    for head in 0..HEADS as usize {
+        for row in 0..ROWS as usize {
+            for step in 0..WIDTH as usize {
+                let seen = (0..=row)
+                    .map(|at| values_data[at * WIDTH as usize + step])
+                    .sum::<f32>();
+                expected[(head * ROWS as usize + row) * WIDTH as usize + step] =
+                    seen / (row + 1) as f32;
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, attended), &expected, 1e-4);
 }

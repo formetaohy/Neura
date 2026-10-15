@@ -167,7 +167,7 @@ mod device {
             scratch[left_slot + row * MATMUL_LEFT_STRIDE + column] =
                 select(0.0, fetch(left, address), inside);
         }
-        let right_slot = buffer * MATMUL_DEPTH * MATMUL_RIGHT_STRIDE;
+        let right_slot = buffer * MATMUL_COLUMNS * MATMUL_RIGHT_STRIDE;
         let right_across = right.strides.z < right.strides.w;
         for unit in stride(lid, MATMUL_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
             let step = select(unit / MATMUL_COLUMNS, unit % MATMUL_DEPTH, right_across);
@@ -402,7 +402,7 @@ mod device {
                     );
                 }
                 let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
-                let right_slot = buffer * MATMUL_DEPTH * MATMUL_RIGHT_STRIDE;
+                let right_slot = buffer * MATMUL_COLUMNS * MATMUL_RIGHT_STRIDE;
                 for step in unroll(0u32, MATMUL_DEPTH, 1u32) {
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         left_registers[row] =

@@ -752,13 +752,9 @@ fn attention_spans(
         None => {
             let mut spans = Vec::new();
             for plane in 0..planes {
-                spans.extend(spans_of(tokens, per_task).map(|(first, count)| {
-                    (
-                        plane,
-                        plane * tokens + first,
-                        count,
-                        Split::Range { first, count },
-                    )
+                spans.extend(spans_of(tokens, per_task).map(|(within, count)| {
+                    let first = plane * tokens + within;
+                    (plane, first, count, Split::Range { first, count })
                 }));
             }
             spans
