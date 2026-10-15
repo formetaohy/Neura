@@ -54,6 +54,7 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
             MatmulStrategy::Staged => {
                 constants.extend([
                     ("MATMUL_LEFT_STRIDE", tile.left_stride()),
+                    ("MATMUL_RIGHT_STRIDE", tile.depth() + 1),
                     ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
                     ("MATMUL_REGISTER_ROWS", tile.register_rows()),
                     ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),
@@ -166,7 +167,7 @@ mod device {
             scratch[left_slot + row * MATMUL_LEFT_STRIDE + column] =
                 select(0.0, fetch(left, address), inside);
         }
-        let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
+        let right_slot = buffer * MATMUL_DEPTH * MATMUL_RIGHT_STRIDE;
         let right_across = right.strides.z < right.strides.w;
         for unit in stride(lid, MATMUL_DEPTH * MATMUL_COLUMNS, WORKGROUP_SIZE) {
             let step = select(unit / MATMUL_COLUMNS, unit % MATMUL_DEPTH, right_across);
@@ -179,7 +180,7 @@ mod device {
                 right_plane + row * right.strides.z + column * right.strides.w,
                 inside,
             );
-            scratch[SCRATCH_MATMUL_RIGHT + right_slot + step * MATMUL_COLUMNS + seat] =
+            scratch[SCRATCH_MATMUL_RIGHT + right_slot + seat * MATMUL_RIGHT_STRIDE + step] =
                 select(0.0, fetch(right, address), inside);
         }
     }
@@ -401,8 +402,8 @@ mod device {
                     );
                 }
                 let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
-                let right_slot = buffer * MATMUL_DEPTH * MATMUL_COLUMNS;
-                for step in stride(0u32, MATMUL_DEPTH, 1u32) {
+                let right_slot = buffer * MATMUL_DEPTH * MATMUL_RIGHT_STRIDE;
+                for step in unroll(0u32, MATMUL_DEPTH, 1u32) {
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         left_registers[row] =
                             scratch[left_slot + (thread_row + row) * MATMUL_LEFT_STRIDE + step];
@@ -410,9 +411,9 @@ mod device {
                     for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
                         right_registers[column] = scratch[SCRATCH_MATMUL_RIGHT
                             + right_slot
-                            + step * MATMUL_COLUMNS
-                            + thread_column
-                            + column * MATMUL_THREAD_COLUMNS];
+                            + (thread_column + column * MATMUL_THREAD_COLUMNS)
+                                * MATMUL_RIGHT_STRIDE
+                            + step];
                     }
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
                         for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {

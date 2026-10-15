@@ -97,6 +97,67 @@ fn product(
     measure::row(label, &program, timing, rate)
 }
 
+const WIDE_ROWS: [u32; 3] = [8, 64, 512];
+
+pub(crate) fn wide_section(runtime: &Runtime) {
+    let mut rows = Vec::new();
+    for element in NARROW {
+        for width in WIDE_ROWS {
+            rows.push(wide(
+                runtime,
+                element,
+                width,
+                COLUMNS,
+                format!(
+                    "a {width}x{DEPTH}x{COLUMNS} product of {} in gguf order",
+                    element.name()
+                ),
+            ));
+        }
+    }
+    rows.push(wide(
+        runtime,
+        Element::Q8_0,
+        8,
+        VOCABULARY,
+        format!("an 8x{DEPTH}x{VOCABULARY} product of q8_0 in gguf order"),
+    ));
+    measure::report("wide products", &rows);
+}
+
+fn wide(
+    runtime: &Runtime,
+    element: Element,
+    rows: u32,
+    columns: u32,
+    label: String,
+) -> measure::Row {
+    let graph = Graph::new();
+    let data = graph.input(Shape::of([1, 1, rows, DEPTH]), Element::Single);
+    let init = Init::Uniform {
+        low: -0.2,
+        high: 0.2,
+    };
+    let stored = if element.block().is_some() {
+        graph.block_quantized_parameter(Shape::of([1, 1, columns, DEPTH]), init, element)
+    } else {
+        graph.parameter(Shape::of([1, 1, columns, DEPTH]), init, element)
+    };
+    let weights = graph.permute(stored, [0, 1, 3, 2]);
+    graph.retain(graph.matmul(data, weights));
+    let held = vec![0.5; (rows * DEPTH) as usize];
+    let program = measure::program(runtime, &graph, &[data], &[&held]);
+    let words = element.payload_words(u64::from(columns) * u64::from(DEPTH));
+    let rounds = if rows > 64 {
+        measure::HEAVY
+    } else {
+        measure::CHEAP
+    };
+    let timing = measure::timed(runtime, &program, rounds);
+    let rate = measure::traffic(timing.step, words * 4, "");
+    measure::row(label, &program, timing, rate)
+}
+
 fn ladder(runtime: &Runtime) {
     println!("\nprofile search");
     println!(

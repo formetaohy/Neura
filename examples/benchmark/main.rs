@@ -28,13 +28,14 @@ fn main() {
         "device: {} ({:?}, {:?})",
         info.name, info.backend, info.device_type
     );
-    let sections: [(&str, Section); 9] = [
+    let sections: [(&str, Section); 10] = [
         ("fixed", scheduler::section),
         ("element", element::section),
         ("decision", decision::section),
         ("movement", movement::section),
         ("ragged", ragged::section),
         ("product", product::section),
+        ("wide", product::wide_section),
         ("attention", attention::section),
         ("vision", vision::section),
         ("training", training::section),

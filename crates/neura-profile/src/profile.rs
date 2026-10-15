@@ -322,6 +322,7 @@ pub enum MatmulStrategy {
 }
 
 pub const FOLDED_LANES: u32 = neura_abi::SUPER_SUB_BLOCK;
+pub const STAGED_RUN: u32 = neura_abi::SUPER_SUB_BLOCK;
 pub const FOLDED_STAGE: u32 = 1024;
 pub const FOLDED_FOLDS: u32 = 8;
 pub const FOLDED_RUN: u32 = match staged_block() {
@@ -828,7 +829,7 @@ impl MatmulTile {
 
     pub const fn right_stage(self) -> u64 {
         match self {
-            Self::Staged(tile) => tile.depth() as u64 * tile.columns() as u64,
+            Self::Staged(tile) => tile.columns() as u64 * (tile.depth() as u64 + 1),
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.right_stage(),
             Self::Folded(tile) => folded_partials(tile.columns()) + tile.run_words(),
@@ -1326,6 +1327,12 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
 }
 
 fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
+    let mut chosen = staged_family(workgroup, budget, DEPTH, &[]);
+    chosen.extend(staged_family(workgroup, budget, STAGED_RUN, &chosen));
+    chosen
+}
+
+fn staged_family(workgroup: u32, budget: u64, depth: u32, held: &[MatmulTile]) -> Vec<MatmulTile> {
     let mut candidates = Vec::new();
     for (rows, columns) in grids(workgroup) {
         for (register_rows, register_columns) in BLOCKINGS.into_iter().chain([PLAINEST_BLOCKING]) {
@@ -1333,7 +1340,7 @@ fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
                 MatmulStrategy::Staged,
                 rows * register_rows,
                 columns * register_columns,
-                DEPTH,
+                depth,
                 rows,
                 columns,
             );
@@ -1354,19 +1361,14 @@ fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
     });
     candidates.dedup();
     let mut chosen: Vec<MatmulTile> = Vec::new();
-    let mut held = HashMap::<(u32, u32), usize>::new();
+    let mut blocks = HashMap::<(u32, u32), usize>::new();
     for tile in &candidates {
         let grid = (tile.thread_rows(), tile.thread_columns());
-        let count = held.entry(grid).or_insert(0);
+        let count = blocks.entry(grid).or_insert(0);
         if *count >= BLOCKINGS_PER_GRID {
             continue;
         }
-        if !carried(
-            joint_stage(&chosen, *tile).0,
-            joint_stage(&chosen, *tile).1,
-            workgroup,
-            budget,
-        ) {
+        if !fits_the_stage(held, &chosen, *tile, workgroup, budget) {
             continue;
         }
         *count += 1;
@@ -1376,13 +1378,7 @@ fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
         if tile.register_rows() * tile.register_columns() != 1 {
             continue;
         }
-
-        if !carried(
-            joint_stage(&chosen, *tile).0,
-            joint_stage(&chosen, *tile).1,
-            workgroup,
-            budget,
-        ) {
+        if !fits_the_stage(held, &chosen, *tile, workgroup, budget) {
             continue;
         }
         chosen.push(*tile);
@@ -1390,14 +1386,20 @@ fn staged_tiles(workgroup: u32, budget: u64) -> Vec<MatmulTile> {
     chosen
 }
 
-fn joint_stage(held: &[MatmulTile], tile: MatmulTile) -> (u64, u64) {
+fn fits_the_stage(
+    held: &[MatmulTile],
+    chosen: &[MatmulTile],
+    tile: MatmulTile,
+    workgroup: u32,
+    budget: u64,
+) -> bool {
     let mut left = tile.left_stage();
     let mut right = tile.right_stage();
-    for held in held {
-        left = left.max(held.left_stage());
-        right = right.max(held.right_stage());
+    for other in held.iter().chain(chosen) {
+        left = left.max(other.left_stage());
+        right = right.max(other.right_stage());
     }
-    (left, right)
+    carried(left, right, workgroup, budget)
 }
 
 fn carried(left_stage: u64, right_stage: u64, workgroup: u32, shared_bytes: u64) -> bool {
