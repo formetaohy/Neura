@@ -1,4 +1,5 @@
 mod autodiff;
+mod fingerprint;
 mod graph;
 mod init;
 mod op;

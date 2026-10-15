@@ -1,4 +1,5 @@
 pub mod control;
+pub mod digest;
 pub mod element;
 pub mod kind;
 pub mod noise;
@@ -10,6 +11,7 @@ pub mod span;
 pub mod store;
 pub mod strategy;
 
+pub use digest::Digest;
 pub use element::{
     Block, Element, FP4_BLOCK, FloatFormat, INT4_BLOCK, QUANT_BLOCK, SUPER_BLOCK,
     SUPER_SCALE_BYTES, SUPER_SMALL_BLOCK, SUPER_SUB_BLOCK,

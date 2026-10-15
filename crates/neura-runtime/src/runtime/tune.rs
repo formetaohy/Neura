@@ -1,3 +1,4 @@
+use super::choice::Choice;
 use super::{Program, Runtime, Weights, resident_weight_slots};
 use neura_abi::{Element, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
@@ -13,6 +14,7 @@ impl Runtime {
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
         let scratch = graph.updates_weights().then(|| self.scratch_weights(graph));
         let measuring = scratch.as_ref().unwrap_or(weights);
+        let held = self.hold_state(measuring);
         let products = self.products(graph);
         let default = self.default_profile();
         let mut candidates = Vec::new();
@@ -40,7 +42,27 @@ impl Runtime {
                 candidates[winner].clone(),
             )
         };
+        self.restore_state(measuring, &held);
+        self.remember(graph, &Choice::of(profile, &chosen));
         self.compile_chosen(graph, weights, profile, &chosen)
+    }
+
+    fn hold_state(&self, weights: &Weights) -> Vec<u8> {
+        let (first, words) = state_words(weights);
+        if words == 0 {
+            return Vec::new();
+        }
+        weights
+            .store()
+            .get(self.context.queue(), first, words * WORD_BYTES)
+    }
+
+    fn restore_state(&self, weights: &Weights, held: &[u8]) {
+        let (first, words) = state_words(weights);
+        if words == 0 || held.is_empty() {
+            return;
+        }
+        weights.store().put(self.context.queue(), first, held);
     }
 
     fn products(&self, graph: &Graph) -> Vec<Product> {
@@ -261,6 +283,12 @@ impl Runtime {
     fn program(&self, graph: &Graph, weights: &Weights, tile: MatmulTile) -> Program {
         self.compile_chosen(graph, weights, Profile::of(&[tile]), &[])
     }
+}
+
+fn state_words(weights: &Weights) -> (u64, u64) {
+    let arena = weights.state();
+    let first = arena.entries().first().map_or(0, |entry| entry.word);
+    (first, arena.words().saturating_sub(first))
 }
 
 fn planned_tiles(products: &[Product], profile: Profile) -> Vec<(Product, MatmulTile)> {

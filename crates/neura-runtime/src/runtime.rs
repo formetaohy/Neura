@@ -21,6 +21,7 @@ use neura_source::Source;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+mod choice;
 mod tune;
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
@@ -362,7 +363,10 @@ impl Runtime {
     }
 
     pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
-        self.compile_with(graph, weights, self.default_profile())
+        match self.remembered(graph) {
+            Some(choice) => self.compile_chosen(graph, weights, choice.profile(), choice.chosen()),
+            None => self.compile_with(graph, weights, self.default_profile()),
+        }
     }
 
     pub fn precompile(&self, graph: &Graph, profile: Profile) {

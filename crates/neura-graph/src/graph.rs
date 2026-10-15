@@ -931,6 +931,11 @@ impl Graph {
         self.state.borrow().tasks.len()
     }
 
+    pub fn fingerprint(&self) -> u64 {
+        let state = self.state.borrow();
+        crate::fingerprint::of(&state.values, &state.tasks)
+    }
+
     pub fn snapshot(&self) -> GraphSnapshot {
         let state = self.state.borrow();
         GraphSnapshot {

@@ -20,3 +20,13 @@ gated delta net states every row advances. A prompt walks through the fill progr
 than a chunk of it remains; the rows it leaves over, together with every token it answers with,
 walk through the answer program one row at a time, so the choice the generation follows always
 stands in the one place that program writes it.
+
+Every run compiles the plan this device measured for the two programs, and a device that has
+measured none walks the profile it balances on. Setting `NEURA_TUNE=1` measures every plan the
+device offers against the weights the two programs walk, keeps the fastest of them, and writes the
+choice into the artifact cache, so the run that measured it and every run after it walk the
+measured plan.
+
+```sh
+NEURA_TUNE=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48
+```

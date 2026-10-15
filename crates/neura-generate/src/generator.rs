@@ -29,6 +29,25 @@ impl Family {
         chunk: u32,
         build: impl Fn(&Graph, u32) -> Step,
     ) -> Self {
+        Self::with(runtime, weights, chunk, build, Runtime::compile)
+    }
+
+    pub fn tuned(
+        runtime: &Runtime,
+        weights: impl FnOnce(&Graph) -> Weights,
+        chunk: u32,
+        build: impl Fn(&Graph, u32) -> Step,
+    ) -> Self {
+        Self::with(runtime, weights, chunk, build, Runtime::tuned)
+    }
+
+    fn with(
+        runtime: &Runtime,
+        weights: impl FnOnce(&Graph) -> Weights,
+        chunk: u32,
+        build: impl Fn(&Graph, u32) -> Step,
+        compile: fn(&Runtime, &Graph, &Weights) -> Program,
+    ) -> Self {
         assert!(
             chunk > 0,
             "a family walks chunks of {} rows, and no step fits a chunk that small",
@@ -38,11 +57,11 @@ impl Family {
         let step = build(&filling, chunk);
         held(&filling, &step, chunk);
         let store = weights(&filling);
-        let fill = Entry::of(runtime, &filling, &store, step);
+        let fill = Entry::of(runtime, &filling, &store, step, compile);
         let answering = Graph::new();
         let step = build(&answering, 1);
         held(&answering, &step, 1);
-        let answer = Entry::of(runtime, &answering, &store, step);
+        let answer = Entry::of(runtime, &answering, &store, step, compile);
         Self {
             chunk,
             fill,
@@ -83,11 +102,17 @@ impl Family {
 }
 
 impl Entry {
-    fn of(runtime: &Runtime, graph: &Graph, weights: &Weights, step: Step) -> Self {
+    fn of(
+        runtime: &Runtime,
+        graph: &Graph,
+        weights: &Weights,
+        step: Step,
+        compile: fn(&Runtime, &Graph, &Weights) -> Program,
+    ) -> Self {
         let chosen = graph.argmax(step.logits);
         graph.retain(chosen);
         Self {
-            program: runtime.compile(graph, weights),
+            program: compile(runtime, graph, weights),
             token: step.token,
             cursor: step.cursor,
             chosen,

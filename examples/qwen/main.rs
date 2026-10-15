@@ -67,21 +67,21 @@ fn main() {
     .expect("a device that runs the model");
     let chunk = CHUNK.min(context);
 
-    let family = Family::of(
-        &runtime,
-        |graph| runtime.load(graph, &source),
-        chunk,
-        |graph, rows| {
-            let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
-            let cursor = graph.input(Shape::scalar(), Element::Single);
-            let model = Model::new(graph, &source, &config, context, rows);
-            Step {
-                token,
-                cursor,
-                logits: model.step(graph, token, cursor),
-            }
-        },
-    );
+    let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
+    let built = |graph: &neura::Graph, rows: u32| {
+        let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+        let cursor = graph.input(Shape::scalar(), Element::Single);
+        let model = Model::new(graph, &source, &config, context, rows);
+        Step {
+            token,
+            cursor,
+            logits: model.step(graph, token, cursor),
+        }
+    };
+    let family = match std::env::var("NEURA_TUNE") {
+        Ok(_) => Family::tuned(&runtime, loaded, chunk, built),
+        Err(_) => Family::of(&runtime, loaded, chunk, built),
+    };
 
     let mut generator = Generator::new(
         runtime,
