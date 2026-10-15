@@ -9,6 +9,8 @@ pub(crate) fn install_tiles(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("SCRATCH_MATMUL_RIGHT", geometry.matmul_right());
     compiler.constant("MATMUL_RUN", neura_profile::STREAMED_DEPTH);
     compiler.constant("FOLDED_LANES", neura_profile::FOLDED_LANES);
+    compiler.constant("FOLDED_RUN", neura_profile::FOLDED_RUN);
+    compiler.constant("SCRATCH_MATMUL_RUN", geometry.matmul_run());
     compiler.constant("FOLDED_SHIFT", neura_profile::FOLDED_LANES.trailing_zeros());
     compiler.constant(
         "FOLDED_PARTIALS",
@@ -36,6 +38,13 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
         match tile.strategy() {
             MatmulStrategy::Folded => {
                 constants.push(("MATMUL_FOLDS", tile.folds()));
+                let (dot, stage, gate) = match tile.stages_a_run() {
+                    true => ("dot_run", "stage", "run_gate"),
+                    false => ("dot_staged", "stage_untouched", "run_gate_none"),
+                };
+                compiler.select(dot, &format!("dot_{suffix}"));
+                compiler.select(stage, &format!("stage_{suffix}"));
+                compiler.select(gate, &format!("gate_{suffix}"));
                 compiler.specialize(
                     "template_run_matmul_folded",
                     &format!("run_matmul_{suffix}"),
@@ -121,6 +130,12 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
 
 #[neura_compiler::module]
 mod device {
+    fn run_gate() {
+        workgroup_barrier();
+    }
+
+    fn run_gate_none() {}
+
     fn template_matmul_load(
         lid: u32,
         base_row: u32,
@@ -237,19 +252,32 @@ mod device {
             for fold in unroll(0u32, MATMUL_FOLDS, 1u32) {
                 let column = base_column + warp * MATMUL_FOLDS + fold;
                 let inside = base_row < row_bound && column < columns;
+                let blocks = last_block - first_block;
                 let mut acc = 0.0;
-                for step in stride(lane, last_block - first_block, FOLDED_LANES) {
+                for chunk in stride(0u32, (blocks + FOLDED_LANES - 1u32) / FOLDED_LANES, 1u32) {
+                    template_gate();
+                    let step = chunk * FOLDED_LANES + lane;
                     let at = (first_block + step) * MATMUL_DEPTH;
-                    let last = min(at + MATMUL_DEPTH, depth) - at;
-                    acc = acc
-                        + dot_staged(
-                            right,
-                            left,
-                            right_plane + at * right.strides.z + column * right.strides.w,
-                            step * (MATMUL_DEPTH + 1u32),
-                            last,
-                            inside,
-                        );
+                    let staged = template_stage(
+                        right,
+                        right_plane + at * right.strides.z + column * right.strides.w,
+                        min(blocks - chunk * FOLDED_LANES, FOLDED_LANES),
+                        warp,
+                        lane,
+                    );
+                    template_gate();
+                    if step < blocks && at < depth {
+                        let last = min(at + MATMUL_DEPTH, depth) - at;
+                        acc = acc
+                            + template_dot(
+                                right,
+                                left,
+                                staged,
+                                step * (MATMUL_DEPTH + 1u32),
+                                last,
+                                inside,
+                            );
+                    }
                 }
                 scratch[FOLDED_PARTIALS
                     + lane * (MATMUL_COLUMNS + 1u32)

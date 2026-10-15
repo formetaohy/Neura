@@ -12,10 +12,18 @@ const _: () = assert!(
 
 pub(crate) const HEAP: &str = "heap";
 pub(crate) const STAGED: &str = "staged";
+pub(crate) const RUN: &str = "run";
+pub(crate) const STAGES_A_RUN: Element = Element::Q8_0;
+
+const _: () = assert!(
+    STAGES_A_RUN.stages_a_run(),
+    "a run stages the blocks of an element whose blocks the device stages",
+);
 
 pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     device::define(compiler);
     left::define(compiler);
+    run::define(compiler);
     for generic in [
         "template_dot_element",
         "template_dot_q8_0",
@@ -28,12 +36,38 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
             compiler.specialize(generic, &format!("{name}_{family}"), &[]);
         }
     }
+    compiler.specialize("template_dot_q8_0_run", "dot_q8_0_run", &[]);
     compiler.select("generic_dot_by_element", "dot_by_element");
     compiler.select("generic_dot_by_element", "dot_staged_by_element");
+    compiler.select("generic_dot_by_element", "dot_run_by_element");
     dispatch(compiler, elements, "dot_by_element", HEAP);
     dispatch(compiler, elements, "dot_staged_by_element", STAGED);
+    compiler.insert_case(
+        "dot_run_by_element",
+        ast::Arm {
+            pattern: ast::Pattern::Integer(STAGES_A_RUN.code()),
+            body: vec![ast::Statement::Return(Some(ast::Expression::call(
+                format!("dot_{}_{RUN}", STAGES_A_RUN.name()),
+                dot_arguments(),
+            )))],
+        },
+    );
     compiler.select("dot_by_element", "dot");
     compiler.select("dot_staged_by_element", "dot_staged");
+    compiler.select("dot_run_by_element", "dot_run");
+    compiler.select("generic_stage_by_element", "stage_by_element");
+    compiler.insert_case(
+        "stage_by_element",
+        ast::Arm {
+            pattern: ast::Pattern::Integer(STAGES_A_RUN.code()),
+            body: vec![ast::Statement::Return(Some(ast::Expression::call(
+                format!("stage_{}", STAGES_A_RUN.name()),
+                stage_arguments(),
+            )))],
+        },
+    );
+    compiler.select("stage_by_element", "stage");
+    compiler.select("stage_none", "stage_untouched");
 }
 
 fn dispatch(compiler: &mut Compiler, elements: &[Element], by_element: &str, family: &str) {
@@ -49,6 +83,13 @@ fn dispatch(compiler: &mut Compiler, elements: &[Element], by_element: &str, fam
             },
         );
     }
+}
+
+fn stage_arguments() -> Vec<ast::Expression> {
+    ["right", "run_at", "blocks", "warp", "lane"]
+        .into_iter()
+        .map(ast::Expression::name)
+        .collect()
 }
 
 fn dot_arguments() -> Vec<ast::Expression> {
@@ -77,6 +118,119 @@ mod left {
 
     fn left_staged(left: Value, address: u32) -> f32 {
         return scratch[address];
+    }
+}
+
+#[neura_compiler::module]
+mod run {
+    fn left_run(left: Value, address: u32) -> f32 {
+        return scratch[address];
+    }
+
+    fn stage_none(right: Value, run_at: u32, blocks: u32, warp: u32, lane: u32) -> u32 {
+        return run_at;
+    }
+
+    fn generic_stage_by_element(
+        right: Value,
+        run_at: u32,
+        blocks: u32,
+        warp: u32,
+        lane: u32,
+    ) -> u32 {
+        match right.element {
+            _ => {
+                refuse(refusal::TENSOR, refusal::ELEMENT, right.element);
+                return 0u32;
+            }
+        }
+    }
+
+    fn stage_q8_0(right: Value, run_at: u32, blocks: u32, warp: u32, lane: u32) -> u32 {
+        let run = ((run_at / Q8_0_BLOCK) - lane) * Q8_0_BYTES;
+        let words = ((blocks * Q8_0_BYTES) + 3u32) / 4u32;
+        let slot = SCRATCH_MATMUL_RUN + warp * FOLDED_RUN;
+        for round in unroll(
+            0u32,
+            (FOLDED_RUN + FOLDED_LANES - 1u32) / FOLDED_LANES,
+            1u32,
+        ) {
+            let index = round * FOLDED_LANES + lane;
+            if index < FOLDED_RUN {
+                let word = select(run >> 2u32, (run >> 2u32) + index, index < words);
+                scratch[slot + index] = bitcast_f32(bitcast_u32(peek(word_of(right, word))));
+            }
+        }
+        return 4u32 * slot + (run & 3u32) + Q8_0_BYTES * lane;
+    }
+
+    fn template_dot_q8_0_run(
+        right: Value,
+        left: Value,
+        right_at: u32,
+        left_at: u32,
+        last: u32,
+        valid: bool,
+    ) -> f32 {
+        let start = right_at >> 2u32;
+        let held0 = bitcast_u32(scratch[start]);
+        let held1 = bitcast_u32(scratch[start + 1u32]);
+        let held2 = bitcast_u32(scratch[start + 2u32]);
+        let held3 = bitcast_u32(scratch[start + 3u32]);
+        let held4 = bitcast_u32(scratch[start + 4u32]);
+        let held5 = bitcast_u32(scratch[start + 5u32]);
+        let held6 = bitcast_u32(scratch[start + 6u32]);
+        let held7 = bitcast_u32(scratch[start + 7u32]);
+        let held8 = bitcast_u32(scratch[start + 8u32]);
+        let pair = unpack2x16float(held0);
+        let scale = select(pair.x, pair.y, (right_at & 2u32) == 2u32);
+        let odd = (right_at & 2u32) == 0u32;
+        let payload0 = select(held1, (held0 >> 16u32) | (held1 << 16u32), odd);
+        let payload1 = select(held2, (held1 >> 16u32) | (held2 << 16u32), odd);
+        let payload2 = select(held3, (held2 >> 16u32) | (held3 << 16u32), odd);
+        let payload3 = select(held4, (held3 >> 16u32) | (held4 << 16u32), odd);
+        let payload4 = select(held5, (held4 >> 16u32) | (held5 << 16u32), odd);
+        let payload5 = select(held6, (held5 >> 16u32) | (held6 << 16u32), odd);
+        let payload6 = select(held7, (held6 >> 16u32) | (held7 << 16u32), odd);
+        let payload7 = select(held8, (held7 >> 16u32) | (held8 << 16u32), odd);
+        let mut total = 0.0;
+        for word in unroll(0u32, SUPER_SUB_BLOCK / 4u32, 1u32) {
+            let worded = select(
+                select(
+                    select(
+                        select(
+                            select(
+                                select(
+                                    select(payload0, payload1, word == 1u32),
+                                    payload2,
+                                    word == 2u32,
+                                ),
+                                payload3,
+                                word == 3u32,
+                            ),
+                            payload4,
+                            word == 4u32,
+                        ),
+                        payload5,
+                        word == 5u32,
+                    ),
+                    payload6,
+                    word == 6u32,
+                ),
+                payload7,
+                word == 7u32,
+            );
+            for lane in unroll(0u32, 4u32, 1u32) {
+                let at = word * 4u32 + lane;
+                let keep = valid && at < last;
+                let byte = (worded >> (lane * 8u32)) & 0xffu32;
+                let left_address = select(0u32, left_at + at * left.strides.w, keep);
+                total = total
+                    + select(0.0, template_left(left, left_address), keep)
+                        * select(0.0, ggml_signed(byte) * scale, keep);
+            }
+        }
+        return total;
     }
 }
 

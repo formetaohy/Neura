@@ -5,10 +5,10 @@ use neura_graph::Graph;
 use neura_plan::{Contiguous, Product, Weight};
 use neura_profile::{MatmulStrategy, MatmulTile, Profile};
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 const HEAD_WORDS: usize = 4;
 const PRODUCT_WORDS: usize = 7;
-const TILE_WORDS: usize = 7;
+const TILE_WORDS: usize = 8;
 const REDUCTION: u32 = 0;
 const OUTPUT: u32 = 1;
 
@@ -175,6 +175,7 @@ fn identity(tile: MatmulTile) -> [u32; TILE_WORDS] {
         tile.threads(),
         tile.thread_rows(),
         tile.thread_columns(),
+        tile.stages_a_run() as u32,
     ]
 }
 

@@ -10,6 +10,7 @@ const NARROW_ROWS: u32 = 2;
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
 const COALESCED_TRAFFIC_WEIGHT: u128 = 4;
+const STAGED_RUN_TRAFFIC_WEIGHT: u128 = 1;
 const STRIDED_TRAFFIC_WEIGHT: u128 = 16;
 const FOLDED_STAGE_WEIGHT: u128 = 8;
 const COOPERATIVE_STAGE_INSTRUCTIONS: u128 = 3;
@@ -215,7 +216,9 @@ impl Product {
             MatmulStrategy::Staged => !self.narrow(profile),
             MatmulStrategy::Streamed | MatmulStrategy::Cooperative => true,
             MatmulStrategy::Folded => {
-                self.narrow(profile) && self.weight.contiguous == Contiguous::Reduction
+                self.narrow(profile)
+                    && self.weight.contiguous == Contiguous::Reduction
+                    && (!tile.stages_a_run() || self.weight.element().stages_a_run())
             }
         }
     }
@@ -265,8 +268,12 @@ impl Product {
                 let bands = rows.div_ceil(block_rows);
                 let reads = u128::from(self.planes)
                     * (bands * depth * columns + columns.div_ceil(block_columns) * depth * rows);
+                let traffic = match tile.stages_a_run() {
+                    true => STAGED_RUN_TRAFFIC_WEIGHT,
+                    false => COALESCED_TRAFFIC_WEIGHT,
+                };
                 STREAMED_LOAD_WEIGHT * work * operands / registers
-                    + COALESCED_TRAFFIC_WEIGHT * reads
+                    + traffic * reads
                     + FOLDED_STAGE_WEIGHT
                         * (tiles * depth.min(u128::from(FOLDED_STAGE))
                             + tiles * u128::from(FOLDED_LANES))

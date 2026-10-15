@@ -200,6 +200,10 @@ impl Element {
         self.block().is_some() || self.elements_per_word() > 1
     }
 
+    pub const fn stages_a_run(self) -> bool {
+        matches!(self, Self::Q8_0)
+    }
+
     pub const fn quanta(self, elements: u64) -> u64 {
         match self {
             Self::Int8 => 1,
