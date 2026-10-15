@@ -29,6 +29,7 @@ pub const DEFAULT_READBACK_SLOTS: usize = 2;
 pub const DEFAULT_HEAP_BYTES: u64 = 16 << 20;
 const TUNE_WARMUP: u32 = 2;
 const TUNE_ROUNDS: u32 = 8;
+const BLOCKING_REUSE: u64 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
 pub struct Readout {
@@ -264,6 +265,32 @@ impl Runtime {
             .expect("the device offers no workgroup the framework can schedule")
     }
 
+    fn planned_profile(&self, graph: &Graph) -> Profile {
+        let balanced = self.default_profile();
+        let plan = Plan::of(graph, self.alignment, balanced, self.encoding_bytes);
+        let mut work = 0u64;
+        let mut walked = 0u64;
+        for product in plan.products() {
+            let weights = u64::from(product.planes())
+                * u64::from(product.columns())
+                * u64::from(product.depth());
+            work += weights * u64::from(product.rows());
+            walked += weights;
+        }
+        match work / walked.max(1) > BLOCKING_REUSE {
+            true => balanced,
+            false => self.resident_profile(balanced),
+        }
+    }
+
+    fn resident_profile(&self, balanced: Profile) -> Profile {
+        self.profiles()
+            .into_iter()
+            .filter(|profile| profile.workgroup() == balanced.workgroup())
+            .min_by_key(|profile| profile.registers())
+            .unwrap_or(balanced)
+    }
+
     pub fn weights(&self, graph: &Graph) -> Weights {
         self.context.assert_alive();
         let (weights, layout) = self.parameter_store(graph);
@@ -365,7 +392,7 @@ impl Runtime {
     pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
         match self.remembered(graph) {
             Some(choice) => self.compile_chosen(graph, weights, choice.profile(), choice.chosen()),
-            None => self.compile_with(graph, weights, self.default_profile()),
+            None => self.compile_with(graph, weights, self.planned_profile(graph)),
         }
     }
 
