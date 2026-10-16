@@ -9,7 +9,7 @@ use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
 use neura_profile::{AttentionTile, ChoiceLayout, MatmulTile, Profile};
 
-const TASK_ELEMENTS_FLOOR: u32 = 2048;
+const TASK_ELEMENTS_PER_THREAD: u32 = 2;
 const TASK_ELEMENTS_CEILING: u32 = 65536;
 const REDUCTION_FLOOR: u32 = 8192;
 const REDUCTION_CEILING: u32 = 65536;
@@ -353,7 +353,7 @@ fn convert(
     let element = plan.values[target as usize].element;
     let words = element.payload_words(u64::from(plan.shape(target).elements()));
     let words = u32::try_from(words).expect("a tensor of words fits the device word space");
-    let per_task = task_elements(words, device_workgroups(profile));
+    let per_task = task_elements(words, profile.workgroup(), device_workgroups(profile));
     span::chunks(words, per_task, measured(plan, target, Measure::Words))
         .into_iter()
         .map(|(first, count, split)| {
@@ -515,7 +515,14 @@ fn schedule_unit(
             let dims = filter.dims();
             let taps = u64::from(dims[1] * dims[2] * dims[3]);
             let input_channels = plan.shape(unit.inputs[0]).dims()[1];
-            let per_task = conv_task_elements(out, input_channels, filter, weight_slots, target);
+            let per_task = conv_task_elements(
+                out,
+                input_channels,
+                filter,
+                weight_slots,
+                profile.workgroup(),
+                target,
+            );
             let measure = measured(plan, unit.out, Measure::Elements);
             spread(plan, unit, out.elements(), per_task, measure, |_, count| {
                 u64::from(count) * taps
@@ -532,7 +539,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 out.elements(),
-                task_elements(out.elements(), target),
+                task_elements(out.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count) * taps,
             );
@@ -550,7 +557,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 out.elements(),
-                task_elements(out.elements(), target),
+                task_elements(out.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count) * scans,
             );
@@ -596,7 +603,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 out.elements(),
-                task_elements(out.elements(), target),
+                task_elements(out.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count) * 4,
             );
@@ -619,7 +626,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 out.elements(),
-                task_elements(out.elements(), target),
+                task_elements(out.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count),
             );
@@ -631,7 +638,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 source.elements(),
-                task_elements(source.elements(), target),
+                task_elements(source.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count),
             );
@@ -643,7 +650,7 @@ fn schedule_unit(
                 plan,
                 unit,
                 out.elements(),
-                task_elements(out.elements(), target),
+                task_elements(out.elements(), profile.workgroup(), target),
                 measure,
                 |_, count| u64::from(count),
             );
@@ -930,7 +937,7 @@ fn attention(
         _ => Kind::AttentionQueryGradFold,
     };
     let elements = planes * tokens * rows[3];
-    let per_task = task_elements(elements, target)
+    let per_task = task_elements(elements, profile.workgroup(), target)
         .next_multiple_of(rows[3].max(1))
         .min(elements.max(1));
     for (first, count, split) in span::chunks(elements, per_task, None) {
@@ -1034,7 +1041,7 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let gradient = plan.shape(unit.inputs[1]);
     let filters = plan.shape(unit.inputs[2]).elements();
     let positions = input.dims()[0] * gradient.dims()[2] * gradient.dims()[3];
-    let per_task = task_elements(filters, device_workgroups(profile));
+    let per_task = task_elements(filters, profile.workgroup(), device_workgroups(profile));
     let spans_per_chunk = filters.div_ceil(per_task);
     let chunks = (device_workgroups(profile) / spans_per_chunk).clamp(1, positions);
     let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
@@ -1737,7 +1744,7 @@ fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Produc
         return;
     };
     let elements = rows * columns;
-    let per_task = task_elements(elements, device_workgroups(profile));
+    let per_task = task_elements(elements, profile.workgroup(), device_workgroups(profile));
     let measure = measured(plan, unit.out, Measure::Elements);
     for (first, count, split) in span::chunks(elements, per_task, measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
@@ -1860,7 +1867,7 @@ fn matmul(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Product
         return;
     };
     let elements = planes * rows * columns;
-    let per_task = task_elements(elements, device_workgroups(profile));
+    let per_task = task_elements(elements, profile.workgroup(), device_workgroups(profile));
     let measure = measured(plan, unit.out, Measure::Elements);
     for (first, count, split) in span::chunks(elements, per_task, measure) {
         let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(splits));
@@ -1940,7 +1947,7 @@ fn prefix(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let lengths = unit.inputs[0];
     let offsets = unit.extra;
     let elements = plan.shape(lengths).elements();
-    let per_chunk = task_elements(elements, device_workgroups(profile));
+    let per_chunk = task_elements(elements, profile.workgroup(), device_workgroups(profile));
     let partials = plan.publish(Shape::vector(elements.div_ceil(per_chunk)));
     let chunks = span::chunks(
         elements,
@@ -1973,10 +1980,10 @@ fn prefix(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     plan.tasks.push(close);
 }
 
-fn task_elements(elements: u32, target: u32) -> u32 {
+fn task_elements(elements: u32, workgroup: u32, target: u32) -> u32 {
     (elements / target)
         .next_power_of_two()
-        .clamp(TASK_ELEMENTS_FLOOR, TASK_ELEMENTS_CEILING)
+        .clamp(workgroup * TASK_ELEMENTS_PER_THREAD, TASK_ELEMENTS_CEILING)
 }
 
 struct Convolution {
@@ -2017,9 +2024,10 @@ fn conv_task_elements(
     input_channels: u32,
     filter: Shape,
     weight_slots: u32,
+    workgroup: u32,
     target: u32,
 ) -> u32 {
-    let per_task = task_elements(out.elements(), target);
+    let per_task = task_elements(out.elements(), workgroup, target);
     if weight_slots == 0 {
         return per_task;
     }
@@ -2071,7 +2079,11 @@ fn conv_input_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile, weight_sl
     let chunk_channels = u64::from(conv.out_channels.div_ceil(chunks));
     let per_task = match chunks > 1 {
         true => conv_group_chunk_elements(plane, &conv, chunk_channels, weight_slots),
-        false => task_elements(out.elements(), device_workgroups(profile)),
+        false => task_elements(
+            out.elements(),
+            profile.workgroup(),
+            device_workgroups(profile),
+        ),
     };
     let measure = measured(plan, unit.out, Measure::Elements);
     let spans = span::chunks(out.elements(), per_task, measure);
