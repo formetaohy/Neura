@@ -358,6 +358,7 @@ const _: () = assert!(
     "a run slot holds one code for every number of a block the element packs",
 );
 pub const FOLDED_STAGE: u32 = 1024;
+const FOLDED_COLUMNS_FLOOR: u32 = 32;
 pub const FOLDED_FOLDS: u32 = 8;
 pub const FOLDED_RUN: u32 = match staged_block() {
     Some(block) => (FOLDED_LANES * block.bytes).div_ceil(neura_abi::WORD_BYTES as u32),
@@ -1427,19 +1428,26 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
         };
     }
     let run = partials + u64::from(warps * FOLDED_RUN);
-    if run * WORD_BYTES + CLAIM_BYTES <= pool {
-        let mut staged = 1u64;
-        while staged <= u64::from(folds) {
-            let held =
-                u32::try_from(staged).expect("a folded tile folds fewer columns than a word holds");
-            tiles.push(FoldedTile::staged(1, warps, held, FOLDED_LANES));
-            staged = match staged {
-                1 => 2,
-                _ => staged * 2,
-            };
+    let stages_a_run = run * WORD_BYTES + CLAIM_BYTES <= pool;
+    let mut held = 1u64;
+    while held <= u64::from(folds) {
+        let fold =
+            u32::try_from(held).expect("a folded tile folds fewer columns than a word holds");
+        if warps * fold >= FOLDED_COLUMNS_FLOOR {
+            tiles.push(FoldedTile::new(1, warps, fold, FOLDED_LANES));
         }
+        if stages_a_run {
+            tiles.push(FoldedTile::staged(1, warps, fold, FOLDED_LANES));
+        }
+        held = match held {
+            1 => 2,
+            _ => held * 2,
+        };
     }
-    tiles.push(FoldedTile::new(1, warps, folds, FOLDED_LANES));
+    let last = FoldedTile::new(1, warps, folds, FOLDED_LANES);
+    if !tiles.contains(&last) {
+        tiles.push(last);
+    }
     tiles
 }
 
