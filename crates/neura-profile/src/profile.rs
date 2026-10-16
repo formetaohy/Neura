@@ -11,16 +11,21 @@ pub struct ChoiceLayout {
 }
 
 impl ChoiceLayout {
-    pub fn of(workgroup: u32, budget: u64) -> Self {
+    pub fn of(workgroup: u32, scratch_bytes: u64) -> Self {
         let owners = workgroup.min(CHOICE_CAP);
-        let room = (budget / WORD_BYTES) as u32;
-        let fixed =
-            2 * workgroup + 2 * neura_abi::CANDIDATES + neura_abi::CHOICE_MERGE_WORDS + CLAIM_WORDS;
+        let room = (scratch_bytes / WORD_BYTES) as u32;
+        let fixed = 2 * workgroup + 2 * neura_abi::CANDIDATES + neura_abi::CHOICE_MERGE_WORDS;
         let mut local = 1;
         while local < CHOICE_LOCAL_CEILING && fixed + 2 * owners * (local + 1) <= room {
             local += 1;
         }
-        Self { owners, local }
+        let layout = Self { owners, local };
+        assert!(
+            u64::from(layout.words(workgroup)) * WORD_BYTES <= scratch_bytes,
+            "a choice of {owners} owners and {local} ranks spans {} bytes of workgroup scratch where its profile offers {scratch_bytes}",
+            u64::from(layout.words(workgroup)) * WORD_BYTES,
+        );
+        layout
     }
 
     pub const fn owners(self) -> u32 {
@@ -1237,6 +1242,10 @@ impl Profile {
         self.shared_bytes - CLAIM_BYTES
     }
 
+    pub const fn body_scratch_bytes(self) -> u64 {
+        self.scratch_bytes() - self.cooperative_panels()
+    }
+
     pub const fn workgroups(self) -> u32 {
         let count = Budget::NOMINAL_RESIDENT_THREADS / self.workgroup;
         if count == 0 { 1 } else { count }
@@ -1523,6 +1532,7 @@ fn streamed_grids(workgroup: u32) -> Vec<(u32, u32)> {
 pub struct Geometry {
     workgroup: u32,
     budget: u64,
+    body_scratch: u64,
     walked: Vec<(u32, MatmulTile)>,
     attention: Vec<AttentionTile>,
     left_stage: u64,
@@ -1533,13 +1543,15 @@ pub struct Geometry {
     copy: u64,
 }
 
+impl Profile {
+    pub fn geometry(self, walked: &[(u32, MatmulTile)], attention: &[AttentionTile]) -> Geometry {
+        Geometry::of(self, walked, attention)
+    }
+}
+
 impl Geometry {
-    pub fn of(
-        workgroup: u32,
-        budget: u64,
-        walked: &[(u32, MatmulTile)],
-        attention: &[AttentionTile],
-    ) -> Self {
+    fn of(profile: Profile, walked: &[(u32, MatmulTile)], attention: &[AttentionTile]) -> Self {
+        let workgroup = profile.workgroup();
         assert!(
             walked.iter().all(|(_, tile)| tile.threads() == workgroup),
             "a device program carries a tile another workgroup stages",
@@ -1569,7 +1581,8 @@ impl Geometry {
         let folded = (partials + run) * WORD_BYTES;
         Self {
             workgroup,
-            budget,
+            budget: profile.shared_bytes(),
+            body_scratch: profile.body_scratch_bytes(),
             walked: walked.to_vec(),
             attention: attention.to_vec(),
             left_stage,
@@ -1653,7 +1666,7 @@ impl Geometry {
     }
 
     pub fn choice_layout(&self) -> ChoiceLayout {
-        ChoiceLayout::of(self.workgroup, self.budget)
+        ChoiceLayout::of(self.workgroup, self.body_scratch)
     }
 
     pub fn attention(&self) -> &[AttentionTile] {

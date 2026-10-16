@@ -452,7 +452,7 @@ fn schedule_unit(
             let planes = rows[0] * rows[1];
             let wanted = attention_rows(tokens, planes, profile.workgroup());
             let tile = AttentionTile::fit(
-                profile.scratch_bytes(),
+                profile.body_scratch_bytes(),
                 profile.workgroup(),
                 profile.registers(),
                 rows[3],
@@ -806,7 +806,7 @@ fn attention_forward_body(
     planes: u32,
 ) -> (u32, u32) {
     let workgroup = profile.workgroup();
-    let pool = profile.scratch_bytes();
+    let pool = profile.body_scratch_bytes();
     let half = (workgroup / 2).max(1).min(tokens.max(1));
     let sealed = unit.segments == NO_VALUE && attention_sealed(plan, unit);
     if sealed
@@ -998,7 +998,7 @@ fn attention_geometry(
     panels: u32,
 ) -> u32 {
     let tile = AttentionTile::fit(
-        profile.scratch_bytes(),
+        profile.body_scratch_bytes(),
         profile.workgroup(),
         profile.registers(),
         width,
@@ -1394,7 +1394,7 @@ fn sample_body(rows: u32, columns: u32, profile: Profile) -> u32 {
 }
 
 fn rank_body(passes: u64, keep: u64, rows: u32, columns: u32, profile: Profile) -> u32 {
-    let layout = ChoiceLayout::of(profile.workgroup(), profile.shared_bytes());
+    let layout = ChoiceLayout::of(profile.workgroup(), profile.body_scratch_bytes());
     let workgroup = u64::from(profile.workgroup());
     let workgroups = u64::from(profile.workgroups());
     let columns = u64::from(columns);

@@ -16,7 +16,7 @@ use neura_plan::{Layout, Plan, Product, Seed, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
 use neura_profile::CooperativeMatrix;
-use neura_profile::{Budget, Geometry, MatmulTile, Profile};
+use neura_profile::{Budget, MatmulTile, Profile};
 use neura_source::Source;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -540,12 +540,7 @@ impl Runtime {
         let kinds = plan.kinds().to_vec();
         let elements = plan.elements().to_vec();
         let walked = plan.walked_tiles().collect::<Vec<_>>();
-        let geometry = Geometry::of(
-            profile.workgroup(),
-            profile.shared_bytes(),
-            &walked,
-            plan.attention(),
-        );
+        let geometry = profile.geometry(&walked, plan.attention());
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
         let tables = cache::tables(plan);
