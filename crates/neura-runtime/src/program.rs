@@ -412,7 +412,7 @@ impl Program {
             queue,
             bytemuck::cast_slice(&control::words(
                 bound_encoding.segments().len() as u32,
-                bound_encoding.wave_tasks(),
+                bound_encoding.wave_segments(),
             )),
         );
         if !plan.measures().is_empty() {
@@ -797,7 +797,7 @@ impl Program {
             control::offset_bytes(),
             bytemuck::cast_slice(&control::progress(
                 encoding.segments().len() as u32,
-                encoding.wave_tasks(),
+                encoding.wave_segments(),
             )),
         );
         if !encoding.patches().is_empty() {

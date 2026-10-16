@@ -29,7 +29,6 @@ mod device {
         if lid == 0u32 {
             rest = atomic_sub(&state[remaining(wave)], 1u32);
         }
-        storage_barrier();
         if rest == 1u32 {
             if lid == 0u32 {
                 atomic_store(&state[control::FRONTIER], wave + 1u32);
@@ -78,6 +77,9 @@ mod device {
                         patch(task.patch, lid);
                     }
                     workgroup_barrier();
+                    storage_barrier();
+                }
+                if last == segment.first + segment.count {
                     finish(segment.wave, lid);
                 }
             }

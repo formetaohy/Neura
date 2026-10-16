@@ -63,25 +63,25 @@ fn header_words(
     bytes
 }
 
-pub fn words(segments: u32, wave_tasks: &[u32]) -> Vec<u32> {
+pub fn words(segments: u32, wave_segments: &[u32]) -> Vec<u32> {
     let mut words = vec![0u32; (REFUSAL + 1) as usize];
-    words.extend(progress(segments, wave_tasks));
+    words.extend(progress(segments, wave_segments));
     words
 }
 
-pub fn progress(segments: u32, wave_tasks: &[u32]) -> Vec<u32> {
+pub fn progress(segments: u32, wave_segments: &[u32]) -> Vec<u32> {
     let mut words =
-        vec![0u32; (COUNTERS - CURSOR + WAVE_STRIDE * wave_tasks.len() as u32) as usize];
+        vec![0u32; (COUNTERS - CURSOR + WAVE_STRIDE * wave_segments.len() as u32) as usize];
     words[(SEGMENTS - CURSOR) as usize] = segments;
-    words[(WAVES - CURSOR) as usize] = wave_tasks.len() as u32;
-    for (wave, tasks) in wave_tasks.iter().enumerate() {
+    words[(WAVES - CURSOR) as usize] = wave_segments.len() as u32;
+    for (wave, held) in wave_segments.iter().enumerate() {
         assert!(
-            *tasks > 0,
-            "wave {wave} holds no task a device program could gate on",
+            *held > 0,
+            "wave {wave} holds no segment a device program could gate on",
         );
         let wave = wave as u32;
-        words[(remaining(wave) - CURSOR) as usize] = *tasks;
-        words[(total(wave) - CURSOR) as usize] = *tasks;
+        words[(remaining(wave) - CURSOR) as usize] = *held;
+        words[(total(wave) - CURSOR) as usize] = *held;
     }
     words
 }

@@ -117,12 +117,12 @@ impl Schedule {
         &self.waves
     }
 
-    pub(crate) fn wave_tasks(&self) -> Vec<u32> {
-        let mut tasks = vec![0u32; self.count as usize];
-        for wave in &self.waves {
-            tasks[*wave as usize] += 1;
+    pub(crate) fn wave_segments(&self) -> Vec<u32> {
+        let mut segments = vec![0u32; self.count as usize];
+        for segment in &self.segments {
+            segments[segment.wave as usize] += 1;
         }
-        tasks
+        segments
     }
 }
 

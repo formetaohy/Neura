@@ -39,7 +39,7 @@ pub struct Encoding {
     order: Vec<u32>,
     waves: Vec<u32>,
     segments: Vec<SegmentRecord>,
-    wave_tasks: Vec<u32>,
+    wave_segments: Vec<u32>,
     work: u64,
     patches: Vec<neura_abi::PatchRecord>,
     patch_list: Vec<u32>,
@@ -57,7 +57,7 @@ impl Encoding {
             + self.order.len() as u64 * size_of::<u32>() as u64
             + self.waves.len() as u64 * size_of::<u32>() as u64
             + self.segments.len() as u64 * size_of::<SegmentRecord>() as u64
-            + self.wave_tasks.len() as u64 * size_of::<u32>() as u64
+            + self.wave_segments.len() as u64 * size_of::<u32>() as u64
             + self.patches.len() as u64 * size_of::<neura_abi::PatchRecord>() as u64
             + self.patch_list.len() as u64 * size_of::<u32>() as u64
             + self.held.len() as u64
@@ -76,7 +76,7 @@ impl Encoding {
             order: Vec::new(),
             waves: Vec::new(),
             segments: Vec::new(),
-            wave_tasks: Vec::new(),
+            wave_segments: Vec::new(),
             work: 0,
             patches: Vec::new(),
             patch_list: Vec::new(),
@@ -124,12 +124,12 @@ impl Encoding {
         &self.segments
     }
 
-    pub fn wave_tasks(&self) -> &[u32] {
-        &self.wave_tasks
+    pub fn wave_segments(&self) -> &[u32] {
+        &self.wave_segments
     }
 
     pub fn wave_count(&self) -> u32 {
-        self.wave_tasks.len() as u32
+        self.wave_segments.len() as u32
     }
 
     pub fn task_count(&self) -> u32 {
@@ -1101,7 +1101,7 @@ impl Plan {
             order,
             waves,
             segments: schedule.segments().to_vec(),
-            wave_tasks: schedule.wave_tasks(),
+            wave_segments: schedule.wave_segments(),
             work,
             patches: tables.patches,
             patch_list: tables.list,
@@ -1125,8 +1125,8 @@ impl Plan {
         self.bound.segments()
     }
 
-    pub fn wave_tasks(&self) -> &[u32] {
-        self.bound.wave_tasks()
+    pub fn wave_segments(&self) -> &[u32] {
+        self.bound.wave_segments()
     }
 
     pub fn wave_count(&self) -> u32 {
