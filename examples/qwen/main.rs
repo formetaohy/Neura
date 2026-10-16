@@ -16,7 +16,7 @@ use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
 use tokenizer::Tokenizer;
 
-const CHUNK: u32 = 8;
+const CHUNKS: &[u32] = &[256, 128, 32, 8];
 const CONTEXT: u32 = 1024;
 const READBACK: u64 = 8 << 20;
 const HEAP: u64 = 2 << 30;
@@ -65,7 +65,13 @@ fn main() {
         ..Default::default()
     })
     .expect("a device that runs the model");
-    let chunk = CHUNK.min(context);
+    let mut chunks = Vec::new();
+    for chunk in CHUNKS.iter().copied() {
+        let chunk = chunk.min(context);
+        if chunks.last() != Some(&chunk) {
+            chunks.push(chunk);
+        }
+    }
 
     let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
     let built = |graph: &neura::Graph, rows: u32| {
@@ -79,8 +85,8 @@ fn main() {
         }
     };
     let family = match std::env::var("NEURA_TUNE") {
-        Ok(_) => Family::tuned(&runtime, loaded, chunk, built),
-        Err(_) => Family::of(&runtime, loaded, chunk, built),
+        Ok(_) => Family::tuned(&runtime, loaded, &chunks, built),
+        Err(_) => Family::of(&runtime, loaded, &chunks, built),
     };
 
     let mut generator = Generator::new(
