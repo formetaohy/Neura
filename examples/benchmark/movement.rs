@@ -38,13 +38,13 @@ fn gathered(runtime: &Runtime) -> measure::Row {
 
 fn joined(runtime: &Runtime) -> measure::Row {
     let graph = Graph::new();
-    let value = plane(&graph, Shape::of([HEADS, 1, 1, WIDTH]));
+    let value = plane(&graph, Shape::of([HEADS, 1, ROWS, WIDTH]));
     graph.retain(decoder::joined(&graph, value, HEADS));
     let program = measure::program(runtime, &graph, &[], &[]);
     let timing = measure::timed(runtime, &program, measure::CHEAP);
-    let rate = measure::traffic(timing.step, u64::from(HEADS * WIDTH) * 8, "");
+    let rate = measure::traffic(timing.step, u64::from(HEADS * ROWS * WIDTH) * 8, "");
     measure::row(
-        format!("a join of {HEADS} heads of {WIDTH}"),
+        format!("a join of {HEADS} heads of {ROWS} rows of {WIDTH}"),
         &program,
         timing,
         rate,

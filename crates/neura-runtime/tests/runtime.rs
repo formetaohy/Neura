@@ -367,6 +367,35 @@ fn a_gradient_input_walks_the_slope_the_device_descends() {
 }
 
 #[test]
+fn a_gradient_input_receives_the_slope_of_the_numbers_a_slice_and_a_join_name() {
+    let runtime = open();
+    let graph = Graph::new();
+    let observations = graph.gradient_input(Shape::of([1, 1, 1, 8]), Element::Single);
+    let sliced = graph.slice(observations, 3, 2, 2);
+    let parts = (0..2)
+        .map(|head| graph.slice(observations, 3, head * 4, 2))
+        .collect::<Vec<_>>();
+    let joined = graph.concat(&parts, 0);
+    let loss = graph.add(
+        graph.sum(graph.mul(sliced, sliced)),
+        graph.sum(graph.mul(joined, joined)),
+    );
+    let gradients = graph.backward(loss);
+    let held = gradients.of(observations);
+    graph.retain(held);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let data = random(8, 41);
+    runtime.write(&program, observations, &data);
+    runtime.run(&program);
+    let mut expected = vec![0.0f32; 8];
+    for at in [0, 1, 2, 3, 4, 5] {
+        expected[at] = 2.0 * data[at];
+    }
+    assert_close(&runtime.read(&program, held), &expected, 1e-5);
+}
+
+#[test]
 fn a_quantized_tensor_reads_back_the_blocks_a_device_packs() {
     for shape in [Shape::matrix(5, 96), Shape::matrix(3, 33), Shape::vector(7)] {
         let runtime = open();

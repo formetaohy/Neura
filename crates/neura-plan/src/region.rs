@@ -120,6 +120,7 @@ pub(crate) trait Values {
     fn len(&self) -> usize;
     fn dims(&self, value: u32) -> [u32; 4];
     fn strides(&self, value: u32) -> [u32; 4];
+    fn origin(&self, value: u32) -> u64;
     fn bounds(&self, value: u32) -> [u32; 4];
     fn element(&self, value: u32) -> Element;
     fn storage(&self, value: u32) -> u32;
@@ -161,6 +162,10 @@ impl Values for &[ValueInfo] {
         self[value as usize].strides
     }
 
+    fn origin(&self, value: u32) -> u64 {
+        self[value as usize].layout.origin()
+    }
+
     fn bounds(&self, value: u32) -> [u32; 4] {
         self[value as usize].shape.dims()
     }
@@ -186,6 +191,7 @@ impl Values for &[ValueInfo] {
 pub(crate) struct Resolved {
     dims: Vec<[u32; 4]>,
     strides: Vec<[u32; 4]>,
+    origins: Vec<u64>,
     bounds: Vec<[u32; 4]>,
     storage: Vec<u32>,
     element: Vec<Element>,
@@ -201,6 +207,7 @@ impl Resolved {
         let mut resolved = Self {
             dims: Vec::with_capacity(count),
             strides: Vec::with_capacity(count),
+            origins: Vec::with_capacity(count),
             bounds: Vec::with_capacity(count),
             storage: Vec::with_capacity(count),
             element: Vec::with_capacity(count),
@@ -220,6 +227,7 @@ impl Resolved {
             resolved.recomputes.push(extents.recomputes(value));
             resolved.dims.push(extents.dims(value, bound));
             resolved.strides.push(extents.strides(value, bound));
+            resolved.origins.push(extents.origin(value));
             resolved
                 .exact
                 .push(extents.sealed(value, authored) && extents.sealed(record.storage, authored));
@@ -246,6 +254,10 @@ impl Values for Resolved {
 
     fn strides(&self, value: u32) -> [u32; 4] {
         self.strides[value as usize]
+    }
+
+    fn origin(&self, value: u32) -> u64 {
+        self.origins[value as usize]
     }
 
     fn bounds(&self, value: u32) -> [u32; 4] {
@@ -951,9 +963,9 @@ impl Rectangle {
             u64::from(strides[2]),
             u64::from(strides[3]),
         );
-        let base = self
-            .plane_row
-            .saturating_mul(x)
+        let base = values
+            .origin(value)
+            .saturating_add(self.plane_row.saturating_mul(x))
             .saturating_add(self.plane_column.saturating_mul(y))
             .saturating_add(self.base_outer.saturating_mul(z))
             .saturating_add(self.base_inner.saturating_mul(w));

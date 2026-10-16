@@ -61,6 +61,14 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
 
 #[neura_compiler::module]
 mod device {
+    fn row_offset(row: u32, dims: uvec4, strides: uvec4) -> u32 {
+        let plane = dims.y * dims.z;
+        let x = row / plane;
+        let y = row / dims.z % dims.y;
+        let z = row % dims.z;
+        return x * strides.x + y * strides.y + z * strides.z;
+    }
+
     fn run_scatter(task: Task, lid: u32) {
         let into = values[task.a];
         let indices = values[task.b];
@@ -74,7 +82,12 @@ mod device {
                 publish(
                     into,
                     address,
-                    fetch(into, address) + fetch(updates, row * width + column),
+                    fetch(into, address)
+                        + fetch(
+                            updates,
+                            row_offset(row, updates.dims, updates.strides)
+                                + column * updates.strides.w,
+                        ),
                 );
             }
         }
@@ -124,7 +137,10 @@ mod device {
                 publish(
                     into,
                     chosen * width + column,
-                    fetch(updates, row * width + column),
+                    fetch(
+                        updates,
+                        row_offset(row, updates.dims, updates.strides) + column * updates.strides.w,
+                    ),
                 );
             }
         }

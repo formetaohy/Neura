@@ -1022,17 +1022,15 @@ impl Plan {
                 sized.element(id) == sized.element(owner) && sized.scale(id) == sized.scale(owner),
                 "value {id} holds numbers of another storage",
             );
-            let address = self.layout.address(owner, sized.residency(owner), &offsets);
+            let address = self.layout.address(owner, sized.residency(owner), &offsets)
+                + word_shift(sized.element(id), sized.origin(id));
             let mut free = [NO_SLOT; 4];
             for axis in 0..neura_abi::MAX_RANK {
                 if let Some(slot) = self.shapes[id as usize].shape.free(axis) {
                     free[axis as usize] = slot;
                 }
             }
-            let rank = self.shapes[id as usize]
-                .strides_rank
-                .unwrap_or([0, 1, 2, 3])
-                .map(u32::from);
+            let rank = self.shapes[id as usize].layout.rank().map(u32::from);
             let record = ValueRecord::of(ValueFields {
                 base: u32::try_from(address).unwrap_or_else(|_| {
                     panic!("value {id} lies at {address}, beyond the device address space")
@@ -1440,13 +1438,19 @@ impl<'a> Sized<'a> {
 
     fn addressed_as_its_storage(&self, value: u32) -> bool {
         let owner = self.storage(value);
-        self.elements(value) == self.elements(owner)
+        self.origin(value) == 0
+            && self.elements(value) == self.elements(owner)
             && self.strides(value) == Shape::dense_strides(self.dims(value))
+    }
+
+    fn origin(&self, value: u32) -> u64 {
+        self.extents.origin(value)
     }
 
     fn matches(&self, left: u32, right: u32) -> bool {
         if self.dims(left) != self.dims(right)
             || self.strides(left) != self.strides(right)
+            || self.origin(left) != self.origin(right)
             || self.element(left) != self.element(right)
         {
             return false;
@@ -1470,6 +1474,10 @@ impl region::Values for Sized<'_> {
 
     fn strides(&self, value: u32) -> [u32; 4] {
         Sized::strides(self, value)
+    }
+
+    fn origin(&self, value: u32) -> u64 {
+        Sized::origin(self, value)
     }
 
     fn bounds(&self, value: u32) -> [u32; 4] {
@@ -2193,6 +2201,19 @@ fn identity_kind(kind: Kind) -> bool {
 
 fn scaled(work: u64, count: u32, base: u32) -> u64 {
     work.saturating_mul(u64::from(count)) / u64::from(base.max(1))
+}
+
+fn word_shift(element: Element, origin: u64) -> u64 {
+    if origin == 0 {
+        return 0;
+    }
+    let (bytes, _) = element.byte_span(origin, 1);
+    assert!(
+        bytes.is_multiple_of(WORD_BYTES),
+        "a view of an {} tensor starting at element {origin} lands off the word grid the device addresses",
+        element.name(),
+    );
+    bytes / WORD_BYTES
 }
 
 fn record_table(sized: &Sized<'_>, value: u32) -> u32 {

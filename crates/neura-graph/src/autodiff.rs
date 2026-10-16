@@ -1,6 +1,7 @@
 use crate::graph::{
     Declaration, Graph, NORM_FLOOR, Ragged, Residency, TaskInfo, Value, ValueInfo, advance,
 };
+use crate::layout::Layout;
 use crate::shape::{Free, Shape};
 use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
 use neura_pointwise as op;
@@ -128,13 +129,13 @@ impl Recomputing {
             (info.residency == Residency::View).then_some((
                 info.storage,
                 info.shape,
-                info.strides_rank,
+                info.layout,
                 info.element,
                 info.scale,
                 info.requires_grad,
             ))
         };
-        let Some((storage, shape, strides_rank, element, scale, tracked)) = view else {
+        let Some((storage, shape, layout, element, scale, tracked)) = view else {
             return value;
         };
         let Some(copy) = self.copies.get(&storage).copied() else {
@@ -143,13 +144,8 @@ impl Recomputing {
         if let Some(view) = self.views.get(&value) {
             return *view;
         }
-        let view = graph.declare(Declaration::view(
-            shape,
-            strides_rank,
-            copy,
-            element,
-            scale,
-            tracked,
+        let view = graph.declare(Declaration::viewed(
+            shape, layout, copy, element, scale, tracked,
         ));
         if graph.prefix_owner(value).is_some() {
             graph.mark_prefix(view.id(), copy);
@@ -1092,31 +1088,73 @@ impl Graph {
         {
             return self.extended(value, contribution);
         }
-        let (view_shape, view_strides, owner_shape) = {
+        let (view_shape, view_strides, view_layout, owner_shape) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.shape, info.strides, state.values[owner as usize].shape)
+            (
+                info.shape,
+                info.strides,
+                info.layout,
+                state.values[owner as usize].shape,
+            )
         };
         if view_shape.dims() == owner_shape.dims() && view_strides == owner_shape.strides() {
             return contribution;
         }
         let contribution = self.own(contribution);
+        let element = self.element(contribution);
+        if let Some((_, origin)) = view_layout.strided_parts() {
+            let origin = u32::try_from(origin).unwrap_or_else(|_| {
+                panic!(
+                    "a gradient lands in a view of value {} that starts at element {origin}, beyond the element space a task walks",
+                    value.id(),
+                )
+            });
+            let out = self.stored(
+                owner_shape,
+                element,
+                self.carries(element, &[contribution]),
+                Residency::Derived,
+                false,
+            );
+            if origin != 0 || view_shape.elements() < owner_shape.elements() {
+                let mut fill = TaskInfo::of(Kind::Fill, op::NONE, out.id(), [NO_VALUE; 6]);
+                fill.literal = 0.0;
+                self.push(fill);
+            }
+            let mut task = TaskInfo::of(
+                Kind::Layout,
+                op::NONE,
+                out.id(),
+                [
+                    contribution.id(),
+                    value.id(),
+                    NO_VALUE,
+                    NO_VALUE,
+                    NO_VALUE,
+                    NO_VALUE,
+                ],
+            );
+            task.offset = origin;
+            task.in_place = origin != 0 || view_shape.elements() < owner_shape.elements();
+            self.push(task);
+            return out;
+        }
         if view_strides == view_shape.strides() {
             assert!(
                 self.contiguous(contribution),
                 "a gradient of a tensor the storage lays out row by row arrives row by row, and value {} walks other strides",
                 contribution.id(),
             );
-            return self.declare(Declaration::view(
+            return self.declare(Declaration::viewed(
                 owner_shape,
-                None,
+                Layout::Dense,
                 self.owner_of(contribution.id()),
                 self.element(contribution),
                 self.scale(contribution),
                 false,
             ));
         }
-        let element = self.element(contribution);
         let out = self.stored(
             owner_shape,
             element,

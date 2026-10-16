@@ -608,6 +608,18 @@ fn schedule_unit(
                 |_, count| u64::from(count) * 4,
             );
         }
+        Kind::Layout => {
+            let source = plan.shape(unit.inputs[0]);
+            let measure = measured(plan, unit.inputs[0], Measure::Elements);
+            spread(
+                plan,
+                unit,
+                source.elements(),
+                task_elements(source.elements(), profile.workgroup(), target),
+                measure,
+                |_, count| u64::from(count),
+            );
+        }
         Kind::Binary
         | Kind::Unary
         | Kind::Select
@@ -615,7 +627,6 @@ fn schedule_unit(
         | Kind::Fill
         | Kind::Noise
         | Kind::Broadcast
-        | Kind::Layout
         | Kind::Extend
         | Kind::OneHot
         | Kind::Length

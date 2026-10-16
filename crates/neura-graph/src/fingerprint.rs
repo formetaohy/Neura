@@ -13,6 +13,11 @@ pub(crate) fn of(values: &[ValueInfo], tasks: &[TaskInfo]) -> u64 {
         for stride in value.strides {
             digest.word(stride);
         }
+        for rank in value.layout.rank() {
+            digest.word(u32::from(rank));
+        }
+        digest.word(value.layout.origin() as u32);
+        digest.word((value.layout.origin() >> 32) as u32);
         digest.word(value.element.code());
         digest.single(value.scale);
         digest.word(residency(value.residency));

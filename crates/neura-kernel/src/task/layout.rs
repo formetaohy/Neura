@@ -14,7 +14,7 @@ mod device {
             let at = coordinates(index, source.dims);
             publish(
                 output,
-                read_address(at, layout.strides),
+                task.offset + read_address(at, layout.strides),
                 fetch(source, read_address(at, source.strides)),
             );
         }

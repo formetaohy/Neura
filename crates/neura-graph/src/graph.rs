@@ -1,5 +1,6 @@
 use crate::autodiff::Recomputation;
 use crate::init::Init;
+use crate::layout::Layout;
 use crate::shape::{Free, Shape};
 use crate::window::Window;
 use neura_abi::{EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE, StepRecord};
@@ -140,7 +141,7 @@ impl TaskInfo {
 pub struct ValueInfo {
     pub shape: Shape,
     pub strides: [u32; 4],
-    pub strides_rank: Option<[u8; 4]>,
+    pub layout: Layout,
     pub storage: u32,
     pub element: Element,
     pub scale: f32,
@@ -158,7 +159,7 @@ impl ValueInfo {
         Self {
             shape,
             strides: shape.strides(),
-            strides_rank: None,
+            layout: Layout::Dense,
             storage: id,
             element: Element::Single,
             scale: 1.0,
@@ -254,8 +255,7 @@ impl GraphSnapshot {
 pub(crate) struct Declaration<'a> {
     name: Option<&'a str>,
     shape: Shape,
-    strides: [u32; 4],
-    strides_rank: Option<[u8; 4]>,
+    layout: Layout,
     storage: Option<u32>,
     residency: Residency,
     element: Element,
@@ -269,8 +269,7 @@ impl<'a> Declaration<'a> {
         Self {
             name: None,
             shape,
-            strides: shape.strides(),
-            strides_rank: None,
+            layout: Layout::Dense,
             storage: None,
             residency,
             element,
@@ -280,9 +279,9 @@ impl<'a> Declaration<'a> {
         }
     }
 
-    pub(crate) fn view(
+    pub(crate) fn viewed(
         shape: Shape,
-        strides_rank: Option<[u8; 4]>,
+        layout: Layout,
         storage: u32,
         element: Element,
         scale: f32,
@@ -291,8 +290,7 @@ impl<'a> Declaration<'a> {
         Self {
             name: None,
             shape,
-            strides: Shape::ranked_strides(shape.dims(), strides_rank.unwrap_or([0, 1, 2, 3])),
-            strides_rank,
+            layout,
             storage: Some(storage),
             residency: Residency::View,
             element,
@@ -401,7 +399,7 @@ impl Graph {
             axis < MAX_RANK,
             "a trim names one of the {MAX_RANK} axes, and {axis} is not one of them",
         );
-        let (shape, strides_rank, storage, element, scale, tracked) = {
+        let (shape, layout, storage, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             assert!(
@@ -412,7 +410,7 @@ impl Graph {
             );
             (
                 info.shape,
-                info.strides_rank,
+                info.layout,
                 info.storage,
                 info.element,
                 info.scale,
@@ -433,9 +431,9 @@ impl Graph {
         let free = self.counted(shape.dims()[axis as usize], count);
         let mut frees = shape.frees();
         frees[axis as usize] = Some(free.slot());
-        let live = self.declare(Declaration::view(
+        let live = self.declare(Declaration::viewed(
             Shape::from_axes(shape.dims(), frees),
-            strides_rank,
+            layout,
             storage,
             element,
             scale,
@@ -1046,24 +1044,19 @@ impl Graph {
 
     pub fn detach(&self, value: Value) -> Value {
         let value = self.own(value);
-        let (shape, strides_rank, storage, element, scale) = {
+        let (shape, layout, storage, element, scale) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
                 info.shape,
-                info.strides_rank,
+                info.layout,
                 info.storage,
                 info.element,
                 info.scale,
             )
         };
-        self.declare(Declaration::view(
-            shape,
-            strides_rank,
-            storage,
-            element,
-            scale,
-            false,
+        self.declare(Declaration::viewed(
+            shape, layout, storage, element, scale, false,
         ))
     }
 
@@ -1144,8 +1137,9 @@ impl Graph {
             target.id(),
         );
         assert!(
-            self.contiguous(updates),
-            "a scatter walks its updates row by row, and value {} is a view",
+            self.element(updates) == Element::Single || self.contiguous(updates),
+            "a scatter walks the words of a {} tensor row by row, and value {} is a view",
+            self.element(updates).name(),
             updates.id(),
         );
         let indices_shape = self.shape(indices);
@@ -1420,8 +1414,7 @@ impl Graph {
         let Declaration {
             name,
             shape,
-            strides,
-            strides_rank,
+            layout,
             storage,
             residency,
             element,
@@ -1434,8 +1427,8 @@ impl Graph {
         let id = state.values.len() as u32;
         state.values.push(ValueInfo {
             shape,
-            strides,
-            strides_rank,
+            strides: layout.strides(shape.dims()),
+            layout,
             storage: storage.unwrap_or(id),
             element,
             scale,

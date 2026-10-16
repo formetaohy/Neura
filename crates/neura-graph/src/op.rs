@@ -1,4 +1,5 @@
 use crate::graph::{AttentionOptions, Declaration, Graph, Ragged, Residency, TaskInfo, Value};
+use crate::layout::Layout;
 use crate::pool::Pool;
 use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
@@ -1370,9 +1371,13 @@ impl Graph {
                 self.scale(*value),
             );
         }
+        let joined = Shape::joined(&shapes, axis);
+        if let Some(view) = self.concat_view(&values, axis, joined) {
+            return view;
+        }
         let widened = element.narrow();
         let out = self.stored(
-            Shape::joined(&shapes, axis),
+            joined,
             if widened { Element::Single } else { element },
             if widened { 1.0 } else { scale },
             Residency::Derived,
@@ -1412,8 +1417,12 @@ impl Graph {
             "a slice of {length} numbers from {start} along axis {axis} reaches beyond {:?}",
             shape.dims(),
         );
+        let sliced = shape.fixed_axis(axis, length);
+        if let Some(view) = self.slice_view(value, axis, start, length) {
+            return view;
+        }
         let out = self.stored(
-            shape.fixed_axis(axis, length),
+            sliced,
             self.element(value),
             self.scale(value),
             Residency::Derived,
@@ -1495,35 +1504,40 @@ impl Graph {
             );
             walked |= 1 << axis;
         }
-        let (shape, strides_rank, storage, element, scale, tracked) = {
+        let (shape, layout, storage, element, scale, tracked, strides) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
             (
                 info.shape,
-                info.strides_rank,
+                info.layout,
                 info.storage,
                 info.element,
                 info.scale,
                 info.requires_grad,
+                info.strides,
             )
         };
         let mut permuted_dims = [1u32; MAX_RANK as usize];
         let mut permuted_frees = [None; MAX_RANK as usize];
+        let mut permuted_strides = [0u32; MAX_RANK as usize];
         let mut permuted_rank = [0u8; MAX_RANK as usize];
-        let rank = strides_rank.unwrap_or([0, 1, 2, 3]);
+        let rank = layout.rank();
         for axis in 0..MAX_RANK as usize {
             let walked = order[axis] as usize;
             permuted_dims[axis] = shape.dims()[walked];
             permuted_frees[axis] = shape.free(walked as u32);
+            permuted_strides[axis] = strides[walked];
             permuted_rank[axis] = rank[walked];
         }
-        self.declare(Declaration::view(
-            Shape::from_axes(permuted_dims, permuted_frees),
-            Some(permuted_rank),
-            storage,
-            element,
-            scale,
-            tracked,
+        let permuted = Shape::from_axes(permuted_dims, permuted_frees);
+        let layout = match layout {
+            Layout::Strided { origin, .. } => {
+                Layout::strided(permuted.dims(), permuted_strides, origin)
+            }
+            _ => Layout::Ranked(permuted_rank),
+        };
+        self.declare(Declaration::viewed(
+            permuted, layout, storage, element, scale, tracked,
         ))
     }
 
@@ -1548,13 +1562,25 @@ impl Graph {
             self.shape(value).dims(),
             shape.dims(),
         );
-        let (storage, element, scale, tracked) = {
+        let (storage, layout, element, scale, tracked) = {
             let state = self.state.borrow();
             let info = &state.values[value.id() as usize];
-            (info.storage, info.element, info.scale, info.requires_grad)
+            (
+                info.storage,
+                info.layout,
+                info.element,
+                info.scale,
+                info.requires_grad,
+            )
         };
-        self.declare(Declaration::view(
-            shape, None, storage, element, scale, tracked,
+        let layout = match layout {
+            Layout::Strided { origin, .. } => {
+                Layout::strided(shape.dims(), Shape::dense_strides(shape.dims()), origin)
+            }
+            _ => Layout::Dense,
+        };
+        self.declare(Declaration::viewed(
+            shape, layout, storage, element, scale, tracked,
         ))
     }
 

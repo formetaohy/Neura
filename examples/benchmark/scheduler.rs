@@ -86,23 +86,28 @@ fn gate(runtime: &Runtime) -> measure::Row {
     );
     let mut a = left;
     let mut b = right;
+    let mut c = left;
+    let mut d = right;
     for _ in 0..PAIRS {
-        let joined = graph.add(graph.matmul(a, weights), graph.matmul(b, weights));
-        a = graph.slice(joined, 3, 0, TINY);
-        b = graph.slice(joined, 3, 0, TINY);
+        let first = graph.add(graph.matmul(a, weights), graph.matmul(b, weights));
+        let second = graph.add(graph.matmul(c, weights), graph.matmul(d, weights));
+        a = graph.slice(first, 3, 0, TINY);
+        b = graph.slice(first, 3, 0, TINY);
+        c = graph.slice(second, 3, 0, TINY);
+        d = graph.slice(second, 3, 0, TINY);
     }
-    graph.retain(a);
+    graph.retain(graph.add(a, c));
     let held = vec![0.5; TINY as usize];
     let program = measure::program(runtime, &graph, &[left, right], &[&held, &held]);
     assert!(
         program.wave_count() >= PAIRS,
-        "a benchmark of the wave gate chains {PAIRS} pairs of products, and this graph gates only {} waves",
+        "a benchmark of the wave gate chains {PAIRS} rounds of two pairs of products, and this graph gates only {} waves",
         program.wave_count(),
     );
     let timing = measure::timed(runtime, &program, measure::CHEAP);
     let rate = measure::each(timing.step, program.wave_count(), "wave");
     measure::row(
-        format!("a chain of {PAIRS} gated pairs"),
+        format!("a chain of {PAIRS} gated rounds of two pairs"),
         &program,
         timing,
         rate,

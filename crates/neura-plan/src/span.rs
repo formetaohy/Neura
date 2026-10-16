@@ -1,6 +1,6 @@
 use crate::lower;
 use neura_abi::{Element, NO_VALUE};
-use neura_graph::{Shape, ValueInfo};
+use neura_graph::{Layout, Shape, ValueInfo};
 use neura_profile::MatmulTile;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -46,7 +46,7 @@ pub(crate) enum Split {
 
 struct Extent {
     shape: Shape,
-    strides_rank: Option<[u8; 4]>,
+    layout: Layout,
     storage: u32,
     element: Element,
     recomputes: Option<u32>,
@@ -65,7 +65,7 @@ impl Extents {
                 .iter()
                 .map(|info| Extent {
                     shape: info.shape,
-                    strides_rank: info.strides_rank,
+                    layout: info.layout,
                     storage: info.storage,
                     element: info.element,
                     recomputes: info.recomputes,
@@ -113,12 +113,13 @@ impl Extents {
     }
 
     pub(crate) fn strides(&self, value: u32, extents: &[u32]) -> [u32; 4] {
-        Shape::ranked_strides(
-            self.dims(value, extents),
-            self.values[value as usize]
-                .strides_rank
-                .unwrap_or([0, 1, 2, 3]),
-        )
+        self.values[value as usize]
+            .layout
+            .strides(self.dims(value, extents))
+    }
+
+    pub(crate) fn origin(&self, value: u32) -> u64 {
+        self.values[value as usize].layout.origin()
     }
 
     pub(crate) fn planes(&self, measure: u32, extents: &[u32]) -> u32 {
