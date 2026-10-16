@@ -3,7 +3,7 @@ use neura_profile::{Geometry, MatmulStrategy};
 
 pub(crate) fn install(compiler: &mut Compiler) {
     device::define(compiler);
-    compiler.constant("QUANT_RUN_BLOCKS", neura_profile::QUANT_RUN_BLOCKS);
+    compiler.constant("QUANT_RUN_BLOCKS", neura_profile::BLOCK_RUN_WORDS);
     compiler.select("run_weight_q8_0", "run_weight");
 }
 
@@ -53,13 +53,17 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                     &constants,
                 );
             }
-            MatmulStrategy::Staged if tile.stages_a_run() => {
+            MatmulStrategy::Staged if tile.run().is_some() => {
+                let codes = tile.run() == Some(neura_profile::Run::Codes);
                 constants.extend([
                     ("MATMUL_LEFT_STRIDE", tile.left_stride()),
                     (
                         "MATMUL_RUN_STRIDE",
-                        u32::try_from(tile.run_words())
-                            .expect("a run of a staged tile fits one device word address"),
+                        match codes {
+                            true => tile.columns() * neura_profile::RUN_SLOT,
+                            false => u32::try_from(tile.run_words())
+                                .expect("a run of a staged tile fits one device word address"),
+                        },
                     ),
                     ("MATMUL_RUN_BLOCKS", tile.depth() / neura_abi::QUANT_BLOCK),
                     ("MATMUL_THREAD_COLUMNS", tile.thread_columns()),
@@ -67,16 +71,20 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                     ("MATMUL_REGISTER_COLUMNS", tile.register_columns()),
                     ("MATMUL_REGISTERS", tile.registers()),
                 ]);
-                compiler.specialize(
-                    "template_matmul_load_run",
-                    &format!("matmul_load_run_{suffix}"),
-                    &constants,
-                );
-                compiler.specialize(
-                    "template_run_matmul_run",
-                    &format!("run_matmul_{suffix}"),
-                    &constants,
-                );
+                let (load, run, name) = match codes {
+                    true => (
+                        "template_matmul_load_codes",
+                        "template_run_matmul_codes",
+                        "matmul_load_codes",
+                    ),
+                    false => (
+                        "template_matmul_load_run",
+                        "template_run_matmul_run",
+                        "matmul_load_run",
+                    ),
+                };
+                compiler.specialize(load, &format!("{name}_{suffix}"), &constants);
+                compiler.specialize(run, &format!("run_matmul_{suffix}"), &constants);
             }
             MatmulStrategy::Staged => {
                 constants.extend([
@@ -270,6 +278,68 @@ mod device {
         }
     }
 
+    fn run_weight_q8_0(base: u32, at: u32) -> f32 {
+        let block = at / Q8_0_BLOCK;
+        let within = at % Q8_0_BLOCK;
+        let held = scratch[base + QUANT_RUN_BLOCKS * block];
+        let scale = unpack2x16float(bitcast_u32(held)).x;
+        let offset = (2u32 + within) / 4u32;
+        let word = bitcast_u32(scratch[base + QUANT_RUN_BLOCKS * block + offset]);
+        let byte = (word >> (((2u32 + within) % 4u32) * 8u32)) & 0xffu32;
+        return ggml_signed(byte) * scale;
+    }
+
+    fn template_matmul_load_codes(
+        lid: u32,
+        base_row: u32,
+        base_column: u32,
+        base_depth: u32,
+        buffer: u32,
+        left_plane: u32,
+        right_plane: u32,
+        left: Value,
+        right: Value,
+        rows: u32,
+        depth: u32,
+        columns: u32,
+    ) {
+        let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
+        let left_across = left.strides.z < left.strides.w;
+        for unit in stride(lid, MATMUL_ROWS * MATMUL_DEPTH, WORKGROUP_SIZE) {
+            let row = select(unit / MATMUL_DEPTH, unit % MATMUL_ROWS, left_across);
+            let column = select(unit % MATMUL_DEPTH, unit / MATMUL_ROWS, left_across);
+            let at_row = base_row + row;
+            let at_column = base_depth + column;
+            let inside = at_row < rows && at_column < depth;
+            let address = select(
+                0u32,
+                left_plane + at_row * left.strides.z + at_column * left.strides.w,
+                inside,
+            );
+            scratch[left_slot + row * MATMUL_LEFT_STRIDE + column] =
+                select(0.0, fetch(left, address), inside);
+        }
+        let right_slot = buffer * MATMUL_RUN_STRIDE * MATMUL_RUN_BLOCKS;
+        for block in unroll(0u32, MATMUL_RUN_BLOCKS, 1u32) {
+            let at_depth = base_depth + block * QUANT_BLOCK;
+            for unit in stride(lid, MATMUL_COLUMNS, WORKGROUP_SIZE) {
+                let column = base_column + unit;
+                let inside = at_depth < depth && column < columns;
+                let address = select(
+                    0u32,
+                    right_plane + at_depth * right.strides.z + column * right.strides.w,
+                    inside,
+                );
+                codes(
+                    right,
+                    address,
+                    inside,
+                    SCRATCH_MATMUL_RIGHT + right_slot + block * MATMUL_RUN_STRIDE + unit * RUN_SLOT,
+                );
+            }
+        }
+    }
+
     fn template_run_matmul_folded(task: Task, lid: u32) {
         let left = values[task.a];
         let right = values[task.b];
@@ -392,17 +462,6 @@ mod device {
                 }
             }
         }
-    }
-
-    fn run_weight_q8_0(base: u32, at: u32) -> f32 {
-        let block = at / Q8_0_BLOCK;
-        let within = at % Q8_0_BLOCK;
-        let held = scratch[base + QUANT_RUN_BLOCKS * block];
-        let scale = unpack2x16float(bitcast_u32(held)).x;
-        let offset = (2u32 + within) / 4u32;
-        let word = bitcast_u32(scratch[base + QUANT_RUN_BLOCKS * block + offset]);
-        let byte = (word >> (((2u32 + within) % 4u32) * 8u32)) & 0xffu32;
-        return ggml_signed(byte) * scale;
     }
 
     fn template_run_matmul(task: Task, lid: u32) {
@@ -649,6 +708,146 @@ mod device {
                                 + (thread_column + column * MATMUL_THREAD_COLUMNS)
                                     * MATMUL_RUN_STRIDE,
                             step,
+                        );
+                    }
+                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                        for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                            let register = row * MATMUL_REGISTER_COLUMNS + column;
+                            acc[register] =
+                                acc[register] + left_registers[row] * right_registers[column];
+                        }
+                    }
+                }
+                workgroup_barrier();
+                buffer = 1u32 - buffer;
+            }
+            for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                    let out_row = base_row + thread_row + row;
+                    let out_column = base_column + thread_column + column * MATMUL_THREAD_COLUMNS;
+                    if out_row < row_bound && out_column < columns {
+                        let index = out_row * columns + out_column;
+                        publish(
+                            output,
+                            out_plane + index,
+                            chained(
+                                task,
+                                uvec4(plane_row, plane_column, chain_row + out_row, out_column),
+                                acc[row * MATMUL_REGISTER_COLUMNS + column],
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_run_matmul_codes(task: Task, lid: u32) {
+        let left = values[task.a];
+        let right = values[task.b];
+        let output = values[task.out];
+        let rows = left.dims.z;
+        let depth = left.dims.w;
+        let columns = right.dims.w;
+        let plane_columns = max(left.dims.y, right.dims.y);
+        let planes = max(left.dims.x, right.dims.x) * plane_columns;
+        let row_blocks = (rows + MATMUL_ROWS - 1u32) / MATMUL_ROWS;
+        let column_blocks = (columns + MATMUL_COLUMNS - 1u32) / MATMUL_COLUMNS;
+        let depth_blocks = (depth + MATMUL_DEPTH - 1u32) / MATMUL_DEPTH;
+        let tiles_per_plane = row_blocks * column_blocks;
+        let first_block = (task.slot * depth_blocks) / task.splits;
+        let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
+        let thread_row = (lid / MATMUL_THREAD_COLUMNS) * MATMUL_REGISTER_ROWS;
+        let thread_column = lid % MATMUL_THREAD_COLUMNS;
+        let mut acc = scalar_array(0.0, MATMUL_REGISTERS);
+        let mut left_registers = scalar_array(0.0, MATMUL_REGISTER_ROWS);
+        let mut right_registers = scalar_array(0.0, MATMUL_REGISTER_COLUMNS);
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let plane = tile / tiles_per_plane;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
+            let within = tile % tiles_per_plane;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
+            for register in unroll(0u32, MATMUL_REGISTERS, 1u32) {
+                acc[register] = 0.0;
+            }
+            let mut buffer = 0u32;
+            template_matmul_load_codes(
+                lid,
+                base_row,
+                base_column,
+                first_block * MATMUL_DEPTH,
+                0u32,
+                left_plane,
+                right_plane,
+                left,
+                right,
+                row_bound,
+                depth,
+                columns,
+            );
+            workgroup_barrier();
+            for block in stride(first_block, last_block, 1u32) {
+                if block + 1u32 < last_block {
+                    template_matmul_load_codes(
+                        lid,
+                        base_row,
+                        base_column,
+                        (block + 1u32) * MATMUL_DEPTH,
+                        1u32 - buffer,
+                        left_plane,
+                        right_plane,
+                        left,
+                        right,
+                        row_bound,
+                        depth,
+                        columns,
+                    );
+                }
+                let left_slot = buffer * MATMUL_ROWS * MATMUL_LEFT_STRIDE;
+                let right_slot = buffer * MATMUL_RUN_STRIDE * MATMUL_RUN_BLOCKS;
+                for step in unroll(0u32, MATMUL_DEPTH, 1u32) {
+                    for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {
+                        left_registers[row] =
+                            scratch[left_slot + (thread_row + row) * MATMUL_LEFT_STRIDE + step];
+                    }
+                    for column in unroll(0u32, MATMUL_REGISTER_COLUMNS, 1u32) {
+                        right_registers[column] = run_codes(
+                            SCRATCH_MATMUL_RIGHT
+                                + right_slot
+                                + (step / QUANT_BLOCK) * MATMUL_RUN_STRIDE
+                                + (thread_column + column * MATMUL_THREAD_COLUMNS) * RUN_SLOT,
+                            step % QUANT_BLOCK,
                         );
                     }
                     for row in unroll(0u32, MATMUL_REGISTER_ROWS, 1u32) {

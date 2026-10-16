@@ -80,6 +80,7 @@ fn install_blocks(compiler: &mut Compiler) {
         compiler.constant(&format!("{prefix}_BYTES"), block.bytes);
     }
     compiler.constant("SUPER_BLOCK", neura_abi::SUPER_BLOCK);
+    compiler.constant("QUANT_BLOCK", neura_abi::QUANT_BLOCK);
     compiler.constant("SUPER_SUB_BLOCK", neura_abi::SUPER_SUB_BLOCK);
     compiler.constant("SUPER_SMALL_BLOCK", neura_abi::SUPER_SMALL_BLOCK);
 }

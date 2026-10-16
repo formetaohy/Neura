@@ -24,6 +24,11 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     device::define(compiler);
     left::define(compiler);
     run::define(compiler);
+    panel::define(compiler);
+    compiler.constant("RUN_CODES", neura_profile::RUN_CODES);
+    compiler.constant("RUN_SCALES", neura_profile::RUN_SCALES);
+    compiler.constant("RUN_OFFSET", neura_profile::RUN_OFFSET);
+    compiler.constant("RUN_SLOT", neura_profile::RUN_SLOT);
     for generic in [
         "template_dot_element",
         "template_dot_q8_0",
@@ -68,6 +73,23 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     );
     compiler.select("stage_by_element", "stage");
     compiler.select("stage_none", "stage_untouched");
+    compiler.select("generic_codes_by_element", "codes_by_element");
+    for element in elements.iter().copied().filter(|held| held.packs_codes()) {
+        compiler.insert_case(
+            "codes_by_element",
+            ast::Arm {
+                pattern: ast::Pattern::Integer(element.code()),
+                body: vec![ast::Statement::Expression(ast::Expression::call(
+                    format!("codes_{}", symbol(element)),
+                    ["right", "address", "inside", "slot"]
+                        .into_iter()
+                        .map(ast::Expression::name)
+                        .collect(),
+                ))],
+            },
+        );
+    }
+    compiler.select("codes_by_element", "codes");
 }
 
 fn dispatch(compiler: &mut Compiler, elements: &[Element], by_element: &str, family: &str) {
@@ -99,15 +121,18 @@ fn dot_arguments() -> Vec<ast::Expression> {
         .collect()
 }
 
-fn dot_of(element: Element, family: &str) -> String {
-    let format = match element {
+fn symbol(element: Element) -> &'static str {
+    match element {
         Element::Q8_0 => "q8_0",
         Element::Q4K => "q4_k",
         Element::Q5K => "q5_k",
         Element::Q6K => "q6_k",
         _ => "element",
-    };
-    format!("dot_{format}_{family}")
+    }
+}
+
+fn dot_of(element: Element, family: &str) -> String {
+    format!("dot_{}_{family}", symbol(element))
 }
 
 #[neura_compiler::module]
@@ -231,6 +256,132 @@ mod run {
             }
         }
         return total;
+    }
+}
+
+#[neura_compiler::module]
+mod panel {
+    fn generic_codes_by_element(right: Value, address: u32, inside: bool, slot: u32) {
+        match right.element {
+            _ => refuse(refusal::TENSOR, refusal::ELEMENT, right.element),
+        }
+    }
+
+    fn panel_affine(slot: u32, low_scale: f32, high_scale: f32, offset: f32, inside: bool) {
+        scratch[slot + RUN_CODES] = select(0.0, low_scale, inside);
+        scratch[slot + RUN_CODES + 1u32] = select(0.0, high_scale, inside);
+        scratch[slot + RUN_CODES + RUN_SCALES] = select(0.0, offset, inside);
+    }
+
+    fn panel_word(right: Value, index: u32, odd: bool) -> u32 {
+        let low = ggml_raw(right, index);
+        let high = ggml_raw(right, index + 1u32);
+        return select(low, (low >> 16u32) | (high << 16u32), odd);
+    }
+
+    fn codes_q8_0(right: Value, address: u32, inside: bool, slot: u32) {
+        let byte = (address / Q8_0_BLOCK) * Q8_0_BYTES;
+        let scale = ggml_half(right, byte);
+        for word in unroll(0u32, RUN_CODES, 1u32) {
+            let at = byte + 2u32 + word * 4u32;
+            let held = panel_word(right, at >> 2u32, (at & 3u32) == 2u32);
+            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+        }
+        panel_affine(slot, scale, scale, 0.0, inside);
+    }
+
+    fn codes_q4_k(right: Value, address: u32, inside: bool, slot: u32) {
+        let base = (address / Q4_K_BLOCK) * Q4_K_BYTES;
+        let within = address % Q4_K_BLOCK;
+        let group = within / 64u32;
+        let seat = (within % 64u32) / SUPER_SUB_BLOCK;
+        let sub = group * 2u32 + seat;
+        let quantum = ggml_half(right, base);
+        let floor = ggml_half(right, base + 2u32);
+        let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
+        let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
+        for word in unroll(0u32, RUN_CODES, 1u32) {
+            let packed = ggml_raw(right, base / 4u32 + 4u32 + group * 8u32 + word);
+            let mut held = 0u32;
+            for lane in unroll(0u32, 4u32, 1u32) {
+                held = held | (((packed >> (lane * 8u32 + seat * 4u32)) & 0xfu32) << (lane * 8u32));
+            }
+            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+        }
+        panel_affine(slot, scale, scale, offset, inside);
+    }
+
+    fn codes_q5_k(right: Value, address: u32, inside: bool, slot: u32) {
+        let base = (address / Q5_K_BLOCK) * Q5_K_BYTES;
+        let within = address % Q5_K_BLOCK;
+        let group = within / 64u32;
+        let seat = (within % 64u32) / SUPER_SUB_BLOCK;
+        let sub = group * 2u32 + seat;
+        let fifth_shift = 2u32 * group + seat;
+        let quantum = ggml_half(right, base);
+        let floor = ggml_half(right, base + 2u32);
+        let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
+        let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
+        for word in unroll(0u32, RUN_CODES, 1u32) {
+            let packed = ggml_raw(right, base / 4u32 + 12u32 + group * 8u32 + word);
+            let fifth = ggml_raw(right, base / 4u32 + 4u32 + word);
+            let mut held = 0u32;
+            for lane in unroll(0u32, 4u32, 1u32) {
+                let nibble = (packed >> (lane * 8u32 + seat * 4u32)) & 0xfu32;
+                let bit = (fifth >> (lane * 8u32 + fifth_shift)) & 1u32;
+                held = held | ((nibble | (bit << 4u32)) << (lane * 8u32));
+            }
+            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+        }
+        panel_affine(slot, scale, scale, offset, inside);
+    }
+
+    fn codes_q6_k(right: Value, address: u32, inside: bool, slot: u32) {
+        let base = (address / Q6_K_BLOCK) * Q6_K_BYTES;
+        let within = address % Q6_K_BLOCK;
+        let side = within / 128u32;
+        let group = (within % 128u32) / SUPER_SUB_BLOCK;
+        let nibble_shift = select(0u32, 4u32, group >= 2u32);
+        let bit_shift = 2u32 * group;
+        let odd = (base & 2u32) == 2u32;
+        let scale_at = base + 192u32 + side * 8u32 + group * 2u32;
+        let held_scale = ggml_raw(right, scale_at >> 2u32);
+        let scale_half = (scale_at & 2u32) == 2u32;
+        let width = ggml_half(right, base + 208u32);
+        let lower = width
+            * ggml_signed(select(
+                held_scale & 0xffu32,
+                (held_scale >> 16u32) & 0xffu32,
+                scale_half,
+            ));
+        let upper = width
+            * ggml_signed(select(
+                (held_scale >> 8u32) & 0xffu32,
+                (held_scale >> 24u32) & 0xffu32,
+                scale_half,
+            ));
+        let low_start = (base + side * 64u32 + (group % 2u32) * 32u32) >> 2u32;
+        let high_start = (base + 128u32 + side * 32u32) >> 2u32;
+        for word in unroll(0u32, RUN_CODES, 1u32) {
+            let low = panel_word(right, low_start + word, odd);
+            let high = panel_word(right, high_start + word, odd);
+            let mut held = 0u32;
+            for lane in unroll(0u32, 4u32, 1u32) {
+                let nibble = (low >> (lane * 8u32 + nibble_shift)) & 0xfu32;
+                let bit = (high >> (lane * 8u32 + bit_shift)) & 3u32;
+                let biased = (nibble | (bit << 4u32)) + 224u32;
+                held = held | (biased & 0xffu32) << (lane * 8u32);
+            }
+            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+        }
+        panel_affine(slot, lower, upper, 0.0, inside);
+    }
+
+    fn run_codes(slot: u32, within: u32) -> f32 {
+        let held = bitcast_u32(scratch[slot + within / 4u32]);
+        let code = (held >> ((within % 4u32) * 8u32)) & 0xffu32;
+        let scale = scratch[slot + RUN_CODES + within / 16u32];
+        return ggml_signed(code) * scale + scratch[slot + RUN_CODES + RUN_SCALES];
     }
 }
 

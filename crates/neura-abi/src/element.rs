@@ -204,6 +204,10 @@ impl Element {
         matches!(self, Self::Q8_0)
     }
 
+    pub const fn packs_codes(self) -> bool {
+        matches!(self, Self::Q4K | Self::Q5K)
+    }
+
     pub const fn quanta(self, elements: u64) -> u64 {
         match self {
             Self::Int8 => 1,

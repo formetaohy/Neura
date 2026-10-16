@@ -69,13 +69,13 @@ fn a_wide_product_walks_the_quantized_weight_a_gguf_stores() {
             &Gguf::decode(&gguf_bytes(32, &[(element, &shape, &payload)])),
         );
         let program = runtime.compile_with(&graph, &weights, runtime.default_profile());
-        if element.stages_a_run() {
+        if element.packs_codes() {
             assert!(
                 program
                     .matmul_geometries()
                     .iter()
                     .any(|(tile, _)| tile.stages_a_run()),
-                "a wide product of {} walks the blocks it stages through the panel a staged tile keeps",
+                "a wide product of {} walks the codes it stages through the panel a staged tile keeps",
                 element.name(),
             );
         }

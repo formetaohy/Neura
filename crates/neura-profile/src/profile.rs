@@ -328,21 +328,34 @@ pub enum MatmulStrategy {
 
 pub const FOLDED_LANES: u32 = neura_abi::SUPER_SUB_BLOCK;
 pub const STAGED_RUN: u32 = neura_abi::SUPER_SUB_BLOCK;
-pub const QUANT_RUN_BLOCKS: u32 = 9;
+pub const BLOCK_RUN_WORDS: u32 = 9;
+pub const RUN_CODES: u32 = neura_abi::QUANT_BLOCK / 4;
+pub const RUN_SCALES: u32 = 2;
+pub const RUN_OFFSET: u32 = 1;
+pub const RUN_SLOT: u32 = RUN_CODES + RUN_SCALES + RUN_OFFSET;
 pub const RUN_STAGE_BLOCKS: [u32; 4] = [1, 2, 4, 8];
 
-pub const fn run_words(depth: u32) -> u64 {
-    (depth / neura_abi::QUANT_BLOCK) as u64 * QUANT_RUN_BLOCKS as u64
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum Run {
+    Blocks,
+    Codes,
+}
+
+pub const fn run_words(depth: u32, run: Run) -> u64 {
+    let blocks = (depth / neura_abi::QUANT_BLOCK) as u64;
+    match run {
+        Run::Blocks => blocks * BLOCK_RUN_WORDS as u64,
+        Run::Codes => blocks * RUN_SLOT as u64,
+    }
 }
 
 const _: () = assert!(
-    neura_abi::Element::Q8_0.stages_a_run(),
-    "a staged run walks the blocks of an element whose blocks the device stages",
+    neura_abi::Element::Q8_0.stages_a_run() && neura_abi::Element::Q4K.packs_codes(),
+    "a staged run stages the blocks of one element and the codes of another",
 );
 const _: () = assert!(
-    neura_abi::Element::Q8_0.payload_bytes(neura_abi::QUANT_BLOCK as u64)
-        <= QUANT_RUN_BLOCKS as u64 * neura_abi::WORD_BYTES,
-    "a run panel holds one block of the element it stages beside the words the next block starts on",
+    RUN_CODES * neura_abi::WORD_BYTES as u32 == neura_abi::QUANT_BLOCK,
+    "a run slot holds one code for every number of a block the element packs",
 );
 pub const FOLDED_STAGE: u32 = 1024;
 pub const FOLDED_FOLDS: u32 = 8;
@@ -618,7 +631,7 @@ pub struct PlainTile {
     depth: u32,
     thread_rows: u32,
     thread_columns: u32,
-    run: bool,
+    run: Option<Run>,
 }
 
 impl PlainTile {
@@ -643,6 +656,10 @@ impl PlainTile {
     }
 
     pub const fn stages_a_run(self) -> bool {
+        self.run.is_some()
+    }
+
+    pub const fn run(self) -> Option<Run> {
         self.run
     }
 
@@ -695,11 +712,12 @@ impl MatmulTile {
             depth,
             thread_rows,
             thread_columns,
-            false,
+            None,
         )
     }
 
     pub const fn staged_run(
+        run: Run,
         rows: u32,
         columns: u32,
         blocks: u32,
@@ -713,7 +731,7 @@ impl MatmulTile {
             blocks * neura_abi::QUANT_BLOCK,
             thread_rows,
             thread_columns,
-            true,
+            Some(run),
         )
     }
 
@@ -724,7 +742,7 @@ impl MatmulTile {
         depth: u32,
         thread_rows: u32,
         thread_columns: u32,
-        run: bool,
+        run: Option<Run>,
     ) -> Self {
         assert!(
             rows > 0 && columns > 0 && depth > 0,
@@ -747,11 +765,11 @@ impl MatmulTile {
             "a staged tile walks two of its rows at one stride into the same bank of the workgroup scratch",
         );
         assert!(
-            !run || matches!(strategy, MatmulStrategy::Staged),
+            run.is_none() || matches!(strategy, MatmulStrategy::Staged),
             "a run stages the blocks of an element beside the panels a staged tile walks",
         );
         assert!(
-            !run || depth.is_multiple_of(neura_abi::QUANT_BLOCK),
+            run.is_none() || depth.is_multiple_of(neura_abi::QUANT_BLOCK),
             "a run stages a depth a block of its element divides",
         );
         let tile = PlainTile {
@@ -883,9 +901,16 @@ impl MatmulTile {
         }
     }
 
-    pub const fn run_words(self) -> u64 {
+    pub const fn run(self) -> Option<Run> {
         match self {
-            Self::Staged(tile) if tile.stages_a_run() => run_words(tile.depth()),
+            Self::Staged(tile) => tile.run(),
+            _ => None,
+        }
+    }
+
+    pub const fn run_words(self) -> u64 {
+        match (self.run(), self.depth()) {
+            (Some(run), depth) => run_words(depth, run),
             _ => 0,
         }
     }
@@ -910,13 +935,10 @@ impl MatmulTile {
 
     pub const fn right_stage(self) -> u64 {
         match self {
-            Self::Staged(tile) => {
-                if tile.stages_a_run() {
-                    tile.columns() as u64 * run_words(tile.depth())
-                } else {
-                    tile.columns() as u64 * (tile.depth() as u64 + 1)
-                }
-            }
+            Self::Staged(tile) => match tile.run() {
+                Some(run) => tile.columns() as u64 * run_words(tile.depth(), run),
+                None => tile.columns() as u64 * (tile.depth() as u64 + 1),
+            },
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.right_stage(),
             Self::Folded(tile) => folded_partials(tile.columns()) + tile.run_words(),
@@ -1424,16 +1446,36 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
 fn staged_tiles(workgroup: u32, budget: u64, run_budget: u64) -> Vec<MatmulTile> {
     let mut chosen = staged_family(workgroup, budget, DEPTH, &[]);
     chosen.extend(staged_family(workgroup, budget, STAGED_RUN, &chosen));
-    chosen.extend(staged_run_family(workgroup, run_budget, &chosen));
+    let blocks = staged_run_family(workgroup, run_budget, &chosen, Run::Blocks, u64::MAX);
+    let ceiling = blocks
+        .iter()
+        .map(|tile| tile.right_stage())
+        .max()
+        .unwrap_or(0);
+    chosen.extend(blocks);
+    chosen.extend(staged_run_family(
+        workgroup,
+        run_budget,
+        &chosen,
+        Run::Codes,
+        ceiling,
+    ));
     chosen
 }
 
-fn staged_run_family(workgroup: u32, budget: u64, held: &[MatmulTile]) -> Vec<MatmulTile> {
+fn staged_run_family(
+    workgroup: u32,
+    budget: u64,
+    held: &[MatmulTile],
+    run: Run,
+    ceiling: u64,
+) -> Vec<MatmulTile> {
     let mut candidates = Vec::new();
     for (rows, columns) in run_grids(workgroup) {
         for (register_rows, register_columns) in RUN_BLOCKINGS {
             for blocks in RUN_STAGE_BLOCKS {
                 let tile = MatmulTile::staged_run(
+                    run,
                     rows * register_rows,
                     columns * register_columns,
                     blocks,
@@ -1446,11 +1488,14 @@ fn staged_run_family(workgroup: u32, budget: u64, held: &[MatmulTile]) -> Vec<Ma
                 if !carried(tile.left_stage(), tile.right_stage(), workgroup, budget) {
                     continue;
                 }
+                if tile.right_stage() > ceiling {
+                    continue;
+                }
                 candidates.push(tile);
             }
         }
     }
-    choose_family(candidates, held, workgroup, budget, true)
+    choose_family(candidates, held, workgroup, budget, true, Some(run))
 }
 
 fn run_grids(workgroup: u32) -> Vec<(u32, u32)> {
@@ -1486,7 +1531,7 @@ fn staged_family(workgroup: u32, budget: u64, depth: u32, held: &[MatmulTile]) -
             candidates.push(tile);
         }
     }
-    choose_family(candidates, held, workgroup, budget, false)
+    choose_family(candidates, held, workgroup, budget, false, None)
 }
 
 fn choose_family(
@@ -1495,6 +1540,7 @@ fn choose_family(
     workgroup: u32,
     budget: u64,
     deep: bool,
+    run: Option<Run>,
 ) -> Vec<MatmulTile> {
     if deep {
         candidates.sort_by_key(|tile| {
@@ -1514,9 +1560,9 @@ fn choose_family(
     }
     candidates.dedup();
     let mut chosen: Vec<MatmulTile> = Vec::new();
-    let mut blocks = HashMap::<(u32, u32), usize>::new();
+    let mut blocks = HashMap::<((u32, u32), Option<Run>), usize>::new();
     for tile in &candidates {
-        let grid = (tile.thread_rows(), tile.thread_columns());
+        let grid = ((tile.thread_rows(), tile.thread_columns()), run);
         let count = blocks.entry(grid).or_insert(0);
         if *count >= BLOCKINGS_PER_GRID {
             continue;
