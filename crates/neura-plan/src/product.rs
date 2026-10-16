@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_profile::{
-    FOLDED_LANES, FOLDED_STAGE, MatmulStrategy, MatmulTile, Profile, folded_splits,
+    FOLDED_LANES, FOLDED_STAGE, MatmulStrategy, MatmulTile, Profile, folded_splits, run_words,
 };
 
 pub(crate) const SPLITS_CEILING: u32 = 64;
@@ -12,6 +12,8 @@ const STREAMED_LOAD_WEIGHT: u128 = 6;
 const COALESCED_TRAFFIC_WEIGHT: u128 = 4;
 const STAGED_RUN_TRAFFIC_WEIGHT: u128 = 1;
 const STRIDED_TRAFFIC_WEIGHT: u128 = 16;
+const RUN_DECODE_WEIGHT: u128 = 4;
+const RUN_COPY_WEIGHT: u128 = 1;
 const FOLDED_STAGE_WEIGHT: u128 = 8;
 const COOPERATIVE_STAGE_INSTRUCTIONS: u128 = 3;
 const COOPERATIVE_TENSOR_INSTRUCTIONS: u128 = 1;
@@ -91,6 +93,9 @@ impl Product {
     }
 
     pub fn planned(self, profile: Profile) -> MatmulTile {
+        if let Some(run) = self.run_walk(profile) {
+            return run;
+        }
         self.narrow_walk(profile)
             .or_else(|| {
                 self.cheapest(profile, |tile| {
@@ -99,6 +104,20 @@ impl Product {
             })
             .or_else(|| self.cheapest_any(profile, |_| true))
             .expect("a profile offers no tile for a product")
+    }
+
+    fn run_walk(self, profile: Profile) -> Option<MatmulTile> {
+        if self.rows <= NARROW_ROWS
+            || self.weight.contiguous != Contiguous::Reduction
+            || !self.weight.element().stages_a_run()
+        {
+            return None;
+        }
+        self.cheapest(profile, |tile| {
+            tile.strategy() == MatmulStrategy::Staged
+                && tile.stages_a_run()
+                && tile.rows() >= self.rows
+        })
     }
 
     fn narrow_walk(self, profile: Profile) -> Option<MatmulTile> {
@@ -129,7 +148,7 @@ impl Product {
 
     pub(crate) fn staged(self, profile: Profile) -> MatmulTile {
         self.cheapest(profile, |tile| {
-            tile.strategy() == MatmulStrategy::Staged
+            tile.strategy() == MatmulStrategy::Staged && !tile.stages_a_run()
         })
         .unwrap_or_else(|| {
             panic!(
@@ -213,7 +232,19 @@ impl Product {
 
     fn walks(self, tile: MatmulTile, profile: Profile) -> bool {
         match tile.strategy() {
-            MatmulStrategy::Staged => !self.narrow(profile),
+            MatmulStrategy::Staged => !self.narrow(profile)
+                && (!tile.stages_a_run()
+                    || (self.weight.contiguous == Contiguous::Reduction
+                        && self.weight.element().stages_a_run()
+                        && self.depth.is_multiple_of(
+                            self.weight
+                                .element()
+                                .block()
+                                .expect(
+                                    "a staged run walks the blocks of an element that packs them",
+                                )
+                                .elements,
+                        ))),
             MatmulStrategy::Streamed | MatmulStrategy::Cooperative => true,
             MatmulStrategy::Folded => {
                 self.narrow(profile)
@@ -246,6 +277,15 @@ impl Product {
         let splits = u128::from(self.splits(tile, profile));
         let work = tiles * block_rows * block_columns * depth;
         let cost = match tile.strategy() {
+            MatmulStrategy::Staged if tile.stages_a_run() => {
+                let registers = u128::from(tile.registers());
+                let operands = u128::from(tile.register_rows())
+                    + RUN_DECODE_WEIGHT * u128::from(tile.register_columns());
+                let staged = registers + operands;
+                let words = block_columns * u128::from(run_words(tile.depth()));
+                let panels = tiles * blocks * (block_rows * depth + words * RUN_COPY_WEIGHT);
+                work * staged / registers + panels + tiles * blocks * threads * BARRIER_SLOTS
+            }
             MatmulStrategy::Staged => {
                 let registers = u128::from(tile.registers());
                 let operands = u128::from(tile.register_rows() + tile.register_columns());

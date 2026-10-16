@@ -1772,11 +1772,13 @@ fn matmul_weight_grad(
     }
     let tile = chosen
         .iter()
-        .find(|(shape, tile)| *shape == product && matches!(tile, MatmulTile::Staged(_)))
+        .find(|(shape, tile)| {
+            *shape == product && matches!(tile, MatmulTile::Staged(_)) && !tile.stages_a_run()
+        })
         .map(|(_, tile)| *tile)
         .unwrap_or_else(|| product.staged(profile));
     assert!(
-        matches!(tile, MatmulTile::Staged(_)),
+        matches!(tile, MatmulTile::Staged(_)) && !tile.stages_a_run(),
         "a segmented product weighs the rows of every segment through the staged panels its body walks, and {tile:?} stages no panel",
     );
     assert!(

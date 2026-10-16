@@ -46,6 +46,58 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
     }
 }
 
+#[test]
+fn a_wide_product_walks_the_quantized_weight_a_gguf_stores() {
+    let (rows, depth, columns) = (8u32, 512u32, 4096u32);
+    for element in [Element::Q8_0, Element::Q4K, Element::Q5K, Element::Q6K] {
+        let runtime = open();
+        let graph = Graph::new();
+        let left = graph.input(Shape::matrix(rows, depth), Element::Single);
+        let stored = graph.named_block_quantized_parameter(
+            element.name(),
+            Shape::matrix(columns, depth),
+            Init::Zero,
+            element,
+        );
+        let out = graph.matmul(left, graph.permute(stored, [0, 1, 3, 2]));
+        graph.retain(out);
+        let values = random(columns * depth, 23);
+        let payload = pack(element, 1.0, &values);
+        let shape = [u64::from(columns), u64::from(depth)];
+        let weights = runtime.load(
+            &graph,
+            &Gguf::decode(&gguf_bytes(32, &[(element, &shape, &payload)])),
+        );
+        let program = runtime.compile_with(&graph, &weights, runtime.default_profile());
+        if element.stages_a_run() {
+            assert!(
+                program
+                    .matmul_geometries()
+                    .iter()
+                    .any(|(tile, _)| tile.stages_a_run()),
+                "a wide product of {} walks the blocks it stages through the panel a staged tile keeps",
+                element.name(),
+            );
+        }
+        let inputs = random(rows * depth, 29);
+        runtime.write(&program, left, &inputs);
+        runtime.run(&program);
+        let weight = unpack(element, values.len(), &payload);
+        let mut expected = Vec::with_capacity((rows * columns) as usize);
+        for row in 0..rows as usize {
+            for column in 0..columns as usize {
+                let mut total = 0.0;
+                for step in 0..depth as usize {
+                    total += weight[column * depth as usize + step]
+                        * inputs[row * depth as usize + step];
+                }
+                expected.push(total);
+            }
+        }
+        assert_close(&runtime.read(&program, out), &expected, 1e-3);
+    }
+}
+
 fn peaked(rows: u32, columns: u32, sections: u32, peak: f32) -> Vec<f32> {
     let mut values = vec![-peak; (rows * columns) as usize];
     let span = columns / sections;
