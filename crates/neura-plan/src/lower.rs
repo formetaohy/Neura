@@ -2168,8 +2168,19 @@ impl FoldBody {
 
 fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let axis = unit.slot;
-    let folds = plan.shape(unit.inputs[0]).dims()[axis as usize];
+    let source = plan.shape(unit.inputs[0]);
     let out = plan.shape(unit.out);
+    if out.dims()[axis as usize] > 1 {
+        assert_eq!(
+            out.dims()[axis as usize],
+            source.dims()[axis as usize],
+            "a spread fold writes {} numbers along axis {axis} where the walk it folds holds {}",
+            out.dims()[axis as usize],
+            source.dims()[axis as usize],
+        );
+        return spread_fold(plan, unit, profile);
+    }
+    let folds = source.dims()[axis as usize];
     let rows = out.elements();
     let body = if folds > FOLD_DEPTH && rows < profile.workgroups() {
         FoldBody::Workgroup
@@ -2190,6 +2201,19 @@ fn fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         return fold(plan, &leaf, profile);
     }
     emit_fold(plan, unit, profile, unit.out, body, folds);
+}
+
+fn spread_fold(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let out = plan.shape(unit.out);
+    let width = out.dims()[unit.slot as usize];
+    let rows = out.elements() / width;
+    let per_task = rows.div_ceil(profile.workgroups()).max(1);
+    for (first, count, split) in span::chunks(rows, per_task, None) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(width) * 2);
+        task.geometry = strategy::WORKGROUP_SPREAD;
+        task.split = split;
+        plan.tasks.push(task);
+    }
 }
 
 fn fold_pieces(body: FoldBody, folds: u32, rows: u32, profile: Profile) -> u32 {

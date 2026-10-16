@@ -277,6 +277,7 @@ pub struct Plan {
     profile: Profile,
     kinds: Vec<Kind>,
     elements: Vec<Element>,
+    strategies: u32,
     tasks: Vec<u8>,
     steps: Vec<u8>,
     geometries: Vec<u32>,
@@ -383,6 +384,7 @@ impl Plan {
         let mut steps = Vec::new();
         let mut updates_weights = false;
         let mut geometries = vec![0u32; matmul_tiles.len()];
+        let mut strategies = 0u32;
         let mut work = 0;
         let mut splits = Vec::with_capacity(tasks.len());
         let mut works = Vec::with_capacity(tasks.len());
@@ -407,7 +409,17 @@ impl Plan {
                     geometries[task.geometry as usize] += 1;
                     task.geometry
                 }
-                Geometry::Strategy => task.geometry,
+                Geometry::Strategy => {
+                    assert!(
+                        task.geometry < u32::BITS,
+                        "a {} task walks strategy {} beyond the {} a device dispatch names",
+                        task.kind.name(),
+                        task.geometry,
+                        u32::BITS,
+                    );
+                    strategies |= 1 << task.geometry;
+                    task.geometry
+                }
                 Geometry::Access => {
                     assert!(
                         task.geometry == neura_abi::strategy::FRAME
@@ -614,6 +626,7 @@ impl Plan {
             profile,
             kinds,
             elements,
+            strategies,
             tasks: task_bytes,
             steps,
             geometries,
@@ -679,6 +692,10 @@ impl Plan {
 
     pub fn kinds(&self) -> &[Kind] {
         &self.kinds
+    }
+
+    pub fn strategies(&self) -> u32 {
+        self.strategies
     }
 
     pub fn elements(&self) -> &[Element] {

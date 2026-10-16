@@ -11,7 +11,7 @@ use neura_gpu::{
     Readback, ReadbackLease, Submission, SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
-use neura_kernel::{Banks, Kernel, binding_count};
+use neura_kernel::{Banks, Kernel, KernelRequest, binding_count};
 use neura_plan::{Layout, Plan, Product, Seed, Span};
 use neura_pointwise as op;
 use neura_precision::{pack, unpack};
@@ -539,6 +539,7 @@ impl Runtime {
     fn kernel(&self, plan: &Plan, profile: Profile, paged: bool) -> Arc<Kernel> {
         let kinds = plan.kinds().to_vec();
         let elements = plan.elements().to_vec();
+        let strategies = plan.strategies();
         let walked = plan.walked_tiles().collect::<Vec<_>>();
         let geometry = profile.geometry(&walked, plan.attention());
         let authored = plan.carries_authored();
@@ -550,12 +551,24 @@ impl Runtime {
                 kinds: kinds.clone(),
                 elements: elements.clone(),
                 geometry: geometry.clone(),
+                strategies,
                 authored,
                 banks,
                 paged,
                 tables,
             },
-            || Kernel::assemble(&kinds, &elements, geometry, authored, banks, paged, tables),
+            || {
+                Kernel::assemble(KernelRequest {
+                    kinds: &kinds,
+                    elements: &elements,
+                    geometry,
+                    strategies,
+                    authored,
+                    banks,
+                    paged,
+                    tables,
+                })
+            },
         )
     }
 

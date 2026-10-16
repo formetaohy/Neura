@@ -1,9 +1,19 @@
+use neura_abi::strategy;
 use neura_compiler::Compiler;
 
-pub(crate) fn install(compiler: &mut Compiler) {
+pub(crate) fn install(compiler: &mut Compiler, strategies: u32) {
     device::define(compiler);
     compiler.select("workgroup_sum_tree", "workgroup_sum");
     compiler.select("workgroup_max_tree", "workgroup_max");
+    if strategies & (1 << strategy::WORKGROUP_SPREAD) == 0 {
+        compiler.retain_cases(
+            "run_sum_axis",
+            &[
+                "strategy::THREAD_ELEMENT".to_owned(),
+                "strategy::WORKGROUP_ROW".to_owned(),
+            ],
+        );
+    }
 }
 
 #[neura_compiler::module]
@@ -68,6 +78,28 @@ mod device {
         );
     }
 
+    fn axis_dims(dims: uvec4, axis: u32) -> uvec4 {
+        return uvec4(
+            select(dims.x, 1u32, axis == 0u32),
+            select(dims.y, 1u32, axis == 1u32),
+            select(dims.z, 1u32, axis == 2u32),
+            select(dims.w, 1u32, axis == 3u32),
+        );
+    }
+
+    fn stepped(at: uvec4, unit: uvec4, count: u32) -> uvec4 {
+        return uvec4(
+            at.x + unit.x * count,
+            at.y + unit.y * count,
+            at.z + unit.z * count,
+            at.w + unit.w * count,
+        );
+    }
+
+    fn walked_index(at: uvec4, dims: uvec4) -> u32 {
+        return ((at.x * dims.y + at.y) * dims.z + at.z) * dims.w + at.w;
+    }
+
     fn sum_axis_chunk(task: Task, lid: u32, source: Value, target: Value, axis: u32) {
         let step = unit_axis(axis);
         let rate = component(source.strides, axis);
@@ -128,6 +160,30 @@ mod device {
         }
     }
 
+    fn sum_axis_spread(task: Task, lid: u32, source: Value, target: Value, axis: u32) {
+        let step = unit_axis(axis);
+        let walked = component(source.dims, axis);
+        let width = component(target.dims, axis);
+        let rows = axis_dims(target.dims, axis);
+        for index in stride(task.first, task.first + task.count, 1u32) {
+            let row = coordinates(index, rows);
+            let mut local = 0.0;
+            for fold in stride(lid, walked, WORKGROUP_SIZE) {
+                local = local + read_frame(task, source, stepped(row, step, fold));
+            }
+            let total = workgroup_sum(lid, local);
+            for column in stride(lid, width, WORKGROUP_SIZE) {
+                let at = stepped(row, step, column);
+                publish(
+                    target,
+                    walked_index(at, target.dims),
+                    chained(task, at, total),
+                );
+            }
+            workgroup_barrier();
+        }
+    }
+
     fn run_length(task: Task, lid: u32) {
         if lid == 0u32 {
             let source = values[task.a];
@@ -178,6 +234,7 @@ mod device {
         match task.geometry {
             strategy::THREAD_ELEMENT => sum_axis_chunk(task, lid, source, target, task.slot),
             strategy::WORKGROUP_ROW => sum_axis_rows(task, lid, source, target, task.slot),
+            strategy::WORKGROUP_SPREAD => sum_axis_spread(task, lid, source, target, task.slot),
             _ => refuse(kind::SUM_AXIS, refusal::GEOMETRY, task.geometry),
         }
     }

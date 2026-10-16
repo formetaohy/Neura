@@ -7,3 +7,4 @@ pub const FRAME: u32 = 5;
 pub const INDEX: u32 = 6;
 pub const INPUT_CHUNK: u32 = 7;
 pub const INPUT_FOLD: u32 = 8;
+pub const WORKGROUP_SPREAD: u32 = 9;

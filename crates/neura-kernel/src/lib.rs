@@ -183,16 +183,29 @@ pub struct Kernel {
     program: ComputeProgram,
 }
 
+pub struct KernelRequest<'a> {
+    pub kinds: &'a [Kind],
+    pub elements: &'a [Element],
+    pub geometry: Geometry,
+    pub strategies: u32,
+    pub authored: bool,
+    pub banks: Banks,
+    pub paged: bool,
+    pub tables: Tables,
+}
+
 impl Kernel {
-    pub fn assemble(
-        kinds: &[Kind],
-        elements: &[Element],
-        geometry: Geometry,
-        authored: bool,
-        banks: Banks,
-        paged: bool,
-        tables: Tables,
-    ) -> Self {
+    pub fn assemble(request: KernelRequest<'_>) -> Self {
+        let KernelRequest {
+            kinds,
+            elements,
+            geometry,
+            strategies,
+            authored,
+            banks,
+            paged,
+            tables,
+        } = request;
         assert!(
             !kinds.is_empty(),
             "a device program with no task has nothing to run"
@@ -263,6 +276,7 @@ impl Kernel {
             ("strategy::INDEX", strategy::INDEX),
             ("strategy::INPUT_CHUNK", strategy::INPUT_CHUNK),
             ("strategy::INPUT_FOLD", strategy::INPUT_FOLD),
+            ("strategy::WORKGROUP_SPREAD", strategy::WORKGROUP_SPREAD),
         ] {
             compiler.constant(name, value);
         }
@@ -328,7 +342,7 @@ impl Kernel {
         task::rope::install(&mut compiler);
         for module in DeviceModule::ALL {
             if kinds.iter().any(|kind| kind.carries(*module)) {
-                install(&mut compiler, *module, elements, &geometry);
+                install(&mut compiler, *module, elements, &geometry, strategies);
             }
         }
         for kind in Kind::ALL {
@@ -418,13 +432,14 @@ fn install(
     module: DeviceModule,
     elements: &[Element],
     geometry: &Geometry,
+    strategies: u32,
 ) {
     match module {
         DeviceModule::Matmul => task::matmul::install(compiler),
         DeviceModule::MatmulTiles => task::matmul::install_tiles(compiler, geometry),
         DeviceModule::MatmulWeight => task::matmul_weight::install(compiler, geometry),
         DeviceModule::Attention => task::attention::install(compiler, geometry),
-        DeviceModule::Reduce => task::reduce::install(compiler),
+        DeviceModule::Reduce => task::reduce::install(compiler, strategies),
         DeviceModule::Softmax => task::softmax::install(compiler),
         DeviceModule::Choice => task::choice::install(compiler, geometry),
         DeviceModule::Select => task::select::install(compiler),

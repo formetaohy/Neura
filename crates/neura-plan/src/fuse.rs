@@ -1,6 +1,6 @@
 use crate::access::{self, Access, Reads};
-use neura_abi::{Kind, NO_VALUE, StepFields, StepRecord};
-use neura_graph::{GraphSnapshot, Residency, TaskInfo, ValueInfo};
+use neura_abi::{Kind, MAX_RANK, NO_VALUE, StepFields, StepRecord};
+use neura_graph::{GraphSnapshot, Residency, Shape, TaskInfo, ValueInfo};
 
 const CHAIN_SLOT: u32 = u32::MAX;
 
@@ -303,7 +303,10 @@ impl<'a> Fold<'a> {
         {
             return None;
         }
-        if self.values[head.out as usize].shape != self.values[tail.out as usize].shape {
+        let spread = self.spread(head, tail);
+        if spread.is_none()
+            && self.values[head.out as usize].shape != self.values[tail.out as usize].shape
+        {
             return None;
         }
         let retired = access::storage(self.values, head.out);
@@ -311,6 +314,15 @@ impl<'a> Fold<'a> {
             return None;
         }
         let step = consumer_step(tail, slot)?;
+        if let Some(axis) = spread {
+            let width = self.values[tail.out as usize].shape.dims()[axis as usize];
+            if step.operand != NO_VALUE {
+                let dim = self.values[step.operand as usize].shape.dims()[axis as usize];
+                if dim != 1 && dim != width {
+                    return None;
+                }
+            }
+        }
         let (from, to) = (self.times[producer], self.times[consumer]);
         for storage in Access::of(self.values, head).reads() {
             if self.write_times[*storage as usize]
@@ -337,6 +349,34 @@ impl<'a> Fold<'a> {
             }
         }
         Some((fused, step))
+    }
+
+    fn spread(&self, head: &TaskInfo, tail: &TaskInfo) -> Option<u32> {
+        if head.kind != Kind::SumAxis || tail.in_place {
+            return None;
+        }
+        let axis = head.slot as usize;
+        let reduced = self.values[head.out as usize].shape;
+        let out = self.values[tail.out as usize].shape;
+        let dims = reduced.dims();
+        let spread = out.dims();
+        if reduced.dynamic() || out.dynamic() {
+            return None;
+        }
+        if dims[axis] != 1 || spread[axis] <= 1 {
+            return None;
+        }
+        if !(0..MAX_RANK as usize).all(|at| at == axis || dims[at] == spread[at]) {
+            return None;
+        }
+        if self.values[head.inputs[0] as usize].shape.dims()[axis] != spread[axis] {
+            return None;
+        }
+        let info = &self.values[tail.out as usize];
+        if info.storage != tail.out || info.strides != Shape::dense_strides(spread) {
+            return None;
+        }
+        Some(head.slot)
     }
 }
 

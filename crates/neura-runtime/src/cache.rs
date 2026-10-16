@@ -76,6 +76,7 @@ pub(crate) struct KernelIdentity {
     pub(crate) kinds: Vec<Kind>,
     pub(crate) elements: Vec<Element>,
     pub(crate) geometry: Geometry,
+    pub(crate) strategies: u32,
     pub(crate) authored: bool,
     pub(crate) banks: Banks,
     pub(crate) paged: bool,
