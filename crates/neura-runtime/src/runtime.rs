@@ -546,6 +546,7 @@ impl Runtime {
             plan.attention(),
             plan.convolution(),
             plan.convolution_weight(),
+            plan.convolution_input(),
         );
         let authored = plan.carries_authored();
         let banks = self.heap.banks();

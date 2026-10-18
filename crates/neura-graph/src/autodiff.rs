@@ -864,6 +864,7 @@ impl Graph {
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
             | Kind::Conv2dWeightTile
+            | Kind::Conv2dInputTile
             | Kind::Conv2dTile
             | Kind::PoolMax2dInputGrad
             | Kind::PoolMean2dInputGrad

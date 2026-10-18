@@ -1,5 +1,5 @@
 use neura_compiler::{Compiler, ast};
-use neura_profile::{ConvolutionTile, ConvolutionWeightTile, Geometry};
+use neura_profile::{ConvolutionInputTile, ConvolutionTile, ConvolutionWeightTile, Geometry};
 
 const COLUMNS: u32 = 4;
 const SPAN: u32 = 4;
@@ -25,6 +25,9 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     }
     for (index, tile) in geometry.convolution_weight().iter().enumerate() {
         specialize_weight(compiler, index as u32, *tile);
+    }
+    for (index, tile) in geometry.convolution_input().iter().enumerate() {
+        specialize_input(compiler, index as u32, *tile);
     }
 }
 
@@ -134,6 +137,67 @@ fn specialize_weight(compiler: &mut Compiler, index: u32, tile: ConvolutionWeigh
             pattern: ast::Pattern::Integer(index),
             body: vec![ast::Statement::Expression(ast::Expression::call(
                 format!("run_conv2d_weight_tile_{index}"),
+                vec![ast::Expression::name("task"), ast::Expression::name("lid")],
+            ))],
+        },
+    );
+}
+
+fn specialize_input(compiler: &mut Compiler, index: u32, tile: ConvolutionInputTile) {
+    let window = tile.window();
+    let constants = [
+        ("CONV_INPUT_ROWS", tile.rows()),
+        ("CONV_INPUT_COLUMNS", tile.columns()),
+        ("CONV_INPUT_CHANNELS", tile.channels()),
+        ("CONV_INPUT_LOCALS", tile.locals()),
+        ("CONV_INPUT_THREAD_COLUMNS", tile.thread_columns()),
+        ("CONV_INPUT_THREAD_LOCALS", tile.thread_locals()),
+        ("CONV_INPUT_REACH_ROWS", window.reach_rows()),
+        ("CONV_INPUT_REACH_COLUMNS", window.reach_columns()),
+        ("CONV_INPUT_DILATION_ROWS", window.dilation_rows()),
+        ("CONV_INPUT_DILATION_COLUMNS", window.dilation_columns()),
+        ("CONV_INPUT_SPAN_ROWS", tile.span_rows()),
+        ("CONV_INPUT_SPAN_COLUMNS", tile.span_columns()),
+        ("CONV_INPUT_TAPS", window.taps()),
+        (
+            "CONV_INPUT_WINDOW",
+            tile.thread_columns() + (window.reach_columns() - 1) * window.dilation_columns(),
+        ),
+        (
+            "CONV_INPUT_COLUMN_GROUPS",
+            tile.columns().div_ceil(tile.thread_columns()),
+        ),
+        (
+            "CONV_INPUT_LOCAL_GROUPS",
+            tile.locals().div_ceil(tile.thread_locals()),
+        ),
+        (
+            "CONV_INPUT_REGISTERS",
+            tile.thread_columns() * tile.thread_locals(),
+        ),
+        ("CONV_INPUT_ITEMS", tile.items()),
+        ("CONV_INPUT_PANEL", 0),
+        (
+            "CONV_INPUT_FILTER",
+            tile.channels() * tile.span_rows() * tile.span_columns(),
+        ),
+    ];
+    compiler.specialize(
+        "template_run_conv2d_input_tile",
+        &format!("run_conv2d_input_tile_{index}"),
+        &constants,
+    );
+    compiler.specialize(
+        "template_conv2d_input_panels",
+        &format!("conv2d_input_panels_{index}"),
+        &constants,
+    );
+    compiler.insert_case(
+        "run_conv2d_input_tile",
+        ast::Arm {
+            pattern: ast::Pattern::Integer(index),
+            body: vec![ast::Statement::Expression(ast::Expression::call(
+                format!("run_conv2d_input_tile_{index}"),
                 vec![ast::Expression::name("task"), ast::Expression::name("lid")],
             ))],
         },
@@ -609,6 +673,247 @@ mod device {
                     }
                 }
             }
+        }
+    }
+
+    fn run_conv2d_input_tile(task: Task, lid: u32) {
+        match task.geometry {
+            _ => refuse(kind::CONV2D_INPUT_TILE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn template_run_conv2d_input_tile(task: Task, lid: u32) {
+        let filter = values[task.a];
+        let gradient = values[task.b];
+        let output = values[task.out];
+        let dims = output.dims;
+        let filter_dims = filter.dims;
+        let gradient_dims = gradient.dims;
+        let locals = filter_dims.y;
+        let groups = dims.y / locals;
+        let out_per_group = filter_dims.x / groups;
+        let row_blocks = ceil_div(dims.z, CONV_INPUT_ROWS);
+        let column_blocks = ceil_div(dims.w, CONV_INPUT_COLUMNS);
+        let local_blocks = ceil_div(locals, CONV_INPUT_LOCALS);
+        let per_batch = groups * local_blocks * row_blocks * column_blocks;
+        let mut acc = scalar_array(0.0, CONV_INPUT_REGISTERS);
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let batch = tile / per_batch;
+            if batch >= dims.x {
+                continue;
+            }
+            let within = tile % per_batch;
+            let column_block = within % column_blocks;
+            let row_block = within / column_blocks % row_blocks;
+            let local_block = within / (column_blocks * row_blocks) % local_blocks;
+            let group = within / (column_blocks * row_blocks * local_blocks);
+            let row0 = row_block * CONV_INPUT_ROWS;
+            let column0 = column_block * CONV_INPUT_COLUMNS;
+            let local0 = local_block * CONV_INPUT_LOCALS;
+            let first_output = group * out_per_group;
+            for register in unroll(0u32, CONV_INPUT_REGISTERS, 1u32) {
+                acc[register] = 0.0;
+            }
+            for block in stride(0u32, out_per_group, CONV_INPUT_CHANNELS) {
+                template_conv2d_input_panels(
+                    task,
+                    lid,
+                    filter,
+                    gradient,
+                    out_per_group,
+                    block,
+                    first_output,
+                    batch,
+                    row0,
+                    column0,
+                    local0,
+                );
+                workgroup_barrier();
+                for item in stride(lid, CONV_INPUT_ITEMS, WORKGROUP_SIZE) {
+                    let row = item / (CONV_INPUT_LOCAL_GROUPS * CONV_INPUT_COLUMN_GROUPS);
+                    let rem = item % (CONV_INPUT_LOCAL_GROUPS * CONV_INPUT_COLUMN_GROUPS);
+                    let local_group = rem / CONV_INPUT_COLUMN_GROUPS;
+                    let column_group = rem % CONV_INPUT_COLUMN_GROUPS;
+                    let local_at = local_group * CONV_INPUT_THREAD_LOCALS;
+                    let column_at = column_group * CONV_INPUT_THREAD_COLUMNS;
+                    for channel in unroll(0u32, CONV_INPUT_CHANNELS, 1u32) {
+                        if block + channel < out_per_group {
+                            for reach_row in unroll(0u32, CONV_INPUT_REACH_ROWS, 1u32) {
+                                let panel_row = row
+                                    + (CONV_INPUT_REACH_ROWS - 1u32 - reach_row)
+                                        * CONV_INPUT_DILATION_ROWS;
+                                let mut window = scalar_array(0.0, CONV_INPUT_WINDOW);
+                                for slot in unroll(0u32, CONV_INPUT_WINDOW, 1u32) {
+                                    window[slot] = scratch[CONV_INPUT_PANEL
+                                        + (channel * CONV_INPUT_SPAN_ROWS + panel_row)
+                                            * CONV_INPUT_SPAN_COLUMNS
+                                        + column_at
+                                        + slot];
+                                }
+                                for reach_column in unroll(0u32, CONV_INPUT_REACH_COLUMNS, 1u32) {
+                                    for local_unit in unroll(0u32, CONV_INPUT_THREAD_LOCALS, 1u32) {
+                                        if local_at + local_unit < CONV_INPUT_LOCALS
+                                            && local0 + local_at + local_unit < locals
+                                        {
+                                            let weight = scratch[CONV_INPUT_FILTER
+                                                + ((channel * CONV_INPUT_LOCALS
+                                                    + local_at
+                                                    + local_unit)
+                                                    * CONV_INPUT_TAPS
+                                                    + reach_row * CONV_INPUT_REACH_COLUMNS
+                                                    + reach_column)];
+                                            for column_unit in
+                                                unroll(0u32, CONV_INPUT_THREAD_COLUMNS, 1u32)
+                                            {
+                                                if column_at + column_unit < CONV_INPUT_COLUMNS {
+                                                    let slot = column_unit
+                                                        + (CONV_INPUT_REACH_COLUMNS
+                                                            - 1u32
+                                                            - reach_column)
+                                                            * CONV_INPUT_DILATION_COLUMNS;
+                                                    let register = local_unit
+                                                        * CONV_INPUT_THREAD_COLUMNS
+                                                        + column_unit;
+                                                    acc[register] =
+                                                        acc[register] + window[slot] * weight;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                workgroup_barrier();
+            }
+            for item in stride(lid, CONV_INPUT_ITEMS, WORKGROUP_SIZE) {
+                let row = item / (CONV_INPUT_LOCAL_GROUPS * CONV_INPUT_COLUMN_GROUPS);
+                let rem = item % (CONV_INPUT_LOCAL_GROUPS * CONV_INPUT_COLUMN_GROUPS);
+                let local_group = rem / CONV_INPUT_COLUMN_GROUPS;
+                let column_group = rem % CONV_INPUT_COLUMN_GROUPS;
+                let local_at = local_group * CONV_INPUT_THREAD_LOCALS;
+                let column_at = column_group * CONV_INPUT_THREAD_COLUMNS;
+                let row_at = row0 + row;
+                if row_at < dims.z {
+                    for local_unit in unroll(0u32, CONV_INPUT_THREAD_LOCALS, 1u32) {
+                        if local_at + local_unit < CONV_INPUT_LOCALS
+                            && local0 + local_at + local_unit < locals
+                        {
+                            let local_index = local0 + local_at + local_unit;
+                            let channel_index = group * locals + local_index;
+                            if channel_index < dims.y {
+                                for column_unit in unroll(0u32, CONV_INPUT_THREAD_COLUMNS, 1u32) {
+                                    if column_at + column_unit < CONV_INPUT_COLUMNS {
+                                        let column_index = column0 + column_at + column_unit;
+                                        if column_index < dims.w {
+                                            let register = local_unit * CONV_INPUT_THREAD_COLUMNS
+                                                + column_unit;
+                                            let index = ((batch * dims.y + channel_index) * dims.z
+                                                + row_at)
+                                                * dims.w
+                                                + column_index;
+                                            publish(
+                                                output,
+                                                index,
+                                                chained(
+                                                    task,
+                                                    uvec4(
+                                                        batch,
+                                                        channel_index,
+                                                        row_at,
+                                                        column_index,
+                                                    ),
+                                                    acc[register],
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_conv2d_input_panels(
+        task: Task,
+        lid: u32,
+        filter: Value,
+        gradient: Value,
+        out_per_group: u32,
+        block: u32,
+        first_output: u32,
+        batch: u32,
+        row0: u32,
+        column0: u32,
+        local0: u32,
+    ) {
+        let filter_dims = filter.dims;
+        let gradient_dims = gradient.dims;
+        let locals = filter_dims.y;
+        let row_base = i32(row0) + i32(task.pad_rows)
+            - i32((CONV_INPUT_REACH_ROWS - 1u32) * CONV_INPUT_DILATION_ROWS);
+        let column_base = i32(column0) + i32(task.pad_columns)
+            - i32((CONV_INPUT_REACH_COLUMNS - 1u32) * CONV_INPUT_DILATION_COLUMNS);
+        for unit in stride(
+            lid,
+            CONV_INPUT_CHANNELS * CONV_INPUT_SPAN_ROWS * CONV_INPUT_SPAN_COLUMNS,
+            WORKGROUP_SIZE,
+        ) {
+            let column = unit % CONV_INPUT_SPAN_COLUMNS;
+            let row = unit / CONV_INPUT_SPAN_COLUMNS % CONV_INPUT_SPAN_ROWS;
+            let channel = unit / (CONV_INPUT_SPAN_COLUMNS * CONV_INPUT_SPAN_ROWS);
+            let at_channel = block + channel;
+            let gradient_row = row_base + i32(row);
+            let gradient_column = column_base + i32(column);
+            let inside = at_channel < out_per_group
+                && gradient_row >= 0i32
+                && gradient_row < i32(gradient_dims.z)
+                && gradient_column >= 0i32
+                && gradient_column < i32(gradient_dims.w);
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(
+                        batch,
+                        first_output + at_channel,
+                        u32(gradient_row),
+                        u32(gradient_column),
+                    ),
+                    gradient.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_INPUT_PANEL + unit] = select(0.0, fetch(gradient, address), inside);
+        }
+        for unit in stride(
+            lid,
+            CONV_INPUT_CHANNELS * CONV_INPUT_LOCALS * CONV_INPUT_TAPS,
+            WORKGROUP_SIZE,
+        ) {
+            let tap = unit % CONV_INPUT_TAPS;
+            let local = unit / CONV_INPUT_TAPS % CONV_INPUT_LOCALS;
+            let output = unit / (CONV_INPUT_TAPS * CONV_INPUT_LOCALS);
+            let at_channel = block + output;
+            let at_local = local0 + local;
+            let inside = at_channel < out_per_group && at_local < locals;
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(
+                        first_output + at_channel,
+                        at_local,
+                        tap / CONV_INPUT_REACH_COLUMNS,
+                        tap % CONV_INPUT_REACH_COLUMNS,
+                    ),
+                    filter.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_INPUT_FILTER + unit] = select(0.0, fetch(filter, address), inside);
         }
     }
 

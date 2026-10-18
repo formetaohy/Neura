@@ -67,6 +67,7 @@ pub enum Geometry {
     Attention,
     Window,
     Weight,
+    Input,
     Strategy,
     Access,
 }
@@ -491,6 +492,14 @@ kinds! {
         entry: "run_conv2d_weight_tile",
         modules: [Conv],
         geometry: Weight,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
+    Conv2dInputTile CONV2D_INPUT_TILE = "conv2d_input_tile" {
+        entry: "run_conv2d_input_tile",
+        modules: [Conv],
+        geometry: Input,
         prelude: false,
         chain: true,
         origin: false,

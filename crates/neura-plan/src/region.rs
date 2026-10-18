@@ -3,7 +3,7 @@ use crate::lower::{Task, softmax_words};
 use crate::span::{Extents, Split};
 use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE, WORD_BYTES};
 use neura_graph::{Shape, ValueInfo, Window};
-use neura_profile::{ConvolutionTile, MatmulTile};
+use neura_profile::{ConvolutionInputTile, ConvolutionTile, MatmulTile};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Region {
@@ -330,6 +330,7 @@ impl<'a> TableRows<'a> {
 pub(crate) struct GeometryTiles<'a> {
     pub(crate) matmul: &'a [MatmulTile],
     pub(crate) convolution: &'a [ConvolutionTile],
+    pub(crate) convolution_input: &'a [ConvolutionInputTile],
 }
 
 pub(crate) fn touches<W: Walk, V: Values>(
@@ -538,6 +539,14 @@ fn narrow<W: Walk, V: Values>(
         {
             fold(values, task, first, count, &mut narrowed)
         }
+        Kind::Conv2dInputTile => convolution_input_window(
+            values,
+            tiles.convolution_input,
+            task,
+            first,
+            count,
+            &mut narrowed,
+        ),
         Kind::Conv2dInputGrad | Kind::Conv2dTranspose => {
             convolution_input_grad(values, task, first, count, &mut narrowed)
         }
@@ -1548,6 +1557,131 @@ fn clip(start: i64, span: u32, bound: i64) -> (i64, u64) {
         return (0, 0);
     }
     (first, (last - first) as u64)
+}
+
+fn convolution_input_window<W: Walk, V: Values>(
+    values: &V,
+    windows: &[ConvolutionInputTile],
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    let filter = task.input(0);
+    let gradient = task.input(1);
+    let dims = values.dims(out);
+    let filter_dims = values.dims(filter);
+    let gradient_dims = values.dims(gradient);
+    let tile = windows[task.geometry() as usize];
+    let locals = filter_dims[1];
+    if locals == 0 || dims[1] == 0 {
+        narrowed.write(out, Region::empty());
+        return;
+    }
+    let groups = dims[1] / locals;
+    let outputs = filter_dims[0] / groups;
+    let local_blocks = locals.div_ceil(tile.locals());
+    let row_blocks = dims[2].div_ceil(tile.rows());
+    let column_blocks = dims[3].div_ceil(tile.columns());
+    let per_batch = groups * local_blocks * row_blocks * column_blocks;
+    let out_strides = values.strides(out);
+    let filter_strides = values.strides(filter);
+    let gradient_strides = values.strides(gradient);
+    let out_origin = values.origin(out);
+    let filter_origin = values.origin(filter);
+    let gradient_origin = values.origin(gradient);
+    let window = tile.window();
+    let pad = task.window();
+    let tap = window.taps();
+    let mut hull = None::<(u64, u64)>;
+    for index in first..first + count {
+        let batch = index / per_batch;
+        let within = index % per_batch;
+        let column_block = within % column_blocks;
+        let row_block = within / column_blocks % row_blocks;
+        let local_block = within / (column_blocks * row_blocks) % local_blocks;
+        let group = within / (column_blocks * row_blocks * local_blocks);
+        let p0 = row_block * tile.rows();
+        let q0 = column_block * tile.columns();
+        let local0 = local_block * tile.locals();
+        let rows = tile.rows().min(dims[2] - p0);
+        let columns = tile.columns().min(dims[3] - q0);
+        let inputs = tile.locals().min(locals - local0);
+        for local in 0..inputs {
+            let base = out_origin
+                + u64::from(batch) * u64::from(out_strides[0])
+                + u64::from(group * locals + local0 + local) * u64::from(out_strides[1])
+                + u64::from(p0) * u64::from(out_strides[2])
+                + u64::from(q0) * u64::from(out_strides[3]);
+            let region = spans(
+                base,
+                u64::from(out_strides[2]),
+                u64::from(out_strides[3]),
+                u64::from(rows),
+                u64::from(columns),
+            );
+            hull = Some(match hull {
+                None => (base, base + region_hull(region)),
+                Some((start, end)) => (start.min(base), end.max(base + region_hull(region))),
+            });
+            narrowed.write(out, region);
+        }
+        let row_start = i64::from(p0) + i64::from(pad.pad_rows())
+            - i64::from(window.reach_rows() - 1) * i64::from(window.dilation_rows());
+        let column_start = i64::from(q0) + i64::from(pad.pad_columns())
+            - i64::from(window.reach_columns() - 1) * i64::from(window.dilation_columns());
+        let rows = clip(
+            row_start,
+            window.span_rows(tile.rows()),
+            i64::from(gradient_dims[2]),
+        );
+        let columns = clip(
+            column_start,
+            window.span_columns(tile.columns()),
+            i64::from(gradient_dims[3]),
+        );
+        if rows.1 > 0 && columns.1 > 0 {
+            for output in 0..outputs {
+                let base = gradient_origin
+                    + u64::from(batch) * u64::from(gradient_strides[0])
+                    + u64::from(group * outputs + output) * u64::from(gradient_strides[1])
+                    + rows.0 as u64 * u64::from(gradient_strides[2])
+                    + columns.0 as u64 * u64::from(gradient_strides[3]);
+                narrowed.read(
+                    gradient,
+                    spans(
+                        base,
+                        u64::from(gradient_strides[2]),
+                        u64::from(gradient_strides[3]),
+                        rows.1,
+                        columns.1,
+                    ),
+                );
+            }
+        }
+        if outputs > 0 && inputs > 0 {
+            let span = (u64::from(inputs) - 1) * u64::from(filter_strides[1])
+                + (u64::from(tap) - 1) * u64::from(filter_strides[3])
+                + 1;
+            let base = filter_origin
+                + u64::from(group * outputs) * u64::from(filter_strides[0])
+                + u64::from(local0) * u64::from(filter_strides[1]);
+            narrowed.read(
+                filter,
+                Region::band(base, span, u64::from(filter_strides[0]), u64::from(outputs)),
+            );
+        }
+    }
+    if let Some((start, end)) = hull {
+        chained_reads(
+            values,
+            task,
+            out,
+            Region::run(start, end - start + 1),
+            narrowed,
+        );
+    }
 }
 
 fn convolution<W: Walk, V: Values>(
