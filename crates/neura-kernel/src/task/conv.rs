@@ -1,4 +1,5 @@
-use neura_compiler::Compiler;
+use neura_compiler::{Compiler, ast};
+use neura_profile::{ConvolutionTile, Geometry};
 
 const COLUMNS: u32 = 4;
 const SPAN: u32 = 4;
@@ -6,7 +7,7 @@ const WINDOW: u32 = COLUMNS + SPAN - 1;
 const WIDE: u32 = 4;
 const NARROW: u32 = 2;
 
-pub(crate) fn install(compiler: &mut Compiler) {
+pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("CONV_COLUMNS", COLUMNS);
     compiler.constant("CONV_SPAN", SPAN);
     compiler.constant("CONV_WINDOW", WINDOW);
@@ -19,6 +20,70 @@ pub(crate) fn install(compiler: &mut Compiler) {
             &[("CONV_CHANNELS", channels)],
         );
     }
+    for (index, tile) in geometry.convolution().iter().enumerate() {
+        specialize(compiler, index as u32, *tile);
+    }
+}
+
+fn specialize(compiler: &mut Compiler, index: u32, tile: ConvolutionTile) {
+    let window = tile.window();
+    let panel = tile.channels() * tile.span_rows() * tile.span_columns();
+    let constants = [
+        ("CONV_TILE_ROWS", tile.rows()),
+        ("CONV_TILE_COLUMNS", tile.columns()),
+        ("CONV_TILE_CHANNELS", tile.channels()),
+        ("CONV_TILE_OUTPUTS", tile.outputs()),
+        ("CONV_THREAD_COLUMNS", tile.thread_columns()),
+        ("CONV_THREAD_OUTPUTS", tile.thread_outputs()),
+        ("CONV_REACH_ROWS", window.reach_rows()),
+        ("CONV_REACH_COLUMNS", window.reach_columns()),
+        ("CONV_STRIDE_ROWS", window.stride_rows()),
+        ("CONV_STRIDE_COLUMNS", window.stride_columns()),
+        ("CONV_DILATION_ROWS", window.dilation_rows()),
+        ("CONV_DILATION_COLUMNS", window.dilation_columns()),
+        ("CONV_SPAN_ROWS", tile.span_rows()),
+        ("CONV_SPAN_COLUMNS", tile.span_columns()),
+        ("CONV_TAPS", window.taps()),
+        (
+            "CONV_TILE_WINDOW",
+            tile.thread_columns() + window.reach_columns() - 1,
+        ),
+        (
+            "CONV_COLUMN_GROUPS",
+            tile.columns().div_ceil(tile.thread_columns()),
+        ),
+        (
+            "CONV_OUTPUT_GROUPS",
+            tile.outputs().div_ceil(tile.thread_outputs()),
+        ),
+        (
+            "CONV_REGISTERS",
+            tile.thread_columns() * tile.thread_outputs(),
+        ),
+        ("CONV_PANEL", 0),
+        ("CONV_FILTER", panel),
+    ];
+    compiler.specialize(
+        "template_conv2d_tile_panels",
+        &format!("conv2d_tile_panels_{index}"),
+        &constants,
+    );
+    let body = if window.slides_columns() {
+        "template_run_conv2d_tile_slide"
+    } else {
+        "template_run_conv2d_tile_walk"
+    };
+    compiler.specialize(body, &format!("run_conv2d_tile_{index}"), &constants);
+    compiler.insert_case(
+        "run_conv2d_tile",
+        ast::Arm {
+            pattern: ast::Pattern::Integer(index),
+            body: vec![ast::Statement::Expression(ast::Expression::call(
+                format!("run_conv2d_tile_{index}"),
+                vec![ast::Expression::name("task"), ast::Expression::name("lid")],
+            ))],
+        },
+    );
 }
 
 #[neura_compiler::module]
@@ -143,6 +208,354 @@ mod device {
             }
         }
         publish(output, index, chained(task, at, total));
+    }
+
+    fn run_conv2d_tile(task: Task, lid: u32) {
+        match task.geometry {
+            _ => refuse(kind::CONV2D_TILE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn template_conv2d_tile_panels(
+        task: Task,
+        lid: u32,
+        input: Value,
+        taps: Value,
+        block: u32,
+        local: u32,
+        group: u32,
+        batch: u32,
+        row0: u32,
+        column0: u32,
+        out0: u32,
+    ) {
+        let input_dims = input.dims;
+        for unit in stride(
+            lid,
+            CONV_TILE_CHANNELS * CONV_SPAN_ROWS * CONV_SPAN_COLUMNS,
+            WORKGROUP_SIZE,
+        ) {
+            let column = unit % CONV_SPAN_COLUMNS;
+            let row = unit / CONV_SPAN_COLUMNS % CONV_SPAN_ROWS;
+            let channel = unit / (CONV_SPAN_COLUMNS * CONV_SPAN_ROWS);
+            let at_channel = block + channel;
+            let input_row = i32(row0 * CONV_STRIDE_ROWS) - i32(task.pad_rows) + i32(row);
+            let input_column =
+                i32(column0 * CONV_STRIDE_COLUMNS) - i32(task.pad_columns) + i32(column);
+            let inside = at_channel < local
+                && input_row >= 0i32
+                && input_row < i32(input_dims.z)
+                && input_column >= 0i32
+                && input_column < i32(input_dims.w);
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(
+                        batch,
+                        group * local + at_channel,
+                        u32(input_row),
+                        u32(input_column),
+                    ),
+                    input.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_PANEL + unit] = select(0.0, fetch(input, address), inside);
+        }
+        for unit in stride(
+            lid,
+            CONV_TILE_OUTPUTS * CONV_TILE_CHANNELS * CONV_TAPS,
+            WORKGROUP_SIZE,
+        ) {
+            let tap = unit % CONV_TAPS;
+            let channel = unit / CONV_TAPS % CONV_TILE_CHANNELS;
+            let output = unit / (CONV_TAPS * CONV_TILE_CHANNELS);
+            let at_channel = block + channel;
+            let at_output = out0 + output;
+            let inside = at_channel < local && at_output < taps.dims.x;
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(
+                        at_output,
+                        at_channel,
+                        tap / CONV_REACH_COLUMNS,
+                        tap % CONV_REACH_COLUMNS,
+                    ),
+                    taps.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_FILTER + unit] = select(0.0, fetch(taps, address), inside);
+        }
+    }
+
+    fn template_run_conv2d_tile_slide(task: Task, lid: u32) {
+        let input = values[task.a];
+        let taps = values[task.b];
+        let output = values[task.out];
+        let dims = output.dims;
+        let filter = taps.dims;
+        let input_dims = input.dims;
+        let local = filter.y;
+        let groups = input_dims.y / local;
+        let out_per_group = filter.x / groups;
+        let out_blocks = ceil_div(out_per_group, CONV_TILE_OUTPUTS);
+        let row_blocks = ceil_div(dims.z, CONV_TILE_ROWS);
+        let column_blocks = ceil_div(dims.w, CONV_TILE_COLUMNS);
+        let per_batch = groups * out_blocks * row_blocks * column_blocks;
+        let items = CONV_TILE_ROWS * CONV_COLUMN_GROUPS * CONV_OUTPUT_GROUPS;
+        let mut acc = scalar_array(0.0, CONV_REGISTERS);
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let batch = tile / per_batch;
+            if batch >= dims.x {
+                continue;
+            }
+            let within = tile % per_batch;
+            let column_block = within % column_blocks;
+            let row_block = within / column_blocks % row_blocks;
+            let out_block = within / (column_blocks * row_blocks) % out_blocks;
+            let group = within / (column_blocks * row_blocks * out_blocks);
+            let row0 = row_block * CONV_TILE_ROWS;
+            let column0 = column_block * CONV_TILE_COLUMNS;
+            let out0 = group * out_per_group + out_block * CONV_TILE_OUTPUTS;
+            for register in unroll(0u32, CONV_REGISTERS, 1u32) {
+                acc[register] = 0.0;
+            }
+            for block in stride(0u32, local, CONV_TILE_CHANNELS) {
+                template_conv2d_tile_panels(
+                    task, lid, input, taps, block, local, group, batch, row0, column0, out0,
+                );
+                workgroup_barrier();
+                for item in stride(lid, items, WORKGROUP_SIZE) {
+                    let row = item / (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                    let rem = item % (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                    let output_group = rem / CONV_COLUMN_GROUPS;
+                    let column_group = rem % CONV_COLUMN_GROUPS;
+                    let output_at = output_group * CONV_THREAD_OUTPUTS;
+                    let column_at = column_group * CONV_THREAD_COLUMNS;
+                    for channel in unroll(0u32, CONV_TILE_CHANNELS, 1u32) {
+                        if block + channel < local {
+                            for reach_row in unroll(0u32, CONV_REACH_ROWS, 1u32) {
+                                let panel_row =
+                                    row * CONV_STRIDE_ROWS + reach_row * CONV_DILATION_ROWS;
+                                let mut window = scalar_array(0.0, CONV_TILE_WINDOW);
+                                for slot in unroll(0u32, CONV_TILE_WINDOW, 1u32) {
+                                    window[slot] = scratch[CONV_PANEL
+                                        + (channel * CONV_SPAN_ROWS + panel_row)
+                                            * CONV_SPAN_COLUMNS
+                                        + column_at
+                                        + slot];
+                                }
+                                for reach_column in unroll(0u32, CONV_REACH_COLUMNS, 1u32) {
+                                    for output_unit in unroll(0u32, CONV_THREAD_OUTPUTS, 1u32) {
+                                        if output_at + output_unit < CONV_TILE_OUTPUTS {
+                                            let weight = scratch[CONV_FILTER
+                                                + ((output_at + output_unit) * CONV_TILE_CHANNELS
+                                                    + channel)
+                                                    * CONV_TAPS
+                                                + reach_row * CONV_REACH_COLUMNS
+                                                + reach_column];
+                                            for column_unit in
+                                                unroll(0u32, CONV_THREAD_COLUMNS, 1u32)
+                                            {
+                                                if column_at + column_unit < CONV_TILE_COLUMNS {
+                                                    let register = output_unit
+                                                        * CONV_THREAD_COLUMNS
+                                                        + column_unit;
+                                                    acc[register] = acc[register]
+                                                        + window[column_unit + reach_column]
+                                                            * weight;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                workgroup_barrier();
+            }
+            for item in stride(lid, items, WORKGROUP_SIZE) {
+                let row = item / (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                let rem = item % (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                let output_group = rem / CONV_COLUMN_GROUPS;
+                let column_group = rem % CONV_COLUMN_GROUPS;
+                let output_at = output_group * CONV_THREAD_OUTPUTS;
+                let column_at = column_group * CONV_THREAD_COLUMNS;
+                let row_at = row0 + row;
+                if row_at < dims.z {
+                    for output_unit in unroll(0u32, CONV_THREAD_OUTPUTS, 1u32) {
+                        if output_at + output_unit < CONV_TILE_OUTPUTS {
+                            let output_index = out0 + output_at + output_unit;
+                            if output_index < dims.y {
+                                for column_unit in unroll(0u32, CONV_THREAD_COLUMNS, 1u32) {
+                                    if column_at + column_unit < CONV_TILE_COLUMNS {
+                                        let column_index = column0 + column_at + column_unit;
+                                        if column_index < dims.w {
+                                            let register =
+                                                output_unit * CONV_THREAD_COLUMNS + column_unit;
+                                            let index = ((batch * dims.y + output_index) * dims.z
+                                                + row_at)
+                                                * dims.w
+                                                + column_index;
+                                            publish(
+                                                output,
+                                                index,
+                                                chained(
+                                                    task,
+                                                    uvec4(
+                                                        batch,
+                                                        output_index,
+                                                        row_at,
+                                                        column_index,
+                                                    ),
+                                                    acc[register],
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_run_conv2d_tile_walk(task: Task, lid: u32) {
+        let input = values[task.a];
+        let taps = values[task.b];
+        let output = values[task.out];
+        let dims = output.dims;
+        let filter = taps.dims;
+        let input_dims = input.dims;
+        let local = filter.y;
+        let groups = input_dims.y / local;
+        let out_per_group = filter.x / groups;
+        let out_blocks = ceil_div(out_per_group, CONV_TILE_OUTPUTS);
+        let row_blocks = ceil_div(dims.z, CONV_TILE_ROWS);
+        let column_blocks = ceil_div(dims.w, CONV_TILE_COLUMNS);
+        let per_batch = groups * out_blocks * row_blocks * column_blocks;
+        let items = CONV_TILE_ROWS * CONV_COLUMN_GROUPS * CONV_OUTPUT_GROUPS;
+        let mut acc = scalar_array(0.0, CONV_REGISTERS);
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let batch = tile / per_batch;
+            if batch >= dims.x {
+                continue;
+            }
+            let within = tile % per_batch;
+            let column_block = within % column_blocks;
+            let row_block = within / column_blocks % row_blocks;
+            let out_block = within / (column_blocks * row_blocks) % out_blocks;
+            let group = within / (column_blocks * row_blocks * out_blocks);
+            let row0 = row_block * CONV_TILE_ROWS;
+            let column0 = column_block * CONV_TILE_COLUMNS;
+            let out0 = group * out_per_group + out_block * CONV_TILE_OUTPUTS;
+            for register in unroll(0u32, CONV_REGISTERS, 1u32) {
+                acc[register] = 0.0;
+            }
+            for block in stride(0u32, local, CONV_TILE_CHANNELS) {
+                template_conv2d_tile_panels(
+                    task, lid, input, taps, block, local, group, batch, row0, column0, out0,
+                );
+                workgroup_barrier();
+                for item in stride(lid, items, WORKGROUP_SIZE) {
+                    let row = item / (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                    let rem = item % (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                    let output_group = rem / CONV_COLUMN_GROUPS;
+                    let column_group = rem % CONV_COLUMN_GROUPS;
+                    let output_at = output_group * CONV_THREAD_OUTPUTS;
+                    let column_at = column_group * CONV_THREAD_COLUMNS;
+                    for channel in unroll(0u32, CONV_TILE_CHANNELS, 1u32) {
+                        if block + channel < local {
+                            for reach_row in unroll(0u32, CONV_REACH_ROWS, 1u32) {
+                                let panel_row =
+                                    row * CONV_STRIDE_ROWS + reach_row * CONV_DILATION_ROWS;
+                                for reach_column in unroll(0u32, CONV_REACH_COLUMNS, 1u32) {
+                                    for output_unit in unroll(0u32, CONV_THREAD_OUTPUTS, 1u32) {
+                                        if output_at + output_unit < CONV_TILE_OUTPUTS {
+                                            let weight = scratch[CONV_FILTER
+                                                + ((output_at + output_unit) * CONV_TILE_CHANNELS
+                                                    + channel)
+                                                    * CONV_TAPS
+                                                + reach_row * CONV_REACH_COLUMNS
+                                                + reach_column];
+                                            for column_unit in
+                                                unroll(0u32, CONV_THREAD_COLUMNS, 1u32)
+                                            {
+                                                if column_at + column_unit < CONV_TILE_COLUMNS {
+                                                    let panel_column = column_at
+                                                        * CONV_STRIDE_COLUMNS
+                                                        + reach_column * CONV_DILATION_COLUMNS
+                                                        + column_unit * CONV_STRIDE_COLUMNS;
+                                                    let held = scratch[CONV_PANEL
+                                                        + (channel * CONV_SPAN_ROWS + panel_row)
+                                                            * CONV_SPAN_COLUMNS
+                                                        + panel_column];
+                                                    let register = output_unit
+                                                        * CONV_THREAD_COLUMNS
+                                                        + column_unit;
+                                                    acc[register] = acc[register] + held * weight;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                workgroup_barrier();
+            }
+            for item in stride(lid, items, WORKGROUP_SIZE) {
+                let row = item / (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                let rem = item % (CONV_OUTPUT_GROUPS * CONV_COLUMN_GROUPS);
+                let output_group = rem / CONV_COLUMN_GROUPS;
+                let column_group = rem % CONV_COLUMN_GROUPS;
+                let output_at = output_group * CONV_THREAD_OUTPUTS;
+                let column_at = column_group * CONV_THREAD_COLUMNS;
+                let row_at = row0 + row;
+                if row_at < dims.z {
+                    for output_unit in unroll(0u32, CONV_THREAD_OUTPUTS, 1u32) {
+                        if output_at + output_unit < CONV_TILE_OUTPUTS {
+                            let output_index = out0 + output_at + output_unit;
+                            if output_index < dims.y {
+                                for column_unit in unroll(0u32, CONV_THREAD_COLUMNS, 1u32) {
+                                    if column_at + column_unit < CONV_TILE_COLUMNS {
+                                        let column_index = column0 + column_at + column_unit;
+                                        if column_index < dims.w {
+                                            let register =
+                                                output_unit * CONV_THREAD_COLUMNS + column_unit;
+                                            let index = ((batch * dims.y + output_index) * dims.z
+                                                + row_at)
+                                                * dims.w
+                                                + column_index;
+                                            publish(
+                                                output,
+                                                index,
+                                                chained(
+                                                    task,
+                                                    uvec4(
+                                                        batch,
+                                                        output_index,
+                                                        row_at,
+                                                        column_index,
+                                                    ),
+                                                    acc[register],
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn run_conv2d_input_grad(task: Task, lid: u32) {

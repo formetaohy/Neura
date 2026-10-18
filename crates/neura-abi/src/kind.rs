@@ -65,6 +65,7 @@ pub enum Geometry {
     None,
     Product,
     Attention,
+    Window,
     Strategy,
     Access,
 }
@@ -449,6 +450,14 @@ kinds! {
         entry: "run_conv2d",
         modules: [Conv],
         geometry: None,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
+    Conv2dTile CONV2D_TILE = "conv2d_tile" {
+        entry: "run_conv2d_tile",
+        modules: [Conv],
+        geometry: Window,
         prelude: false,
         chain: true,
         origin: false,

@@ -2,8 +2,8 @@ use crate::access::Reads;
 use crate::lower::{Task, softmax_words};
 use crate::span::{Extents, Split};
 use neura_abi::{CANDIDATES, Element, Kind, NO_VALUE, WORD_BYTES};
-use neura_graph::{Shape, ValueInfo};
-use neura_profile::MatmulTile;
+use neura_graph::{Shape, ValueInfo, Window};
+use neura_profile::{ConvolutionTile, MatmulTile};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Region {
@@ -67,6 +67,7 @@ pub(crate) trait Walk: Reads {
     fn splits(&self) -> u32;
     fn slot(&self) -> u32;
     fn section(&self) -> u32;
+    fn window(&self) -> Window;
     fn input(&self, slot: usize) -> u32;
     fn prelude(&self) -> impl Iterator<Item = u32>;
     fn chain(&self) -> impl Iterator<Item = u32>;
@@ -77,6 +78,10 @@ pub(crate) trait Walk: Reads {
 impl Walk for Task {
     fn kind(&self) -> Kind {
         self.kind
+    }
+
+    fn window(&self) -> Window {
+        self.window
     }
 
     fn geometry(&self) -> u32 {
@@ -321,9 +326,15 @@ impl<'a> TableRows<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct GeometryTiles<'a> {
+    pub(crate) matmul: &'a [MatmulTile],
+    pub(crate) convolution: &'a [ConvolutionTile],
+}
+
 pub(crate) fn touches<W: Walk, V: Values>(
     values: &V,
-    tiles: &[MatmulTile],
+    tiles: GeometryTiles<'_>,
     task: &W,
     span: (u32, u32),
     touched: &mut Touches,
@@ -361,7 +372,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
     touched: &mut Touches,
     task: &W,
     values: &V,
-    tiles: &[MatmulTile],
+    tiles: GeometryTiles<'_>,
     span: (u32, u32),
     rows: &[TableRows<'_>],
 ) {
@@ -507,7 +518,7 @@ impl Narrowed<'_> {
 fn narrow<W: Walk, V: Values>(
     task: &W,
     values: &V,
-    tiles: &[MatmulTile],
+    tiles: GeometryTiles<'_>,
     span: (u32, u32),
     rows: &[TableRows<'_>],
     writes: &mut Vec<(u32, Region)>,
@@ -516,9 +527,12 @@ fn narrow<W: Walk, V: Values>(
     let (first, count) = span;
     let mut narrowed = Narrowed { writes, reads };
     match task.kind() {
-        Kind::Matmul => product(values, tiles, task, first, count, &mut narrowed),
+        Kind::Matmul => product(values, tiles.matmul, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
         Kind::Conv2d => convolution(values, task, first, count, &mut narrowed),
+        Kind::Conv2dTile => {
+            convolution_window(values, tiles.convolution, task, first, count, &mut narrowed)
+        }
         Kind::Conv2dInputGrad | Kind::Conv2dTranspose
             if task.geometry() == neura_abi::strategy::INPUT_FOLD =>
         {
@@ -1385,6 +1399,155 @@ fn softmax<W: Walk, V: Values>(
         };
         narrowed.read(value, region);
     }
+}
+
+fn convolution_window<W: Walk, V: Values>(
+    values: &V,
+    windows: &[ConvolutionTile],
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    let input = task.input(0);
+    let filter = task.input(1);
+    let dims = values.dims(out);
+    let input_dims = values.dims(input);
+    let filter_dims = values.dims(filter);
+    let tile = windows[task.geometry() as usize];
+    let local = filter_dims[1];
+    let channels = input_dims[1];
+    if local == 0 || channels == 0 || dims[0] == 0 || dims[1] == 0 {
+        narrowed.write(out, Region::empty());
+        return;
+    }
+    let groups = (channels / local).max(1);
+    let out_per_group = (dims[1] / groups).max(1);
+    let out_blocks = out_per_group.div_ceil(tile.outputs());
+    let row_blocks = dims[2].div_ceil(tile.rows());
+    let column_blocks = dims[3].div_ceil(tile.columns());
+    let per_batch = groups * out_blocks * row_blocks * column_blocks;
+    let out_strides = values.strides(out);
+    let input_strides = values.strides(input);
+    let filter_strides = values.strides(filter);
+    let out_origin = values.origin(out);
+    let input_origin = values.origin(input);
+    let filter_origin = values.origin(filter);
+    let window = tile.window();
+    let pad = task.window();
+    let tap = window.taps();
+    let mut hull = None::<(u64, u64)>;
+    for index in first..first + count {
+        let batch = index / per_batch;
+        let within = index % per_batch;
+        let group = within / (out_blocks * row_blocks * column_blocks);
+        let k_block = within / (row_blocks * column_blocks) % out_blocks;
+        let p_block = within / column_blocks % row_blocks;
+        let q_block = within % column_blocks;
+        let p0 = p_block * tile.rows();
+        let q0 = q_block * tile.columns();
+        let k0 = group * out_per_group + k_block * tile.outputs();
+        let rows = tile.rows().min(dims[2] - p0);
+        let columns = tile.columns().min(dims[3] - q0);
+        for output in 0..tile.outputs().min(dims[1] - k0) {
+            let base = out_origin
+                + u64::from(batch) * u64::from(out_strides[0])
+                + u64::from(k0 + output) * u64::from(out_strides[1])
+                + u64::from(p0) * u64::from(out_strides[2])
+                + u64::from(q0) * u64::from(out_strides[3]);
+            let region = spans(
+                base,
+                u64::from(out_strides[2]),
+                u64::from(out_strides[3]),
+                u64::from(rows),
+                u64::from(columns),
+            );
+            hull = Some(match hull {
+                None => (base, base + region_hull(region)),
+                Some((start, end)) => (start.min(base), end.max(base + region_hull(region))),
+            });
+            narrowed.write(out, region);
+        }
+        let row_start = i64::from(p0) * i64::from(window.stride_rows()) - i64::from(pad.pad_rows());
+        let column_start =
+            i64::from(q0) * i64::from(window.stride_columns()) - i64::from(pad.pad_columns());
+        let rows = clip(
+            row_start,
+            window.span_rows(tile.rows()),
+            i64::from(input_dims[2]),
+        );
+        let columns = clip(
+            column_start,
+            window.span_columns(tile.columns()),
+            i64::from(input_dims[3]),
+        );
+        if rows.1 > 0 && columns.1 > 0 {
+            for channel in 0..local {
+                let base = input_origin
+                    + u64::from(batch) * u64::from(input_strides[0])
+                    + u64::from(group * local + channel) * u64::from(input_strides[1])
+                    + rows.0 as u64 * u64::from(input_strides[2])
+                    + columns.0 as u64 * u64::from(input_strides[3]);
+                narrowed.read(
+                    input,
+                    spans(
+                        base,
+                        u64::from(input_strides[2]),
+                        u64::from(input_strides[3]),
+                        rows.1,
+                        columns.1,
+                    ),
+                );
+            }
+        }
+        for output in 0..tile.outputs().min(dims[1] - k0) {
+            let base = filter_origin + u64::from(k0 + output) * u64::from(filter_strides[0]);
+            narrowed.read(
+                filter,
+                Region::run(base, filter_hull(&filter_strides, local, tap)),
+            );
+        }
+    }
+    if let Some((start, end)) = hull {
+        chained_reads(
+            values,
+            task,
+            out,
+            Region::run(start, end - start + 1),
+            narrowed,
+        );
+    }
+}
+
+fn filter_hull(strides: &[u32; 4], local: u32, taps: u32) -> u64 {
+    (u64::from(local) - 1).saturating_mul(u64::from(strides[1]))
+        + u64::from(taps - 1).saturating_mul(u64::from(strides[3]))
+        + 1
+}
+
+fn region_hull(region: Region) -> u64 {
+    match region {
+        Region::Empty => 0,
+        Region::Whole => panic!("a window narrows no whole walk"),
+        Region::Run { count, .. } => count - 1,
+        Region::Band {
+            span,
+            stride,
+            count,
+            ..
+        } => (count - 1) * stride + span - 1,
+    }
+}
+
+fn clip(start: i64, span: u32, bound: i64) -> (i64, u64) {
+    let end = start + i64::from(span);
+    let first = start.max(0);
+    let last = end.min(bound);
+    if last <= first {
+        return (0, 0);
+    }
+    (first, (last - first) as u64)
 }
 
 fn convolution<W: Walk, V: Values>(

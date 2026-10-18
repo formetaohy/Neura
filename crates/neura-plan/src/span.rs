@@ -1,15 +1,24 @@
 use crate::lower;
 use neura_abi::{Element, NO_VALUE};
 use neura_graph::{Layout, Shape, ValueInfo};
-use neura_profile::MatmulTile;
+use neura_profile::{ConvolutionTile, MatmulTile};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Measure {
     Elements(u32),
     Rows(u32),
     Words(u32),
-    Tiles { value: u32, geometry: u32 },
+    Tiles {
+        value: u32,
+        geometry: u32,
+    },
     Tokens(u32),
+    Windows {
+        value: u32,
+        input: u32,
+        filter: u32,
+        geometry: u32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -56,10 +65,16 @@ pub(crate) struct Extents {
     values: Vec<Extent>,
     measures: Vec<Measure>,
     tiles: Vec<MatmulTile>,
+    windows: Vec<ConvolutionTile>,
 }
 
 impl Extents {
-    pub(crate) fn of(values: &[ValueInfo], tiles: &[MatmulTile], measures: &[Measure]) -> Self {
+    pub(crate) fn of(
+        values: &[ValueInfo],
+        tiles: &[MatmulTile],
+        windows: &[ConvolutionTile],
+        measures: &[Measure],
+    ) -> Self {
         Self {
             values: values
                 .iter()
@@ -73,6 +88,7 @@ impl Extents {
                 .collect(),
             measures: measures.to_vec(),
             tiles: tiles.to_vec(),
+            windows: windows.to_vec(),
         }
     }
 
@@ -137,6 +153,12 @@ impl Extents {
             Measure::Words(value) => self.words(value, extents),
             Measure::Tokens(value) => self.dims(value, extents)[2],
             Measure::Tiles { value, geometry } => self.tiles(value, geometry, extents),
+            Measure::Windows {
+                value,
+                input,
+                filter,
+                geometry,
+            } => self.windows(value, input, filter, geometry, extents),
         }
     }
 
@@ -213,6 +235,19 @@ impl Extents {
         let dims = self.dims(value, extents);
         let tile = self.tiles[geometry as usize];
         dims[0] * dims[1] * dims[2].div_ceil(tile.rows()) * dims[3].div_ceil(tile.columns())
+    }
+
+    fn windows(&self, value: u32, input: u32, filter: u32, geometry: u32, extents: &[u32]) -> u32 {
+        let dims = self.dims(value, extents);
+        let local = self.dims(filter, extents)[1].max(1);
+        let groups = (self.dims(input, extents)[1] / local).max(1);
+        let out_per_group = (dims[1] / groups).max(1);
+        let tile = self.windows[geometry as usize];
+        dims[0]
+            * groups
+            * out_per_group.div_ceil(tile.outputs())
+            * dims[2].div_ceil(tile.rows())
+            * dims[3].div_ceil(tile.columns())
     }
 }
 

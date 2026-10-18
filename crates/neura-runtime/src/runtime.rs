@@ -541,7 +541,7 @@ impl Runtime {
         let elements = plan.elements().to_vec();
         let strategies = plan.strategies();
         let walked = plan.walked_tiles().collect::<Vec<_>>();
-        let geometry = profile.geometry(&walked, plan.attention());
+        let geometry = profile.geometry(&walked, plan.attention(), plan.convolution());
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
         let tables = cache::tables(plan);

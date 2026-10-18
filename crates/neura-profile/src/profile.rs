@@ -319,6 +319,312 @@ impl AttentionTile {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ConvolutionWindow {
+    reach_rows: u32,
+    reach_columns: u32,
+    stride_rows: u32,
+    stride_columns: u32,
+    dilation_rows: u32,
+    dilation_columns: u32,
+}
+
+impl ConvolutionWindow {
+    pub fn new(
+        reach_rows: u32,
+        reach_columns: u32,
+        stride_rows: u32,
+        stride_columns: u32,
+        dilation_rows: u32,
+        dilation_columns: u32,
+    ) -> Self {
+        assert!(
+            reach_rows > 0
+                && reach_columns > 0
+                && stride_rows > 0
+                && stride_columns > 0
+                && dilation_rows > 0
+                && dilation_columns > 0,
+            "a window of {reach_rows} by {reach_columns} taps at stride {stride_rows} by {stride_columns} and dilation {dilation_rows} by {dilation_columns} walks no tap",
+        );
+        Self {
+            reach_rows,
+            reach_columns,
+            stride_rows,
+            stride_columns,
+            dilation_rows,
+            dilation_columns,
+        }
+    }
+
+    pub const fn reach_rows(self) -> u32 {
+        self.reach_rows
+    }
+
+    pub const fn reach_columns(self) -> u32 {
+        self.reach_columns
+    }
+
+    pub const fn stride_rows(self) -> u32 {
+        self.stride_rows
+    }
+
+    pub const fn stride_columns(self) -> u32 {
+        self.stride_columns
+    }
+
+    pub const fn dilation_rows(self) -> u32 {
+        self.dilation_rows
+    }
+
+    pub const fn dilation_columns(self) -> u32 {
+        self.dilation_columns
+    }
+
+    pub const fn taps(self) -> u32 {
+        self.reach_rows * self.reach_columns
+    }
+
+    pub const fn span_rows(self, rows: u32) -> u32 {
+        (rows - 1) * self.stride_rows + (self.reach_rows - 1) * self.dilation_rows + 1
+    }
+
+    pub const fn span_columns(self, columns: u32) -> u32 {
+        (columns - 1) * self.stride_columns + (self.reach_columns - 1) * self.dilation_columns + 1
+    }
+
+    pub const fn slides_columns(self) -> bool {
+        self.stride_columns == 1 && self.dilation_columns == 1
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConvolutionShape {
+    pub batch: u32,
+    pub groups: u32,
+    pub rows: u32,
+    pub columns: u32,
+    pub outputs: u32,
+    pub channels: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ConvolutionTile {
+    window: ConvolutionWindow,
+    rows: u32,
+    columns: u32,
+    channels: u32,
+    outputs: u32,
+    thread_columns: u32,
+    thread_outputs: u32,
+}
+
+impl ConvolutionTile {
+    pub const THREAD_STEPS: [(u32, u32); 9] = [
+        (4, 4),
+        (4, 2),
+        (4, 1),
+        (2, 4),
+        (2, 2),
+        (2, 1),
+        (1, 4),
+        (1, 2),
+        (1, 1),
+    ];
+    pub const COLUMN_STEPS: [u32; 4] = [32, 16, 8, 4];
+    pub const OUTPUT_STEPS: [u32; 4] = [16, 8, 4, 1];
+    pub const CHANNEL_STEPS: [u32; 5] = [16, 8, 4, 2, 1];
+    pub const ROW_STEPS: [u32; 5] = [16, 8, 4, 2, 1];
+
+    pub fn new(
+        window: ConvolutionWindow,
+        rows: u32,
+        columns: u32,
+        channels: u32,
+        outputs: u32,
+        thread_columns: u32,
+        thread_outputs: u32,
+    ) -> Self {
+        assert!(
+            rows > 0 && columns > 0 && channels > 0 && outputs > 0,
+            "a convolution tile walks {rows} rows of {columns} numbers through {channels} channels into {outputs} outputs, and a tile covers at least one of each",
+        );
+        assert!(
+            Self::THREAD_STEPS.contains(&(thread_columns, thread_outputs)),
+            "a convolution tile hands {thread_columns} by {thread_outputs} outputs to one thread, where a thread holds {} of them",
+            Self::THREAD_STEPS
+                .iter()
+                .map(|(columns, outputs)| format!("{columns}x{outputs}"))
+                .collect::<Vec<String>>()
+                .join("/"),
+        );
+        Self {
+            window,
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_columns,
+            thread_outputs,
+        }
+    }
+
+    pub fn fit(
+        pool: u64,
+        workgroup: u32,
+        wanted: u32,
+        weight_words: u64,
+        shape: ConvolutionShape,
+        window: ConvolutionWindow,
+    ) -> Option<Self> {
+        if shape.batch == 0
+            || shape.groups == 0
+            || shape.rows == 0
+            || shape.columns == 0
+            || shape.outputs == 0
+            || shape.channels == 0
+        {
+            return None;
+        }
+        let taps = u64::from(window.taps());
+        let mut best: Option<(f64, ConvolutionTile)> = None;
+        for (thread_columns, thread_outputs) in Self::THREAD_STEPS {
+            for column_step in Self::COLUMN_STEPS {
+                let columns = column_step.min(shape.columns);
+                let column_groups = columns.div_ceil(thread_columns);
+                for output_step in Self::OUTPUT_STEPS {
+                    let outputs = output_step.min(shape.outputs);
+                    if u64::from(outputs) * u64::from(shape.channels) * taps > weight_words {
+                        continue;
+                    }
+                    let output_groups = outputs.div_ceil(thread_outputs);
+                    let lanes = column_groups * output_groups;
+                    for row_step in Self::ROW_STEPS {
+                        let ceiling = (workgroup / lanes).max(1);
+                        let rows = row_step.min(shape.rows).min(ceiling);
+                        let span_rows = window.span_rows(rows);
+                        let span_columns = window.span_columns(columns);
+                        let area = u64::from(span_rows) * u64::from(span_columns);
+                        let Some(channels) =
+                            Self::staged(pool, area, shape.channels, outputs, taps)
+                        else {
+                            continue;
+                        };
+                        let candidate = Self::new(
+                            window,
+                            rows,
+                            columns,
+                            channels,
+                            outputs,
+                            thread_columns,
+                            thread_outputs,
+                        );
+                        let score = candidate.score(workgroup, wanted, shape);
+                        if best.as_ref().is_none_or(|(kept, led)| {
+                            score > *kept || (score == *kept && candidate.rows > led.rows)
+                        }) {
+                            best = Some((score, candidate));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, tile)| tile)
+    }
+
+    fn staged(pool: u64, area: u64, local: u32, outputs: u32, taps: u64) -> Option<u32> {
+        for step in Self::CHANNEL_STEPS {
+            let channels = step.min(local);
+            let words =
+                u64::from(channels) * area + u64::from(outputs) * u64::from(channels) * taps;
+            if words * neura_abi::WORD_BYTES <= pool {
+                return Some(channels);
+            }
+        }
+        None
+    }
+
+    fn score(self, workgroup: u32, wanted: u32, shape: ConvolutionShape) -> f64 {
+        let columns = self.thread_columns.min(self.columns);
+        let outputs = self.thread_outputs.min(self.outputs);
+        let fma = f64::from(columns * outputs * self.window.reach_columns);
+        let window = if self.window.slides_columns() {
+            f64::from(columns + self.window.reach_columns - 1)
+        } else {
+            f64::from(columns * self.window.reach_columns)
+        };
+        let loads = window + f64::from(outputs * self.window.reach_columns);
+        let inner = (fma + loads) / fma;
+        let macs = f64::from(self.rows * self.columns * self.outputs)
+            * f64::from(shape.channels)
+            * f64::from(self.window.taps());
+        let staged = f64::from(self.span_rows() * self.span_columns()) * f64::from(shape.channels)
+            + f64::from(self.outputs * shape.channels * self.window.taps());
+        let throughput = macs / (inner * macs + staged);
+        let tiles = self.tiles(shape);
+        let fill = f64::from(tiles).min(f64::from(wanted)) / f64::from(wanted.max(1));
+        let lanes =
+            self.columns.div_ceil(self.thread_columns) * self.outputs.div_ceil(self.thread_outputs);
+        let busy = f64::from(self.rows * lanes).min(f64::from(workgroup)) / f64::from(workgroup);
+        throughput * (fill * busy).sqrt()
+    }
+
+    pub fn tiles(self, shape: ConvolutionShape) -> u32 {
+        shape.batch
+            * shape.groups
+            * shape.outputs.div_ceil(self.outputs)
+            * shape.rows.div_ceil(self.rows)
+            * shape.columns.div_ceil(self.columns)
+    }
+
+    pub const fn window(self) -> ConvolutionWindow {
+        self.window
+    }
+
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    pub const fn columns(self) -> u32 {
+        self.columns
+    }
+
+    pub const fn channels(self) -> u32 {
+        self.channels
+    }
+
+    pub const fn outputs(self) -> u32 {
+        self.outputs
+    }
+
+    pub const fn thread_columns(self) -> u32 {
+        self.thread_columns
+    }
+
+    pub const fn thread_outputs(self) -> u32 {
+        self.thread_outputs
+    }
+
+    pub const fn span_rows(self) -> u32 {
+        self.window.span_rows(self.rows)
+    }
+
+    pub const fn span_columns(self) -> u32 {
+        self.window.span_columns(self.columns)
+    }
+
+    pub const fn scratch_words(self) -> u32 {
+        self.channels * self.span_rows() * self.span_columns()
+            + self.outputs * self.channels * self.window.taps()
+    }
+
+    pub const fn items(self) -> u32 {
+        self.rows
+            * self.columns.div_ceil(self.thread_columns)
+            * self.outputs.div_ceil(self.thread_outputs)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum MatmulStrategy {
     Staged,
     Streamed,
@@ -1733,6 +2039,7 @@ pub struct Geometry {
     body_scratch: u64,
     walked: Vec<(u32, MatmulTile)>,
     attention: Vec<AttentionTile>,
+    convolution: Vec<ConvolutionTile>,
     left_stage: u64,
     right_stage: u64,
     folded: u64,
@@ -1742,13 +2049,23 @@ pub struct Geometry {
 }
 
 impl Profile {
-    pub fn geometry(self, walked: &[(u32, MatmulTile)], attention: &[AttentionTile]) -> Geometry {
-        Geometry::of(self, walked, attention)
+    pub fn geometry(
+        self,
+        walked: &[(u32, MatmulTile)],
+        attention: &[AttentionTile],
+        convolution: &[ConvolutionTile],
+    ) -> Geometry {
+        Geometry::of(self, walked, attention, convolution)
     }
 }
 
 impl Geometry {
-    fn of(profile: Profile, walked: &[(u32, MatmulTile)], attention: &[AttentionTile]) -> Self {
+    fn of(
+        profile: Profile,
+        walked: &[(u32, MatmulTile)],
+        attention: &[AttentionTile],
+        convolution: &[ConvolutionTile],
+    ) -> Self {
         let workgroup = profile.workgroup();
         assert!(
             walked.iter().all(|(_, tile)| tile.threads() == workgroup),
@@ -1783,6 +2100,7 @@ impl Geometry {
             body_scratch: profile.body_scratch_bytes(),
             walked: walked.to_vec(),
             attention: attention.to_vec(),
+            convolution: convolution.to_vec(),
             left_stage,
             right_stage,
             folded,
@@ -1835,6 +2153,12 @@ impl Geometry {
             DeviceModule::Attention => self.attention_scratch_words(),
             DeviceModule::Reduce => self.workgroup,
             DeviceModule::Choice => self.choice_layout().words(self.workgroup),
+            DeviceModule::Conv => self
+                .convolution
+                .iter()
+                .map(|tile| tile.scratch_words())
+                .max()
+                .unwrap_or(0),
             DeviceModule::Scan => self.workgroup,
             _ => 0,
         }
@@ -1869,6 +2193,10 @@ impl Geometry {
 
     pub fn attention(&self) -> &[AttentionTile] {
         &self.attention
+    }
+
+    pub fn convolution(&self) -> &[ConvolutionTile] {
+        &self.convolution
     }
 
     pub fn attention_geometry(&self, tile: AttentionTile) -> u32 {

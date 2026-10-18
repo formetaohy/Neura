@@ -1,8 +1,8 @@
 use crate::access::Access;
 use crate::hazard::{Hazard, Hazards};
-use crate::region::{self, Walk};
+use crate::region::{self, GeometryTiles, Walk};
 use neura_abi::{SegmentFields, SegmentRecord};
-use neura_profile::MatmulTile;
+use neura_profile::{ConvolutionTile, MatmulTile};
 
 pub(crate) trait Scheduled: Walk {
     fn span(&self) -> (u32, u32);
@@ -24,12 +24,14 @@ impl Schedule {
     pub(crate) fn of<T: Scheduled, V: region::Values>(
         values: &V,
         tiles: &[MatmulTile],
+        windows: &[ConvolutionTile],
         tasks: &[T],
         declared: &[u32],
     ) -> Self {
         let barriers = barriers(values, tasks);
-        let depths = depths(values, tiles, tasks, &barriers);
-        let packed = Packer::new(values, tiles, tasks, &barriers, &depths, declared).pack();
+        let depths = depths(values, tiles, windows, tasks, &barriers);
+        let packed =
+            Packer::new(values, tiles, windows, tasks, &barriers, &depths, declared).pack();
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -129,12 +131,17 @@ impl Schedule {
 fn depths<T: Scheduled, V: region::Values>(
     values: &V,
     tiles: &[MatmulTile],
+    windows: &[ConvolutionTile],
     tasks: &[T],
     barriers: &[Vec<u32>],
 ) -> Vec<u32> {
     let mut hazards = Hazards::of(values.len());
     let mut depths = vec![0u32; tasks.len()];
     let mut touches = region::Touches::default();
+    let tiles = GeometryTiles {
+        matmul: tiles,
+        convolution: windows,
+    };
     for (index, task) in tasks.iter().enumerate() {
         region::touches(values, tiles, task, task.span(), &mut touches);
         let evidence = hazards.inspect(values, &touches, task.in_place());
@@ -196,6 +203,7 @@ fn barriers<T: Scheduled, V: region::Values>(values: &V, tasks: &[T]) -> Vec<Vec
 struct Packer<'a, T, V> {
     values: &'a V,
     tiles: &'a [MatmulTile],
+    windows: &'a [ConvolutionTile],
     tasks: &'a [T],
     barriers: &'a [Vec<u32>],
     declared: &'a [u32],
@@ -216,6 +224,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
     fn new(
         values: &'a V,
         tiles: &'a [MatmulTile],
+        windows: &'a [ConvolutionTile],
         tasks: &'a [T],
         barriers: &'a [Vec<u32>],
         depths: &'a [u32],
@@ -224,6 +233,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         Self {
             values,
             tiles,
+            windows,
             tasks,
             barriers,
             declared,
@@ -255,7 +265,10 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         let task = &self.tasks[index as usize];
         region::touches(
             self.values,
-            self.tiles,
+            GeometryTiles {
+                matmul: self.tiles,
+                convolution: self.windows,
+            },
             task,
             task.span(),
             &mut self.touches,

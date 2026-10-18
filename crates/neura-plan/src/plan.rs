@@ -7,7 +7,7 @@ use crate::lower::Task;
 use crate::pages::{self, WeightPages};
 use crate::product::Product;
 use crate::record::{self, Recorded};
-use crate::region::{self, Resolved, TableRows, Touches, Walk};
+use crate::region::{self, GeometryTiles, Resolved, TableRows, Touches, Walk};
 use crate::remembered::Remembered;
 use crate::schedule;
 use crate::span::{self, Extents, Split};
@@ -15,8 +15,8 @@ use neura_abi::{
     Element, Geometry, Kind, MAX_RANK, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord,
     Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
-use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo};
-use neura_profile::{AttentionTile, MatmulTile, Profile};
+use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo, Window};
+use neura_profile::{AttentionTile, ConvolutionTile, MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -283,6 +283,7 @@ pub struct Plan {
     geometries: Vec<u32>,
     products: Vec<Product>,
     attention: Vec<AttentionTile>,
+    convolution: Vec<ConvolutionTile>,
     layout: Layout,
     updates_weights: bool,
     work: u64,
@@ -340,13 +341,21 @@ impl Plan {
         );
         let fused = fuse::fuse(state);
         let authored_slots = state.authored().to_vec();
-        let lowered = lower::lower(state.values(), &fused, profile, chosen, weight_slots);
+        let lowered = lower::lower(
+            state.values(),
+            &fused,
+            &authored_slots,
+            profile,
+            chosen,
+            weight_slots,
+        );
         let lower::Plan {
             values,
             mut tasks,
             tiles: menu,
             products,
             attention,
+            convolution,
             measures,
         } = lowered;
         let shapes = Arc::new(values);
@@ -366,8 +375,15 @@ impl Plan {
         assert_a_per_plane_sum_walks_the_planes_its_offsets_close(values, &tasks);
         assert_prefix_tables_close_their_walk(values, &tasks);
         assert_a_task_needs_exact_lengths_the_plan_froze(values, &tasks);
-        let authored = authored::analyse(&authored_slots, values, &mut tasks, &measures, &menu);
-        let patches = authored::patches(&authored, values, &tasks);
+        let authored = authored::analyse(
+            &authored_slots,
+            values,
+            &mut tasks,
+            &measures,
+            &menu,
+            &convolution,
+        );
+        let patches = authored::patches(&authored, values, &tasks, &measures);
         assert_a_packed_rope_turns_the_rows_of_one_plane_at_a_time(
             values,
             &tasks,
@@ -407,6 +423,15 @@ impl Plan {
                         matmul_tiles.len(),
                     );
                     geometries[task.geometry as usize] += 1;
+                    task.geometry
+                }
+                Geometry::Window => {
+                    assert!(
+                        (task.geometry as usize) < convolution.len(),
+                        "a window names geometry {} beyond the {} tiles its plan carries",
+                        task.geometry,
+                        convolution.len(),
+                    );
                     task.geometry
                 }
                 Geometry::Strategy => {
@@ -599,7 +624,7 @@ impl Plan {
             tables.dedup();
             tables
         };
-        let extents = Extents::of(values, &menu, &measures);
+        let extents = Extents::of(values, &menu, &convolution, &measures);
         let slot_bounds = {
             let mut bounds = Vec::new();
             for info in values {
@@ -632,6 +657,7 @@ impl Plan {
             geometries,
             products,
             attention,
+            convolution,
             layout,
             updates_weights,
             work,
@@ -704,6 +730,10 @@ impl Plan {
 
     pub fn attention(&self) -> &[AttentionTile] {
         &self.attention
+    }
+
+    pub fn convolution(&self) -> &[ConvolutionTile] {
+        &self.convolution
     }
 
     pub fn products(&self) -> &[Product] {
@@ -992,6 +1022,7 @@ impl Plan {
         let schedule = schedule::Schedule::of(
             &sized,
             self.profile.tiles(),
+            &self.convolution,
             &emitted.walks,
             &emitted.declared,
         );
@@ -1207,7 +1238,10 @@ impl Plan {
             encoding.lengths(),
             self.authored.slots(),
         );
-        let tiles = self.profile.tiles();
+        let tiles = GeometryTiles {
+            matmul: self.profile.tiles(),
+            convolution: &self.convolution,
+        };
         let mut touched = Touches::default();
         Recorded::of(encoding.tasks(), &self.steps)
             .map(|task| {
@@ -1308,6 +1342,10 @@ impl Reads for Walked<'_> {
 impl Walk for Walked<'_> {
     fn kind(&self) -> Kind {
         self.recorded.kind()
+    }
+
+    fn window(&self) -> Window {
+        self.recorded.window()
     }
 
     fn geometry(&self) -> u32 {
@@ -1932,7 +1970,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
                 }
             }
             Kind::Slice => exact_length(values, task, task.inputs[0], task.axis),
-            Kind::Conv2d => {
+            Kind::Conv2d | Kind::Conv2dTile => {
                 for axis in 1..MAX_RANK {
                     exact_length(values, task, task.inputs[0], axis);
                     exact_length(values, task, task.inputs[1], axis);

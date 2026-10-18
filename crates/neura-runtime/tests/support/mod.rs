@@ -13,11 +13,15 @@ static DEVICES: LazyLock<Mutex<HashMap<GpuRequest, Device>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn open() -> Runtime {
+    opened(MemoryRequest {
+        readback_bytes: 4 << 20,
+        ..Default::default()
+    })
+}
+
+pub fn opened(memory: MemoryRequest) -> Runtime {
     let request = RuntimeRequest {
-        memory: MemoryRequest {
-            readback_bytes: 4 << 20,
-            ..Default::default()
-        },
+        memory,
         ..Default::default()
     };
     let device = DEVICES

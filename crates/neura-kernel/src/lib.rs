@@ -443,7 +443,7 @@ fn install(
         DeviceModule::Softmax => task::softmax::install(compiler),
         DeviceModule::Choice => task::choice::install(compiler, geometry),
         DeviceModule::Select => task::select::install(compiler),
-        DeviceModule::Conv => task::conv::install(compiler),
+        DeviceModule::Conv => task::conv::install(compiler, geometry),
         DeviceModule::Scatter => task::scatter::install(compiler, elements),
         DeviceModule::Layout => task::layout::install(compiler),
         DeviceModule::Pool => task::pool::install(compiler),

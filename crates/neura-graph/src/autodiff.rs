@@ -863,6 +863,7 @@ impl Graph {
             | Kind::AttentionValueGrad
             | Kind::Conv2dInputGrad
             | Kind::Conv2dWeightGrad
+            | Kind::Conv2dTile
             | Kind::PoolMax2dInputGrad
             | Kind::PoolMean2dInputGrad
             | Kind::MatmulFold

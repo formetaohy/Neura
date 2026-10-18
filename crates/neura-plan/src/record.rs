@@ -75,15 +75,6 @@ impl<'a> Recorded<'a> {
         }
     }
 
-    fn window(&self) -> Window {
-        Window::new(
-            [self.record.reach_rows, self.record.reach_columns],
-            [self.record.stride_rows, self.record.stride_columns],
-            [self.record.pad_rows, self.record.pad_columns],
-            [self.record.dilation_rows, self.record.dilation_columns],
-        )
-    }
-
     fn step(&self, at: u32) -> StepRecord {
         read::<StepRecord>(self.steps, at as usize)
     }
@@ -131,6 +122,15 @@ impl Reads for Recorded<'_> {
 impl Walk for Recorded<'_> {
     fn kind(&self) -> Kind {
         Kind::of(self.record.kind)
+    }
+
+    fn window(&self) -> Window {
+        Window::new(
+            [self.record.reach_rows, self.record.reach_columns],
+            [self.record.stride_rows, self.record.stride_columns],
+            [self.record.pad_rows, self.record.pad_columns],
+            [self.record.dilation_rows, self.record.dilation_columns],
+        )
     }
 
     fn geometry(&self) -> u32 {

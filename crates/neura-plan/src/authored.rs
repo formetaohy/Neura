@@ -3,7 +3,7 @@ use crate::lower::Task;
 use crate::span::{Measure, Split};
 use neura_abi::{Kind, MeasureFields, MeasureRecord, NO_VALUE, PatchFields, PatchRecord, measure};
 use neura_graph::ValueInfo;
-use neura_profile::MatmulTile;
+use neura_profile::{ConvolutionTile, MatmulTile};
 use std::collections::BTreeMap;
 
 pub(crate) struct Authored {
@@ -45,6 +45,7 @@ pub(crate) fn analyse(
     tasks: &mut [Task],
     measures: &[Measure],
     tiles: &[MatmulTile],
+    windows: &[ConvolutionTile],
 ) -> Authored {
     let mut authored = Authored {
         slots: slots.to_vec(),
@@ -53,7 +54,7 @@ pub(crate) fn analyse(
         measures: Vec::new(),
     };
     if !authored.carries() {
-        authored.measures = measure_records(measures, tiles);
+        authored.measures = measure_records(measures, tiles, windows);
         return authored;
     }
     let mut changed = true;
@@ -66,7 +67,8 @@ pub(crate) fn analyse(
                 | Measure::Rows(value)
                 | Measure::Words(value)
                 | Measure::Tokens(value)
-                | Measure::Tiles { value, .. } => {
+                | Measure::Tiles { value, .. }
+                | Measure::Windows { value, .. } => {
                     slots.extend_from_slice(&authored.value_slots[value as usize])
                 }
             }
@@ -110,7 +112,7 @@ pub(crate) fn analyse(
             task.inputs[1],
         );
     }
-    authored.measures = measure_records(measures, tiles);
+    authored.measures = measure_records(measures, tiles, windows);
     authored
 }
 
@@ -133,7 +135,12 @@ pub(crate) struct Tables {
     pub(crate) list: Vec<u32>,
 }
 
-pub(crate) fn patches(authored: &Authored, values: &[ValueInfo], tasks: &[Task]) -> Patches {
+pub(crate) fn patches(
+    authored: &Authored,
+    values: &[ValueInfo],
+    tasks: &[Task],
+    measures: &[Measure],
+) -> Patches {
     let mut owners = vec![NO_VALUE; tasks.len()];
     let mut counted = Vec::new();
     if !authored.carries() {
@@ -188,9 +195,14 @@ pub(crate) fn patches(authored: &Authored, values: &[ValueInfo], tasks: &[Task])
             .enumerate()
             .filter(|(_, task)| {
                 let walks_the_measure = split_measure(task.split).is_some_and(|measure| {
-                    authored.measure_slots[measure as usize]
+                    let ruled = authored.measure_slots[measure as usize]
                         .iter()
-                        .any(|slot| slots.contains(slot))
+                        .any(|slot| slots.contains(slot));
+                    assert!(
+                        !ruled || !matches!(measures[measure as usize], Measure::Windows { .. }),
+                        "a device counts the tiles of a window, and a window walks the tiles its host counts; the task of a tiled convolution never stands on a counted extent",
+                    );
+                    ruled
                 });
                 let walks_a_segment = (task.grid != NO_VALUE || task.segments != NO_VALUE)
                     && task.depends.contains(&count);
@@ -278,7 +290,11 @@ fn writes(task: &Task, value: u32) -> bool {
     task.writes().any(|written| written == value)
 }
 
-fn measure_records(measures: &[Measure], tiles: &[MatmulTile]) -> Vec<MeasureRecord> {
+fn measure_records(
+    measures: &[Measure],
+    tiles: &[MatmulTile],
+    windows: &[ConvolutionTile],
+) -> Vec<MeasureRecord> {
     measures
         .iter()
         .map(|measure| match *measure {
@@ -288,6 +304,12 @@ fn measure_records(measures: &[Measure], tiles: &[MatmulTile]) -> Vec<MeasureRec
             Measure::Tokens(value) => record(measure::TOKENS, value, 0, 0),
             Measure::Tiles { value, geometry } => {
                 let tile = tiles[geometry as usize];
+                record(measure::TILES, value, tile.rows(), tile.columns())
+            }
+            Measure::Windows {
+                value, geometry, ..
+            } => {
+                let tile = windows[geometry as usize];
                 record(measure::TILES, value, tile.rows(), tile.columns())
             }
         })
