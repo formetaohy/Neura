@@ -6,6 +6,7 @@ mod layout;
 mod op;
 mod pool;
 mod shape;
+mod triangle;
 mod view;
 mod window;
 
@@ -18,4 +19,5 @@ pub use init::{Fan, Init};
 pub use layout::Layout;
 pub use pool::Pool;
 pub use shape::{Free, Shape};
+pub use triangle::Triangle;
 pub use window::Window;

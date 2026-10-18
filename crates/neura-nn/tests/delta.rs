@@ -1,0 +1,110 @@
+use neura_abi::Element;
+use neura_graph::{Graph, Shape, Value};
+use neura_nn::DeltaRule;
+use neura_runtime::{Runtime, RuntimeRequest};
+
+fn open() -> Runtime {
+    Runtime::open(RuntimeRequest::default()).expect("a device runs the delta rule test")
+}
+
+fn random(count: u32, seed: u32) -> Vec<f32> {
+    let mut state = seed | 1;
+    (0..count)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        })
+        .collect()
+}
+
+fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len());
+    for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "element {index} came back as {actual} where {expected} was expected",
+        );
+    }
+}
+
+#[test]
+fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
+    let (heads, width, rows, chunk) = (2u32, 3u32, 6u32, 2u32);
+    let mut queries = random(heads * rows * width, 7);
+    let mut keys = random(heads * rows * width, 11);
+    for tensor in [&mut queries, &mut keys] {
+        for head in 0..heads {
+            for row in 0..rows {
+                let at = ((head * rows + row) * width) as usize;
+                let span = &mut tensor[at..at + width as usize];
+                let length = span.iter().map(|value| value * value).sum::<f32>().sqrt();
+                for value in span {
+                    *value /= length;
+                }
+            }
+        }
+    }
+    let values = random(heads * rows * width, 13);
+    let betas = random(heads * rows, 17)
+        .into_iter()
+        .map(|value| 1.0 / (1.0 + (-value).exp()))
+        .collect::<Vec<f32>>();
+    let decays = random(heads * rows, 19)
+        .into_iter()
+        .map(|value| -value.abs())
+        .collect::<Vec<f32>>();
+    let runtime = open();
+
+    let graph = Graph::new();
+    let query = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let key = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let value = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let beta = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
+    let decay = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
+    let rule = DeltaRule::chunked(&graph, heads, width, rows, chunk);
+    let out = rule.forward(&graph, query, key, value, beta, decay);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile_with(&graph, &weights, runtime.default_profile());
+    runtime.write(&program, query, &queries);
+    runtime.write(&program, key, &keys);
+    runtime.write(&program, value, &values);
+    runtime.write(&program, beta, &betas);
+    runtime.write(&program, decay, &decays);
+    runtime.run(&program);
+    let chunked = runtime.read(&program, out);
+
+    let graph = Graph::new();
+    let query = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let key = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let value = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
+    let beta = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
+    let decay = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
+    let rule = DeltaRule::new(&graph, heads, width, 1);
+    let walked = (0..rows)
+        .map(|row| {
+            rule.forward(
+                &graph,
+                graph.slice(query, 2, row, 1),
+                graph.slice(key, 2, row, 1),
+                graph.slice(value, 2, row, 1),
+                graph.slice(beta, 2, row, 1),
+                graph.slice(decay, 2, row, 1),
+            )
+        })
+        .collect::<Vec<Value>>();
+    let out = graph.concat(&walked, 2);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile_with(&graph, &weights, runtime.default_profile());
+    runtime.write(&program, query, &queries);
+    runtime.write(&program, key, &keys);
+    runtime.write(&program, value, &values);
+    runtime.write(&program, beta, &betas);
+    runtime.write(&program, decay, &decays);
+    runtime.run(&program);
+    let recurrent = runtime.read(&program, out);
+    assert_close(&chunked, &recurrent, 1e-4);
+}

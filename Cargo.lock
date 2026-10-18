@@ -249,6 +249,7 @@ version = "0.7.4"
 dependencies = [
  "neura-abi",
  "neura-graph",
+ "neura-runtime",
 ]
 
 [[package]]

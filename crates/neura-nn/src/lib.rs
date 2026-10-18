@@ -1,7 +1,9 @@
+mod delta;
 mod layer;
 mod loss;
 mod optimizer;
 
+pub use delta::DeltaRule;
 pub use layer::{
     Adapter, Conv2d, ConvTranspose2d, Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp,
     MultiHeadAttention, RmsNorm,

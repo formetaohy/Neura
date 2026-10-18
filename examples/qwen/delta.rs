@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
+use neura::DeltaRule;
 use neura::decoder::{heads, joined, l2, matrix, rms, softplus, vector};
 use neura::gguf::Archive;
 use neura::{Element, Graph, Init, Shape, Value};
@@ -17,7 +18,7 @@ pub(crate) struct Delta {
     output_norm: Value,
     mlp: Mlp,
     conv_state: Value,
-    state: Value,
+    rule: DeltaRule,
     floor: Value,
     scale: Value,
     heads: u32,
@@ -73,11 +74,7 @@ impl Delta {
                 Init::Zero,
                 Element::Single,
             ),
-            state: graph.state(
-                Shape::of([config.linear_heads, 1, width, width]),
-                Init::Zero,
-                Element::Single,
-            ),
+            rule: DeltaRule::new(graph, config.linear_heads, width, rows),
             floor: graph.fill(Shape::scalar(), config.floor),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
             heads: config.linear_heads,
@@ -161,27 +158,8 @@ impl Delta {
             graph,
             graph.add(alpha, heads(graph, self.bias, self.heads, 1)),
         );
-        let decay = graph.exp(graph.mul(heads(graph, self.decay, self.heads, 1), paced));
-        let mut state = self.state;
-        let mut attended = Vec::with_capacity(self.rows as usize);
-        for row in 0..self.rows {
-            let query = graph.slice(query, 2, row, 1);
-            let key = graph.slice(key, 2, row, 1);
-            let value = graph.slice(value, 2, row, 1);
-            let beta = graph.slice(beta, 2, row, 1);
-            let decay = graph.slice(decay, 2, row, 1);
-            let decayed = graph.mul(state, decay);
-            let memory = graph.matmul(key, decayed);
-            let delta = graph.mul(graph.sub(value, memory), beta);
-            let grown = graph.add(
-                decayed,
-                graph.matmul(graph.permute(key, [0, 1, 3, 2]), delta),
-            );
-            attended.push(graph.matmul(query, grown));
-            state = grown;
-        }
-        graph.copy_into(self.state, state);
-        let attended = graph.concat(&attended, 2);
+        let log_decay = graph.mul(heads(graph, self.decay, self.heads, 1), paced);
+        let attended = self.rule.forward(graph, query, key, value, beta, log_decay);
         let gated = graph.mul(
             rms(graph, attended, self.output_norm, self.floor),
             graph.silu(heads(graph, gate, self.heads, self.width)),
