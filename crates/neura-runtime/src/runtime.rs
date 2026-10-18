@@ -2,10 +2,10 @@ use crate::cache::{self, Artifacts, Assembly, Resident};
 use crate::checkpoint::{self, Checkpoint, CheckpointFile, Container};
 use crate::heap::Heap;
 use crate::pool::{Pool, Recycled};
-use crate::program::{Program, Weights};
+use crate::program::{Dispatch, Program, Weights};
 use crate::spill::Spill;
 use crate::store::WeightStore;
-use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES, control};
+use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, HostDevice, Queue,
     Readback, ReadbackLease, Submission, SubmissionIndex,
@@ -267,7 +267,7 @@ impl Runtime {
 
     fn planned_profile(&self, graph: &Graph) -> Profile {
         let balanced = self.default_profile();
-        let plan = Plan::of(graph, self.alignment, balanced, self.encoding_bytes);
+        let plan = Plan::sketch(graph, self.alignment, balanced, self.encoding_bytes);
         let mut work = 0u64;
         let mut walked = 0u64;
         for product in plan.products() {
@@ -651,15 +651,27 @@ impl Runtime {
         }
         if program.windows().is_empty() {
             let device = self.context.device();
+            let queue = self.context.queue();
+            let encoding = program.encoding();
+            let (generation, clear) = program.begin();
+            program.write_dispatch(
+                queue,
+                Dispatch {
+                    generation,
+                    clear,
+                    first: 0,
+                    count: encoding.segments().len() as u32,
+                    counts: None,
+                    roots: encoding.roots(),
+                    waves: encoding.wave_segments(),
+                    wave_table: encoding.successors().len() as u32,
+                },
+            );
+            let group = program.group();
             let mut submission = Submission::new(device, "neura program");
-            let header = program.header();
-            program
-                .state
-                .buffer()
-                .write_at(self.context.queue(), control::offset_bytes(), &header);
             submission.dispatch(
                 &program.resident.kernel,
-                &program.group,
+                &group,
                 [program.workgroups(), 1, 1],
             );
             let submission = submission.submit(self.context.queue());
@@ -676,31 +688,35 @@ impl Runtime {
         let queue = self.context.queue();
         let device = self.context.device();
         let windows = program.windows();
+        let encoding = program.encoding();
         let mut submissions = Vec::with_capacity(windows.len());
-        for group in windows.iter() {
-            submissions.extend(program.store().ensure(queue, group.pages()));
-            program.state.buffer().write_at(
+        for window in windows.iter() {
+            submissions.extend(program.store().ensure(queue, window.pages()));
+            let (generation, clear) = program.begin();
+            program.write_dispatch(
                 queue,
-                control::offset_bytes(),
-                &control::window(
-                    group.first_segment(),
-                    group.segments(),
-                    group.first_wave(),
-                    program.wave_count(),
-                    group.first_task(),
-                    group.last_task(),
-                ),
+                Dispatch {
+                    generation,
+                    clear,
+                    first: window.first_segment(),
+                    count: window.segments(),
+                    counts: Some(window.counts()),
+                    roots: window.roots(),
+                    waves: encoding.wave_segments(),
+                    wave_table: encoding.successors().len() as u32,
+                },
             );
+            let group = program.group();
             let mut submission = Submission::new(device, "neura program");
             submission.dispatch(
                 &program.resident.kernel,
-                &program.group,
+                &group,
                 [program.workgroups(), 1, 1],
             );
             let submission = submission.submit(queue);
             program.used(submission);
             submissions.push(submission);
-            program.store().mark_dirty(group.writes());
+            program.store().mark_dirty(window.writes());
         }
         Run {
             queue: queue.clone(),

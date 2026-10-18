@@ -1,91 +1,78 @@
 pub const REFUSAL: u32 = 0;
 pub const CURSOR: u32 = crate::REFUSAL_WORDS;
-pub const FRONTIER: u32 = CURSOR + 1;
-pub const SEGMENTS: u32 = FRONTIER + 1;
-pub const WAVES: u32 = SEGMENTS + 1;
-pub const FIRST_TASK: u32 = WAVES + 1;
-pub const LAST_TASK: u32 = FIRST_TASK + 1;
-pub const HEADER_WORDS: u32 = LAST_TASK - CURSOR + 1;
-pub const WAVE_STRIDE: u32 = 2;
-pub const COUNTERS: u32 = LAST_TASK + 1;
+pub const TAIL: u32 = CURSOR + 1;
+pub const COUNT: u32 = TAIL + 1;
+pub const FIRST: u32 = COUNT + 1;
+pub const QUEUE: u32 = FIRST + 1;
+pub const GENERATION: u32 = QUEUE + 1;
+pub const WAVES: u32 = GENERATION + 1;
+pub const WAVE_TABLE: u32 = WAVES + 1;
+pub const HEADER_WORDS: u32 = WAVE_TABLE - CURSOR + 1;
+pub const COUNTERS: u32 = WAVE_TABLE + 1;
+
+pub const ENTRY_SHIFT: u32 = 24;
+pub const ENTRY_MASK: u32 = (1 << ENTRY_SHIFT) - 1;
+pub const MAX_SEGMENTS: u32 = ENTRY_MASK;
 
 const _: () = assert!(
     CURSOR == crate::REFUSAL_WORDS && COUNTERS == HEADER_WORDS + crate::REFUSAL_WORDS,
     "the control block opens on the refusal word and carries the scheduler header",
 );
 
-pub const fn remaining(wave: u32) -> u32 {
-    COUNTERS + WAVE_STRIDE * wave
+pub const fn remaining(segment: u32) -> u32 {
+    COUNTERS + segment
 }
 
-pub const fn total(wave: u32) -> u32 {
-    remaining(wave) + 1
+pub const fn queue(capacity: u32, slot: u32) -> u32 {
+    COUNTERS + capacity + slot
+}
+
+pub const fn wave(capacity: u32, wave: u32) -> u32 {
+    COUNTERS + 2 * capacity + wave
 }
 
 pub const fn offset_bytes() -> u64 {
     CURSOR as u64 * crate::WORD_BYTES
 }
 
-pub fn header(segments: u32, waves: u32) -> Vec<u8> {
-    header_words(0, 0, segments, waves, 0, u32::MAX)
+pub fn entry(generation: u32, segment: u32) -> u32 {
+    assert!(
+        segment < MAX_SEGMENTS,
+        "segment {segment} outruns the {} a queue entry names",
+        MAX_SEGMENTS,
+    );
+    ((generation & 0xff) << ENTRY_SHIFT) | segment
 }
 
-pub fn window(
-    first_segment: u32,
-    segments: u32,
-    first_wave: u32,
+pub const fn generation_of(entry: u32) -> u32 {
+    entry >> ENTRY_SHIFT
+}
+
+pub const fn segment_of(entry: u32) -> u32 {
+    entry & ENTRY_MASK
+}
+
+pub fn header(
+    generation: u32,
+    tail: u32,
+    count: u32,
+    first: u32,
+    queue: u32,
     waves: u32,
-    first_task: u32,
-    last_task: u32,
-) -> Vec<u8> {
-    header_words(
-        first_segment,
-        first_wave,
-        first_segment + segments,
+    wave_table: u32,
+) -> Vec<u32> {
+    vec![
+        0,
+        tail,
+        count,
+        first,
+        queue,
+        generation & 0xff,
         waves,
-        first_task,
-        last_task,
-    )
+        wave_table,
+    ]
 }
 
-fn header_words(
-    cursor: u32,
-    frontier: u32,
-    segments: u32,
-    waves: u32,
-    first_task: u32,
-    last_task: u32,
-) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(HEADER_WORDS as usize * crate::WORD_BYTES as usize);
-    for word in [cursor, frontier, segments, waves, first_task, last_task] {
-        bytes.extend_from_slice(&word.to_ne_bytes());
-    }
-    bytes
-}
-
-pub fn words(segments: u32, wave_segments: &[u32]) -> Vec<u32> {
-    let mut words = vec![0u32; (REFUSAL + 1) as usize];
-    words.extend(progress(segments, wave_segments));
-    words
-}
-
-pub fn progress(segments: u32, wave_segments: &[u32]) -> Vec<u32> {
-    let mut words =
-        vec![0u32; (COUNTERS - CURSOR + WAVE_STRIDE * wave_segments.len() as u32) as usize];
-    words[(SEGMENTS - CURSOR) as usize] = segments;
-    words[(WAVES - CURSOR) as usize] = wave_segments.len() as u32;
-    for (wave, held) in wave_segments.iter().enumerate() {
-        assert!(
-            *held > 0,
-            "wave {wave} holds no segment a device program could gate on",
-        );
-        let wave = wave as u32;
-        words[(remaining(wave) - CURSOR) as usize] = *held;
-        words[(total(wave) - CURSOR) as usize] = *held;
-    }
-    words
-}
-
-pub const fn bytes(waves: u32) -> u64 {
-    (COUNTERS + WAVE_STRIDE * waves) as u64 * crate::WORD_BYTES
+pub fn bytes(capacity: u32) -> u64 {
+    (COUNTERS + 3 * capacity) as u64 * crate::WORD_BYTES
 }

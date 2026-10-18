@@ -43,6 +43,11 @@ pub struct Encoding {
     waves: Vec<u32>,
     segments: Vec<SegmentRecord>,
     wave_segments: Vec<u32>,
+    dependencies: Vec<u32>,
+    dependencies_at: Vec<u32>,
+    successors: Vec<u32>,
+    wave_table: Vec<u32>,
+    roots: Vec<u32>,
     work: u64,
     patches: Vec<neura_abi::PatchRecord>,
     patch_list: Vec<u32>,
@@ -61,6 +66,11 @@ impl Encoding {
             + self.waves.len() as u64 * size_of::<u32>() as u64
             + self.segments.len() as u64 * size_of::<SegmentRecord>() as u64
             + self.wave_segments.len() as u64 * size_of::<u32>() as u64
+            + self.dependencies.len() as u64 * size_of::<u32>() as u64
+            + self.dependencies_at.len() as u64 * size_of::<u32>() as u64
+            + self.successors.len() as u64 * size_of::<u32>() as u64
+            + self.wave_table.len() as u64 * size_of::<u32>() as u64
+            + self.roots.len() as u64 * size_of::<u32>() as u64
             + self.patches.len() as u64 * size_of::<neura_abi::PatchRecord>() as u64
             + self.patch_list.len() as u64 * size_of::<u32>() as u64
             + self.held.len() as u64
@@ -80,6 +90,11 @@ impl Encoding {
             waves: Vec::new(),
             segments: Vec::new(),
             wave_segments: Vec::new(),
+            dependencies: Vec::new(),
+            dependencies_at: Vec::new(),
+            successors: Vec::new(),
+            wave_table: Vec::new(),
+            roots: Vec::new(),
             work: 0,
             patches: Vec::new(),
             patch_list: Vec::new(),
@@ -135,6 +150,35 @@ impl Encoding {
         self.wave_segments.len() as u32
     }
 
+    pub fn dependencies(&self) -> &[u32] {
+        &self.dependencies
+    }
+
+    pub fn dependencies_at(&self) -> &[u32] {
+        &self.dependencies_at
+    }
+
+    pub fn successors(&self) -> &[u32] {
+        &self.successors
+    }
+
+    pub fn wave_table(&self) -> &[u32] {
+        &self.wave_table
+    }
+
+    pub fn roots(&self) -> &[u32] {
+        &self.roots
+    }
+
+    pub fn predecessors(&self, segment: usize, first: usize) -> u32 {
+        let from = self.dependencies_at[segment] as usize;
+        let to = self.dependencies_at[segment + 1] as usize;
+        self.dependencies[from..to]
+            .iter()
+            .filter(|dependency| **dependency as usize >= first)
+            .count() as u32
+    }
+
     pub fn task_count(&self) -> u32 {
         self.order.len() as u32
     }
@@ -149,10 +193,6 @@ impl Encoding {
 
     pub fn patch_list(&self) -> &[u32] {
         &self.patch_list
-    }
-
-    pub fn header(&self) -> Vec<u8> {
-        neura_abi::control::header(self.segments.len() as u32, self.wave_count())
     }
 
     pub fn holds(&self, storage: u32) -> bool {
@@ -307,6 +347,7 @@ pub struct Plan {
     bound: Arc<Encoding>,
     remembered: Mutex<Remembered>,
     derived: AtomicU64,
+    paged: bool,
 }
 
 impl Plan {
@@ -329,6 +370,19 @@ impl Plan {
             chosen,
             encoding_bytes,
             weight_slots,
+            true,
+        )
+    }
+
+    pub fn sketch(graph: &Graph, alignment: u64, profile: Profile, encoding_bytes: u64) -> Self {
+        Self::compile(
+            &graph.snapshot(),
+            profile,
+            alignment,
+            &[],
+            encoding_bytes,
+            0,
+            false,
         )
     }
 
@@ -339,6 +393,7 @@ impl Plan {
         chosen: &[(Product, MatmulTile)],
         encoding_bytes: u64,
         weight_slots: u32,
+        deliver: bool,
     ) -> Self {
         assert!(
             alignment.is_power_of_two() && alignment >= 4,
@@ -703,19 +758,22 @@ impl Plan {
             bound: Arc::new(Encoding::empty()),
             remembered: Mutex::new(Remembered::of(encoding_bytes)),
             derived: AtomicU64::new(0),
+            paged: weight_slots > 0,
         };
-        let bound = plan.deliver(&plan.slot_bounds);
-        plan.declared_waves = declared_waves(&bound);
-        plan.bound = Arc::new(bound);
-        for (task, owner) in tasks.iter_mut().zip(&plan.patches.owners) {
-            task.patch = *owner;
+        if deliver {
+            let bound = plan.deliver(&plan.slot_bounds);
+            plan.declared_waves = declared_waves(&bound);
+            plan.bound = Arc::new(bound);
+            for (task, owner) in tasks.iter_mut().zip(&plan.patches.owners) {
+                task.patch = *owner;
+            }
+            record::assert_records_hold_the_tasks_they_carry(
+                &tasks,
+                plan.bound.order(),
+                plan.bound.tasks(),
+                &plan.steps,
+            );
         }
-        record::assert_records_hold_the_tasks_they_carry(
-            &tasks,
-            plan.bound.order(),
-            plan.bound.tasks(),
-            &plan.steps,
-        );
         plan
     }
 
@@ -1032,6 +1090,11 @@ impl Plan {
             "a plan carries one dependency run per task it schedules and one more for the end",
         );
         let at_bound = lengths == self.slot_bounds.as_slice();
+        let tiles = GeometryTiles {
+            matmul: self.profile.tiles(),
+            convolution: &self.convolution,
+            convolution_input: &self.convolution_input,
+        };
         let decoded = Recorded::of(&self.tasks, &self.steps).collect::<Vec<_>>();
         let mut emitted = Emitted {
             walks: Vec::new(),
@@ -1054,7 +1117,7 @@ impl Plan {
             self.emit(lengths, &decoded, start, end, at_bound, &mut emitted);
             start = end;
         }
-        let schedule = schedule::Schedule::of(
+        let mut schedule = schedule::Schedule::of(
             &sized,
             self.profile.tiles(),
             &self.convolution,
@@ -1098,6 +1161,9 @@ impl Plan {
             tensor_bytes.is_multiple_of(WORD_BYTES),
             "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
         );
+        let resident = (0..sized.len())
+            .map(|storage| sized.resident(storage as u32))
+            .collect::<Vec<bool>>();
         let mut records = Vec::with_capacity(sized.len() * size_of::<ValueRecord>());
         for id in 0..sized.len() {
             let id = id as u32;
@@ -1170,7 +1236,32 @@ impl Plan {
                 table: sized.table(id),
             });
         }
+        let tail = schedule.segments().len() > 50_000;
+        if !self.paged {
+            schedule.gate_dense_waves(tail);
+        }
+        schedule.add_arena_hazards(&sized, tiles, &resident, &offsets, &ordered, tail);
+        if !self.paged {
+            schedule.gate_dense_waves(tail);
+        }
+        schedule.build_wave_table();
         let work = ordered.iter().map(|task| task.work).sum();
+        let mut dependencies = Vec::new();
+        let mut dependencies_at = Vec::with_capacity(schedule.segments().len() + 1);
+        for held in schedule.dependencies() {
+            dependencies_at.push(dependencies.len() as u32);
+            dependencies.extend_from_slice(held);
+        }
+        dependencies_at.push(dependencies.len() as u32);
+        let roots = schedule
+            .segments()
+            .iter()
+            .enumerate()
+            .filter(|(_, segment)| {
+                segment.predecessors == 0 && !schedule.gated()[segment.wave as usize]
+            })
+            .map(|(segment, _)| segment as u32)
+            .collect::<Vec<u32>>();
         Encoding {
             values: records,
             tasks: task_bytes,
@@ -1184,6 +1275,11 @@ impl Plan {
             waves,
             segments: schedule.segments().to_vec(),
             wave_segments: schedule.wave_segments(),
+            dependencies,
+            dependencies_at,
+            successors: schedule.successors().to_vec(),
+            wave_table: schedule.wave_table().to_vec(),
+            roots,
             work,
             patches: tables.patches,
             patch_list: tables.list,

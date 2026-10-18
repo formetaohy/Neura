@@ -1,8 +1,12 @@
 use crate::access::Access;
+use crate::flow::{Flow, WordFlow, arena_spans};
 use crate::hazard::{Hazard, Hazards};
 use crate::region::{self, GeometryTiles, Walk};
-use neura_abi::{SegmentFields, SegmentRecord};
+use neura_abi::{SegmentFields, SegmentRecord, control};
 use neura_profile::{ConvolutionInputTile, ConvolutionTile, MatmulTile};
+
+const GATE_DEPTH: usize = 64;
+const GATE_EDGES: u64 = 4096;
 
 pub(crate) trait Scheduled: Walk {
     fn span(&self) -> (u32, u32);
@@ -12,12 +16,17 @@ pub(crate) struct Schedule {
     order: Vec<u32>,
     segments: Vec<SegmentRecord>,
     waves: Vec<u32>,
+    dependencies: Vec<Vec<u32>>,
+    successors: Vec<u32>,
+    gated: Vec<bool>,
+    wave_table: Vec<u32>,
     count: u32,
 }
 
 struct Packed {
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
+    dependencies: Vec<Vec<u32>>,
 }
 
 impl Schedule {
@@ -56,6 +65,10 @@ impl Schedule {
         let mut segments = Vec::with_capacity(grouped.len());
         let mut waves = Vec::new();
         let mut count = 0;
+        let mut final_of = vec![0u32; packed.segments.len()];
+        for (position, segment) in grouped.iter().enumerate() {
+            final_of[*segment] = position as u32;
+        }
         for segment in grouped {
             let tasks = &packed.segments[segment];
             let wave = packed.waves[tasks[0] as usize];
@@ -69,6 +82,9 @@ impl Schedule {
                 first: order.len() as u32,
                 count: tasks.len() as u32,
                 wave,
+                predecessors: 0,
+                successors: 0,
+                successors_count: 0,
             }));
             for task in tasks {
                 order.push(*task);
@@ -81,13 +97,50 @@ impl Schedule {
             "a schedule of {} tasks gates {count} waves, and every wave opens on a task of its own",
             order.len(),
         );
+        let mut dependencies = vec![Vec::new(); segments.len()];
+        let mut successors_of = vec![Vec::new(); segments.len()];
+        for (segment, held) in packed.dependencies.iter().enumerate() {
+            if packed.segments[segment].is_empty() {
+                continue;
+            }
+            let here = final_of[segment] as usize;
+            for dependency in held {
+                let before = final_of[*dependency as usize] as usize;
+                assert!(
+                    before < here,
+                    "segment {here} depends on segment {before}, which the device reaches later",
+                );
+                dependencies[here].push(before as u32);
+                successors_of[before].push(here as u32);
+            }
+            dependencies[here].sort_unstable();
+            dependencies[here].dedup();
+        }
+        let mut successors = Vec::new();
+        for (segment, record) in segments.iter_mut().enumerate() {
+            record.predecessors = dependencies[segment].len() as u32;
+            record.successors = successors.len() as u32;
+            record.successors_count = successors_of[segment].len() as u32;
+            successors.extend_from_slice(&successors_of[segment]);
+        }
+        assert!(
+            segments.len() <= control::MAX_SEGMENTS as usize,
+            "a plan of {} segments outruns the {} a queue entry names",
+            segments.len(),
+            control::MAX_SEGMENTS,
+        );
         let mut schedule = Self {
             order,
             segments,
             waves,
+            dependencies,
+            successors,
+            gated: vec![false; count as usize],
+            wave_table: Vec::new(),
             count,
         };
         schedule.compact();
+        schedule.gated = vec![false; schedule.count as usize];
         schedule
     }
 
@@ -122,6 +175,169 @@ impl Schedule {
 
     pub(crate) fn waves(&self) -> &[u32] {
         &self.waves
+    }
+
+    pub(crate) fn dependencies(&self) -> &[Vec<u32>] {
+        &self.dependencies
+    }
+
+    pub(crate) fn successors(&self) -> &[u32] {
+        &self.successors
+    }
+
+    pub(crate) fn add_arena_hazards<T: Scheduled, V: region::Values>(
+        &mut self,
+        values: &V,
+        tiles: GeometryTiles<'_>,
+        resident: &[bool],
+        offsets: &[u64],
+        tasks: &[T],
+        skip_gated: bool,
+    ) {
+        let mut segment_at = vec![0u32; tasks.len()];
+        for (segment, record) in self.segments.iter().enumerate() {
+            for at in record.first..record.first + record.count {
+                segment_at[at as usize] = segment as u32;
+            }
+        }
+        let mut written = vec![false; values.len()];
+        for task in tasks {
+            for value in task.writes() {
+                written[values.storage(value) as usize] = true;
+            }
+        }
+        let mut flow = WordFlow::default();
+        let mut touches = region::Touches::default();
+        let mut pages = Vec::new();
+        let mut collected = Vec::new();
+        for (position, task) in tasks.iter().enumerate() {
+            let segment = segment_at[position];
+            if skip_gated && self.gated[self.segments[segment as usize].wave as usize] {
+                continue;
+            }
+            region::touches(values, tiles, task, task.span(), &mut touches);
+            collected.clear();
+            for (storage, region) in &touches.reads {
+                let storage = *storage;
+                if !resident[storage as usize] || !written[storage as usize] {
+                    continue;
+                }
+                arena_spans(
+                    offsets[storage as usize],
+                    values.element(storage),
+                    values.elements(storage),
+                    *region,
+                    &mut pages,
+                );
+                flow.read(&pages, segment, &mut collected);
+            }
+            for (storage, region) in &touches.writes {
+                let storage = *storage;
+                if !resident[storage as usize] {
+                    continue;
+                }
+                arena_spans(
+                    offsets[storage as usize],
+                    values.element(storage),
+                    values.elements(storage),
+                    *region,
+                    &mut pages,
+                );
+                flow.write(&pages, segment, task.in_place(), &mut collected);
+            }
+            collected.sort_unstable();
+            collected.dedup();
+            if self.gated[self.segments[segment as usize].wave as usize] {
+                collected.clear();
+            }
+            for dependency in collected.drain(..) {
+                if dependency == segment {
+                    continue;
+                }
+                assert!(
+                    dependency < segment,
+                    "segment {segment} walks storage a later segment {dependency} still owns",
+                );
+                self.dependencies[segment as usize].push(dependency);
+            }
+        }
+        self.rebuild_successors();
+    }
+
+    pub(crate) fn gate_dense_waves(&mut self, tail: bool) {
+        let waves = self.count as usize;
+        let mut deepest = vec![0usize; waves];
+        let mut edges = vec![0u64; waves];
+        for (segment, dependencies) in self.dependencies.iter().enumerate() {
+            let wave = self.segments[segment].wave as usize;
+            deepest[wave] = deepest[wave].max(dependencies.len());
+            edges[wave] += dependencies.len() as u64;
+        }
+        let mut gated = self.gated.clone();
+        for wave in 0..waves {
+            gated[wave] |= deepest[wave] > GATE_DEPTH || edges[wave] > GATE_EDGES;
+        }
+        if tail && let Some(first) = gated.iter().position(|gated| *gated) {
+            for wave in &mut gated[first..] {
+                *wave = true;
+            }
+        }
+        for (segment, dependencies) in self.dependencies.iter_mut().enumerate() {
+            if gated[self.segments[segment].wave as usize] {
+                dependencies.clear();
+            }
+        }
+        self.gated = gated;
+        self.rebuild_successors();
+        self.build_wave_table();
+    }
+
+    pub(crate) fn build_wave_table(&mut self) {
+        let waves = self.count as usize;
+        let mut table = vec![0u32; (waves + 1) * 4];
+        for (segment, record) in self.segments.iter().enumerate() {
+            let wave = record.wave as usize;
+            if table[wave * 4 + 1] == 0 {
+                table[wave * 4] = segment as u32;
+            }
+            table[wave * 4 + 1] += 1;
+        }
+        for wave in 0..waves {
+            table[wave * 4 + 2] = u32::from(self.gated[wave]);
+            table[wave * 4 + 3] = u32::from(self.gated.get(wave + 1).copied().unwrap_or(false));
+        }
+        self.wave_table = table;
+    }
+
+    pub(crate) fn gated(&self) -> &[bool] {
+        &self.gated
+    }
+
+    pub(crate) fn wave_table(&self) -> &[u32] {
+        &self.wave_table
+    }
+
+    fn rebuild_successors(&mut self) {
+        let mut successors_of = vec![Vec::new(); self.segments.len()];
+        for (segment, dependencies) in self.dependencies.iter_mut().enumerate() {
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            assert!(
+                !dependencies.contains(&(segment as u32)),
+                "segment {segment} depends on itself",
+            );
+            for dependency in dependencies.iter() {
+                successors_of[*dependency as usize].push(segment as u32);
+            }
+        }
+        let mut successors = Vec::new();
+        for (segment, record) in self.segments.iter_mut().enumerate() {
+            record.predecessors = self.dependencies[segment].len() as u32;
+            record.successors = successors.len() as u32;
+            record.successors_count = successors_of[segment].len() as u32;
+            successors.extend_from_slice(&successors_of[segment]);
+        }
+        self.successors = successors;
     }
 
     pub(crate) fn wave_segments(&self) -> Vec<u32> {
@@ -207,12 +423,13 @@ struct Packer<'a, T, V> {
     barriers: &'a [Vec<u32>],
     declared: &'a [u32],
     lonely: Vec<bool>,
-    hazards: Hazards,
+    flow: Flow,
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
     segment_of: Vec<u32>,
     segment_wave: Vec<u32>,
-    entry: Hazard,
+    dependencies: Vec<Vec<u32>>,
+    collected: Vec<u32>,
     touches: region::Touches,
     prefix: u32,
     stage: u32,
@@ -235,12 +452,13 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             barriers,
             declared,
             lonely: lonely(depths),
-            hazards: Hazards::of(values.len()),
+            flow: Flow::of(values, tasks.iter().flat_map(|task| task.writes())),
             waves: vec![0u32; tasks.len()],
             segments: Vec::new(),
             segment_of: vec![0u32; tasks.len()],
             segment_wave: Vec::new(),
-            entry: Hazard::default(),
+            dependencies: Vec::new(),
+            collected: Vec::new(),
             touches: region::Touches::default(),
             prefix: 0,
             stage: 0,
@@ -255,6 +473,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         Packed {
             waves: self.waves,
             segments: self.segments,
+            dependencies: self.dependencies,
         }
     }
 
@@ -277,40 +496,40 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             self.stage = self.prefix + 1;
         }
         self.in_recompute = recomputed;
-        let mut evidence = self
-            .hazards
-            .inspect(self.values, &self.touches, task.in_place());
+        self.flow.inspect(
+            self.values,
+            &self.touches,
+            task.in_place(),
+            &mut self.collected,
+        );
         for dependency in &self.barriers[index as usize] {
-            evidence.join(&Hazard::at(
-                self.waves[*dependency as usize],
-                self.segment_of[*dependency as usize],
-            ));
+            self.collected.push(self.segment_of[*dependency as usize]);
         }
-        let earliest = evidence.wave;
-        let mut dependencies = std::mem::take(&mut evidence.segments);
-        dependencies.settle();
+        self.collected.sort_unstable();
+        self.collected.dedup();
+        let mut earliest = None;
+        for dependency in &self.collected {
+            let wave = self.segment_wave[*dependency as usize];
+            earliest = Some(earliest.map_or(wave, |held: u32| held.max(wave)));
+        }
         let joined = earliest
             .filter(|earliest| {
-                !dependencies.overflowed()
-                    && self.lonely[index as usize]
+                self.lonely[index as usize]
                     && !recomputed
-                    && dependencies.len() == 1
-                    && self.segment_wave.get(dependencies.get(0) as usize).copied()
-                        == Some(*earliest)
+                    && self.collected.len() == 1
+                    && self.segment_wave[self.collected[0] as usize] == *earliest
             })
-            .map(|earliest| (earliest, dependencies.get(0)));
+            .map(|earliest| (earliest, self.collected[0]));
         let (wave, segment) = match joined {
             Some((wave, segment)) => (wave, segment),
             None => {
-                let wave = match dependencies.overflowed() {
-                    true => earliest.expect("a hazard that overflows names a wave") + 1,
-                    false => earliest.map_or_else(
-                        || self.declared.get(index as usize).copied().unwrap_or(0),
-                        |earliest| earliest + 1,
-                    ),
-                };
+                let wave = earliest.map_or_else(
+                    || self.declared.get(index as usize).copied().unwrap_or(0),
+                    |earliest| earliest + 1,
+                );
                 self.segments.push(Vec::new());
                 self.segment_wave.push(wave);
+                self.dependencies.push(Vec::new());
                 (wave, (self.segments.len() - 1) as u32)
             }
         };
@@ -319,23 +538,21 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         } else {
             wave
         };
-        if let Some(earliest) = earliest {
-            let ordered = wave > earliest
-                || (wave == earliest && dependencies.iter().all(|reached| *reached == segment));
+        self.collected.retain(|dependency| *dependency != segment);
+        for dependency in &self.collected {
             assert!(
-                ordered,
-                "task {index} lands in wave {wave} while a hazard of its own reaches wave {earliest} of segments {dependencies:?}, and the device gates two waves apart only what a segment orders",
+                self.segment_wave[*dependency as usize] < wave,
+                "task {index} lands in wave {wave} while a dependency of its own reaches wave {} of segment {dependency}",
+                self.segment_wave[*dependency as usize],
             );
         }
         self.segment_wave[segment as usize] = self.segment_wave[segment as usize].max(wave);
         self.waves[index as usize] = wave;
         self.segment_of[index as usize] = segment;
         self.segments[segment as usize].push(index);
+        self.dependencies[segment as usize].extend_from_slice(&self.collected);
         self.prefix = self.prefix.max(wave);
-        self.entry.wave = Some(wave);
-        self.entry.segments.clear();
-        self.entry.segments.extend_from(&[segment]);
-        self.hazards.record(self.values, &self.touches, &self.entry);
+        self.flow.record(self.values, &self.touches, wave, segment);
     }
 }
 

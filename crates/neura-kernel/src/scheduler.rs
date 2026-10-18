@@ -8,31 +8,62 @@ pub(crate) fn install(compiler: &mut Compiler) {
 
 #[neura_compiler::module]
 mod device {
-    fn remaining(wave: u32) -> u32 {
-        return control::COUNTERS + control::WAVE_STRIDE * wave;
+    fn remaining(segment: u32) -> u32 {
+        return control::COUNTERS + segment;
     }
 
-    fn total(wave: u32) -> u32 {
-        return remaining(wave) + 1u32;
+    fn wave_of(waves: u32, wave: u32) -> u32 {
+        return waves + wave;
     }
 
-    fn gate(wave: u32) {
-        loop {
-            if atomic_add(&state[control::FRONTIER], 0u32) >= wave {
-                break;
+    fn finish(
+        segment_id: u32,
+        segment: Segment,
+        lid: u32,
+        first: u32,
+        last: u32,
+        queue: u32,
+        generation: u32,
+        waves: u32,
+        wave_table: u32,
+    ) {
+        for index in stride(lid, segment.successors_count, WORKGROUP_SIZE) {
+            let next = successors[segment.successors + index];
+            if next >= first && next < last {
+                if atomic_sub(&state[remaining(next)], 1u32) == 1u32 {
+                    let slot = atomic_add(&state[control::TAIL], 1u32);
+                    atomic_store(
+                        &state[queue + slot],
+                        (generation << control::ENTRY_SHIFT) | next,
+                    );
+                }
             }
         }
-    }
-
-    fn finish(wave: u32, lid: u32) {
-        let mut rest = 0u32;
         if lid == 0u32 {
-            rest = atomic_sub(&state[remaining(wave)], 1u32);
+            atomic_store(&state[remaining(segment_id)], segment.predecessors);
         }
-        if rest == 1u32 {
+        let held = wave_table + segment.wave * 4u32;
+        let counted = successors[held + 3u32];
+        if counted != 0u32 {
             if lid == 0u32 {
-                atomic_store(&state[control::FRONTIER], wave + 1u32);
-                atomic_add(&state[remaining(wave)], state[total(wave)]);
+                claim[0u32] = atomic_sub(&state[wave_of(waves, segment.wave)], 1u32);
+            }
+            let reached = workgroup_uniform_load(&claim[0u32]);
+            if reached == 1u32 {
+                let next = held + 4u32;
+                let wave_first = successors[next];
+                let wave_count = successors[next + 1u32];
+                let gated = successors[next + 2u32];
+                if gated != 0u32 {
+                    for offset in stride(lid, wave_count, WORKGROUP_SIZE) {
+                        let segment = wave_first + offset;
+                        let slot = atomic_add(&state[control::TAIL], 1u32);
+                        atomic_store(
+                            &state[queue + slot],
+                            (generation << control::ENTRY_SHIFT) | segment,
+                        );
+                    }
+                }
             }
         }
     }
@@ -46,43 +77,55 @@ mod device {
     #[neura_compiler::kernel]
     fn main(lid: u32) {
         if lid == 0u32 {
-            claim[0u32] = state[control::SEGMENTS];
-            claim[2u32] = state[control::FIRST_TASK];
-            claim[3u32] = state[control::LAST_TASK];
+            claim[0u32] = state[control::COUNT];
+            claim[1u32] = state[control::FIRST];
+            claim[2u32] = state[control::QUEUE];
+            claim[3u32] = state[control::GENERATION];
+            claim[4u32] = state[control::WAVES];
+            claim[5u32] = state[control::WAVE_TABLE];
         }
-        let total = workgroup_uniform_load(&claim[0u32]);
-        let from = workgroup_uniform_load(&claim[2u32]);
-        let to = workgroup_uniform_load(&claim[3u32]);
+        let count = workgroup_uniform_load(&claim[0u32]);
+        let first = workgroup_uniform_load(&claim[1u32]);
+        let queue = workgroup_uniform_load(&claim[2u32]);
+        let generation = workgroup_uniform_load(&claim[3u32]);
+        let waves = workgroup_uniform_load(&claim[4u32]);
+        let wave_table = workgroup_uniform_load(&claim[5u32]);
+        let last = first + count;
         loop {
             if lid == 0u32 {
-                claim[1u32] = atomic_add(&state[control::CURSOR], 1u32);
+                claim[6u32] = atomic_add(&state[control::CURSOR], 1u32);
             }
-            let ticket = workgroup_uniform_load(&claim[1u32]);
-            if ticket >= total {
+            let ticket = workgroup_uniform_load(&claim[6u32]);
+            if ticket >= count {
                 break;
             }
-            let segment = segments[ticket];
-            let first = max(segment.first, from);
-            let last = min(segment.first + segment.count, to);
-            if first < last {
+            let slot = queue + ticket;
+            loop {
                 if lid == 0u32 {
-                    gate(segment.wave);
+                    claim[7u32] = atomic_add(&state[slot], 0u32);
                 }
-                storage_barrier();
-                for index in stride(first, last, 1u32) {
-                    let task = tasks[index];
-                    run_task(task, lid);
-                    if task.patch != NO_VALUE {
-                        workgroup_barrier();
-                        patch(task.patch, lid);
-                    }
-                    workgroup_barrier();
-                    storage_barrier();
-                }
-                if last == segment.first + segment.count {
-                    finish(segment.wave, lid);
+                let held = workgroup_uniform_load(&claim[7u32]);
+                if (held >> control::ENTRY_SHIFT) == generation {
+                    break;
                 }
             }
+            storage_barrier();
+            let entry = workgroup_uniform_load(&claim[7u32]);
+            let segment_id = entry & control::ENTRY_MASK;
+            let segment = segments[segment_id];
+            for index in stride(segment.first, segment.first + segment.count, 1u32) {
+                let task = tasks[index];
+                run_task(task, lid);
+                if task.patch != NO_VALUE {
+                    workgroup_barrier();
+                    patch(task.patch, lid);
+                }
+                workgroup_barrier();
+                storage_barrier();
+            }
+            finish(
+                segment_id, segment, lid, first, last, queue, generation, waves, wave_table,
+            );
         }
     }
 }

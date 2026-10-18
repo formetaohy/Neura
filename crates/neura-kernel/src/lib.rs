@@ -53,7 +53,7 @@ impl Banks {
     }
 }
 
-pub const BINDINGS_WITHOUT_HEAP: u32 = 6;
+pub const BINDINGS_WITHOUT_HEAP: u32 = 7;
 pub const BINDINGS_OF_PAGES: u32 = 1;
 
 pub const fn binding_count(banks: Banks, paged: bool) -> u32 {
@@ -76,8 +76,12 @@ pub const fn segments(banks: Banks, paged: bool) -> u32 {
     steps(banks, paged) + 1
 }
 
-pub const fn tables(banks: Banks, paged: bool) -> u32 {
+pub const fn successors(banks: Banks, paged: bool) -> u32 {
     segments(banks, paged) + 1
+}
+
+pub const fn tables(banks: Banks, paged: bool) -> u32 {
+    successors(banks, paged) + 1
 }
 
 pub const fn bank_ceiling(slots: u32) -> u32 {
@@ -158,6 +162,13 @@ pub fn bindings(authored: bool, banks: Banks, paged: bool) -> Vec<KernelBinding>
         BindingKind::ReadOnlyStorage,
         "segments",
         "Segment",
+        true,
+    ));
+    list.push(binding(
+        successors(banks, paged),
+        BindingKind::ReadOnlyStorage,
+        "successors",
+        "u32",
         true,
     ));
     list.push(binding(
@@ -297,13 +308,16 @@ impl Kernel {
         for (name, value) in [
             ("control::REFUSAL", control::REFUSAL),
             ("control::CURSOR", control::CURSOR),
-            ("control::FRONTIER", control::FRONTIER),
-            ("control::SEGMENTS", control::SEGMENTS),
+            ("control::TAIL", control::TAIL),
+            ("control::COUNT", control::COUNT),
+            ("control::FIRST", control::FIRST),
+            ("control::QUEUE", control::QUEUE),
+            ("control::GENERATION", control::GENERATION),
             ("control::WAVES", control::WAVES),
-            ("control::FIRST_TASK", control::FIRST_TASK),
-            ("control::LAST_TASK", control::LAST_TASK),
+            ("control::WAVE_TABLE", control::WAVE_TABLE),
             ("control::COUNTERS", control::COUNTERS),
-            ("control::WAVE_STRIDE", control::WAVE_STRIDE),
+            ("control::ENTRY_SHIFT", control::ENTRY_SHIFT),
+            ("control::ENTRY_MASK", control::ENTRY_MASK),
         ] {
             compiler.constant(name, value);
         }

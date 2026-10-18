@@ -3,12 +3,9 @@ use neura_abi::PAGE_WORDS;
 
 const QUANTUM: u64 = PAGE_WORDS;
 const QUANTUM_MASK: u64 = QUANTUM - 1;
-const HAZARD_SEGMENTS: usize = 4;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Hazard {
-    pub(crate) wave: Option<u32>,
-    pub(crate) segments: Segments,
     pub(crate) deepest: Option<u32>,
 }
 
@@ -16,145 +13,14 @@ impl Hazard {
     pub(crate) fn deep(deepest: u32) -> Self {
         Self {
             deepest: Some(deepest),
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn at(wave: u32, segment: u32) -> Self {
-        Self {
-            wave: Some(wave),
-            segments: Segments::of(segment),
-            deepest: None,
         }
     }
 
     pub(crate) fn join(&mut self, other: &Self) {
-        self.combine(other, true);
-    }
-
-    pub(crate) fn gather(&mut self, other: &Self) {
-        self.combine(other, false);
-    }
-
-    fn combine(&mut self, other: &Self, ordered: bool) {
-        match (self.wave, other.wave) {
-            (_, None) => {}
-            (None, Some(wave)) => {
-                self.wave = Some(wave);
-                self.segments.copy_from(&other.segments);
-            }
-            (Some(kept), Some(wave)) if wave > kept => {
-                self.wave = Some(wave);
-                self.segments.copy_from(&other.segments);
-            }
-            (Some(kept), Some(wave)) if wave == kept => {
-                if ordered {
-                    self.segments.merge(&other.segments);
-                } else {
-                    self.segments.extend_from(other.segments.slice());
-                }
-            }
-            _ => {}
-        }
         self.deepest = match (self.deepest, other.deepest) {
             (Some(kept), Some(carried)) => Some(kept.max(carried)),
             (kept, carried) => kept.or(carried),
         };
-    }
-
-    fn settle(&mut self) {
-        self.segments.settle();
-    }
-}
-
-impl PartialEq<Vec<u32>> for Segments {
-    fn eq(&self, other: &Vec<u32>) -> bool {
-        self.slice() == other.as_slice()
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
-pub(crate) struct Segments {
-    inline: [u32; HAZARD_SEGMENTS],
-    held: u8,
-    overflow: bool,
-}
-
-impl Segments {
-    pub(crate) fn of(segment: u32) -> Self {
-        let mut segments = Self::default();
-        segments.inline[0] = segment;
-        segments.held = 1;
-        segments
-    }
-
-    pub(crate) fn slice(&self) -> &[u32] {
-        &self.inline[..self.held as usize]
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.held as usize
-    }
-
-    pub(crate) fn overflowed(&self) -> bool {
-        self.overflow
-    }
-
-    pub(crate) fn get(&self, at: usize) -> u32 {
-        self.inline[at]
-    }
-
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, u32> {
-        self.slice().iter()
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.held = 0;
-        self.overflow = false;
-    }
-
-    pub(crate) fn copy_from(&mut self, other: &Self) {
-        *self = *other;
-    }
-
-    pub(crate) fn merge(&mut self, other: &Self) {
-        for segment in other.slice() {
-            self.insert(*segment);
-        }
-        self.overflow |= other.overflow;
-    }
-
-    fn insert(&mut self, segment: u32) {
-        let at = match self.slice().binary_search(&segment) {
-            Ok(_) => return,
-            Err(at) => at,
-        };
-        if self.held as usize == HAZARD_SEGMENTS {
-            self.overflow = true;
-            return;
-        }
-        self.inline.copy_within(at..self.held as usize, at + 1);
-        self.inline[at] = segment;
-        self.held += 1;
-    }
-
-    pub(crate) fn extend_from(&mut self, other: &[u32]) {
-        for segment in other {
-            self.insert(*segment);
-        }
-    }
-
-    pub(crate) fn settle(&mut self) {
-        self.inline[..self.held as usize].sort_unstable();
-        let mut kept = 0usize;
-        for at in 0..self.held as usize {
-            if kept == 0 || self.inline[kept - 1] != self.inline[at] {
-                self.inline[kept] = self.inline[at];
-                kept += 1;
-            }
-        }
-        self.held = kept as u8;
-        self.overflow |= kept == HAZARD_SEGMENTS;
     }
 }
 
@@ -222,17 +88,16 @@ impl Accesses {
             return self.every;
         }
         let mut hazard = Hazard::default();
-        hazard.gather(&self.whole);
+        hazard.join(&self.whole);
         for (first, end) in quanta(region, quantized) {
             let from = self.first_cell(first);
             for (start, cell) in &self.cells[from..] {
                 if end.is_some_and(|end| *start >= end) {
                     break;
                 }
-                hazard.gather(cell);
+                hazard.join(cell);
             }
         }
-        hazard.settle();
         hazard
     }
 
@@ -373,19 +238,18 @@ impl Hazards {
         let mut hazard = Hazard::default();
         for (storage, region) in &touches.reads {
             let quantized = quantized(values, *storage);
-            hazard.gather(&self.writers[*storage as usize].query(*region, quantized));
+            hazard.join(&self.writers[*storage as usize].query(*region, quantized));
         }
         for (storage, region) in &touches.writes {
             let quantized = quantized(values, *storage);
-            hazard.gather(&self.readers[*storage as usize].query(*region, quantized));
+            hazard.join(&self.readers[*storage as usize].query(*region, quantized));
         }
         if in_place {
             for (storage, region) in &touches.writes {
                 let quantized = quantized(values, *storage);
-                hazard.gather(&self.writers[*storage as usize].query(*region, quantized));
+                hazard.join(&self.writers[*storage as usize].query(*region, quantized));
             }
         }
-        hazard.settle();
         hazard
     }
 

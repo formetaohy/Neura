@@ -64,6 +64,9 @@ record!(SegmentRecord, SegmentFields, SEGMENT, "Segment" {
     first: u32 => U32,
     count: u32 => U32,
     wave: u32 => U32,
+    predecessors: u32 => U32,
+    successors: u32 => U32,
+    successors_count: u32 => U32,
 });
 
 record!(StepRecord, StepFields, STEP, "Step" {

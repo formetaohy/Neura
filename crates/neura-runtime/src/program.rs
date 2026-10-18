@@ -116,10 +116,12 @@ pub struct Program {
     tables: Tables,
     cached: Mutex<Option<Vec<u32>>>,
     pub(crate) state: Recycled,
-    pub(crate) group: BindGroup,
+    group: Mutex<Option<BindGroup>>,
     pub(crate) weights: Weights,
     table_buffer: Recycled,
     segments: Recycled,
+    successors: Mutex<Successors>,
+    generation: Mutex<u32>,
     revision: Revision,
     tasks: Recycled,
     values: Recycled,
@@ -164,41 +166,82 @@ struct Windows {
     groups: Arc<Vec<WeightGroup>>,
 }
 
+pub(crate) struct Dispatch<'a> {
+    pub(crate) generation: u32,
+    pub(crate) clear: bool,
+    pub(crate) first: u32,
+    pub(crate) count: u32,
+    pub(crate) counts: Option<&'a [u32]>,
+    pub(crate) roots: &'a [u32],
+    pub(crate) waves: &'a [u32],
+    pub(crate) wave_table: u32,
+}
+
+struct Successors {
+    active: Recycled,
+    retired: Vec<Recycled>,
+}
+
+impl Successors {
+    fn new(active: Recycled) -> Self {
+        Self {
+            active,
+            retired: Vec::new(),
+        }
+    }
+
+    fn buffer(&self) -> &GpuBuffer {
+        self.active.buffer()
+    }
+
+    fn write(&mut self, queue: &Queue, bytes: &[u8]) {
+        self.active.buffer().write(queue, bytes);
+    }
+
+    fn write_at(&mut self, queue: &Queue, offset: u64, bytes: &[u8]) {
+        self.active.buffer().write_at(queue, offset, bytes);
+    }
+
+    fn grow(&mut self, queue: &Queue, bytes: &[u8], fresh: Recycled) {
+        self.retired
+            .push(std::mem::replace(&mut self.active, fresh));
+        self.write(queue, bytes);
+    }
+}
+
 pub(crate) struct WeightGroup {
     first_segment: u32,
     segments: u32,
-    first_wave: u32,
-    first_task: u32,
-    last_task: u32,
     pages: Vec<u32>,
     writes: Vec<u32>,
+    roots: Vec<u32>,
+    counts: Vec<u32>,
 }
 
 impl WeightGroup {
     fn of(
         encoding: &Encoding,
-        first_task: u32,
-        last_task: u32,
+        first: usize,
+        end: usize,
         pages: Vec<u32>,
         writes: Vec<u32>,
     ) -> Self {
-        let segments = encoding.segments();
-        let first = segments
-            .iter()
-            .position(|segment| segment.first + segment.count > first_task)
-            .unwrap_or_else(|| panic!("task {first_task} of a plan stands in no segment"));
-        let last = segments
-            .iter()
-            .rposition(|segment| segment.first < last_task)
-            .unwrap_or_else(|| panic!("task {} of a plan stands in no segment", last_task - 1));
+        let mut roots = Vec::new();
+        let mut counts = Vec::with_capacity(end - first);
+        for segment in first..end {
+            let count = encoding.predecessors(segment, first);
+            if count == 0 {
+                roots.push(segment as u32);
+            }
+            counts.push(count);
+        }
         Self {
             first_segment: first as u32,
-            segments: (last - first + 1) as u32,
-            first_wave: segments[first].wave,
-            first_task,
-            last_task,
+            segments: (end - first) as u32,
             pages,
             writes,
+            roots,
+            counts,
         }
     }
 
@@ -210,24 +253,20 @@ impl WeightGroup {
         self.segments
     }
 
-    pub(crate) fn first_wave(&self) -> u32 {
-        self.first_wave
-    }
-
-    pub(crate) fn first_task(&self) -> u32 {
-        self.first_task
-    }
-
-    pub(crate) fn last_task(&self) -> u32 {
-        self.last_task
-    }
-
     pub(crate) fn pages(&self) -> &[u32] {
         &self.pages
     }
 
     pub(crate) fn writes(&self) -> &[u32] {
         &self.writes
+    }
+
+    pub(crate) fn roots(&self) -> &[u32] {
+        &self.roots
+    }
+
+    pub(crate) fn counts(&self) -> &[u32] {
+        &self.counts
     }
 }
 
@@ -249,57 +288,74 @@ fn weight_groups(
     let mut groups = Vec::new();
     let mut pages = Vec::<u32>::new();
     let mut writes = Vec::<u32>::new();
-    let mut start = 0u32;
-    for (position, task) in tasks.iter().enumerate() {
-        let position = position as u32;
-        let added = task
-            .pages()
+    let mut start = 0usize;
+    for (segment, record) in encoding.segments().iter().enumerate() {
+        let first = record.first as usize;
+        let end = first + record.count as usize;
+        let mut walking = Vec::<u32>::new();
+        let mut writing = Vec::<u32>::new();
+        for task in &tasks[first..end] {
+            walking.extend_from_slice(task.pages());
+            writing.extend_from_slice(task.writes());
+        }
+        walking.sort_unstable();
+        walking.dedup();
+        writing.sort_unstable();
+        writing.dedup();
+        let added = walking
             .iter()
             .filter(|page| pages.binary_search(page).is_err())
             .count();
         if pages.len() + added > slots as usize {
             if pages.is_empty() {
                 panic!(
-                    "task {position} of this plan walks {added} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
+                    "segment {segment} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose segments walk no more pages than it holds",
+                    walking.len(),
                     raise_or_declare(plan),
                 );
             }
             groups.push(WeightGroup::of(
                 encoding,
                 start,
-                position,
+                segment,
                 std::mem::take(&mut pages),
                 std::mem::take(&mut writes),
             ));
-            start = position;
+            start = segment;
         }
-        for page in task.pages() {
-            match pages.binary_search(page) {
+        for page in walking {
+            match pages.binary_search(&page) {
                 Ok(_) => {}
-                Err(at) => pages.insert(at, *page),
+                Err(at) => pages.insert(at, page),
             }
         }
         assert!(
             pages.len() <= slots as usize,
-            "task {position} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
+            "segment {segment} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
             pages.len(),
             raise_or_declare(plan),
         );
-        for write in task.writes() {
-            match writes.binary_search(write) {
+        for write in writing {
+            match writes.binary_search(&write) {
                 Ok(_) => {}
-                Err(at) => writes.insert(at, *write),
+                Err(at) => writes.insert(at, write),
             }
         }
     }
     groups.push(WeightGroup::of(
         encoding,
         start,
-        tasks.len() as u32,
+        encoding.segments().len(),
         pages,
         writes,
     ));
     groups
+}
+
+fn counters(encoding: &Encoding, first: usize, count: usize) -> Vec<u32> {
+    (first..first + count)
+        .map(|segment| encoding.predecessors(segment, first))
+        .collect()
 }
 
 struct Bound {
@@ -359,6 +415,16 @@ impl Program {
             (plan.task_count() as u64 * size_of::<SegmentRecord>() as u64).max(4),
             BufferUsages::STORAGE | BufferUsages::COPY_DST,
         );
+        let bound_encoding = plan.bound_encoding();
+        let successors = Recycled::claim(
+            pool,
+            "neura successors",
+            ((bound_encoding.successors().len() + bound_encoding.wave_table().len()) as u64
+                * WORD_BYTES)
+                .next_power_of_two()
+                .max(4),
+            BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        );
         let tensors = Tensors {
             active: Some(tensors),
             retired: Vec::new(),
@@ -408,12 +474,27 @@ impl Program {
         segments
             .buffer()
             .write(queue, bytemuck::cast_slice(bound_encoding.segments()));
-        state_buffer.buffer().write(
+        successors
+            .buffer()
+            .write(queue, bytemuck::cast_slice(bound_encoding.successors()));
+        successors.buffer().write_at(
             queue,
-            bytemuck::cast_slice(&control::words(
-                bound_encoding.segments().len() as u32,
-                bound_encoding.wave_segments(),
+            bound_encoding.successors().len() as u64 * WORD_BYTES,
+            bytemuck::cast_slice(bound_encoding.wave_table()),
+        );
+        state_buffer.buffer().write_at(
+            queue,
+            u64::from(control::COUNTERS) * WORD_BYTES,
+            bytemuck::cast_slice(&counters(
+                &bound_encoding,
+                0,
+                bound_encoding.segments().len(),
             )),
+        );
+        state_buffer.buffer().write_at(
+            queue,
+            u64::from(control::wave(plan.task_count(), 0)) * WORD_BYTES,
+            bytemuck::cast_slice(bound_encoding.wave_segments()),
         );
         if !plan.measures().is_empty() {
             table_buffer.buffer().write_at(
@@ -439,9 +520,6 @@ impl Program {
                 bytemuck::cast_slice(&plan.host_extents()),
             );
         }
-        let heap = arena.heap();
-        let banks = heap.banks();
-        let bank_bytes = heap.bank_bytes();
         let paged = weights.paged();
         let bound = plan.host_extents();
         let preview = match paged && !plan.dynamic() && plan.gather_tables().is_empty() {
@@ -461,68 +539,20 @@ impl Program {
             false => None,
         };
         let previewed = usize::from(preview.is_some());
-        let mut bindings = vec![
-            Binding {
-                index: TASKS,
-                buffer: tasks.buffer().binding(0, tasks.buffer().size()),
-            },
-            Binding {
-                index: VALUES,
-                buffer: values.buffer().binding(0, values.buffer().size()),
-            },
-        ];
-        for bank in 0..banks.count() {
-            let offset = u64::from(bank) * bank_bytes;
-            let size = (heap.bytes() - offset).min(bank_bytes);
-            bindings.push(Binding {
-                index: HEAP + bank,
-                buffer: arena.buffer().binding(offset, size),
-            });
-        }
-        if let Some(table) = weights.store().table() {
-            bindings.push(Binding {
-                index: neura_kernel::pages(banks),
-                buffer: table.binding(0, table.size()),
-            });
-        }
-        bindings.extend([
-            Binding {
-                index: neura_kernel::state(banks, paged),
-                buffer: state_buffer
-                    .buffer()
-                    .binding(0, state_buffer.buffer().size()),
-            },
-            Binding {
-                index: neura_kernel::steps(banks, paged),
-                buffer: resident
-                    .steps
-                    .buffer()
-                    .binding(0, resident.steps.buffer().size()),
-            },
-            Binding {
-                index: neura_kernel::segments(banks, paged),
-                buffer: segments.buffer().binding(0, segments.buffer().size()),
-            },
-            Binding {
-                index: neura_kernel::tables(banks, paged),
-                buffer: table_buffer
-                    .buffer()
-                    .binding(0, table_buffer.buffer().size()),
-            },
-        ]);
-        let group = resident.kernel.bind_group(&bindings);
         let bound = Bound::of(&plan);
         let encoding = (!plan.awaits_a_binding()).then(|| plan.bound_encoding());
-        Self {
+        let program = Self {
             resident,
             tables,
             cached: Mutex::new(None),
-            group,
+            group: Mutex::new(None),
             tensors: Mutex::new(tensors),
             weights,
             state: state_buffer,
             table_buffer,
             segments,
+            successors: Mutex::new(Successors::new(successors)),
+            generation: Mutex::new(0),
             revision,
             tasks,
             values,
@@ -532,7 +562,206 @@ impl Program {
             encoding: Mutex::new(encoding),
             last: Mutex::new(None),
             plan,
+        };
+        program.rebuild();
+        program
+    }
+
+    pub(crate) fn group(&self) -> BindGroup {
+        self.group
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .expect("a program binds its buffers when it is born")
+            .clone()
+    }
+
+    pub(crate) fn begin(&self) -> (u32, bool) {
+        let mut generation = self
+            .generation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *generation = generation.wrapping_add(1);
+        let wrapped = *generation > 0xff;
+        if wrapped {
+            *generation = 1;
         }
+        (*generation, wrapped)
+    }
+
+    pub(crate) fn write_dispatch(&self, queue: &Queue, dispatch: Dispatch<'_>) {
+        let capacity = self.plan.task_count();
+        let queue_base = control::queue(capacity, 0);
+        assert!(
+            dispatch.first as u64 + u64::from(dispatch.count) <= u64::from(capacity),
+            "a dispatch of {} segments at {} outruns the {capacity} a plan holds",
+            dispatch.count,
+            dispatch.first,
+        );
+        assert!(
+            dispatch.roots.len() <= capacity as usize,
+            "a dispatch queues {} roots beyond the {capacity} a plan holds",
+            dispatch.roots.len(),
+        );
+        if dispatch.clear {
+            let mut submission = Submission::new(queue.device(), "neura queue");
+            submission.clear(
+                self.state.buffer(),
+                u64::from(queue_base) * WORD_BYTES,
+                u64::from(capacity) * WORD_BYTES,
+            );
+            submission.submit(queue);
+        }
+        self.state.buffer().write_at(
+            queue,
+            control::offset_bytes(),
+            bytemuck::cast_slice(&control::header(
+                dispatch.generation,
+                dispatch.roots.len() as u32,
+                dispatch.count,
+                dispatch.first,
+                queue_base,
+                control::wave(capacity, 0),
+                dispatch.wave_table,
+            )),
+        );
+        if let Some(counts) = dispatch.counts {
+            assert_eq!(
+                counts.len(),
+                dispatch.count as usize,
+                "a dispatch of {} segments carries {} predecessor counts",
+                dispatch.count,
+                counts.len(),
+            );
+            self.state.buffer().write_at(
+                queue,
+                u64::from(control::COUNTERS + dispatch.first) * WORD_BYTES,
+                bytemuck::cast_slice(counts),
+            );
+        }
+        self.state.buffer().write_at(
+            queue,
+            u64::from(control::wave(capacity, 0)) * WORD_BYTES,
+            bytemuck::cast_slice(dispatch.waves),
+        );
+        let entries = dispatch
+            .roots
+            .iter()
+            .map(|root| control::entry(dispatch.generation, *root))
+            .collect::<Vec<u32>>();
+        self.state.buffer().write_at(
+            queue,
+            u64::from(queue_base) * WORD_BYTES,
+            bytemuck::cast_slice(&entries),
+        );
+    }
+
+    fn write_successors(&self, queue: &Queue, encoding: &Encoding) {
+        let bytes = ((encoding.successors().len() + encoding.wave_table().len()) as u64
+            * WORD_BYTES)
+            .max(4);
+        let mut successors = self
+            .successors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if successors.buffer().size() < bytes {
+            let fresh = Recycled::claim(
+                self.resident.pool(),
+                "neura successors",
+                bytes.next_power_of_two(),
+                BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            );
+            successors.grow(queue, bytemuck::cast_slice(encoding.successors()), fresh);
+            successors.write_at(
+                queue,
+                encoding.successors().len() as u64 * WORD_BYTES,
+                bytemuck::cast_slice(encoding.wave_table()),
+            );
+            drop(successors);
+            self.rebuild();
+            return;
+        }
+        successors.write(queue, bytemuck::cast_slice(encoding.successors()));
+        successors.write_at(
+            queue,
+            encoding.successors().len() as u64 * WORD_BYTES,
+            bytemuck::cast_slice(encoding.wave_table()),
+        );
+    }
+
+    fn rebuild(&self) {
+        let group = self.bind_group();
+        *self.group.lock().unwrap_or_else(PoisonError::into_inner) = Some(group);
+    }
+
+    fn bind_group(&self) -> BindGroup {
+        let successors = self
+            .successors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let arena = self.tensors.lock().unwrap_or_else(PoisonError::into_inner);
+        let held = arena.held();
+        let heap = held.heap();
+        let banks = heap.banks();
+        let bank_bytes = heap.bank_bytes();
+        let paged = self.weights.paged();
+        let mut bindings = vec![
+            Binding {
+                index: TASKS,
+                buffer: self.tasks.buffer().binding(0, self.tasks.buffer().size()),
+            },
+            Binding {
+                index: VALUES,
+                buffer: self.values.buffer().binding(0, self.values.buffer().size()),
+            },
+        ];
+        for bank in 0..banks.count() {
+            let offset = u64::from(bank) * bank_bytes;
+            let size = (heap.bytes() - offset).min(bank_bytes);
+            bindings.push(Binding {
+                index: HEAP + bank,
+                buffer: held.buffer().binding(offset, size),
+            });
+        }
+        if let Some(table) = self.weights.store().table() {
+            bindings.push(Binding {
+                index: neura_kernel::pages(banks),
+                buffer: table.binding(0, table.size()),
+            });
+        }
+        bindings.extend([
+            Binding {
+                index: neura_kernel::state(banks, paged),
+                buffer: self.state.buffer().binding(0, self.state.buffer().size()),
+            },
+            Binding {
+                index: neura_kernel::steps(banks, paged),
+                buffer: self
+                    .resident
+                    .steps
+                    .buffer()
+                    .binding(0, self.resident.steps.buffer().size()),
+            },
+            Binding {
+                index: neura_kernel::segments(banks, paged),
+                buffer: self
+                    .segments
+                    .buffer()
+                    .binding(0, self.segments.buffer().size()),
+            },
+            Binding {
+                index: neura_kernel::successors(banks, paged),
+                buffer: successors.buffer().binding(0, successors.buffer().size()),
+            },
+            Binding {
+                index: neura_kernel::tables(banks, paged),
+                buffer: self
+                    .table_buffer
+                    .buffer()
+                    .binding(0, self.table_buffer.buffer().size()),
+            },
+        ]);
+        self.resident.kernel.bind_group(&bindings)
     }
 
     pub(crate) fn bind(&self, extents: &[u32]) -> Vec<u32> {
@@ -792,13 +1021,16 @@ impl Program {
         self.segments
             .buffer()
             .write(queue, bytemuck::cast_slice(encoding.segments()));
+        self.write_successors(queue, &encoding);
         self.state.buffer().write_at(
             queue,
-            control::offset_bytes(),
-            bytemuck::cast_slice(&control::progress(
-                encoding.segments().len() as u32,
-                encoding.wave_segments(),
-            )),
+            u64::from(control::COUNTERS) * WORD_BYTES,
+            bytemuck::cast_slice(&counters(&encoding, 0, encoding.segments().len())),
+        );
+        self.state.buffer().write_at(
+            queue,
+            u64::from(control::wave(self.plan.task_count(), 0)) * WORD_BYTES,
+            bytemuck::cast_slice(encoding.wave_segments()),
         );
         if !encoding.patches().is_empty() {
             self.tables_buffer().write_at(
@@ -913,6 +1145,12 @@ impl Program {
             + self.tasks.buffer().size()
             + self.values.buffer().size()
             + self.segments.buffer().size()
+            + self
+                .successors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .buffer()
+                .size()
             + self.resident.steps.buffer().size()
             + self.state.buffer().size()
             + self.tables_buffer().size()
@@ -971,10 +1209,6 @@ impl Program {
         (encoding.segments().len() as u32)
             .min(self.plan.profile().workgroups())
             .max(1)
-    }
-
-    pub(crate) fn header(&self) -> Vec<u8> {
-        self.stored_encoding().header()
     }
 
     fn stored_encoding(&self) -> Arc<Encoding> {
