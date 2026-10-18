@@ -24,6 +24,7 @@ pub use gate::QueueLock;
 pub use host::VulkanHost;
 pub use host::{HostAdvance, HostDevice, HostIdentity};
 pub use library::WARM_PROGRAMS;
+pub use native::STAGING_BYTES;
 pub use pipeline::{BindGroup, Binding, PipelineHandle};
 pub use readback::{READBACK_TIMEOUT, Readback, ReadbackLease};
 pub use submission::{Submission, SubmissionIndex};

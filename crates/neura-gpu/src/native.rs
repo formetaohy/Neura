@@ -34,7 +34,7 @@ pub(crate) fn hang_deadline(
         timeout
     }
 }
-pub(crate) const STAGING_BYTES: u64 = 256 << 10;
+pub const STAGING_BYTES: u64 = 1 << 20;
 pub(crate) const TIME_SLOTS: usize = 4096;
 
 pub(crate) enum DeviceFailure {

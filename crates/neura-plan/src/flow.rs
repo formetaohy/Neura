@@ -13,21 +13,14 @@ enum Query {
 
 #[derive(Clone, Default)]
 struct Cell {
-    writer: Option<(u32, u32)>,
-    readers: Vec<(u32, u32)>,
+    writer: Option<u32>,
+    readers: Vec<u32>,
 }
 
 impl Cell {
-    fn hold(&mut self, wave: u32, segment: u32) {
-        if self
-            .readers
-            .last()
-            .is_some_and(|held| *held == (wave, segment))
-        {
-            return;
-        }
-        if !self.readers.contains(&(wave, segment)) {
-            self.readers.push((wave, segment));
+    fn hold(&mut self, segment: u32) {
+        if self.readers.last() != Some(&segment) {
+            self.readers.push(segment);
         }
     }
 }
@@ -102,14 +95,12 @@ impl Store {
 
 fn collect(cell: &Cell, query: Query, out: &mut Vec<u32>) {
     if matches!(query, Query::Writers | Query::Both)
-        && let Some((_, segment)) = cell.writer
+        && let Some(segment) = cell.writer
     {
         out.push(segment);
     }
     if matches!(query, Query::Readers | Query::Both) {
-        for (_, segment) in &cell.readers {
-            out.push(*segment);
-        }
+        out.extend_from_slice(&cell.readers);
     }
 }
 
@@ -173,13 +164,7 @@ impl Flow {
         out.dedup();
     }
 
-    pub(crate) fn record<V: Values>(
-        &mut self,
-        values: &V,
-        touches: &Touches,
-        wave: u32,
-        segment: u32,
-    ) {
+    pub(crate) fn record<V: Values>(&mut self, values: &V, touches: &Touches, segment: u32) {
         for (storage, region) in &touches.reads {
             if !self.written[*storage as usize] {
                 continue;
@@ -190,7 +175,7 @@ impl Flow {
                 values.elements(*storage),
                 quantized(values, *storage),
                 |cell| {
-                    cell.hold(wave, segment);
+                    cell.hold(segment);
                 },
             );
         }
@@ -201,7 +186,7 @@ impl Flow {
                 values.elements(*storage),
                 quantized(values, *storage),
                 |cell| {
-                    cell.writer = Some((wave, segment));
+                    cell.writer = Some(segment);
                     cell.readers.clear();
                 },
             );

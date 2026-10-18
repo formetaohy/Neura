@@ -161,7 +161,7 @@ pub(crate) const fn page_bytes() -> u64 {
 
 const WRITEBACK_CHUNKS: usize = 64;
 const CAPTURE_PAGES: usize = 64;
-const UPLOAD_PAGES: usize = 64;
+const UPLOAD_PAGES: usize = (neura_gpu::STAGING_BYTES / (PAGE_WORDS * WORD_BYTES)) as usize;
 const STREAM_BYTES: u64 = 1 << 16;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
 const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);

@@ -552,7 +552,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         self.segments[segment as usize].push(index);
         self.dependencies[segment as usize].extend_from_slice(&self.collected);
         self.prefix = self.prefix.max(wave);
-        self.flow.record(self.values, &self.touches, wave, segment);
+        self.flow.record(self.values, &self.touches, segment);
     }
 }
 
