@@ -75,6 +75,7 @@ impl Resident {
 pub(crate) struct KernelIdentity {
     pub(crate) kinds: Vec<Kind>,
     pub(crate) elements: Vec<Element>,
+    pub(crate) matmul_elements: Vec<Element>,
     pub(crate) geometry: Geometry,
     pub(crate) strategies: u32,
     pub(crate) authored: bool,

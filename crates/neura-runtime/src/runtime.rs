@@ -539,6 +539,7 @@ impl Runtime {
     fn kernel(&self, plan: &Plan, profile: Profile, paged: bool) -> Arc<Kernel> {
         let kinds = plan.kinds().to_vec();
         let elements = plan.elements().to_vec();
+        let matmul_elements = plan.matmul_elements().to_vec();
         let strategies = plan.strategies();
         let walked = plan.walked_tiles().collect::<Vec<_>>();
         let geometry = profile.geometry(
@@ -556,6 +557,7 @@ impl Runtime {
             cache::KernelIdentity {
                 kinds: kinds.clone(),
                 elements: elements.clone(),
+                matmul_elements: matmul_elements.clone(),
                 geometry: geometry.clone(),
                 strategies,
                 authored,
@@ -567,6 +569,7 @@ impl Runtime {
                 Kernel::assemble(KernelRequest {
                     kinds: &kinds,
                     elements: &elements,
+                    matmul_elements: &matmul_elements,
                     geometry,
                     strategies,
                     authored,

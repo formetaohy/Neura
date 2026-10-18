@@ -320,6 +320,7 @@ pub struct Plan {
     profile: Profile,
     kinds: Vec<Kind>,
     elements: Vec<Element>,
+    matmul_elements: Vec<Element>,
     strategies: u32,
     tasks: Vec<u8>,
     steps: Vec<u8>,
@@ -462,11 +463,18 @@ impl Plan {
         let mut steps = Vec::new();
         let mut updates_weights = false;
         let mut geometries = vec![0u32; matmul_tiles.len()];
+        let mut matmul_elements = Vec::new();
         let mut strategies = 0u32;
         let mut work = 0;
         let mut splits = Vec::with_capacity(tasks.len());
         let mut works = Vec::with_capacity(tasks.len());
         for task in &tasks {
+            if task.kind == Kind::Matmul {
+                let weight = values[task.inputs[1] as usize].element;
+                if !matmul_elements.contains(&weight) {
+                    matmul_elements.push(weight);
+                }
+            }
             let geometry = match task.kind.geometry() {
                 Geometry::Attention => {
                     assert!(
@@ -731,6 +739,7 @@ impl Plan {
             profile,
             kinds,
             elements,
+            matmul_elements,
             strategies,
             tasks: task_bytes,
             steps,
@@ -811,6 +820,10 @@ impl Plan {
 
     pub fn elements(&self) -> &[Element] {
         &self.elements
+    }
+
+    pub fn matmul_elements(&self) -> &[Element] {
+        &self.matmul_elements
     }
 
     pub fn attention(&self) -> &[AttentionTile] {

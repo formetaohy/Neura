@@ -42,7 +42,11 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                 constants.push(("MATMUL_FOLDS", tile.folds()));
                 constants.push((
                     "MATMUL_FOLD_UNROLL",
-                    if tile.stages_a_run() { tile.folds() } else { 1 },
+                    if tile.stages_a_run() {
+                        tile.folds()
+                    } else {
+                        tile.folds().min(4)
+                    },
                 ));
                 let (dot, stage, gate) = match tile.stages_a_run() {
                     true => ("dot_run", "stage", "run_gate"),

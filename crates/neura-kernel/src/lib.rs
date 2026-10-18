@@ -197,6 +197,7 @@ pub struct Kernel {
 pub struct KernelRequest<'a> {
     pub kinds: &'a [Kind],
     pub elements: &'a [Element],
+    pub matmul_elements: &'a [Element],
     pub geometry: Geometry,
     pub strategies: u32,
     pub authored: bool,
@@ -210,6 +211,7 @@ impl Kernel {
         let KernelRequest {
             kinds,
             elements,
+            matmul_elements,
             geometry,
             strategies,
             authored,
@@ -351,7 +353,7 @@ impl Kernel {
         scheduler::install(&mut compiler);
         substrate::install(&mut compiler, banks, paged);
         fetch::install(&mut compiler, elements);
-        dot::install(&mut compiler, elements);
+        dot::install(&mut compiler, matmul_elements);
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
         for module in DeviceModule::ALL {

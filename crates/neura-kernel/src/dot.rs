@@ -20,7 +20,7 @@ const _: () = assert!(
     "a run stages the blocks of an element whose blocks the device stages",
 );
 
-pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
+pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     device::define(compiler);
     left::define(compiler);
     run::define(compiler);
@@ -45,8 +45,8 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     compiler.select("generic_dot_by_element", "dot_by_element");
     compiler.select("generic_dot_by_element", "dot_staged_by_element");
     compiler.select("generic_dot_by_element", "dot_run_by_element");
-    dispatch(compiler, elements, "dot_by_element", HEAP);
-    dispatch(compiler, elements, "dot_staged_by_element", STAGED);
+    dispatch(compiler, weights, "dot_by_element", HEAP);
+    dispatch(compiler, weights, "dot_staged_by_element", STAGED);
     compiler.insert_case(
         "dot_run_by_element",
         ast::Arm {
@@ -74,7 +74,7 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     compiler.select("stage_by_element", "stage");
     compiler.select("stage_none", "stage_untouched");
     compiler.select("generic_codes_by_element", "codes_by_element");
-    for element in elements.iter().copied().filter(|held| held.packs_codes()) {
+    for element in weights.iter().copied().filter(|held| held.packs_codes()) {
         compiler.insert_case(
             "codes_by_element",
             ast::Arm {
@@ -92,8 +92,8 @@ pub(crate) fn install(compiler: &mut Compiler, elements: &[Element]) {
     compiler.select("codes_by_element", "codes");
 }
 
-fn dispatch(compiler: &mut Compiler, elements: &[Element], by_element: &str, family: &str) {
-    for element in elements.iter().copied() {
+fn dispatch(compiler: &mut Compiler, weights: &[Element], by_element: &str, family: &str) {
+    for element in weights.iter().copied() {
         compiler.insert_case(
             by_element,
             ast::Arm {
