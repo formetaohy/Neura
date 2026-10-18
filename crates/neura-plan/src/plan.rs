@@ -16,7 +16,7 @@ use neura_abi::{
     Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo, Window};
-use neura_profile::{AttentionTile, ConvolutionTile, MatmulTile, Profile};
+use neura_profile::{AttentionTile, ConvolutionTile, ConvolutionWeightTile, MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -284,6 +284,7 @@ pub struct Plan {
     products: Vec<Product>,
     attention: Vec<AttentionTile>,
     convolution: Vec<ConvolutionTile>,
+    convolution_weight: Vec<ConvolutionWeightTile>,
     layout: Layout,
     updates_weights: bool,
     work: u64,
@@ -356,6 +357,7 @@ impl Plan {
             products,
             attention,
             convolution,
+            convolution_weight,
             measures,
         } = lowered;
         let shapes = Arc::new(values);
@@ -431,6 +433,15 @@ impl Plan {
                         "a window names geometry {} beyond the {} tiles its plan carries",
                         task.geometry,
                         convolution.len(),
+                    );
+                    task.geometry
+                }
+                Geometry::Weight => {
+                    assert!(
+                        (task.geometry as usize) < convolution_weight.len(),
+                        "a weight window names geometry {} beyond the {} tiles its plan carries",
+                        task.geometry,
+                        convolution_weight.len(),
                     );
                     task.geometry
                 }
@@ -658,6 +669,7 @@ impl Plan {
             products,
             attention,
             convolution,
+            convolution_weight,
             layout,
             updates_weights,
             work,
@@ -734,6 +746,10 @@ impl Plan {
 
     pub fn convolution(&self) -> &[ConvolutionTile] {
         &self.convolution
+    }
+
+    pub fn convolution_weight(&self) -> &[ConvolutionWeightTile] {
+        &self.convolution_weight
     }
 
     pub fn products(&self) -> &[Product] {
@@ -1992,6 +2008,13 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
                 }
                 for axis in 2..MAX_RANK {
                     exact_length(values, task, task.inputs[1], axis);
+                }
+            }
+            Kind::Conv2dWeightTile => {
+                for axis in 1..MAX_RANK {
+                    exact_length(values, task, task.inputs[0], axis);
+                    exact_length(values, task, task.inputs[1], axis);
+                    exact_length(values, task, task.inputs[2], axis);
                 }
             }
             Kind::PoolMax2d | Kind::PoolMean2d => {

@@ -8,8 +8,8 @@ use neura_abi::{
 use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
 use neura_profile::{
-    AttentionTile, ChoiceLayout, ConvolutionShape, ConvolutionTile, ConvolutionWindow, MatmulTile,
-    Profile,
+    AttentionTile, ChoiceLayout, ConvolutionShape, ConvolutionTile, ConvolutionWeightTile,
+    ConvolutionWindow, MatmulTile, Profile,
 };
 
 const TASK_ELEMENTS_PER_THREAD: u32 = 2;
@@ -39,6 +39,7 @@ const CHOICE_SECTION_COLUMNS: u32 = 1024;
 const CHOICE_SECTION_FLOOR: u32 = 8192;
 const CHOICE_THREAD_ROUND_WEIGHT: u64 = 2;
 const CONV_TILE_FLOOR: u32 = 512;
+const CONV_WEIGHT_TILE_FLOOR: u64 = 4096;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -155,6 +156,7 @@ pub(crate) struct Plan {
     pub(crate) products: Vec<Product>,
     pub(crate) attention: Vec<AttentionTile>,
     pub(crate) convolution: Vec<ConvolutionTile>,
+    pub(crate) convolution_weight: Vec<ConvolutionWeightTile>,
     pub(crate) measures: Vec<Measure>,
 }
 
@@ -173,6 +175,7 @@ pub(crate) fn lower(
         products: Vec::new(),
         attention: Vec::new(),
         convolution: Vec::new(),
+        convolution_weight: Vec::new(),
         measures: Vec::new(),
     };
     for (unit, task) in units.iter().enumerate() {
@@ -436,6 +439,18 @@ impl Plan {
         (self.convolution.len() - 1) as u32
     }
 
+    fn weight_window(&mut self, tile: ConvolutionWeightTile) -> u32 {
+        if let Some(index) = self
+            .convolution_weight
+            .iter()
+            .position(|candidate| *candidate == tile)
+        {
+            return index as u32;
+        }
+        self.convolution_weight.push(tile);
+        (self.convolution_weight.len() - 1) as u32
+    }
+
     fn publish(&mut self, shape: Shape) -> u32 {
         let id = self.values.len() as u32;
         self.values.push(ValueInfo::derived(shape, id));
@@ -570,6 +585,11 @@ fn schedule_unit(
         Kind::Conv2dTile => {
             panic!(
                 "a tiled convolution comes from the graph convolution whose window the plan tiles"
+            )
+        }
+        Kind::Conv2dWeightTile => {
+            panic!(
+                "a tiled convolution weight gradient comes from the graph convolution whose filter the plan tiles"
             )
         }
         Kind::MatmulFold => {
@@ -1168,6 +1188,9 @@ fn tiled_convolution(
 }
 
 fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    if tiled_conv_weight_grad(plan, unit, profile) {
+        return;
+    }
     let input = plan.shape(unit.inputs[0]);
     let gradient = plan.shape(unit.inputs[1]);
     let filters = plan.shape(unit.inputs[2]).elements();
@@ -1197,6 +1220,95 @@ fn conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
         plan.tasks.push(task);
     }
+}
+
+fn tiled_conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) -> bool {
+    let input = plan.shape(unit.inputs[0]);
+    let gradient = plan.shape(unit.inputs[1]);
+    let filter = plan.shape(unit.inputs[2]);
+    let input_dims = input.dims();
+    let gradient_dims = gradient.dims();
+    let filter_dims = filter.dims();
+    if filter.dynamic()
+        || (1..MAX_RANK).any(|axis| input.free(axis).is_some() || gradient.free(axis).is_some())
+        || filter_dims[1] == 0
+        || input_dims[1] == 0
+        || !input_dims[1].is_multiple_of(filter_dims[1])
+    {
+        return false;
+    }
+    let filters = filter.elements();
+    let local = filter_dims[1];
+    let groups = input_dims[1] / local;
+    if !filter_dims[0].is_multiple_of(groups) {
+        return false;
+    }
+    let out_per_group = filter_dims[0] / groups;
+    let positions = input_dims[0] * gradient_dims[2] * gradient_dims[3];
+    if u64::from(positions) * u64::from(filters) < CONV_WEIGHT_TILE_FLOOR {
+        return false;
+    }
+    let shape = ConvolutionShape {
+        batch: input_dims[0],
+        groups,
+        rows: gradient_dims[2],
+        columns: gradient_dims[3],
+        outputs: out_per_group,
+        channels: local,
+    };
+    let window = ConvolutionWindow::new(
+        unit.window.reach_rows(),
+        unit.window.reach_columns(),
+        unit.window.stride_rows(),
+        unit.window.stride_columns(),
+        unit.window.dilation_rows(),
+        unit.window.dilation_columns(),
+    );
+    let Some(tile) = ConvolutionWeightTile::fit(
+        profile.body_scratch_bytes(),
+        profile.workgroup(),
+        profile.workgroups(),
+        shape,
+        window,
+    ) else {
+        return false;
+    };
+    let room =
+        u32::try_from((PARTIALS_CEILING / u64::from(filters).max(1)).max(1)).unwrap_or(u32::MAX);
+    let chunks = tile.chunks(shape, profile.workgroups()).min(room);
+    let geometry = plan.weight_window(tile);
+    let partials = plan.publish(Shape::of([1, 1, chunks, filters]));
+    let blocks_per_group = out_per_group.div_ceil(tile.outputs());
+    let per_chunk = positions.div_ceil(chunks);
+    for group in 0..groups {
+        for block in 0..blocks_per_group {
+            let output_at = block * tile.outputs();
+            let outputs = tile.outputs().min(out_per_group - output_at);
+            let first = (group * out_per_group + output_at) * local * window.taps();
+            let count = outputs * local * window.taps();
+            for chunk in 0..chunks {
+                let mut task =
+                    Task::span(unit, first, count, u64::from(count) * u64::from(per_chunk));
+                task.kind = Kind::Conv2dWeightTile;
+                task.geometry = geometry;
+                task.slot = chunk;
+                task.splits = chunks;
+                task.out = partials;
+                task.prelude.clear();
+                task.chain.clear();
+                task.in_place = false;
+                plan.tasks.push(task);
+            }
+        }
+    }
+    let per_task = task_elements(filters, profile.workgroup(), device_workgroups(profile));
+    for (first, count) in spans(filters, per_task) {
+        let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(chunks));
+        task.geometry = strategy::WEIGHT_FOLD;
+        task.inputs = [partials, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE, NO_VALUE];
+        plan.tasks.push(task);
+    }
+    true
 }
 
 fn softmax(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {

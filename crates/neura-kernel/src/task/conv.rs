@@ -1,5 +1,5 @@
 use neura_compiler::{Compiler, ast};
-use neura_profile::{ConvolutionTile, Geometry};
+use neura_profile::{ConvolutionTile, ConvolutionWeightTile, Geometry};
 
 const COLUMNS: u32 = 4;
 const SPAN: u32 = 4;
@@ -22,6 +22,9 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     }
     for (index, tile) in geometry.convolution().iter().enumerate() {
         specialize(compiler, index as u32, *tile);
+    }
+    for (index, tile) in geometry.convolution_weight().iter().enumerate() {
+        specialize_weight(compiler, index as u32, *tile);
     }
 }
 
@@ -80,6 +83,57 @@ fn specialize(compiler: &mut Compiler, index: u32, tile: ConvolutionTile) {
             pattern: ast::Pattern::Integer(index),
             body: vec![ast::Statement::Expression(ast::Expression::call(
                 format!("run_conv2d_tile_{index}"),
+                vec![ast::Expression::name("task"), ast::Expression::name("lid")],
+            ))],
+        },
+    );
+}
+
+fn specialize_weight(compiler: &mut Compiler, index: u32, tile: ConvolutionWeightTile) {
+    let window = tile.window();
+    let constants = [
+        ("CONV_WEIGHT_ROWS", tile.rows()),
+        ("CONV_WEIGHT_COLUMNS", tile.columns()),
+        ("CONV_WEIGHT_CHANNELS", tile.channels()),
+        ("CONV_WEIGHT_THREAD_OUTPUTS", tile.thread_outputs()),
+        ("CONV_WEIGHT_THREAD_SLICES", tile.thread_slices()),
+        ("CONV_WEIGHT_REACH_COLUMNS", window.reach_columns()),
+        ("CONV_WEIGHT_STRIDE_ROWS", window.stride_rows()),
+        ("CONV_WEIGHT_STRIDE_COLUMNS", window.stride_columns()),
+        ("CONV_WEIGHT_DILATION_ROWS", window.dilation_rows()),
+        ("CONV_WEIGHT_DILATION_COLUMNS", window.dilation_columns()),
+        ("CONV_WEIGHT_TAPS", window.taps()),
+        ("CONV_WEIGHT_SPAN_ROWS", tile.span_rows()),
+        ("CONV_WEIGHT_SPAN_COLUMNS", tile.span_columns()),
+        ("CONV_WEIGHT_STAGE", tile.staged_outputs()),
+        ("CONV_WEIGHT_SLICE_GROUPS", tile.slice_groups()),
+        ("CONV_WEIGHT_ITEMS", tile.items()),
+        (
+            "CONV_WEIGHT_REGISTERS",
+            tile.thread_outputs() * tile.thread_slices(),
+        ),
+        ("CONV_WEIGHT_PANEL", 0),
+        (
+            "CONV_WEIGHT_GRADIENT",
+            tile.channels() * tile.span_rows() * tile.span_columns(),
+        ),
+    ];
+    compiler.specialize(
+        "template_run_conv2d_weight_tile",
+        &format!("run_conv2d_weight_tile_{index}"),
+        &constants,
+    );
+    compiler.specialize(
+        "template_conv2d_weight_panels",
+        &format!("conv2d_weight_panels_{index}"),
+        &constants,
+    );
+    compiler.insert_case(
+        "run_conv2d_weight_tile",
+        ast::Arm {
+            pattern: ast::Pattern::Integer(index),
+            body: vec![ast::Statement::Expression(ast::Expression::call(
+                format!("run_conv2d_weight_tile_{index}"),
                 vec![ast::Expression::name("task"), ast::Expression::name("lid")],
             ))],
         },
@@ -935,6 +989,212 @@ mod device {
             strategy::WEIGHT_CHUNK => run_conv2d_weight_chunk(task, lid),
             strategy::WEIGHT_FOLD => run_conv2d_weight_fold(task, lid),
             _ => refuse(kind::CONV2D_WEIGHT_GRAD, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn run_conv2d_weight_tile(task: Task, lid: u32) {
+        match task.geometry {
+            _ => refuse(kind::CONV2D_WEIGHT_TILE, refusal::GEOMETRY, task.geometry),
+        }
+    }
+
+    fn template_run_conv2d_weight_tile(task: Task, lid: u32) {
+        let input = values[task.a];
+        let gradient = values[task.b];
+        let taps = values[task.c];
+        let partials = values[task.out];
+        let filter_dims = taps.dims;
+        let input_dims = input.dims;
+        let gradient_dims = gradient.dims;
+        let local = CONV_WEIGHT_CHANNELS;
+        let reach = CONV_WEIGHT_TAPS;
+        let groups = input_dims.y / local;
+        let out_per_group = filter_dims.x / groups;
+        let rows_total = input_dims.x * gradient_dims.z;
+        let chunks = partials.dims.z;
+        let filters = filter_dims.x * filter_dims.y * filter_dims.z * filter_dims.w;
+        let row_first = task.slot * rows_total / chunks;
+        let row_last = (task.slot + 1u32) * rows_total / chunks;
+        let batch_first = row_first / gradient_dims.z;
+        let batch_last = ceil_div(row_last, gradient_dims.z);
+        let first_output = task.first / (local * reach);
+        let group = task.first / (out_per_group * local * reach);
+        let outputs = task.count / (local * reach);
+        let output_at = lid / CONV_WEIGHT_SLICE_GROUPS * CONV_WEIGHT_THREAD_OUTPUTS;
+        let slice_at = lid % CONV_WEIGHT_SLICE_GROUPS * CONV_WEIGHT_THREAD_SLICES;
+        let mut acc = scalar_array(0.0, CONV_WEIGHT_REGISTERS);
+        for batch in stride(batch_first, batch_last, 1u32) {
+            let first_row = max(row_first, batch * gradient_dims.z) - batch * gradient_dims.z;
+            let last_row =
+                min(row_last, (batch + 1u32) * gradient_dims.z) - batch * gradient_dims.z;
+            for row0 in stride(first_row, last_row, CONV_WEIGHT_ROWS) {
+                let rows = min(CONV_WEIGHT_ROWS, last_row - row0);
+                for column0 in stride(0u32, gradient_dims.w, CONV_WEIGHT_COLUMNS) {
+                    let columns = min(CONV_WEIGHT_COLUMNS, gradient_dims.w - column0);
+                    template_conv2d_weight_panels(
+                        task,
+                        lid,
+                        input,
+                        gradient,
+                        batch,
+                        row0,
+                        column0,
+                        rows,
+                        columns,
+                        group,
+                        first_output,
+                        outputs,
+                    );
+                    workgroup_barrier();
+                    if lid < CONV_WEIGHT_ITEMS && output_at < outputs {
+                        for row in unroll(0u32, CONV_WEIGHT_ROWS, 1u32) {
+                            if row < rows {
+                                for column in unroll(0u32, CONV_WEIGHT_COLUMNS, 1u32) {
+                                    if column < columns {
+                                        let gradient_at = (output_at * CONV_WEIGHT_ROWS + row)
+                                            * CONV_WEIGHT_COLUMNS
+                                            + column;
+                                        let mut weighed =
+                                            scalar_array(0.0, CONV_WEIGHT_THREAD_OUTPUTS);
+                                        for output in unroll(0u32, CONV_WEIGHT_THREAD_OUTPUTS, 1u32)
+                                        {
+                                            weighed[output] = scratch[CONV_WEIGHT_GRADIENT
+                                                + gradient_at
+                                                + output * CONV_WEIGHT_ROWS * CONV_WEIGHT_COLUMNS];
+                                        }
+                                        for slice_unit in
+                                            unroll(0u32, CONV_WEIGHT_THREAD_SLICES, 1u32)
+                                        {
+                                            let slice = slice_at + slice_unit;
+                                            if slice < CONV_WEIGHT_CHANNELS * CONV_WEIGHT_TAPS {
+                                                let channel = slice / CONV_WEIGHT_TAPS;
+                                                let tap = slice % CONV_WEIGHT_TAPS;
+                                                let reach_row = tap / CONV_WEIGHT_REACH_COLUMNS;
+                                                let reach_column = tap % CONV_WEIGHT_REACH_COLUMNS;
+                                                let panel_row = row * CONV_WEIGHT_STRIDE_ROWS
+                                                    + reach_row * CONV_WEIGHT_DILATION_ROWS;
+                                                let panel_column = column
+                                                    * CONV_WEIGHT_STRIDE_COLUMNS
+                                                    + reach_column * CONV_WEIGHT_DILATION_COLUMNS;
+                                                let held = scratch[CONV_WEIGHT_PANEL
+                                                    + (channel * CONV_WEIGHT_SPAN_ROWS
+                                                        + panel_row)
+                                                        * CONV_WEIGHT_SPAN_COLUMNS
+                                                    + panel_column];
+                                                for output in
+                                                    unroll(0u32, CONV_WEIGHT_THREAD_OUTPUTS, 1u32)
+                                                {
+                                                    if output_at + output < outputs {
+                                                        let register = output
+                                                            * CONV_WEIGHT_THREAD_SLICES
+                                                            + slice_unit;
+                                                        acc[register] =
+                                                            acc[register] + held * weighed[output];
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    workgroup_barrier();
+                }
+            }
+        }
+        if lid < CONV_WEIGHT_ITEMS {
+            for slice_unit in unroll(0u32, CONV_WEIGHT_THREAD_SLICES, 1u32) {
+                let slice = slice_at + slice_unit;
+                if slice < CONV_WEIGHT_CHANNELS * CONV_WEIGHT_TAPS {
+                    for output in unroll(0u32, CONV_WEIGHT_THREAD_OUTPUTS, 1u32) {
+                        if output_at + output < outputs {
+                            let index = task.slot * filters
+                                + task.first
+                                + (output_at + output) * local * reach
+                                + slice;
+                            publish(
+                                partials,
+                                index,
+                                acc[output * CONV_WEIGHT_THREAD_SLICES + slice_unit],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_conv2d_weight_panels(
+        task: Task,
+        lid: u32,
+        input: Value,
+        gradient: Value,
+        batch: u32,
+        row0: u32,
+        column0: u32,
+        rows: u32,
+        columns: u32,
+        group: u32,
+        first_output: u32,
+        outputs: u32,
+    ) {
+        let input_dims = input.dims;
+        let gradient_dims = gradient.dims;
+        for unit in stride(
+            lid,
+            CONV_WEIGHT_CHANNELS * CONV_WEIGHT_SPAN_ROWS * CONV_WEIGHT_SPAN_COLUMNS,
+            WORKGROUP_SIZE,
+        ) {
+            let column = unit % CONV_WEIGHT_SPAN_COLUMNS;
+            let row = unit / CONV_WEIGHT_SPAN_COLUMNS % CONV_WEIGHT_SPAN_ROWS;
+            let channel = unit / (CONV_WEIGHT_SPAN_COLUMNS * CONV_WEIGHT_SPAN_ROWS);
+            let input_row = i32(row0 * CONV_WEIGHT_STRIDE_ROWS) - i32(task.pad_rows) + i32(row);
+            let input_column =
+                i32(column0 * CONV_WEIGHT_STRIDE_COLUMNS) - i32(task.pad_columns) + i32(column);
+            let inside = input_row >= 0i32
+                && input_row < i32(input_dims.z)
+                && input_column >= 0i32
+                && input_column < i32(input_dims.w);
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(
+                        batch,
+                        group * CONV_WEIGHT_CHANNELS + channel,
+                        u32(input_row),
+                        u32(input_column),
+                    ),
+                    input.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_WEIGHT_PANEL + unit] = select(0.0, fetch(input, address), inside);
+        }
+        for unit in stride(
+            lid,
+            CONV_WEIGHT_STAGE * CONV_WEIGHT_ROWS * CONV_WEIGHT_COLUMNS,
+            WORKGROUP_SIZE,
+        ) {
+            let column = unit % CONV_WEIGHT_COLUMNS;
+            let row = unit / CONV_WEIGHT_COLUMNS % CONV_WEIGHT_ROWS;
+            let output = unit / (CONV_WEIGHT_COLUMNS * CONV_WEIGHT_ROWS);
+            let gradient_row = row0 + row;
+            let gradient_column = column0 + column;
+            let inside = output < outputs
+                && row < rows
+                && column < columns
+                && gradient_row < gradient_dims.z
+                && gradient_column < gradient_dims.w;
+            let address = select(
+                0u32,
+                read_address(
+                    uvec4(batch, first_output + output, gradient_row, gradient_column),
+                    gradient.strides,
+                ),
+                inside,
+            );
+            scratch[CONV_WEIGHT_GRADIENT + unit] = select(0.0, fetch(gradient, address), inside);
         }
     }
 }

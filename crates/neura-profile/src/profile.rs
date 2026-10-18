@@ -625,6 +625,239 @@ impl ConvolutionTile {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct ConvolutionWeightTile {
+    window: ConvolutionWindow,
+    rows: u32,
+    columns: u32,
+    channels: u32,
+    outputs: u32,
+    thread_outputs: u32,
+    thread_slices: u32,
+}
+
+impl ConvolutionWeightTile {
+    pub const OUTPUT_STEPS: [u32; 6] = [32, 16, 8, 4, 2, 1];
+    pub const THREAD_OUTPUTS: [u32; 4] = [1, 2, 4, 8];
+    pub const THREAD_SLICES: [u32; 5] = [1, 2, 4, 8, 16];
+    pub const ROW_STEPS: [u32; 4] = [8, 4, 2, 1];
+    pub const COLUMN_STEPS: [u32; 6] = [32, 16, 8, 4, 2, 1];
+    pub const REGISTER_CEILING: u32 = 32;
+
+    pub fn new(
+        window: ConvolutionWindow,
+        rows: u32,
+        columns: u32,
+        channels: u32,
+        outputs: u32,
+        thread_outputs: u32,
+        thread_slices: u32,
+    ) -> Self {
+        assert!(
+            rows > 0 && columns > 0 && channels > 0 && outputs > 0,
+            "a convolution weight tile weighs {rows} rows of {columns} positions across {channels} channels into {outputs} outputs, and a tile covers at least one of each",
+        );
+        assert!(
+            thread_outputs > 0 && thread_outputs <= outputs,
+            "a convolution weight tile hands {thread_outputs} of its {outputs} outputs to one thread",
+        );
+        assert!(
+            Self::THREAD_SLICES.contains(&thread_slices),
+            "a convolution weight tile hands {thread_slices} filter slices to one thread, where a thread holds one of {}",
+            Self::THREAD_SLICES
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<String>>()
+                .join("/"),
+        );
+        assert!(
+            thread_outputs * thread_slices <= Self::REGISTER_CEILING,
+            "a convolution weight tile hands {thread_outputs} by {thread_slices} filter elements to one thread, and those {} totals outrun the {} a thread holds here",
+            thread_outputs * thread_slices,
+            Self::REGISTER_CEILING,
+        );
+        Self {
+            window,
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_outputs,
+            thread_slices,
+        }
+    }
+
+    pub fn fit(
+        pool: u64,
+        workgroup: u32,
+        wanted: u32,
+        shape: ConvolutionShape,
+        window: ConvolutionWindow,
+    ) -> Option<Self> {
+        if shape.batch == 0
+            || shape.groups == 0
+            || shape.rows == 0
+            || shape.columns == 0
+            || shape.outputs == 0
+            || shape.channels == 0
+        {
+            return None;
+        }
+        let slices = u64::from(shape.channels) * u64::from(window.taps());
+        let mut best: Option<(f64, ConvolutionWeightTile)> = None;
+        for output_step in Self::OUTPUT_STEPS {
+            let outputs = output_step.min(shape.outputs);
+            for thread_outputs in Self::THREAD_OUTPUTS {
+                if thread_outputs > outputs {
+                    continue;
+                }
+                let output_groups = outputs.div_ceil(thread_outputs);
+                for thread_slices in Self::THREAD_SLICES {
+                    if u64::from(thread_slices) > slices
+                        || thread_outputs * thread_slices > Self::REGISTER_CEILING
+                    {
+                        continue;
+                    }
+                    let slice_groups = u32::try_from(slices)
+                        .expect("a filter slice fits one device word")
+                        .div_ceil(thread_slices);
+                    if output_groups * slice_groups > workgroup {
+                        continue;
+                    }
+                    let staged_outputs = output_groups * thread_outputs;
+                    for row_step in Self::ROW_STEPS {
+                        let rows = row_step.min(shape.rows);
+                        for column_step in Self::COLUMN_STEPS {
+                            let columns = column_step.min(shape.columns);
+                            let staged = u64::from(shape.channels)
+                                * u64::from(window.span_rows(rows))
+                                * u64::from(window.span_columns(columns))
+                                + u64::from(staged_outputs) * u64::from(rows) * u64::from(columns);
+                            if staged * WORD_BYTES > pool {
+                                continue;
+                            }
+                            let candidate = Self::new(
+                                window,
+                                rows,
+                                columns,
+                                shape.channels,
+                                outputs,
+                                thread_outputs,
+                                thread_slices,
+                            );
+                            let score = candidate.score(workgroup, wanted, shape);
+                            if best.as_ref().is_none_or(|(kept, led)| {
+                                score > *kept
+                                    || (score == *kept
+                                        && (candidate.rows, candidate.columns)
+                                            > (led.rows, led.columns))
+                            }) {
+                                best = Some((score, candidate));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, tile)| tile)
+    }
+
+    fn score(self, workgroup: u32, wanted: u32, shape: ConvolutionShape) -> f64 {
+        let slices = f64::from(shape.channels) * f64::from(self.window.taps());
+        let fma = f64::from(self.thread_outputs) * f64::from(self.thread_slices);
+        let loads = f64::from(self.thread_outputs + self.thread_slices);
+        let inner = (fma + loads) / fma;
+        let macs =
+            f64::from(self.outputs) * f64::from(self.rows) * f64::from(self.columns) * slices;
+        let staged =
+            f64::from(self.channels) * f64::from(self.span_rows()) * f64::from(self.span_columns())
+                + f64::from(self.staged_outputs()) * f64::from(self.rows) * f64::from(self.columns);
+        let throughput = macs / (inner * macs + staged);
+        let chunks = self.chunks(shape, wanted);
+        let tasks = self.blocks(shape).max(1) * chunks;
+        let fill = f64::from(tasks).min(f64::from(wanted)) / f64::from(wanted.max(1));
+        let busy = f64::from(self.lanes()).min(f64::from(workgroup)) / f64::from(workgroup);
+        throughput * (fill * busy).sqrt()
+    }
+
+    pub fn blocks(self, shape: ConvolutionShape) -> u32 {
+        shape.groups * shape.outputs.div_ceil(self.outputs)
+    }
+
+    pub fn chunks(self, shape: ConvolutionShape, wanted: u32) -> u32 {
+        let blocks = self.blocks(shape).max(1);
+        let rows_total = shape.batch * shape.rows;
+        (wanted / blocks)
+            .max(1)
+            .min(rows_total.div_ceil(self.rows).max(1))
+    }
+
+    pub fn lanes(self) -> u32 {
+        self.outputs.div_ceil(self.thread_outputs) * self.slice_groups()
+    }
+
+    pub const fn window(self) -> ConvolutionWindow {
+        self.window
+    }
+
+    pub const fn rows(self) -> u32 {
+        self.rows
+    }
+
+    pub const fn columns(self) -> u32 {
+        self.columns
+    }
+
+    pub const fn channels(self) -> u32 {
+        self.channels
+    }
+
+    pub const fn outputs(self) -> u32 {
+        self.outputs
+    }
+
+    pub const fn thread_outputs(self) -> u32 {
+        self.thread_outputs
+    }
+
+    pub const fn thread_slices(self) -> u32 {
+        self.thread_slices
+    }
+
+    pub const fn output_groups(self) -> u32 {
+        self.outputs.div_ceil(self.thread_outputs)
+    }
+
+    pub const fn slices(self) -> u32 {
+        self.channels * self.window.taps()
+    }
+
+    pub const fn slice_groups(self) -> u32 {
+        self.slices().div_ceil(self.thread_slices)
+    }
+
+    pub const fn staged_outputs(self) -> u32 {
+        self.output_groups() * self.thread_outputs
+    }
+
+    pub const fn span_rows(self) -> u32 {
+        self.window.span_rows(self.rows)
+    }
+
+    pub const fn span_columns(self) -> u32 {
+        self.window.span_columns(self.columns)
+    }
+
+    pub const fn scratch_words(self) -> u32 {
+        self.channels * self.span_rows() * self.span_columns()
+            + self.staged_outputs() * self.rows * self.columns
+    }
+
+    pub const fn items(self) -> u32 {
+        self.output_groups() * self.slice_groups()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum MatmulStrategy {
     Staged,
     Streamed,
@@ -2040,6 +2273,7 @@ pub struct Geometry {
     walked: Vec<(u32, MatmulTile)>,
     attention: Vec<AttentionTile>,
     convolution: Vec<ConvolutionTile>,
+    convolution_weight: Vec<ConvolutionWeightTile>,
     left_stage: u64,
     right_stage: u64,
     folded: u64,
@@ -2054,8 +2288,9 @@ impl Profile {
         walked: &[(u32, MatmulTile)],
         attention: &[AttentionTile],
         convolution: &[ConvolutionTile],
+        convolution_weight: &[ConvolutionWeightTile],
     ) -> Geometry {
-        Geometry::of(self, walked, attention, convolution)
+        Geometry::of(self, walked, attention, convolution, convolution_weight)
     }
 }
 
@@ -2065,6 +2300,7 @@ impl Geometry {
         walked: &[(u32, MatmulTile)],
         attention: &[AttentionTile],
         convolution: &[ConvolutionTile],
+        convolution_weight: &[ConvolutionWeightTile],
     ) -> Self {
         let workgroup = profile.workgroup();
         assert!(
@@ -2101,6 +2337,7 @@ impl Geometry {
             walked: walked.to_vec(),
             attention: attention.to_vec(),
             convolution: convolution.to_vec(),
+            convolution_weight: convolution_weight.to_vec(),
             left_stage,
             right_stage,
             folded,
@@ -2157,6 +2394,11 @@ impl Geometry {
                 .convolution
                 .iter()
                 .map(|tile| tile.scratch_words())
+                .chain(
+                    self.convolution_weight
+                        .iter()
+                        .map(|tile| tile.scratch_words()),
+                )
                 .max()
                 .unwrap_or(0),
             DeviceModule::Scan => self.workgroup,
@@ -2197,6 +2439,10 @@ impl Geometry {
 
     pub fn convolution(&self) -> &[ConvolutionTile] {
         &self.convolution
+    }
+
+    pub fn convolution_weight(&self) -> &[ConvolutionWeightTile] {
+        &self.convolution_weight
     }
 
     pub fn attention_geometry(&self, tile: AttentionTile) -> u32 {

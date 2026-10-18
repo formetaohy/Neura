@@ -541,7 +541,7 @@ fn narrow<W: Walk, V: Values>(
         Kind::Conv2dInputGrad | Kind::Conv2dTranspose => {
             convolution_input_grad(values, task, first, count, &mut narrowed)
         }
-        Kind::Conv2dWeightGrad => {
+        Kind::Conv2dWeightGrad | Kind::Conv2dWeightTile => {
             convolution_weight_grad(values, task, first, count, &mut narrowed)
         }
         Kind::Convert => convert(values, task, first, count, &mut narrowed),

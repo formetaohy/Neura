@@ -66,6 +66,7 @@ pub enum Geometry {
     Product,
     Attention,
     Window,
+    Weight,
     Strategy,
     Access,
 }
@@ -482,6 +483,14 @@ kinds! {
         entry: "run_conv2d_weight_grad",
         modules: [Conv],
         geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
+    Conv2dWeightTile CONV2D_WEIGHT_TILE = "conv2d_weight_tile" {
+        entry: "run_conv2d_weight_tile",
+        modules: [Conv],
+        geometry: Weight,
         prelude: false,
         chain: true,
         origin: false,

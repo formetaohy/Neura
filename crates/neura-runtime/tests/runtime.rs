@@ -3,7 +3,7 @@ use neura_gguf::Gguf;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_precision::{pack, unpack};
 use support::attention::{Shapes, attention_forward};
-use support::convolution::conv2d_reference;
+use support::convolution::{conv2d_reference, conv2d_weight_reference};
 use support::{assert_close, gguf_bytes, open, opened, random, rounded};
 
 mod support;
@@ -717,4 +717,103 @@ fn a_tiled_convolution_walks_the_filter_a_resident_page_holds() {
     runtime.run(&program);
     let expected = conv2d_reference(&input_values, &filter_values, shape, outputs, window);
     assert_close(&runtime.read(&program, convolved), &expected, 1e-3);
+}
+
+#[test]
+fn a_tiled_convolution_weight_walks_every_window_it_fits() {
+    for (shape, outputs, groups, window) in [
+        (
+            [2u32, 4, 24, 24],
+            8u32,
+            1u32,
+            Window::new([3, 3], [1, 1], [0, 0], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            8,
+            1,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            6,
+            1,
+            Window::new([3, 3], [2, 2], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            6,
+            1,
+            Window::new([3, 3], [1, 1], [2, 2], [2, 2]),
+        ),
+        (
+            [2, 4, 24, 24],
+            8,
+            2,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            4,
+            4,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 8, 21, 23],
+            3,
+            1,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            8,
+            1,
+            Window::new([5, 5], [1, 1], [2, 2], [1, 1]),
+        ),
+        (
+            [2, 4, 24, 24],
+            8,
+            1,
+            Window::new([1, 1], [1, 1], [0, 0], [1, 1]),
+        ),
+        (
+            [2, 4, 17, 19],
+            40,
+            1,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+        (
+            [2, 5, 23, 25],
+            8,
+            1,
+            Window::new([3, 3], [1, 1], [1, 1], [1, 1]),
+        ),
+    ] {
+        let runtime = open();
+        let graph = Graph::new();
+        let channels = shape[1];
+        let input = graph.input(Shape::of(shape), Element::Single);
+        let local = channels / groups;
+        let filter = graph.parameter(
+            Shape::of([outputs, local, window.reach_rows(), window.reach_columns()]),
+            Init::Zero,
+            Element::Single,
+        );
+        let convolved = graph.conv2d(input, filter, window);
+        let slope = graph.input(convolved.shape(), Element::Single);
+        let loss = graph.sum(graph.mul(convolved, slope));
+        let gradients = graph.backward(loss);
+        let walked = gradients.of(filter);
+        graph.retain(walked);
+        let weights = runtime.weights(&graph);
+        let program = runtime.compile(&graph, &weights);
+        let input_values = random(shape.iter().product(), 5);
+        let slope_values = random(convolved.shape().elements(), 7);
+        runtime.write(&program, input, &input_values);
+        runtime.write(&program, slope, &slope_values);
+        runtime.run(&program);
+        let expected =
+            conv2d_weight_reference(&input_values, &slope_values, shape, outputs, groups, window);
+        assert_close(&runtime.read(&program, walked), &expected, 1e-3);
+    }
 }

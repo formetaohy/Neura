@@ -50,6 +50,7 @@ fn a_workgroup_holds_the_attention_beside_the_panels_its_cooperative_tiles_stage
         &plan.walked_tiles().collect::<Vec<_>>(),
         plan.attention(),
         plan.convolution(),
+        plan.convolution_weight(),
     );
     let declared = geometry.workgroup_bytes(plan.kinds());
     assert!(
