@@ -40,6 +40,10 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
         match tile.strategy() {
             MatmulStrategy::Folded => {
                 constants.push(("MATMUL_FOLDS", tile.folds()));
+                constants.push((
+                    "MATMUL_FOLD_UNROLL",
+                    if tile.stages_a_run() { tile.folds() } else { 1 },
+                ));
                 let (dot, stage, gate) = match tile.stages_a_run() {
                     true => ("dot_run", "stage", "run_gate"),
                     false => ("dot_staged", "stage_untouched", "run_gate_none"),
@@ -405,40 +409,43 @@ mod device {
                 scratch[slot + (slot >> FOLDED_SHIFT)] = select(0.0, fetch(left, address), inside);
             }
             workgroup_barrier();
-            for fold in unroll(0u32, MATMUL_FOLDS, 1u32) {
-                let column = base_column + warp * MATMUL_FOLDS + fold;
-                let inside = base_row < row_bound && column < columns;
-                let blocks = last_block - first_block;
-                let mut acc = 0.0;
-                for chunk in stride(0u32, (blocks + FOLDED_LANES - 1u32) / FOLDED_LANES, 1u32) {
-                    template_gate();
-                    let step = chunk * FOLDED_LANES + lane;
-                    let at = (first_block + step) * MATMUL_DEPTH;
-                    let staged = template_stage(
-                        right,
-                        right_plane + at * right.strides.z + column * right.strides.w,
-                        min(blocks - chunk * FOLDED_LANES, FOLDED_LANES),
-                        warp,
-                        lane,
-                    );
-                    template_gate();
-                    if step < blocks && at < depth {
-                        let last = min(at + MATMUL_DEPTH, depth) - at;
-                        acc = acc
-                            + template_dot(
-                                right,
-                                left,
-                                staged,
-                                step * (MATMUL_DEPTH + 1u32),
-                                last,
-                                inside,
-                            );
+            for group in stride(0u32, MATMUL_FOLDS, MATMUL_FOLD_UNROLL) {
+                for fold in unroll(0u32, MATMUL_FOLD_UNROLL, 1u32) {
+                    let column = base_column + warp * MATMUL_FOLDS + group + fold;
+                    let inside = base_row < row_bound && column < columns;
+                    let blocks = last_block - first_block;
+                    let mut acc = 0.0;
+                    for chunk in stride(0u32, (blocks + FOLDED_LANES - 1u32) / FOLDED_LANES, 1u32) {
+                        template_gate();
+                        let step = chunk * FOLDED_LANES + lane;
+                        let at = (first_block + step) * MATMUL_DEPTH;
+                        let staged = template_stage(
+                            right,
+                            right_plane + at * right.strides.z + column * right.strides.w,
+                            min(blocks - chunk * FOLDED_LANES, FOLDED_LANES),
+                            warp,
+                            lane,
+                        );
+                        template_gate();
+                        if step < blocks && at < depth {
+                            let last = min(at + MATMUL_DEPTH, depth) - at;
+                            acc = acc
+                                + template_dot(
+                                    right,
+                                    left,
+                                    staged,
+                                    step * (MATMUL_DEPTH + 1u32),
+                                    last,
+                                    inside,
+                                );
+                        }
                     }
+                    scratch[FOLDED_PARTIALS
+                        + lane * (MATMUL_COLUMNS + 1u32)
+                        + warp * MATMUL_FOLDS
+                        + group
+                        + fold] = acc;
                 }
-                scratch[FOLDED_PARTIALS
-                    + lane * (MATMUL_COLUMNS + 1u32)
-                    + warp * MATMUL_FOLDS
-                    + fold] = acc;
             }
             workgroup_barrier();
             if lid < MATMUL_COLUMNS {

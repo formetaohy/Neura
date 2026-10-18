@@ -47,8 +47,18 @@ pub struct Step {
 }
 
 pub struct Family {
-    fills: Vec<(u32, Entry)>,
-    answer: Entry,
+    store: Weights,
+    fills: Vec<(u32, Pending)>,
+    answer: Pending,
+    compile: fn(&Runtime, &Graph, &Weights) -> Program,
+}
+
+struct Pending {
+    graph: Graph,
+    step: Step,
+    sampling: Sampling,
+    seed: Option<Value>,
+    entry: Option<Entry>,
 }
 
 struct Entry {
@@ -148,20 +158,18 @@ impl Family {
         }
         let store = weights(&graphs[0].0);
         let fills = graphs
-            .iter()
+            .into_iter()
             .zip(chunks)
             .map(|((graph, step), chunk)| {
                 (
                     *chunk,
-                    Entry::of(
-                        runtime,
+                    Pending {
                         graph,
-                        &store,
-                        *step,
-                        compile,
-                        Sampling::GREEDY,
-                        None,
-                    ),
+                        step,
+                        sampling: Sampling::GREEDY,
+                        seed: None,
+                        entry: None,
+                    },
                 )
             })
             .collect();
@@ -169,47 +177,87 @@ impl Family {
         let step = build(&answering, 1);
         held(&answering, &step, 1);
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
-        let answer = Entry::of(runtime, &answering, &store, step, compile, sampling, seed);
-        Self { fills, answer }
+        let entry = Entry::of(runtime, &answering, &store, step, compile, sampling, seed);
+        let answer = Pending {
+            graph: answering,
+            step,
+            sampling,
+            seed,
+            entry: Some(entry),
+        };
+        Self {
+            store,
+            fills,
+            answer,
+            compile,
+        }
     }
 
     pub fn chunks(&self) -> impl Iterator<Item = u32> + '_ {
         self.fills.iter().map(|(chunk, _)| *chunk)
     }
 
-    pub fn fill(&self, runtime: &Runtime, tokens: &[u32], cursor: u32) {
-        let fill = self
-            .fills
-            .iter()
+    pub fn fill(&mut self, runtime: &Runtime, tokens: &[u32], cursor: u32) {
+        let Self {
+            store,
+            fills,
+            compile,
+            ..
+        } = self;
+        let chunks = fills.iter().map(|(chunk, _)| *chunk).collect::<Vec<_>>();
+        let fill = fills
+            .iter_mut()
             .find(|(chunk, _)| *chunk == tokens.len() as u32)
             .map(|(_, fill)| fill)
             .unwrap_or_else(|| {
                 panic!(
-                    "a family fills chunks {:?}, and {} tokens arrived",
-                    self.fills
-                        .iter()
-                        .map(|(chunk, _)| *chunk)
-                        .collect::<Vec<_>>(),
+                    "a family fills chunks {chunks:?}, and {} tokens arrived",
                     tokens.len(),
                 )
             });
+        let fill = fill.entry(runtime, store, *compile);
         let ids = tokens.iter().map(|id| *id as f32).collect::<Vec<f32>>();
         runtime.write(&fill.program, fill.token, &ids);
         runtime.write(&fill.program, fill.cursor, &[cursor as f32]);
         runtime.run(&fill.program);
     }
 
-    pub fn answer(&self, runtime: &Runtime, token: u32, cursor: u32) -> u32 {
-        runtime.write(&self.answer.program, self.answer.token, &[token as f32]);
-        runtime.write(&self.answer.program, self.answer.cursor, &[cursor as f32]);
-        runtime.run(&self.answer.program);
-        let held = runtime.read(&self.answer.program, self.answer.chosen);
+    pub fn answer(&mut self, runtime: &Runtime, token: u32, cursor: u32) -> u32 {
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, answer.token, &[token as f32]);
+        runtime.write(&answer.program, answer.cursor, &[cursor as f32]);
+        runtime.run(&answer.program);
+        let held = runtime.read(&answer.program, answer.chosen);
         let value = held[0];
         assert!(
             value.fract() == 0.0 && value >= 0.0 && value <= u32::MAX as f32,
             "the model chose {value} where a token stands",
         );
         value as u32
+    }
+}
+
+impl Pending {
+    fn entry(
+        &mut self,
+        runtime: &Runtime,
+        weights: &Weights,
+        compile: fn(&Runtime, &Graph, &Weights) -> Program,
+    ) -> &mut Entry {
+        if self.entry.is_none() {
+            self.entry = Some(Entry::of(
+                runtime,
+                &self.graph,
+                weights,
+                self.step,
+                compile,
+                self.sampling,
+                self.seed,
+            ));
+        }
+        self.entry
+            .as_mut()
+            .expect("a pending entry compiles the program it holds")
     }
 }
 
