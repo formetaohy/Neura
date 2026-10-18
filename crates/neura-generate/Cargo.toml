@@ -14,11 +14,11 @@ doctest = false
 workspace = true
 
 [dependencies]
+neura-abi = { workspace = true }
 neura-graph = { workspace = true }
 neura-runtime = { workspace = true }
 neura-tokenizer = { workspace = true }
 
 [dev-dependencies]
-neura-abi = { workspace = true }
 neura-decoder = { workspace = true }
 neura-gguf = { workspace = true }

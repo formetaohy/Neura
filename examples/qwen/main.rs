@@ -9,7 +9,7 @@ mod tokenizer;
 
 use config::Config;
 use model::Model;
-use neura::generate::{Family, Generator, Step};
+use neura::generate::{Family, Generator, Sampling, Step};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
@@ -84,9 +84,16 @@ fn main() {
             logits: model.step(graph, token, cursor),
         }
     };
-    let family = match std::env::var("NEURA_TUNE") {
-        Ok(_) => Family::tuned(&runtime, loaded, &chunks, built),
-        Err(_) => Family::of(&runtime, loaded, &chunks, built),
+    let sampling = sampling();
+    if let Some(sampling) = sampling {
+        println!("sampling: {sampling:?}");
+    }
+    let tuned = std::env::var("NEURA_TUNE").is_ok();
+    let family = match (tuned, sampling) {
+        (true, Some(sampling)) => Family::tuned_sampled(&runtime, loaded, &chunks, built, sampling),
+        (true, None) => Family::tuned(&runtime, loaded, &chunks, built),
+        (false, Some(sampling)) => Family::sampled(&runtime, loaded, &chunks, built, sampling),
+        (false, None) => Family::of(&runtime, loaded, &chunks, built),
     };
 
     let mut generator = Generator::new(
@@ -107,4 +114,30 @@ fn main() {
     if report.reached_context() {
         println!("(the model reached its {context} token context)");
     }
+}
+
+fn sampling() -> Option<Sampling> {
+    std::env::var("NEURA_SAMPLE").ok().map(|held| {
+        let mut parts = held.split(',');
+        let temperature = parts
+            .next()
+            .expect("a sample holds a temperature")
+            .parse::<f32>()
+            .expect("a sample temperature is a number");
+        let keep = parts
+            .next()
+            .expect("a sample holds a candidate count")
+            .parse::<u32>()
+            .expect("a sample candidate count is a whole number");
+        let cumulative = parts
+            .next()
+            .expect("a sample holds a cumulative mass")
+            .parse::<f32>()
+            .expect("a sample cumulative mass is a number");
+        assert!(
+            parts.next().is_none(),
+            "a sample names a temperature, a candidate count and a cumulative mass, and {held} names more",
+        );
+        Sampling::sampled(temperature, keep, cumulative)
+    })
 }

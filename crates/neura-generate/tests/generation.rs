@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_decoder::Cache;
-use neura_generate::{Family, Generator, Step};
+use neura_generate::{Family, Generator, Sampling, Step};
 use neura_gguf::Gguf;
 use neura_graph::Shape;
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
@@ -53,29 +53,40 @@ fn runtime() -> Runtime {
     .expect("a device that runs the tests")
 }
 
-fn family(runtime: &Runtime, chunks: &[u32]) -> Family {
-    Family::of(
-        runtime,
-        |graph| runtime.weights(graph),
-        chunks,
-        |graph, rows| {
-            let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
-            let cursor = graph.input(Shape::scalar(), Element::Single);
-            let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
-            let held = graph.one_hot(token, CLASSES);
-            cache.write(graph, cursor, held, held);
-            Step {
-                token,
-                cursor,
-                logits: graph.sum_axis(cache.states()[0], 2),
-            }
-        },
-    )
+fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Family {
+    let build = |graph: &neura_graph::Graph, rows| {
+        let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+        let cursor = graph.input(Shape::scalar(), Element::Single);
+        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
+        let held = graph.one_hot(token, CLASSES);
+        cache.write(graph, cursor, held, held);
+        Step {
+            token,
+            cursor,
+            logits: graph.sum_axis(cache.states()[0], 2),
+        }
+    };
+    match sampling {
+        Some(sampling) => Family::sampled(
+            runtime,
+            |graph| runtime.weights(graph),
+            chunks,
+            build,
+            sampling,
+        ),
+        None => Family::of(runtime, |graph| runtime.weights(graph), chunks, build),
+    }
 }
 
-fn generate(prompt: &[u32], context: u32, wanted: usize, chunks: &[u32]) -> (usize, String, bool) {
+fn generate(
+    prompt: &[u32],
+    context: u32,
+    wanted: usize,
+    chunks: &[u32],
+    sampling: Option<Sampling>,
+) -> (usize, String, bool) {
     let runtime = runtime();
-    let family = family(&runtime, chunks);
+    let family = family(&runtime, chunks, sampling);
     let tokenizer = tokenizer();
     let mut generator = Generator::new(runtime, family, &tokenizer, END, context);
     let mut text = String::new();
@@ -85,11 +96,11 @@ fn generate(prompt: &[u32], context: u32, wanted: usize, chunks: &[u32]) -> (usi
 
 #[test]
 fn a_generator_prefills_a_prompt_in_the_chunks_its_model_takes() {
-    let walked = generate(&[0, 1, 1, 2, 1], 16, 5, &[1]);
+    let walked = generate(&[0, 1, 1, 2, 1], 16, 5, &[1], None);
     assert_eq!(walked, (5, "0112111111".to_owned(), false));
     for chunks in [&[2u32][..], &[3], &[4], &[8], &[4, 1], &[3, 2, 1]] {
         assert_eq!(
-            generate(&[0, 1, 1, 2, 1], 16, 5, chunks),
+            generate(&[0, 1, 1, 2, 1], 16, 5, chunks, None),
             walked,
             "a prefill in the chunks {chunks:?} answers with the tokens a row at a time answers with",
         );
@@ -99,12 +110,27 @@ fn a_generator_prefills_a_prompt_in_the_chunks_its_model_takes() {
 #[test]
 fn a_generator_stops_at_the_token_count_it_was_asked_for() {
     assert_eq!(
-        generate(&[0, 1, 1, 2, 1], 16, 2, &[3]),
+        generate(&[0, 1, 1, 2, 1], 16, 2, &[3], None),
         (2, "0112111".to_owned(), false),
     );
 }
 
 #[test]
 fn a_generator_stops_at_the_context_it_holds() {
-    assert_eq!(generate(&[0], 3, 5, &[2]), (2, "000".to_owned(), true));
+    assert_eq!(
+        generate(&[0], 3, 5, &[2], None),
+        (2, "000".to_owned(), true)
+    );
+}
+
+#[test]
+fn a_generator_samples_the_token_its_logits_and_seed_choose() {
+    let walked = generate(
+        &[0, 1, 1, 2, 1],
+        16,
+        5,
+        &[3],
+        Some(Sampling::sampled(1.0, 4, 1.0)),
+    );
+    assert_eq!(walked, (5, "0112111111".to_owned(), false));
 }

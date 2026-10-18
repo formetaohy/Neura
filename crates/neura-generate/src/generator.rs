@@ -1,7 +1,43 @@
-use neura_graph::{Graph, Value};
+use neura_abi::Element;
+use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Program, Runtime, Weights};
 use neura_tokenizer::{Text, Tokenizer};
 use std::time::Instant;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Sampling {
+    Greedy,
+    Sampled {
+        temperature: f32,
+        keep: u32,
+        cumulative: f32,
+    },
+}
+
+impl Sampling {
+    pub const GREEDY: Self = Self::Greedy;
+
+    pub fn sampled(temperature: f32, keep: u32, cumulative: f32) -> Self {
+        assert!(
+            temperature > 0.0 && temperature.is_finite(),
+            "a sampling temperature of {temperature} spreads no logits",
+        );
+        assert!(
+            (1..=neura_abi::CANDIDATES).contains(&keep),
+            "a sample keeps {keep} candidates where a row holds between one and {}",
+            neura_abi::CANDIDATES,
+        );
+        assert!(
+            cumulative > 0.0 && cumulative <= 1.0,
+            "a cumulative mass of {cumulative} keeps no candidate or names more than every candidate",
+        );
+        Self::Sampled {
+            temperature,
+            keep,
+            cumulative,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct Step {
@@ -29,7 +65,14 @@ impl Family {
         chunks: &[u32],
         build: impl Fn(&Graph, u32) -> Step,
     ) -> Self {
-        Self::with(runtime, weights, chunks, build, Runtime::compile)
+        Self::with(
+            runtime,
+            weights,
+            chunks,
+            build,
+            Sampling::GREEDY,
+            Runtime::compile,
+        )
     }
 
     pub fn tuned(
@@ -38,7 +81,34 @@ impl Family {
         chunks: &[u32],
         build: impl Fn(&Graph, u32) -> Step,
     ) -> Self {
-        Self::with(runtime, weights, chunks, build, Runtime::tuned)
+        Self::with(
+            runtime,
+            weights,
+            chunks,
+            build,
+            Sampling::GREEDY,
+            Runtime::tuned,
+        )
+    }
+
+    pub fn sampled(
+        runtime: &Runtime,
+        weights: impl FnOnce(&Graph) -> Weights,
+        chunks: &[u32],
+        build: impl Fn(&Graph, u32) -> Step,
+        sampling: Sampling,
+    ) -> Self {
+        Self::with(runtime, weights, chunks, build, sampling, Runtime::compile)
+    }
+
+    pub fn tuned_sampled(
+        runtime: &Runtime,
+        weights: impl FnOnce(&Graph) -> Weights,
+        chunks: &[u32],
+        build: impl Fn(&Graph, u32) -> Step,
+        sampling: Sampling,
+    ) -> Self {
+        Self::with(runtime, weights, chunks, build, sampling, Runtime::tuned)
     }
 
     fn with(
@@ -46,6 +116,7 @@ impl Family {
         weights: impl FnOnce(&Graph) -> Weights,
         chunks: &[u32],
         build: impl Fn(&Graph, u32) -> Step,
+        sampling: Sampling,
         compile: fn(&Runtime, &Graph, &Weights) -> Program,
     ) -> Self {
         assert!(
@@ -64,11 +135,15 @@ impl Family {
                 pair[1],
             );
         }
+        let seeded = sampling != Sampling::GREEDY;
         let mut graphs = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
             let step = build(&graph, *chunk);
             held(&graph, &step, *chunk);
+            if seeded {
+                graph.state(Shape::scalar(), Init::Zero, Element::Single);
+            }
             graphs.push((graph, step));
         }
         let store = weights(&graphs[0].0);
@@ -76,13 +151,25 @@ impl Family {
             .iter()
             .zip(chunks)
             .map(|((graph, step), chunk)| {
-                (*chunk, Entry::of(runtime, graph, &store, *step, compile))
+                (
+                    *chunk,
+                    Entry::of(
+                        runtime,
+                        graph,
+                        &store,
+                        *step,
+                        compile,
+                        Sampling::GREEDY,
+                        None,
+                    ),
+                )
             })
             .collect();
         let answering = Graph::new();
         let step = build(&answering, 1);
         held(&answering, &step, 1);
-        let answer = Entry::of(runtime, &answering, &store, step, compile);
+        let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
+        let answer = Entry::of(runtime, &answering, &store, step, compile, sampling, seed);
         Self { fills, answer }
     }
 
@@ -133,8 +220,31 @@ impl Entry {
         weights: &Weights,
         step: Step,
         compile: fn(&Runtime, &Graph, &Weights) -> Program,
+        sampling: Sampling,
+        seed: Option<Value>,
     ) -> Self {
-        let chosen = graph.argmax(step.logits);
+        let chosen = match sampling {
+            Sampling::Greedy => graph.argmax(step.logits),
+            Sampling::Sampled {
+                temperature,
+                keep,
+                cumulative,
+            } => {
+                let seed = seed.expect("a sampled program walks a seed of its own");
+                let logits = if temperature == 1.0 {
+                    step.logits
+                } else {
+                    graph.mul(step.logits, graph.fill(Shape::scalar(), 1.0 / temperature))
+                };
+                graph.add_into(seed, graph.fill(Shape::scalar(), 1.0));
+                graph.sample(
+                    logits,
+                    seed,
+                    graph.fill(Shape::scalar(), keep as f32),
+                    graph.fill(Shape::scalar(), cumulative),
+                )
+            }
+        };
         graph.retain(chosen);
         Self {
             program: compile(runtime, graph, weights),
