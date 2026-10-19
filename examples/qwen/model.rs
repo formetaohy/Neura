@@ -5,10 +5,6 @@ use neura::decoder::{matrix, rms, vector};
 use neura::gguf::Archive;
 use neura::{Graph, Shape, Value};
 
-pub(crate) fn hidden_mask(graph: &Graph, mask: Value) -> Value {
-    graph.permute(mask, [0, 2, 1, 3])
-}
-
 pub(crate) fn as_planes(graph: &Graph, value: Value) -> Value {
     graph.permute(value, [0, 2, 1, 3])
 }
@@ -36,15 +32,16 @@ impl Model {
         config: &Config,
         capacity: u32,
         batch: u32,
+        rows: u32,
     ) -> Self {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
                     Layer::Attend(Attention::new(
-                        graph, source, config, layer, capacity, batch,
+                        graph, source, config, layer, capacity, batch, rows,
                     ))
                 } else {
-                    Layer::Delta(Delta::new(graph, source, config, layer, batch))
+                    Layer::Delta(Delta::new(graph, source, config, layer, batch, rows))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -72,16 +69,27 @@ impl Model {
     }
 
     pub fn step(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
-        let row_mask = hidden_mask(graph, mask);
-        let mut hidden = graph.mul(graph.gather(self.embedding, token), row_mask);
+        let hidden = self.layers(graph, token, cursor, mask);
+        let normed = rms(graph, hidden, self.output_norm, self.floor);
+        graph.matmul(normed, graph.permute(self.embedding, [0, 1, 3, 2]))
+    }
+
+    pub fn prefill(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
+        let hidden = self.layers(graph, token, cursor, mask);
+        graph.retain(hidden);
+        hidden
+    }
+
+    fn layers(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
+        let plane_mask = graph.permute(mask, [0, 2, 1, 3]);
+        let mut hidden = graph.mul(graph.gather(self.embedding, token), mask);
         for layer in &self.layers {
             hidden = match layer {
                 Layer::Attend(attend) => attend.forward(graph, hidden, cursor),
-                Layer::Delta(delta) => delta.forward(graph, hidden, mask),
+                Layer::Delta(delta) => delta.forward(graph, hidden, plane_mask),
             };
-            hidden = graph.mul(hidden, row_mask);
+            hidden = graph.mul(hidden, mask);
         }
-        let normed = rms(graph, hidden, self.output_norm, self.floor);
-        graph.matmul(normed, graph.permute(self.embedding, [0, 1, 3, 2]))
+        hidden
     }
 }

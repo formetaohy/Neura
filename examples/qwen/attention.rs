@@ -33,6 +33,7 @@ impl Attention {
         layer: u32,
         capacity: u32,
         batch: u32,
+        rows: u32,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.head_width;
@@ -68,7 +69,7 @@ impl Attention {
             ),
             query_norm: vector(graph, source, &at("attn_q_norm.weight"), width),
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
-            cache: Cache::new(graph, config.key_heads, width, capacity, batch, 1),
+            cache: Cache::new(graph, config.key_heads, width, capacity, batch, rows),
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
             floor: graph.fill(Shape::scalar(), config.floor),
             base: graph.fill(Shape::scalar(), config.rope_base),

@@ -9,7 +9,7 @@ mod tokenizer;
 
 use config::Config;
 use model::Model;
-use neura::generate::{Batch, BatchStep, Sampling};
+use neura::generate::{Batch, BatchFill, BatchSpec, BatchStep, Sampling};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::tokenizer::Text;
@@ -18,6 +18,7 @@ use std::path::Path;
 use std::time::Instant;
 use tokenizer::Tokenizer;
 
+const CHUNKS: &[u32] = &[32, 8];
 const CONTEXT: u32 = 1024;
 const READBACK: u64 = 8 << 20;
 const HEAP: u64 = 2 << 30;
@@ -80,9 +81,9 @@ fn main() {
     let answer = |graph: &neura::Graph, batch: u32, capacity: u32| {
         let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
         let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-        let mask = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
         let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-        let model = Model::new(graph, &source, &config, capacity, batch);
+        let model = Model::new(graph, &source, &config, capacity, batch, 1);
         BatchStep {
             token,
             cursor,
@@ -91,22 +92,40 @@ fn main() {
             logits: model.step(graph, token, cursor, mask),
         }
     };
+    let fill = |graph: &neura::Graph, rows: u32, batch: u32, capacity: u32| {
+        let token = graph.input(Shape::of([1, rows, batch, 1]), Element::Single);
+        let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
+        let model = Model::new(graph, &source, &config, capacity, batch, rows);
+        model.prefill(graph, token, cursor, mask);
+        BatchFill {
+            token,
+            cursor,
+            mask,
+        }
+    };
     let reset = |graph: &neura::Graph, batch: u32, capacity: u32| {
         let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-        let model = Model::new(graph, &source, &config, capacity, batch);
+        let model = Model::new(graph, &source, &config, capacity, batch, 1);
         model.reset(graph, reset);
         reset
     };
-    let mut batch = match (tuned, sampling) {
-        (true, Some(sampling)) => Batch::tuned_sampled(
-            &runtime, loaded, context, sequences, answer, reset, sampling,
-        ),
-        (true, None) => Batch::tuned(&runtime, loaded, context, sequences, answer, reset),
-        (false, Some(sampling)) => Batch::sampled(
-            &runtime, loaded, context, sequences, answer, reset, sampling,
-        ),
-        (false, None) => Batch::of(&runtime, loaded, context, sequences, answer, reset),
+    let chunks = match sequences {
+        1 => CHUNKS
+            .iter()
+            .copied()
+            .filter(|chunk| *chunk < context)
+            .collect::<Vec<u32>>(),
+        _ => Vec::new(),
     };
+    let mut spec = BatchSpec::new(context, sequences, &chunks);
+    if let Some(sampling) = sampling {
+        spec = spec.sampled(sampling);
+    }
+    if tuned {
+        spec = spec.tuned();
+    }
+    let mut batch = Batch::new(&runtime, loaded, spec, answer, fill, reset);
     run(&runtime, &tokenizer, &mut batch, &tokens, wanted);
 }
 

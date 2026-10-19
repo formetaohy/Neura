@@ -65,6 +65,7 @@ fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
     let value = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
     let beta = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
     let decay = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
+    let keep = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
     let rule = DeltaRule::chunked(&graph, heads, width, batch, rows, chunk);
     let out = rule.forward(
         &graph,
@@ -75,7 +76,7 @@ fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
             beta,
             log_decay: decay,
         },
-        None,
+        Some(keep),
     );
     graph.retain(out);
     let weights = runtime.weights(&graph);
@@ -85,6 +86,7 @@ fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
     runtime.write(&program, value, &values);
     runtime.write(&program, beta, &betas);
     runtime.write(&program, decay, &decays);
+    runtime.write(&program, keep, &[1.0; 2]);
     runtime.run(&program);
     let chunked = runtime.read(&program, out);
 

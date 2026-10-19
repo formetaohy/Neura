@@ -25,6 +25,7 @@ pub(crate) struct Delta {
     heads: u32,
     width: u32,
     kernel: u32,
+    rows: u32,
 }
 
 impl Delta {
@@ -34,6 +35,7 @@ impl Delta {
         config: &Config,
         layer: u32,
         batch: u32,
+        rows: u32,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.linear_width;
@@ -74,12 +76,13 @@ impl Delta {
                 Init::Zero,
                 Element::Single,
             ),
-            rule: DeltaRule::new(graph, config.linear_heads, width, batch, 1),
+            rule: DeltaRule::new(graph, config.linear_heads, width, batch, rows),
             floor: graph.fill(Shape::scalar(), config.floor),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
             heads: config.linear_heads,
             width,
             kernel: config.conv_kernel,
+            rows,
         }
     }
 
@@ -105,14 +108,17 @@ impl Delta {
         let taps = graph.permute(self.conv, [0, 1, 3, 2]);
         let mut convolved = None;
         for tap in 0..self.kernel {
-            let held = graph.mul(graph.slice(window, 2, tap, 1), graph.slice(taps, 2, tap, 1));
+            let held = graph.mul(
+                graph.slice(window, 2, tap, self.rows),
+                graph.slice(taps, 2, tap, 1),
+            );
             convolved = Some(match convolved {
                 Some(sum) => graph.add(sum, held),
                 None => held,
             });
         }
         let convolved = graph.silu(convolved.expect("a convolution walks the taps of its kernel"));
-        let carried = graph.slice(window, 2, 1, self.kernel - 1);
+        let carried = graph.slice(window, 2, self.rows, self.kernel - 1);
         graph.copy_into(
             self.conv_state,
             graph.select(mask, carried, self.conv_state),

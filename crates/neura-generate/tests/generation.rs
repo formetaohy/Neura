@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_decoder::Cache;
-use neura_generate::{Batch, BatchStep, Family, Generator, Sampling, Step};
+use neura_generate::{Batch, BatchFill, BatchSpec, BatchStep, Family, Generator, Sampling, Step};
 use neura_gguf::Gguf;
 use neura_graph::Shape;
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
@@ -138,15 +138,12 @@ fn a_generator_samples_the_token_its_logits_and_seed_choose() {
 fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> BatchStep {
     let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
     let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let mask = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
     let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
     let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
     let held = graph.mul(
-        graph.reshape(
-            graph.one_hot(token, CLASSES),
-            Shape::of([1, batch, 1, CLASSES]),
-        ),
-        mask,
+        graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
+        graph.permute(mask, [0, 2, 1, 3]),
     );
     cache.write(graph, cursor, held, held);
     BatchStep {
@@ -161,6 +158,23 @@ fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> BatchS
     }
 }
 
+fn batch_fill(graph: &neura_graph::Graph, rows: u32, batch: u32, capacity: u32) -> BatchFill {
+    let token = graph.input(Shape::of([1, rows, batch, 1]), Element::Single);
+    let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
+    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, rows);
+    let held = graph.mul(
+        graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
+        graph.permute(mask, [0, 2, 1, 3]),
+    );
+    cache.write(graph, cursor, held, held);
+    BatchFill {
+        token,
+        cursor,
+        mask,
+    }
+}
+
 fn batch_reset(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> neura_graph::Value {
     let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
     let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
@@ -172,17 +186,24 @@ fn batched(
     first_prompt: &[u32],
     second_prompt: &[u32],
     wanted: usize,
+    chunks: &[u32],
     stagger: bool,
+    sampling: Option<Sampling>,
 ) -> Vec<Vec<u32>> {
     let runtime = runtime();
     let context = 16;
     let batch = 2;
-    let mut batch = Batch::of(
+    let spec = BatchSpec::new(context, batch, chunks);
+    let spec = match sampling {
+        Some(sampling) => spec.sampled(sampling),
+        None => spec,
+    };
+    let mut batch = Batch::new(
         &runtime,
         |graph| runtime.weights(graph),
-        context,
-        batch,
+        spec,
         batch_answer,
+        batch_fill,
         batch_reset,
     );
     let first = batch.admit(&runtime, first_prompt);
@@ -214,14 +235,67 @@ fn batched(
     walked
 }
 
+fn walked_alone(
+    prompt: &[u32],
+    wanted: usize,
+    chunks: &[u32],
+    sampling: Option<Sampling>,
+) -> Vec<u32> {
+    let runtime = runtime();
+    let context = 16;
+    let batch = 1;
+    let spec = BatchSpec::new(context, batch, chunks);
+    let spec = match sampling {
+        Some(sampling) => spec.sampled(sampling),
+        None => spec,
+    };
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    batch.admit(&runtime, prompt);
+    let mut walked = Vec::new();
+    while walked.len() < wanted && batch.active().next().is_some() {
+        for held in batch.step(&runtime) {
+            if held.token == END {
+                batch.finish(held.slot);
+                continue;
+            }
+            walked.push(held.token);
+        }
+    }
+    for slot in batch.active().collect::<Vec<u32>>() {
+        batch.finish(slot);
+    }
+    walked
+}
+
 #[test]
 fn a_batch_answers_every_plane_with_the_tokens_a_row_answers_with() {
     for stagger in [false, true] {
-        let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, stagger);
+        let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, &[], stagger, None);
         assert_eq!(
             walked,
             vec![vec![1, 1, 1, 1, 1], vec![2, 2, 2, 2, 2]],
             "stagger {stagger}",
         );
     }
+}
+
+#[test]
+fn a_batch_fills_a_single_prompt_in_the_chunks_its_model_takes() {
+    let plain = walked_alone(&[0, 1, 1, 2, 1], 5, &[], None);
+    let chunked = walked_alone(&[0, 1, 1, 2, 1], 5, &[8, 4, 2], None);
+    assert_eq!(chunked, plain);
+    let sampled = walked_alone(
+        &[0, 1, 1, 2, 1],
+        5,
+        &[8, 4, 2],
+        Some(Sampling::sampled(1.0, 4, 1.0)),
+    );
+    assert_eq!(sampled.len(), 5);
 }

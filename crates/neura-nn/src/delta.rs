@@ -89,10 +89,14 @@ impl DeltaRule {
                 graph.shape(held).dims(),
             );
         }
+        let input = match keep {
+            Some(keep) => self.kept(graph, input, keep),
+            None => input,
+        };
         if self.rows == 1 {
-            return self.step(graph, input, keep);
+            return self.step(graph, input);
         }
-        self.walk(graph, input, keep)
+        self.walk(graph, input)
     }
 
     pub fn state(&self) -> Value {
@@ -138,7 +142,28 @@ impl DeltaRule {
         );
     }
 
-    fn step(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
+    fn kept(&self, graph: &Graph, input: DeltaInput, keep: Value) -> DeltaInput {
+        let shape = graph.shape(keep).dims();
+        assert!(
+            shape[0] == 1
+                && shape[1] == self.batch
+                && (shape[2] == 1 || shape[2] == self.rows)
+                && shape[3] == 1,
+            "a delta rule keeps the {shape:?} rows of {} planes where it reads {} rows of {} planes",
+            self.batch,
+            self.rows,
+            self.batch,
+        );
+        DeltaInput {
+            query: graph.mul(input.query, keep),
+            key: graph.mul(input.key, keep),
+            value: graph.mul(input.value, keep),
+            beta: graph.mul(input.beta, keep),
+            log_decay: graph.mul(input.log_decay, keep),
+        }
+    }
+
+    fn step(&self, graph: &Graph, input: DeltaInput) -> Value {
         let DeltaInput {
             query,
             key,
@@ -154,15 +179,11 @@ impl DeltaRule {
             graph.matmul(graph.permute(key, [0, 1, 3, 2]), delta),
         );
         let attended = graph.matmul(query, grown);
-        let next = match keep {
-            Some(keep) => graph.select(keep, grown, self.state),
-            None => grown,
-        };
-        graph.copy_into(self.state, next);
+        graph.copy_into(self.state, grown);
         attended
     }
 
-    fn walk(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
+    fn walk(&self, graph: &Graph, input: DeltaInput) -> Value {
         let mut state = self.state;
         let mut attended = Vec::new();
         let mut start = 0;
@@ -179,10 +200,7 @@ impl DeltaRule {
             };
             let (attended_rows, next) = self.chunk_forward(graph, state, held);
             attended.push(attended_rows);
-            state = match keep {
-                Some(keep) => graph.select(keep, next, state),
-                None => next,
-            };
+            state = next;
             start += extent;
         }
         graph.copy_into(self.state, state);
