@@ -18,6 +18,39 @@ impl Graph {
         let (batch_rows, rows_free) = left_shape.paired_axis(right_shape, 0, 0);
         let (batch_columns, columns_free) = left_shape.paired_axis(right_shape, 1, 1);
         let (_, _) = left_shape.meeting(right_shape, 3, 2);
+        if left_shape.dims()[1] > 1
+            && right_shape.dims()[1] == 1
+            && left_shape.free(1).is_none()
+            && left_shape.free(2).is_none()
+            && right_shape.free(1).is_none()
+        {
+            let left = match self.contiguous(left) {
+                true => left,
+                false => self.identity(left),
+            };
+            let rows = left_shape.dims()[1] * left_shape.dims()[2];
+            let flat = Shape::from_axes(
+                [left_shape.dims()[0], 1, rows, left_shape.dims()[3]],
+                [left_shape.free(0), None, None, left_shape.free(3)],
+            );
+            let left = self.reshape(left, flat);
+            let out = self.matmul(left, right);
+            let shape = Shape::from_axes(
+                [
+                    batch_rows,
+                    batch_columns,
+                    left_shape.dims()[2],
+                    right_shape.dims()[3],
+                ],
+                [
+                    rows_free,
+                    columns_free,
+                    left_shape.free(2),
+                    right_shape.free(3),
+                ],
+            );
+            return self.reshape(out, shape);
+        }
         let element = self.element(left).promote(self.element(right));
         let out = self.stored(
             Shape::from_axes(
