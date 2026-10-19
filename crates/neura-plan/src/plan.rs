@@ -1130,6 +1130,7 @@ impl Plan {
             self.emit(lengths, &decoded, start, end, at_bound, &mut emitted);
             start = end;
         }
+        let tail = emitted.walks.len() > 50_000;
         let mut schedule = schedule::Schedule::of(
             &sized,
             self.profile.tiles(),
@@ -1137,6 +1138,7 @@ impl Plan {
             &self.convolution_input,
             &emitted.walks,
             &emitted.declared,
+            tail,
         );
         let order = schedule
             .order()
@@ -1249,7 +1251,6 @@ impl Plan {
                 table: sized.table(id),
             });
         }
-        let tail = schedule.segments().len() > 50_000;
         if !self.paged {
             schedule.gate_dense_waves(tail);
         }

@@ -27,6 +27,7 @@ struct Packed {
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
     dependencies: Vec<Vec<u32>>,
+    gated: Vec<bool>,
 }
 
 impl Schedule {
@@ -37,6 +38,7 @@ impl Schedule {
         input_windows: &[ConvolutionInputTile],
         tasks: &[T],
         declared: &[u32],
+        tail: bool,
     ) -> Self {
         let barriers = barriers(values, tasks);
         let geometry = GeometryTiles {
@@ -45,7 +47,8 @@ impl Schedule {
             convolution_input: input_windows,
         };
         let depths = depths(values, geometry, tasks, &barriers);
-        let packed = Packer::new(values, geometry, tasks, &barriers, &depths, declared).pack();
+        let packed =
+            Packer::new(values, geometry, tasks, &barriers, &depths, declared, tail).pack();
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -129,18 +132,19 @@ impl Schedule {
             segments.len(),
             control::MAX_SEGMENTS,
         );
+        let mut gated = packed.gated.clone();
+        gated.resize(count as usize, false);
         let mut schedule = Self {
             order,
             segments,
             waves,
             dependencies,
             successors,
-            gated: vec![false; count as usize],
+            gated,
             wave_table: Vec::new(),
             count,
         };
         schedule.compact();
-        schedule.gated = vec![false; schedule.count as usize];
         schedule
     }
 
@@ -156,6 +160,11 @@ impl Schedule {
         for segment in &mut self.segments {
             segment.wave = ranks[&segment.wave];
         }
+        let mut gated = vec![false; ranks.len()];
+        for (wave, rank) in &ranks {
+            gated[*rank as usize] = self.gated[*wave as usize];
+        }
+        self.gated = gated;
         self.count = ranks.len() as u32;
         assert!(
             self.count as usize <= self.order.len(),
@@ -431,6 +440,12 @@ struct Packer<'a, T, V> {
     dependencies: Vec<Vec<u32>>,
     collected: Vec<u32>,
     touches: region::Touches,
+    gated: Vec<bool>,
+    deepest: Vec<usize>,
+    edges: Vec<u64>,
+    wave_segments: Vec<Vec<u32>>,
+    first_gated: Option<u32>,
+    tail: bool,
     prefix: u32,
     stage: u32,
     in_recompute: bool,
@@ -444,6 +459,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         barriers: &'a [Vec<u32>],
         depths: &'a [u32],
         declared: &'a [u32],
+        tail: bool,
     ) -> Self {
         Self {
             values,
@@ -460,6 +476,12 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             dependencies: Vec::new(),
             collected: Vec::new(),
             touches: region::Touches::default(),
+            gated: Vec::new(),
+            deepest: Vec::new(),
+            edges: Vec::new(),
+            wave_segments: Vec::new(),
+            first_gated: None,
+            tail,
             prefix: 0,
             stage: 0,
             in_recompute: false,
@@ -474,6 +496,31 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             waves: self.waves,
             segments: self.segments,
             dependencies: self.dependencies,
+            gated: self.gated,
+        }
+    }
+
+    fn grow(&mut self, wave: u32) {
+        let waves = wave as usize + 1;
+        if self.gated.len() < waves {
+            self.gated.resize(waves, false);
+            self.deepest.resize(waves, 0);
+            self.edges.resize(waves, 0);
+            self.wave_segments.resize_with(waves, Vec::new);
+        }
+    }
+
+    fn gate(&mut self, wave: u32) {
+        self.grow(wave);
+        let wave = wave as usize;
+        if self.gated[wave] {
+            return;
+        }
+        self.gated[wave] = true;
+        let held = wave as u32;
+        self.first_gated = Some(self.first_gated.map_or(held, |first| first.min(held)));
+        for segment in std::mem::take(&mut self.wave_segments[wave]) {
+            self.dependencies[segment as usize] = Vec::new();
         }
     }
 
@@ -505,17 +552,19 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         for dependency in &self.barriers[index as usize] {
             self.collected.push(self.segment_of[*dependency as usize]);
         }
-        self.collected.sort_unstable();
-        self.collected.dedup();
         let mut earliest = None;
         for dependency in &self.collected {
             let wave = self.segment_wave[*dependency as usize];
             earliest = Some(earliest.map_or(wave, |held: u32| held.max(wave)));
         }
+        let candidate = self.lonely[index as usize] && !recomputed;
+        if candidate {
+            self.collected.sort_unstable();
+            self.collected.dedup();
+        }
         let joined = earliest
             .filter(|earliest| {
-                self.lonely[index as usize]
-                    && !recomputed
+                candidate
                     && self.collected.len() == 1
                     && self.segment_wave[self.collected[0] as usize] == *earliest
             })
@@ -523,14 +572,17 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         let (wave, segment) = match joined {
             Some((wave, segment)) => (wave, segment),
             None => {
-                let wave = earliest.map_or_else(
+                let early_wave = earliest.map_or_else(
                     || self.declared.get(index as usize).copied().unwrap_or(0),
                     |earliest| earliest + 1,
                 );
+                self.grow(early_wave);
                 self.segments.push(Vec::new());
-                self.segment_wave.push(wave);
+                self.segment_wave.push(early_wave);
                 self.dependencies.push(Vec::new());
-                (wave, (self.segments.len() - 1) as u32)
+                let segment = (self.segments.len() - 1) as u32;
+                self.wave_segments[early_wave as usize].push(segment);
+                (early_wave, segment)
             }
         };
         let wave = if recomputed {
@@ -538,6 +590,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         } else {
             wave
         };
+        self.grow(wave);
         self.collected.retain(|dependency| *dependency != segment);
         for dependency in &self.collected {
             assert!(
@@ -550,7 +603,19 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         self.waves[index as usize] = wave;
         self.segment_of[index as usize] = segment;
         self.segments[segment as usize].push(index);
-        self.dependencies[segment as usize].extend_from_slice(&self.collected);
+        let gated = self.gated[wave as usize]
+            || (self.tail && self.first_gated.is_some_and(|first| wave >= first));
+        if !gated {
+            self.collected.sort_unstable();
+            self.collected.dedup();
+            self.deepest[wave as usize] = self.deepest[wave as usize].max(self.collected.len());
+            self.edges[wave as usize] += self.collected.len() as u64;
+            if self.deepest[wave as usize] > GATE_DEPTH || self.edges[wave as usize] > GATE_EDGES {
+                self.gate(wave);
+            } else {
+                self.dependencies[segment as usize].extend_from_slice(&self.collected);
+            }
+        }
         self.prefix = self.prefix.max(wave);
         self.flow.record(self.values, &self.touches, segment);
     }
