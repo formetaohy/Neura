@@ -8,8 +8,8 @@ mod text;
 mod tokenizer;
 
 use config::Config;
-use model::Model;
-use neura::generate::{Batch, BatchFill, BatchSpec, BatchStep, Sampling};
+use model::{Model, Planes};
+use neura::generate::{Batch, BatchFill, BatchPrefix, BatchSeed, BatchSpec, BatchStep, Sampling};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::tokenizer::Text;
@@ -76,14 +76,26 @@ fn main() {
         println!("sampling: {sampling:?}");
     }
     let tuned = std::env::var("NEURA_TUNE").is_ok();
+    let shared = std::env::var("NEURA_PREFIX").is_ok();
 
     let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
-    let answer = |graph: &neura::Graph, batch: u32, capacity: u32| {
+    let answer = |graph: &neura::Graph, batch: u32, capacity: u32, shared: bool| {
         let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
         let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
         let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
         let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-        let model = Model::new(graph, &source, &config, capacity, batch, 1);
+        let model = Model::new(
+            graph,
+            &source,
+            &config,
+            Planes {
+                capacity,
+                batch,
+                rows: 1,
+                shared,
+                prefix: false,
+            },
+        );
         BatchStep {
             token,
             cursor,
@@ -92,11 +104,22 @@ fn main() {
             logits: model.step(graph, token, cursor, mask),
         }
     };
-    let fill = |graph: &neura::Graph, rows: u32, batch: u32, capacity: u32| {
+    let fill = |graph: &neura::Graph, rows: u32, batch: u32, capacity: u32, shared: bool| {
         let token = graph.input(Shape::of([1, rows, batch, 1]), Element::Single);
         let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
         let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
-        let model = Model::new(graph, &source, &config, capacity, batch, rows);
+        let model = Model::new(
+            graph,
+            &source,
+            &config,
+            Planes {
+                capacity,
+                batch,
+                rows,
+                shared,
+                prefix: false,
+            },
+        );
         model.prefill(graph, token, cursor, mask);
         BatchFill {
             token,
@@ -104,11 +127,49 @@ fn main() {
             mask,
         }
     };
-    let reset = |graph: &neura::Graph, batch: u32, capacity: u32| {
+    let reset = |graph: &neura::Graph, batch: u32, capacity: u32, shared: bool| {
         let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-        let model = Model::new(graph, &source, &config, capacity, batch, 1);
-        model.reset(graph, reset);
-        reset
+        let share = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let model = Model::new(
+            graph,
+            &source,
+            &config,
+            Planes {
+                capacity,
+                batch,
+                rows: 1,
+                shared,
+                prefix: false,
+            },
+        );
+        model.reset(graph, reset, shared.then_some(share));
+        BatchSeed { reset, share }
+    };
+    let prefix = |graph: &neura::Graph, rows: u32, batch: u32, capacity: u32| {
+        let token = graph.input(Shape::of([1, rows, 1, 1]), Element::Single);
+        let cursor = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+        let mask = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+        let reset = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+        let model = Model::new(
+            graph,
+            &source,
+            &config,
+            Planes {
+                capacity,
+                batch,
+                rows,
+                shared: true,
+                prefix: true,
+            },
+        );
+        model.clear_shared(graph, reset);
+        model.prefill(graph, token, cursor, mask);
+        BatchPrefix {
+            token,
+            cursor,
+            mask,
+            reset,
+        }
     };
     let chunks = CHUNKS
         .iter()
@@ -122,7 +183,13 @@ fn main() {
     if tuned {
         spec = spec.tuned();
     }
+    if shared {
+        spec = spec.shared();
+    }
     let mut batch = Batch::new(&runtime, loaded, spec, answer, fill, reset);
+    if shared && tokens.len() > 1 {
+        batch.prefix(&runtime, &tokens[..tokens.len() - 1], prefix);
+    }
     run(&runtime, &tokenizer, &mut batch, &tokens, wanted);
 }
 

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
-use crate::model::{as_planes, as_rows};
+use crate::model::{Planes, as_planes, as_rows};
 use neura::decoder::{heads, joined, l2, matrix, rms, softplus, vector};
 use neura::gguf::Archive;
 use neura::{DeltaInput, DeltaRule};
@@ -19,6 +19,7 @@ pub(crate) struct Delta {
     output_norm: Value,
     mlp: Mlp,
     conv_state: Value,
+    conv_shared: Option<Value>,
     rule: DeltaRule,
     floor: Value,
     scale: Value,
@@ -26,6 +27,7 @@ pub(crate) struct Delta {
     width: u32,
     kernel: u32,
     rows: u32,
+    prefix: bool,
 }
 
 impl Delta {
@@ -34,13 +36,19 @@ impl Delta {
         source: &impl Archive,
         config: &Config,
         layer: u32,
-        batch: u32,
-        rows: u32,
+        planes: Planes,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.linear_width;
         let held = config.linear_width_total();
         let mixed = config.mixed_width();
+        let Planes {
+            batch,
+            rows,
+            shared,
+            prefix,
+            ..
+        } = planes;
         Self {
             norm: vector(graph, source, &at("attn_norm.weight"), config.hidden),
             qkv: matrix(graph, source, &at("attn_qkv.weight"), mixed, config.hidden),
@@ -76,23 +84,66 @@ impl Delta {
                 Init::Zero,
                 Element::Single,
             ),
-            rule: DeltaRule::new(graph, config.linear_heads, width, batch, rows),
+            conv_shared: shared.then(|| {
+                graph.state(
+                    Shape::of([1, 1, config.conv_kernel - 1, mixed]),
+                    Init::Zero,
+                    Element::Single,
+                )
+            }),
+            rule: match (shared, prefix) {
+                (false, _) => DeltaRule::new(graph, config.linear_heads, width, batch, rows),
+                (true, false) => {
+                    DeltaRule::with_shared(graph, config.linear_heads, width, batch, rows)
+                }
+                (true, true) => DeltaRule::shared(graph, config.linear_heads, width, batch, rows),
+            },
             floor: graph.fill(Shape::scalar(), config.floor),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
             heads: config.linear_heads,
             width,
             kernel: config.conv_kernel,
             rows,
+            prefix,
         }
     }
 
-    pub(crate) fn reset(&self, graph: &Graph, reset: Value) {
-        self.rule.reset(graph, reset);
+    pub(crate) fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
+        self.rule.reset(graph, reset, share);
         let zero = graph.fill(Shape::scalar(), 0.0);
-        graph.copy_into(self.conv_state, graph.select(reset, zero, self.conv_state));
+        match (self.conv_shared, share) {
+            (Some(conv_shared), Some(share)) => {
+                let shape = graph.shape(self.conv_state);
+                let prefix = graph.broadcast_to(graph.slice(conv_shared, 1, 0, 1), shape);
+                let blank = graph.select(reset, zero, self.conv_state);
+                graph.copy_into(self.conv_state, graph.select(share, prefix, blank));
+            }
+            (None, None) => {
+                graph.copy_into(self.conv_state, graph.select(reset, zero, self.conv_state));
+            }
+            _ => panic!(
+                "a delta layer resets with the prefix it declares, and this layer declares {}",
+                self.conv_shared.is_some(),
+            ),
+        }
+    }
+
+    pub(crate) fn clear_shared(&self, graph: &Graph, reset: Value) {
+        self.rule.clear_shared(graph, reset);
+        let conv_shared = self
+            .conv_shared
+            .expect("a delta layer that shares a prefix declares one");
+        let zero = graph.fill(Shape::scalar(), 0.0);
+        graph.copy_into(conv_shared, graph.select(reset, zero, conv_shared));
     }
 
     pub(crate) fn forward(&self, graph: &Graph, hidden: Value, mask: Value) -> Value {
+        let conv_state = match self.prefix {
+            true => self
+                .conv_shared
+                .expect("a delta layer that walks a shared prefix declares one"),
+            false => self.conv_state,
+        };
         let normed = rms(graph, hidden, self.norm, self.floor);
         let mixed = as_planes(
             graph,
@@ -100,7 +151,7 @@ impl Delta {
         );
         let window = graph.concat(
             &(0..self.kernel - 1)
-                .map(|row| graph.slice(self.conv_state, 2, row, 1))
+                .map(|row| graph.slice(conv_state, 2, row, 1))
                 .chain([mixed])
                 .collect::<Vec<Value>>(),
             2,
@@ -119,10 +170,7 @@ impl Delta {
         }
         let convolved = graph.silu(convolved.expect("a convolution walks the taps of its kernel"));
         let carried = graph.slice(window, 2, self.rows, self.kernel - 1);
-        graph.copy_into(
-            self.conv_state,
-            graph.select(mask, carried, self.conv_state),
-        );
+        graph.copy_into(conv_state, graph.select(mask, carried, conv_state));
         let held = self.heads * self.width;
         let query = graph.mul(
             l2(

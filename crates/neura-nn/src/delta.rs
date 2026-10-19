@@ -23,6 +23,23 @@ struct Chunk {
 
 pub struct DeltaRule {
     state: Value,
+    shared: Option<Value>,
+    heads: u32,
+    width: u32,
+    batch: u32,
+    rows: u32,
+    chunk: u32,
+    seat: Seat,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Seat {
+    Planes,
+    Shared,
+}
+
+#[derive(Clone, Copy)]
+struct DeltaShape {
     heads: u32,
     width: u32,
     batch: u32,
@@ -35,6 +52,36 @@ impl DeltaRule {
         Self::chunked(graph, heads, width, batch, rows, DEFAULT_CHUNK)
     }
 
+    pub fn with_shared(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
+        Self::of(
+            graph,
+            DeltaShape {
+                heads,
+                width,
+                batch,
+                rows,
+                chunk: DEFAULT_CHUNK,
+            },
+            true,
+            Seat::Planes,
+        )
+    }
+
+    pub fn shared(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
+        Self::of(
+            graph,
+            DeltaShape {
+                heads,
+                width,
+                batch,
+                rows,
+                chunk: DEFAULT_CHUNK,
+            },
+            true,
+            Seat::Shared,
+        )
+    }
+
     pub fn chunked(
         graph: &Graph,
         heads: u32,
@@ -43,6 +90,28 @@ impl DeltaRule {
         rows: u32,
         chunk: u32,
     ) -> Self {
+        Self::of(
+            graph,
+            DeltaShape {
+                heads,
+                width,
+                batch,
+                rows,
+                chunk,
+            },
+            false,
+            Seat::Planes,
+        )
+    }
+
+    fn of(graph: &Graph, shape: DeltaShape, declares_shared: bool, seat: Seat) -> Self {
+        let DeltaShape {
+            heads,
+            width,
+            batch,
+            rows,
+            chunk,
+        } = shape;
         assert!(
             heads > 0 && width > 0 && batch > 0,
             "a delta rule of {batch} planes of {heads} heads of {width} numbers carries no state",
@@ -52,17 +121,37 @@ impl DeltaRule {
             rows == 1 || chunk >= 2,
             "a delta rule walks {rows} rows in chunks of {chunk}, and a chunk of fewer than two rows reaches nothing a recurrent step does not",
         );
-        Self {
-            state: graph.state(
-                Shape::of([heads, batch, width, width]),
+        assert!(
+            declares_shared || seat == Seat::Planes,
+            "a delta rule that walks a shared prefix declares the prefix it walks",
+        );
+        let planes = graph.state(
+            Shape::of([heads, batch, width, width]),
+            Init::Zero,
+            Element::Single,
+        );
+        let shared = declares_shared.then(|| {
+            graph.state(
+                Shape::of([heads, 1, width, width]),
                 Init::Zero,
                 Element::Single,
-            ),
+            )
+        });
+        Self {
+            state: match seat {
+                Seat::Planes => planes,
+                Seat::Shared => shared.expect("a shared delta rule declares its prefix"),
+            },
+            shared,
             heads,
             width,
-            batch,
+            batch: match seat {
+                Seat::Planes => batch,
+                Seat::Shared => 1,
+            },
             rows,
             chunk,
+            seat,
         }
     }
 
@@ -115,9 +204,41 @@ impl DeltaRule {
         self.batch
     }
 
-    pub fn reset(&self, graph: &Graph, reset: Value) {
+    pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
+        assert_eq!(
+            self.seat,
+            Seat::Planes,
+            "a delta rule resets the planes it walks, and this rule walks the shared prefix",
+        );
         let zero = graph.fill(Shape::scalar(), 0.0);
-        graph.copy_into(self.state, graph.select(reset, zero, self.state));
+        match (self.shared, share) {
+            (Some(shared), Some(share)) => {
+                let shape = graph.shape(self.state);
+                let prefix = graph.broadcast_to(graph.slice(shared, 1, 0, 1), shape);
+                let blank = graph.select(reset, zero, self.state);
+                graph.copy_into(self.state, graph.select(share, prefix, blank));
+            }
+            (None, None) => {
+                graph.copy_into(self.state, graph.select(reset, zero, self.state));
+            }
+            _ => panic!(
+                "a delta rule resets with the prefix it declares, and this rule declares {}",
+                self.shared.is_some(),
+            ),
+        }
+    }
+
+    pub fn clear_shared(&self, graph: &Graph, reset: Value) {
+        assert_eq!(
+            self.seat,
+            Seat::Shared,
+            "a shared delta rule clears the prefix it walks, and this rule walks the planes",
+        );
+        let zero = graph.fill(Shape::scalar(), 0.0);
+        let shared = self
+            .shared
+            .expect("a shared delta rule declares the prefix it clears");
+        graph.copy_into(shared, graph.select(reset, zero, shared));
     }
 
     pub fn rows(&self) -> u32 {

@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
-use crate::model::{as_planes, as_rows};
+use crate::model::{Planes, as_planes, as_rows};
 use crate::ops::interleaved;
 use neura::decoder::{Cache, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
@@ -31,12 +31,17 @@ impl Attention {
         source: &impl Archive,
         config: &Config,
         layer: u32,
-        capacity: u32,
-        batch: u32,
-        rows: u32,
+        planes: Planes,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.head_width;
+        let Planes {
+            capacity,
+            batch,
+            rows,
+            shared,
+            prefix,
+        } = planes;
         Self {
             norm: vector(graph, source, &at("attn_norm.weight"), config.hidden),
             query: matrix(
@@ -69,7 +74,15 @@ impl Attention {
             ),
             query_norm: vector(graph, source, &at("attn_q_norm.weight"), width),
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
-            cache: Cache::new(graph, config.key_heads, width, capacity, batch, rows),
+            cache: match (shared, prefix) {
+                (false, _) => Cache::new(graph, config.key_heads, width, capacity, batch, rows),
+                (true, false) => {
+                    Cache::with_shared(graph, config.key_heads, width, capacity, batch, rows)
+                }
+                (true, true) => {
+                    Cache::shared(graph, config.key_heads, width, capacity, batch, rows)
+                }
+            },
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
             floor: graph.fill(Shape::scalar(), config.floor),
             base: graph.fill(Shape::scalar(), config.rope_base),
@@ -81,8 +94,12 @@ impl Attention {
         }
     }
 
-    pub(crate) fn reset(&self, graph: &Graph, reset: Value) {
-        self.cache.reset(graph, reset);
+    pub(crate) fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
+        self.cache.reset(graph, reset, share);
+    }
+
+    pub(crate) fn clear_shared(&self, graph: &Graph, reset: Value) {
+        self.cache.clear_shared(graph, reset);
     }
 
     pub(crate) fn forward(&self, graph: &Graph, hidden: Value, cursor: Value) -> Value {

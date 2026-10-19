@@ -1,6 +1,9 @@
 use neura_abi::Element;
 use neura_decoder::Cache;
-use neura_generate::{Batch, BatchFill, BatchSpec, BatchStep, Family, Generator, Sampling, Step};
+use neura_generate::{
+    Batch, BatchFill, BatchPrefix, BatchSeed, BatchSpec, BatchStep, Family, Generator, Sampling,
+    Step,
+};
 use neura_gguf::Gguf;
 use neura_graph::Shape;
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
@@ -132,15 +135,18 @@ fn a_generator_samples_the_token_its_logits_and_seed_choose() {
         &[3],
         Some(Sampling::sampled(1.0, 4, 1.0)),
     );
-    assert_eq!(walked, (5, "0112111111".to_owned(), false));
+    assert_eq!(walked, (5, "0112101111".to_owned(), false));
 }
 
-fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> BatchStep {
+fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32, shared: bool) -> BatchStep {
     let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
     let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
     let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
     let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
+    let cache = match shared {
+        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, 1),
+        false => Cache::new(graph, 1, CLASSES, capacity, batch, 1),
+    };
     let held = graph.mul(
         graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
         graph.permute(mask, [0, 2, 1, 3]),
@@ -158,11 +164,20 @@ fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> BatchS
     }
 }
 
-fn batch_fill(graph: &neura_graph::Graph, rows: u32, batch: u32, capacity: u32) -> BatchFill {
+fn batch_fill(
+    graph: &neura_graph::Graph,
+    rows: u32,
+    batch: u32,
+    capacity: u32,
+    shared: bool,
+) -> BatchFill {
     let token = graph.input(Shape::of([1, rows, batch, 1]), Element::Single);
     let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
     let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
-    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, rows);
+    let cache = match shared {
+        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, rows),
+        false => Cache::new(graph, 1, CLASSES, capacity, batch, rows),
+    };
     let held = graph.mul(
         graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
         graph.permute(mask, [0, 2, 1, 3]),
@@ -175,11 +190,35 @@ fn batch_fill(graph: &neura_graph::Graph, rows: u32, batch: u32, capacity: u32) 
     }
 }
 
-fn batch_reset(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> neura_graph::Value {
+fn batch_reset(graph: &neura_graph::Graph, batch: u32, capacity: u32, shared: bool) -> BatchSeed {
     let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
-    cache.reset(graph, reset);
-    reset
+    let share = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let cache = match shared {
+        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, 1),
+        false => Cache::new(graph, 1, CLASSES, capacity, batch, 1),
+    };
+    cache.reset(graph, reset, shared.then_some(share));
+    BatchSeed { reset, share }
+}
+
+fn batch_prefix(graph: &neura_graph::Graph, rows: u32, batch: u32, capacity: u32) -> BatchPrefix {
+    let token = graph.input(Shape::of([1, rows, 1, 1]), Element::Single);
+    let cursor = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let reset = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+    let cache = Cache::shared(graph, 1, CLASSES, capacity, batch, rows);
+    cache.clear_shared(graph, reset);
+    let held = graph.mul(
+        graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
+        graph.permute(mask, [0, 2, 1, 3]),
+    );
+    cache.write(graph, cursor, held, held);
+    BatchPrefix {
+        token,
+        cursor,
+        mask,
+        reset,
+    }
 }
 
 fn batched(
@@ -189,6 +228,7 @@ fn batched(
     chunks: &[u32],
     stagger: bool,
     sampling: Option<Sampling>,
+    prefix: Option<&[u32]>,
 ) -> Vec<Vec<u32>> {
     let runtime = runtime();
     let context = 16;
@@ -196,6 +236,10 @@ fn batched(
     let spec = BatchSpec::new(context, batch, chunks);
     let spec = match sampling {
         Some(sampling) => spec.sampled(sampling),
+        None => spec,
+    };
+    let spec = match prefix {
+        Some(_) => spec.shared(),
         None => spec,
     };
     let mut batch = Batch::new(
@@ -206,6 +250,9 @@ fn batched(
         batch_fill,
         batch_reset,
     );
+    if let Some(prefix) = prefix {
+        batch.prefix(&runtime, prefix, batch_prefix);
+    }
     let first = batch.admit(&runtime, first_prompt);
     let mut walked = vec![Vec::new(); batch.batch() as usize];
     if stagger {
@@ -278,12 +325,39 @@ fn walked_alone(
 fn a_batch_answers_every_plane_with_the_tokens_a_row_answers_with() {
     for chunks in [&[][..], &[4, 2]] {
         for stagger in [false, true] {
-            let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, chunks, stagger, None);
+            let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, chunks, stagger, None, None);
             assert_eq!(
                 walked,
                 vec![vec![1, 1, 1, 1, 1], vec![2, 2, 2, 2, 2]],
                 "chunks {chunks:?} stagger {stagger}",
             );
+        }
+    }
+}
+
+#[test]
+fn a_batch_reuses_the_prefix_its_planes_share() {
+    for chunks in [&[][..], &[4, 2]] {
+        for sampling in [None, Some(Sampling::sampled(1.0, 4, 1.0))] {
+            let plain = batched(
+                &[0, 1, 1, 2, 1],
+                &[0, 1, 1, 2, 0],
+                5,
+                chunks,
+                false,
+                sampling,
+                None,
+            );
+            let shared = batched(
+                &[0, 1, 1, 2, 1],
+                &[0, 1, 1, 2, 0],
+                5,
+                chunks,
+                false,
+                sampling,
+                Some(&[0, 1, 1]),
+            );
+            assert_eq!(shared, plain, "chunks {chunks:?} sampling {sampling:?}");
         }
     }
 }

@@ -13,6 +13,15 @@ pub(crate) fn as_rows(graph: &Graph, value: Value) -> Value {
     graph.permute(value, [0, 2, 1, 3])
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Planes {
+    pub capacity: u32,
+    pub batch: u32,
+    pub rows: u32,
+    pub shared: bool,
+    pub prefix: bool,
+}
+
 pub struct Model {
     embedding: Value,
     output_norm: Value,
@@ -26,22 +35,13 @@ enum Layer {
 }
 
 impl Model {
-    pub fn new(
-        graph: &Graph,
-        source: &impl Archive,
-        config: &Config,
-        capacity: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
+    pub fn new(graph: &Graph, source: &impl Archive, config: &Config, planes: Planes) -> Self {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
-                    Layer::Attend(Attention::new(
-                        graph, source, config, layer, capacity, batch, rows,
-                    ))
+                    Layer::Attend(Attention::new(graph, source, config, layer, planes))
                 } else {
-                    Layer::Delta(Delta::new(graph, source, config, layer, batch, rows))
+                    Layer::Delta(Delta::new(graph, source, config, layer, planes))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -59,11 +59,20 @@ impl Model {
         }
     }
 
-    pub fn reset(&self, graph: &Graph, reset: Value) {
+    pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
         for layer in &self.layers {
             match layer {
-                Layer::Attend(attend) => attend.reset(graph, reset),
-                Layer::Delta(delta) => delta.reset(graph, reset),
+                Layer::Attend(attend) => attend.reset(graph, reset, share),
+                Layer::Delta(delta) => delta.reset(graph, reset, share),
+            }
+        }
+    }
+
+    pub fn clear_shared(&self, graph: &Graph, reset: Value) {
+        for layer in &self.layers {
+            match layer {
+                Layer::Attend(attend) => attend.clear_shared(graph, reset),
+                Layer::Delta(delta) => delta.clear_shared(graph, reset),
             }
         }
     }

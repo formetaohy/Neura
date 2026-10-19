@@ -27,6 +27,16 @@ no longer fills a chunk walks its remaining tokens one at a time. Admitting a se
 runs a small reset program that zeroes the kv cache, the convolution state and the gated delta net
 state of its plane before the first prompt token; the other planes keep their state.
 
+Setting `NEURA_PREFIX=1` fills the prompt except its last token once, on a prefix plane, and every
+sequence of the batch copies that plane's kv cache, convolution states and gated delta net states
+before it walks its own last token. The copy is a state copy, not a replay: the sequences answer the
+same tokens they answer without the shared prefix, sampled runs included, while the prompt is
+computed once instead of once a plane.
+
+```sh
+NEURA_PREFIX=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
+```
+
 Every run compiles the plan this device measured for the answer, fill and reset programs, and a
 device that has measured none walks the profile it balances on. Setting `NEURA_TUNE=1` measures
 every plan the device offers against the weights the programs walk, keeps the fastest of them, and

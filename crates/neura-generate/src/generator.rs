@@ -53,11 +53,17 @@ pub struct Family {
     compile: fn(&Runtime, &Graph, &Weights) -> Program,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct Draw {
+    pub(crate) sampling: Sampling,
+    pub(crate) seed: Option<Value>,
+    pub(crate) advance: Option<Value>,
+}
+
 struct Pending {
     graph: Graph,
     step: Step,
-    sampling: Sampling,
-    seed: Option<Value>,
+    draw: Draw,
     entry: Option<Entry>,
 }
 
@@ -65,6 +71,7 @@ struct Entry {
     program: Program,
     token: Value,
     cursor: Value,
+    advance: Option<Value>,
     chosen: Value,
 }
 
@@ -166,8 +173,11 @@ impl Family {
                     Pending {
                         graph,
                         step,
-                        sampling: Sampling::GREEDY,
-                        seed: None,
+                        draw: Draw {
+                            sampling: Sampling::GREEDY,
+                            seed: None,
+                            advance: None,
+                        },
                         entry: None,
                     },
                 )
@@ -177,12 +187,17 @@ impl Family {
         let step = build(&answering, 1);
         held(&answering, &step, 1);
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
-        let entry = Entry::of(runtime, &answering, &store, step, compile, sampling, seed);
+        let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
+        let draw = Draw {
+            sampling,
+            seed,
+            advance,
+        };
+        let entry = Entry::of(runtime, &answering, &store, step, compile, draw);
         let answer = Pending {
             graph: answering,
             step,
-            sampling,
-            seed,
+            draw,
             entry: Some(entry),
         };
         Self {
@@ -226,6 +241,9 @@ impl Family {
         let answer = self.answer.entry(runtime, &self.store, self.compile);
         runtime.write(&answer.program, answer.token, &[token as f32]);
         runtime.write(&answer.program, answer.cursor, &[cursor as f32]);
+        if let Some(advance) = answer.advance {
+            runtime.write(&answer.program, advance, &[1.0]);
+        }
         runtime.run(&answer.program);
         let held = runtime.read(&answer.program, answer.chosen);
         let value = held[0];
@@ -234,6 +252,16 @@ impl Family {
             "the model chose {value} where a token stands",
         );
         value as u32
+    }
+
+    pub fn feed(&mut self, runtime: &Runtime, token: u32, cursor: u32) {
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, answer.token, &[token as f32]);
+        runtime.write(&answer.program, answer.cursor, &[cursor as f32]);
+        if let Some(advance) = answer.advance {
+            runtime.write(&answer.program, advance, &[0.0]);
+        }
+        runtime.run(&answer.program);
     }
 }
 
@@ -251,8 +279,7 @@ impl Pending {
                 weights,
                 self.step,
                 compile,
-                self.sampling,
-                self.seed,
+                self.draw,
             ));
         }
         self.entry
@@ -268,39 +295,39 @@ impl Entry {
         weights: &Weights,
         step: Step,
         compile: fn(&Runtime, &Graph, &Weights) -> Program,
-        sampling: Sampling,
-        seed: Option<Value>,
+        draw: Draw,
     ) -> Self {
-        let chosen = chosen(graph, step.logits, sampling, seed);
+        let chosen = chosen(graph, step.logits, draw);
         Self {
             program: compile(runtime, graph, weights),
             token: step.token,
             cursor: step.cursor,
+            advance: draw.advance,
             chosen,
         }
     }
 }
 
-pub(crate) fn chosen(
-    graph: &Graph,
-    logits: Value,
-    sampling: Sampling,
-    seed: Option<Value>,
-) -> Value {
-    let chosen = match sampling {
+pub(crate) fn chosen(graph: &Graph, logits: Value, draw: Draw) -> Value {
+    let chosen = match draw.sampling {
         Sampling::Greedy => graph.argmax(logits),
         Sampling::Sampled {
             temperature,
             keep,
             cumulative,
         } => {
-            let seed = seed.expect("a sampled program walks a seed of its own");
+            let seed = draw
+                .seed
+                .expect("a sampled program walks a seed of its own");
+            let advance = draw
+                .advance
+                .expect("a sampled program walks the steps it draws");
             let logits = if temperature == 1.0 {
                 logits
             } else {
                 graph.mul(logits, graph.fill(Shape::scalar(), 1.0 / temperature))
             };
-            graph.add_into(seed, graph.fill(Shape::scalar(), 1.0));
+            graph.add_into(seed, advance);
             graph.sample(
                 logits,
                 seed,
@@ -446,18 +473,17 @@ impl<'t> Generator<'t> {
     }
 
     fn walk(&mut self, tokens: &[u32], sink: &mut impl FnMut(&str)) -> u32 {
-        let mut held = tokens.iter();
-        let first = held
-            .next()
+        let (last, head) = tokens
+            .split_last()
             .expect("a prompt leaves a row for its walk to answer alone");
-        let mut next = self.family.answer(&self.runtime, *first, self.position);
-        self.emit(*first, sink);
-        self.position += 1;
-        for id in held {
-            next = self.family.answer(&self.runtime, *id, self.position);
+        for id in head {
+            self.family.feed(&self.runtime, *id, self.position);
             self.emit(*id, sink);
             self.position += 1;
         }
+        let next = self.family.answer(&self.runtime, *last, self.position);
+        self.emit(*last, sink);
+        self.position += 1;
         next
     }
 
