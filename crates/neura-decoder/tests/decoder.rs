@@ -52,7 +52,7 @@ fn a_vector_reads_the_width_the_file_weighs() {
 #[test]
 fn a_cache_takes_the_rows_of_every_chunk_it_holds() {
     let graph = Graph::new();
-    let cache = Cache::new(&graph, 2, 4, 8, 3);
+    let cache = Cache::new(&graph, 2, 4, 8, 1, 3);
     let [keys, values] = cache.states();
     assert_eq!(graph.shape(keys).dims(), [2, 1, 8, 4]);
     assert_eq!(graph.shape(values).dims(), [2, 1, 8, 4]);
@@ -91,6 +91,6 @@ fn a_cache_takes_the_rows_of_every_chunk_it_holds() {
             scale,
         )
     }));
-    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 9)));
-    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 0)));
+    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 1, 9)));
+    assert!(refuses(|| Cache::new(&graph, 2, 4, 8, 1, 0)));
 }

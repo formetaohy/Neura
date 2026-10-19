@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_decoder::Cache;
-use neura_generate::{Family, Generator, Sampling, Step};
+use neura_generate::{Batch, BatchStep, Family, Generator, Sampling, Step};
 use neura_gguf::Gguf;
 use neura_graph::Shape;
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
@@ -57,7 +57,7 @@ fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Fami
     let build = |graph: &neura_graph::Graph, rows| {
         let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
         let cursor = graph.input(Shape::scalar(), Element::Single);
-        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, rows);
+        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, 1, rows);
         let held = graph.one_hot(token, CLASSES);
         cache.write(graph, cursor, held, held);
         Step {
@@ -133,4 +133,95 @@ fn a_generator_samples_the_token_its_logits_and_seed_choose() {
         Some(Sampling::sampled(1.0, 4, 1.0)),
     );
     assert_eq!(walked, (5, "0112111111".to_owned(), false));
+}
+
+fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> BatchStep {
+    let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
+    let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
+    let held = graph.mul(
+        graph.reshape(
+            graph.one_hot(token, CLASSES),
+            Shape::of([1, batch, 1, CLASSES]),
+        ),
+        mask,
+    );
+    cache.write(graph, cursor, held, held);
+    BatchStep {
+        token,
+        cursor,
+        mask,
+        reset,
+        logits: graph.reshape(
+            graph.sum_axis(cache.states()[0], 2),
+            Shape::of([1, 1, batch, CLASSES]),
+        ),
+    }
+}
+
+fn batch_reset(graph: &neura_graph::Graph, batch: u32, capacity: u32) -> neura_graph::Value {
+    let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+    let cache = Cache::new(graph, 1, CLASSES, capacity, batch, 1);
+    cache.reset(graph, reset);
+    reset
+}
+
+fn batched(
+    first_prompt: &[u32],
+    second_prompt: &[u32],
+    wanted: usize,
+    stagger: bool,
+) -> Vec<Vec<u32>> {
+    let runtime = runtime();
+    let context = 16;
+    let batch = 2;
+    let mut batch = Batch::of(
+        &runtime,
+        |graph| runtime.weights(graph),
+        context,
+        batch,
+        batch_answer,
+        batch_reset,
+    );
+    let first = batch.admit(&runtime, first_prompt);
+    let mut walked = vec![Vec::new(); batch.batch() as usize];
+    if stagger {
+        while walked[first as usize].len() < 2 {
+            for held in batch.step(&runtime) {
+                if held.slot == first {
+                    walked[first as usize].push(held.token);
+                }
+            }
+        }
+    }
+    let second = batch.admit(&runtime, second_prompt);
+    while walked.iter().any(|held| held.len() < wanted) {
+        for held in batch.step(&runtime) {
+            if held.token == END || walked[held.slot as usize].len() >= wanted {
+                batch.finish(held.slot);
+                continue;
+            }
+            walked[held.slot as usize].push(held.token);
+        }
+        assert!(
+            batch.active().next().is_some(),
+            "a batch with no token left still walked",
+        );
+    }
+    assert_eq!((first, second), (0, 1));
+    walked
+}
+
+#[test]
+fn a_batch_answers_every_plane_with_the_tokens_a_row_answers_with() {
+    for stagger in [false, true] {
+        let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, stagger);
+        assert_eq!(
+            walked,
+            vec![vec![1, 1, 1, 1, 1], vec![2, 2, 2, 2, 2]],
+            "stagger {stagger}",
+        );
+    }
 }

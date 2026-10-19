@@ -9,14 +9,15 @@ mod tokenizer;
 
 use config::Config;
 use model::Model;
-use neura::generate::{Family, Generator, Sampling, Step};
+use neura::generate::{Batch, BatchStep, Sampling};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
+use neura::tokenizer::Text;
 use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
+use std::time::Instant;
 use tokenizer::Tokenizer;
 
-const CHUNKS: &[u32] = &[256, 128, 32, 8];
 const CONTEXT: u32 = 1024;
 const READBACK: u64 = 8 << 20;
 const HEAP: u64 = 2 << 30;
@@ -24,7 +25,7 @@ const HEAP: u64 = 2 << 30;
 fn main() {
     let mut arguments = std::env::args().skip(1);
     let path = arguments.next().unwrap_or_else(|| {
-        panic!("usage: qwen <model.gguf> [prompt] [tokens], holding one Qwen3.5 gguf");
+        panic!("usage: qwen <model.gguf> [prompt] [tokens] [sequences], holding one Qwen3.5 gguf");
     });
     let prompt = arguments
         .next()
@@ -32,6 +33,10 @@ fn main() {
     let wanted = arguments
         .next()
         .map_or(48, |held| held.parse::<usize>().expect("a token count"));
+    let sequences = arguments
+        .next()
+        .map_or(1, |held| held.parse::<u32>().expect("a sequence count"));
+    assert!(sequences > 0, "a run answers at least one sequence");
 
     let source = GgufFile::open(Path::new(&path));
     let tokenizer = Tokenizer::read(&source);
@@ -65,53 +70,94 @@ fn main() {
         ..Default::default()
     })
     .expect("a device that runs the model");
-    let mut chunks = Vec::new();
-    for chunk in CHUNKS.iter().copied() {
-        let chunk = chunk.min(context);
-        if chunks.last() != Some(&chunk) {
-            chunks.push(chunk);
-        }
-    }
-
-    let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
-    let built = |graph: &neura::Graph, rows: u32| {
-        let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
-        let cursor = graph.input(Shape::scalar(), Element::Single);
-        let model = Model::new(graph, &source, &config, context, rows);
-        Step {
-            token,
-            cursor,
-            logits: model.step(graph, token, cursor),
-        }
-    };
     let sampling = sampling();
     if let Some(sampling) = sampling {
         println!("sampling: {sampling:?}");
     }
     let tuned = std::env::var("NEURA_TUNE").is_ok();
-    let family = match (tuned, sampling) {
-        (true, Some(sampling)) => Family::tuned_sampled(&runtime, loaded, &chunks, built, sampling),
-        (true, None) => Family::tuned(&runtime, loaded, &chunks, built),
-        (false, Some(sampling)) => Family::sampled(&runtime, loaded, &chunks, built, sampling),
-        (false, None) => Family::of(&runtime, loaded, &chunks, built),
-    };
 
-    let mut generator = Generator::new(
-        runtime,
-        family,
-        tokenizer.engine(),
-        tokenizer.end_of_turn(),
-        context,
-    );
-    let report = generator.run(&tokens, wanted, |held| print!("{held}"));
+    let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
+    let answer = |graph: &neura::Graph, batch: u32, capacity: u32| {
+        let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
+        let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let mask = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let model = Model::new(graph, &source, &config, capacity, batch);
+        BatchStep {
+            token,
+            cursor,
+            mask,
+            reset,
+            logits: model.step(graph, token, cursor, mask),
+        }
+    };
+    let reset = |graph: &neura::Graph, batch: u32, capacity: u32| {
+        let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
+        let model = Model::new(graph, &source, &config, capacity, batch);
+        model.reset(graph, reset);
+        reset
+    };
+    let mut batch = match (tuned, sampling) {
+        (true, Some(sampling)) => Batch::tuned_sampled(
+            &runtime, loaded, context, sequences, answer, reset, sampling,
+        ),
+        (true, None) => Batch::tuned(&runtime, loaded, context, sequences, answer, reset),
+        (false, Some(sampling)) => Batch::sampled(
+            &runtime, loaded, context, sequences, answer, reset, sampling,
+        ),
+        (false, None) => Batch::of(&runtime, loaded, context, sequences, answer, reset),
+    };
+    run(&runtime, &tokenizer, &mut batch, &tokens, wanted);
+}
+
+fn run(runtime: &Runtime, tokenizer: &Tokenizer, batch: &mut Batch, tokens: &[u32], wanted: usize) {
+    let started = Instant::now();
+    let context = batch.context();
+    for _ in 0..batch.batch() {
+        batch.admit(runtime, tokens);
+    }
+    let mut text = Text::new();
+    let end = tokenizer.end_of_turn();
+    let mut produced = 0usize;
+    let mut reached_context = false;
+    while produced < wanted && batch.active().next().is_some() {
+        let emitted = batch.step(runtime);
+        for held in emitted {
+            let reached = batch
+                .cursor(held.slot)
+                .is_some_and(|cursor| cursor >= context);
+            if held.token == end || produced >= wanted || reached {
+                batch.finish(held.slot);
+                reached_context |= held.slot == 0 && reached;
+                continue;
+            }
+            if held.slot == 0 {
+                let piece = tokenizer.engine().piece(held.token);
+                let text = text.push(&piece);
+                if !text.is_empty() {
+                    print!("{text}");
+                }
+                produced += 1;
+            }
+        }
+    }
+    for slot in batch.active().collect::<Vec<u32>>() {
+        batch.finish(slot);
+    }
+    let tail = text.flush();
+    if !tail.is_empty() {
+        print!("{tail}");
+    }
+    let seconds = started.elapsed().as_secs_f64();
     println!(
         "
-{} tokens in {:.2}s ({:.1} tokens/s)",
-        report.produced(),
-        report.seconds(),
-        report.produced() as f64 / report.seconds(),
+{} sequences of {} tokens in {:.2}s ({:.1} tokens/s)",
+        batch.batch(),
+        produced,
+        seconds,
+        (produced as f64 * batch.batch() as f64) / seconds,
     );
-    if report.reached_context() {
+    if reached_context {
         println!("(the model reached its {context} token context)");
     }
 }

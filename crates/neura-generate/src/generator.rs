@@ -271,29 +271,7 @@ impl Entry {
         sampling: Sampling,
         seed: Option<Value>,
     ) -> Self {
-        let chosen = match sampling {
-            Sampling::Greedy => graph.argmax(step.logits),
-            Sampling::Sampled {
-                temperature,
-                keep,
-                cumulative,
-            } => {
-                let seed = seed.expect("a sampled program walks a seed of its own");
-                let logits = if temperature == 1.0 {
-                    step.logits
-                } else {
-                    graph.mul(step.logits, graph.fill(Shape::scalar(), 1.0 / temperature))
-                };
-                graph.add_into(seed, graph.fill(Shape::scalar(), 1.0));
-                graph.sample(
-                    logits,
-                    seed,
-                    graph.fill(Shape::scalar(), keep as f32),
-                    graph.fill(Shape::scalar(), cumulative),
-                )
-            }
-        };
-        graph.retain(chosen);
+        let chosen = chosen(graph, step.logits, sampling, seed);
         Self {
             program: compile(runtime, graph, weights),
             token: step.token,
@@ -301,6 +279,38 @@ impl Entry {
             chosen,
         }
     }
+}
+
+pub(crate) fn chosen(
+    graph: &Graph,
+    logits: Value,
+    sampling: Sampling,
+    seed: Option<Value>,
+) -> Value {
+    let chosen = match sampling {
+        Sampling::Greedy => graph.argmax(logits),
+        Sampling::Sampled {
+            temperature,
+            keep,
+            cumulative,
+        } => {
+            let seed = seed.expect("a sampled program walks a seed of its own");
+            let logits = if temperature == 1.0 {
+                logits
+            } else {
+                graph.mul(logits, graph.fill(Shape::scalar(), 1.0 / temperature))
+            };
+            graph.add_into(seed, graph.fill(Shape::scalar(), 1.0));
+            graph.sample(
+                logits,
+                seed,
+                graph.fill(Shape::scalar(), keep as f32),
+                graph.fill(Shape::scalar(), cumulative),
+            )
+        }
+    };
+    graph.retain(chosen);
+    chosen
 }
 
 fn held(graph: &Graph, step: &Step, rows: u32) {

@@ -1,6 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Shape, Value};
-use neura_nn::DeltaRule;
+use neura_nn::{DeltaInput, DeltaRule};
 use neura_runtime::{Runtime, RuntimeRequest};
 
 fn open() -> Runtime {
@@ -31,40 +31,52 @@ fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
 
 #[test]
 fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
-    let (heads, width, rows, chunk) = (2u32, 3u32, 6u32, 2u32);
-    let mut queries = random(heads * rows * width, 7);
-    let mut keys = random(heads * rows * width, 11);
+    let (heads, batch, width, rows, chunk) = (2u32, 2u32, 3u32, 6u32, 2u32);
+    let mut queries = random(heads * batch * rows * width, 7);
+    let mut keys = random(heads * batch * rows * width, 11);
     for tensor in [&mut queries, &mut keys] {
         for head in 0..heads {
-            for row in 0..rows {
-                let at = ((head * rows + row) * width) as usize;
-                let span = &mut tensor[at..at + width as usize];
-                let length = span.iter().map(|value| value * value).sum::<f32>().sqrt();
-                for value in span {
-                    *value /= length;
+            for plane in 0..batch {
+                for row in 0..rows {
+                    let at = (((head * batch + plane) * rows + row) * width) as usize;
+                    let span = &mut tensor[at..at + width as usize];
+                    let length = span.iter().map(|value| value * value).sum::<f32>().sqrt();
+                    for value in span {
+                        *value /= length;
+                    }
                 }
             }
         }
     }
-    let values = random(heads * rows * width, 13);
-    let betas = random(heads * rows, 17)
+    let values = random(heads * batch * rows * width, 13);
+    let betas = random(heads * batch * rows, 17)
         .into_iter()
         .map(|value| 1.0 / (1.0 + (-value).exp()))
         .collect::<Vec<f32>>();
-    let decays = random(heads * rows, 19)
+    let decays = random(heads * batch * rows, 19)
         .into_iter()
         .map(|value| -value.abs())
         .collect::<Vec<f32>>();
     let runtime = open();
 
     let graph = Graph::new();
-    let query = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let key = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let value = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let beta = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
-    let decay = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
-    let rule = DeltaRule::chunked(&graph, heads, width, rows, chunk);
-    let out = rule.forward(&graph, query, key, value, beta, decay);
+    let query = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let key = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let value = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let beta = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
+    let decay = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
+    let rule = DeltaRule::chunked(&graph, heads, width, batch, rows, chunk);
+    let out = rule.forward(
+        &graph,
+        DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay: decay,
+        },
+        None,
+    );
     graph.retain(out);
     let weights = runtime.weights(&graph);
     let program = runtime.compile_with(&graph, &weights, runtime.default_profile());
@@ -77,21 +89,24 @@ fn a_chunked_delta_rule_walks_the_rows_a_recurrent_step_walks() {
     let chunked = runtime.read(&program, out);
 
     let graph = Graph::new();
-    let query = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let key = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let value = graph.input(Shape::of([heads, 1, rows, width]), Element::Single);
-    let beta = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
-    let decay = graph.input(Shape::of([heads, 1, rows, 1]), Element::Single);
-    let rule = DeltaRule::new(&graph, heads, width, 1);
+    let query = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let key = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let value = graph.input(Shape::of([heads, batch, rows, width]), Element::Single);
+    let beta = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
+    let decay = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
+    let rule = DeltaRule::new(&graph, heads, width, batch, 1);
     let walked = (0..rows)
         .map(|row| {
             rule.forward(
                 &graph,
-                graph.slice(query, 2, row, 1),
-                graph.slice(key, 2, row, 1),
-                graph.slice(value, 2, row, 1),
-                graph.slice(beta, 2, row, 1),
-                graph.slice(decay, 2, row, 1),
+                DeltaInput {
+                    query: graph.slice(query, 2, row, 1),
+                    key: graph.slice(key, 2, row, 1),
+                    value: graph.slice(value, 2, row, 1),
+                    beta: graph.slice(beta, 2, row, 1),
+                    log_decay: graph.slice(decay, 2, row, 1),
+                },
+                None,
             )
         })
         .collect::<Vec<Value>>();

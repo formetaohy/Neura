@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
+use crate::model::{as_planes, as_rows};
 use crate::ops::interleaved;
 use neura::decoder::{Cache, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
@@ -30,8 +31,8 @@ impl Attention {
         source: &impl Archive,
         config: &Config,
         layer: u32,
-        context: u32,
-        rows: u32,
+        capacity: u32,
+        batch: u32,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.head_width;
@@ -67,7 +68,7 @@ impl Attention {
             ),
             query_norm: vector(graph, source, &at("attn_q_norm.weight"), width),
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
-            cache: Cache::new(graph, config.key_heads, width, context, rows),
+            cache: Cache::new(graph, config.key_heads, width, capacity, batch, 1),
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
             floor: graph.fill(Shape::scalar(), config.floor),
             base: graph.fill(Shape::scalar(), config.rope_base),
@@ -79,22 +80,35 @@ impl Attention {
         }
     }
 
+    pub(crate) fn reset(&self, graph: &Graph, reset: Value) {
+        self.cache.reset(graph, reset);
+    }
+
     pub(crate) fn forward(&self, graph: &Graph, hidden: Value, cursor: Value) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let packed = graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2]));
-        let query = interleaved(graph, packed, self.heads, self.width, 0);
-        let gate = interleaved(graph, packed, self.heads, self.width, self.width);
-        let key = heads(
+        let query = as_planes(graph, interleaved(graph, packed, self.heads, self.width, 0));
+        let gate = as_planes(
             graph,
-            graph.matmul(normed, graph.permute(self.key, [0, 1, 3, 2])),
-            self.key_heads,
-            self.width,
+            interleaved(graph, packed, self.heads, self.width, self.width),
         );
-        let value = heads(
+        let key = as_planes(
             graph,
-            graph.matmul(normed, graph.permute(self.value, [0, 1, 3, 2])),
-            self.key_heads,
-            self.width,
+            heads(
+                graph,
+                graph.matmul(normed, graph.permute(self.key, [0, 1, 3, 2])),
+                self.key_heads,
+                self.width,
+            ),
+        );
+        let value = as_planes(
+            graph,
+            heads(
+                graph,
+                graph.matmul(normed, graph.permute(self.value, [0, 1, 3, 2])),
+                self.key_heads,
+                self.width,
+            ),
         );
         let query = partial(
             graph,
@@ -113,8 +127,8 @@ impl Attention {
         self.cache.write(graph, cursor, key, value);
         let attended = self.cache.attend(graph, query, cursor, self.scale);
         let gated = graph.mul(
-            joined(graph, attended, self.heads),
-            graph.sigmoid(joined(graph, gate, self.heads)),
+            as_rows(graph, joined(graph, attended, self.heads)),
+            graph.sigmoid(as_rows(graph, joined(graph, gate, self.heads))),
         );
         let projected = graph.matmul(gated, graph.permute(self.output, [0, 1, 3, 2]));
         self.mlp

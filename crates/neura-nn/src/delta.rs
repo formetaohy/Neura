@@ -3,6 +3,15 @@ use neura_graph::{Graph, Init, Shape, Triangle, Value};
 
 const DEFAULT_CHUNK: u32 = 64;
 
+#[derive(Clone, Copy)]
+pub struct DeltaInput {
+    pub query: Value,
+    pub key: Value,
+    pub value: Value,
+    pub beta: Value,
+    pub log_decay: Value,
+}
+
 struct Chunk {
     query: Value,
     key: Value,
@@ -16,19 +25,27 @@ pub struct DeltaRule {
     state: Value,
     heads: u32,
     width: u32,
+    batch: u32,
     rows: u32,
     chunk: u32,
 }
 
 impl DeltaRule {
-    pub fn new(graph: &Graph, heads: u32, width: u32, rows: u32) -> Self {
-        Self::chunked(graph, heads, width, rows, DEFAULT_CHUNK)
+    pub fn new(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
+        Self::chunked(graph, heads, width, batch, rows, DEFAULT_CHUNK)
     }
 
-    pub fn chunked(graph: &Graph, heads: u32, width: u32, rows: u32, chunk: u32) -> Self {
+    pub fn chunked(
+        graph: &Graph,
+        heads: u32,
+        width: u32,
+        batch: u32,
+        rows: u32,
+        chunk: u32,
+    ) -> Self {
         assert!(
-            heads > 0 && width > 0,
-            "a delta rule of {heads} heads of {width} numbers carries no state",
+            heads > 0 && width > 0 && batch > 0,
+            "a delta rule of {batch} planes of {heads} heads of {width} numbers carries no state",
         );
         assert!(rows > 0, "a delta rule walks no row of {rows}");
         assert!(
@@ -37,44 +54,45 @@ impl DeltaRule {
         );
         Self {
             state: graph.state(
-                Shape::of([heads, 1, width, width]),
+                Shape::of([heads, batch, width, width]),
                 Init::Zero,
                 Element::Single,
             ),
             heads,
             width,
+            batch,
             rows,
             chunk,
         }
     }
 
-    pub fn forward(
-        &self,
-        graph: &Graph,
-        query: Value,
-        key: Value,
-        value: Value,
-        beta: Value,
-        log_decay: Value,
-    ) -> Value {
+    pub fn forward(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
+        let DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay,
+        } = input;
         self.holds(graph, "query", query);
         self.holds(graph, "key", key);
         self.holds(graph, "value", value);
         for (what, held) in [("beta", beta), ("log decay", log_decay)] {
             assert_eq!(
                 graph.shape(held).dims(),
-                [self.heads, 1, self.rows, 1],
-                "a delta rule scales the {what} of {} heads over {} rows, and value {} walks {:?}",
+                [self.heads, self.batch, self.rows, 1],
+                "a delta rule scales the {what} of {} heads over {} planes of {} rows, and value {} walks {:?}",
                 self.heads,
+                self.batch,
                 self.rows,
                 held.id(),
                 graph.shape(held).dims(),
             );
         }
         if self.rows == 1 {
-            return self.step(graph, query, key, value, beta, log_decay);
+            return self.step(graph, input, keep);
         }
-        self.walk(graph, query, key, value, beta, log_decay)
+        self.walk(graph, input, keep)
     }
 
     pub fn state(&self) -> Value {
@@ -89,6 +107,15 @@ impl DeltaRule {
         self.width
     }
 
+    pub fn batch(&self) -> u32 {
+        self.batch
+    }
+
+    pub fn reset(&self, graph: &Graph, reset: Value) {
+        let zero = graph.fill(Shape::scalar(), 0.0);
+        graph.copy_into(self.state, graph.select(reset, zero, self.state));
+    }
+
     pub fn rows(&self) -> u32 {
         self.rows
     }
@@ -100,9 +127,10 @@ impl DeltaRule {
     fn holds(&self, graph: &Graph, what: &str, value: Value) {
         assert_eq!(
             graph.shape(value).dims(),
-            [self.heads, 1, self.rows, self.width],
-            "a delta rule reads {what} of {} heads of {} rows of {} numbers, and value {} walks {:?}",
+            [self.heads, self.batch, self.rows, self.width],
+            "a delta rule reads {what} of {} heads of {} planes of {} rows of {} numbers, and value {} walks {:?}",
             self.heads,
+            self.batch,
             self.rows,
             self.width,
             value.id(),
@@ -110,15 +138,14 @@ impl DeltaRule {
         );
     }
 
-    fn step(
-        &self,
-        graph: &Graph,
-        query: Value,
-        key: Value,
-        value: Value,
-        beta: Value,
-        log_decay: Value,
-    ) -> Value {
+    fn step(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
+        let DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay,
+        } = input;
         let decayed = graph.mul(self.state, graph.exp(log_decay));
         let memory = graph.matmul(key, decayed);
         let delta = graph.mul(graph.sub(value, memory), beta);
@@ -127,19 +154,15 @@ impl DeltaRule {
             graph.matmul(graph.permute(key, [0, 1, 3, 2]), delta),
         );
         let attended = graph.matmul(query, grown);
-        graph.copy_into(self.state, grown);
+        let next = match keep {
+            Some(keep) => graph.select(keep, grown, self.state),
+            None => grown,
+        };
+        graph.copy_into(self.state, next);
         attended
     }
 
-    fn walk(
-        &self,
-        graph: &Graph,
-        query: Value,
-        key: Value,
-        value: Value,
-        beta: Value,
-        log_decay: Value,
-    ) -> Value {
+    fn walk(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
         let mut state = self.state;
         let mut attended = Vec::new();
         let mut start = 0;
@@ -147,16 +170,19 @@ impl DeltaRule {
             let extent = self.chunk.min(self.rows - start);
             let rows = |held: Value| graph.slice(held, 2, start, extent);
             let held = Chunk {
-                query: rows(query),
-                key: rows(key),
-                value: rows(value),
-                beta: rows(beta),
-                log_decay: rows(log_decay),
+                query: rows(input.query),
+                key: rows(input.key),
+                value: rows(input.value),
+                beta: rows(input.beta),
+                log_decay: rows(input.log_decay),
                 extent,
             };
             let (attended_rows, next) = self.chunk_forward(graph, state, held);
             attended.push(attended_rows);
-            state = next;
+            state = match keep {
+                Some(keep) => graph.select(keep, next, state),
+                None => next,
+            };
             start += extent;
         }
         graph.copy_into(self.state, state);
