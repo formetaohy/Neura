@@ -112,13 +112,13 @@ mod device {
             return 0.0;
         }
         let bias = values[task.bias];
-        return fetch(
-            bias,
-            head * bias.strides.x
-                + batch * bias.strides.y
-                + row * bias.strides.z
-                + column * bias.strides.w,
+        let held = uvec4(
+            select(0u32, head, bias.dims.x > 1u32),
+            select(0u32, batch, bias.dims.y > 1u32),
+            select(0u32, row, bias.dims.z > 1u32),
+            select(0u32, column, bias.dims.w > 1u32),
         );
+        return fetch(bias, read_address(held, bias.strides));
     }
 
     fn attention_scale(task: Task, width: u32) -> f32 {
@@ -235,11 +235,14 @@ mod device {
             return 0u32;
         }
         let cursor = values[task.origin];
+        let held = uvec4(
+            select(0u32, head, cursor.dims.x > 1u32),
+            select(0u32, batch, cursor.dims.y > 1u32),
+            0u32,
+            0u32,
+        );
         let raw = select(
-            fetch(
-                cursor,
-                read_address(uvec4(head, batch, 0u32, 0u32), cursor.strides),
-            ),
+            fetch(cursor, read_address(held, cursor.strides)),
             fetch(cursor, task.plane),
             task.queries != NO_VALUE,
         );

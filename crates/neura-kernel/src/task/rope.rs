@@ -11,10 +11,13 @@ mod device {
             return 0u32;
         }
         let cursor = values[task.origin];
-        let raw = fetch(
-            cursor,
-            read_address(uvec4(at.x, at.y, 0u32, 0u32), cursor.strides),
+        let held = uvec4(
+            select(0u32, at.x, cursor.dims.x > 1u32),
+            select(0u32, at.y, cursor.dims.y > 1u32),
+            0u32,
+            0u32,
         );
+        let raw = fetch(cursor, read_address(held, cursor.strides));
         if trunc(raw) != raw || !(raw >= 0.0) || !(raw < 4294967296.0) {
             refuse(task.kind, refusal::ORIGIN, 0u32);
             return 0u32;
