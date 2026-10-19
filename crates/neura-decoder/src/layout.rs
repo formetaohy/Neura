@@ -20,9 +20,6 @@ pub(crate) fn seat(graph: &Graph, heads: u32, batch: u32, capacity: u32, rows: u
         .collect::<Vec<Value>>();
     let head = graph.concat(&head, 0);
     let row = graph.concat(&row, 2);
-    if batch == 1 {
-        return graph.add(head, row);
-    }
     let plane = (0..batch)
         .map(|at| graph.fill(Shape::scalar(), (at * capacity) as f32))
         .collect::<Vec<Value>>();

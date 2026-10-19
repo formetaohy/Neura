@@ -284,6 +284,7 @@ pub(crate) fn arena_spans(
     region: Region,
     out: &mut Vec<(u64, u64)>,
 ) {
+    let base = base / neura_abi::WORD_BYTES;
     out.clear();
     match region {
         Region::Empty => return,
@@ -324,4 +325,20 @@ pub(crate) fn arena_spans(
         }
     }
     out.truncate(kept);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arena_spans;
+    use crate::region::Region;
+    use neura_abi::Element;
+
+    #[test]
+    fn arena_spans_address_words() {
+        let mut spans = Vec::new();
+        arena_spans(256, Element::Single, 64, Region::run(4, 8), &mut spans);
+        assert_eq!(spans, vec![(68, 76)]);
+        arena_spans(256, Element::Single, 64, Region::Whole, &mut spans);
+        assert_eq!(spans, vec![(64, 128)]);
+    }
 }
