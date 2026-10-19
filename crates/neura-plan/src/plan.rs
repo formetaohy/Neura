@@ -2498,9 +2498,11 @@ fn allocate(
     let mut active = Vec::<Active>::new();
     for (storage, live) in pending {
         let wave = wave_of(live.first);
-        let taken = active
-            .iter()
-            .position(|held| held.live.reads == 1 && held.live.aliased_at == Some(live.first));
+        let taken = active.iter().position(|held| {
+            held.live.reads == 1
+                && held.live.last == live.first
+                && held.live.aliased_at == Some(live.first)
+        });
         if let Some(position) = taken {
             let held = active.swap_remove(position);
             let bytes = sized.bytes(storage as u32);
