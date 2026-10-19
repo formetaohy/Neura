@@ -98,6 +98,41 @@ fn a_wide_product_walks_the_quantized_weight_a_gguf_stores() {
     }
 }
 
+#[test]
+fn a_sectioned_top_k_sorts_every_band_it_walks() {
+    const ROWS: u32 = 1;
+    const WIDTH: u32 = 32768;
+    const KEEP: u32 = 64;
+    let graph = Graph::new();
+    let logits = graph.input(Shape::of([1, 1, ROWS, WIDTH]), Element::Single);
+    let (values, indices) = graph.top_k(logits, KEEP);
+    graph.retain(values);
+    graph.retain(indices);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let held = random(ROWS * WIDTH, 37);
+    runtime.write(&program, logits, &held);
+    runtime.run(&program);
+    let mut order = (0..WIDTH).collect::<Vec<u32>>();
+    order.sort_by(|left, right| {
+        held[*right as usize]
+            .partial_cmp(&held[*left as usize])
+            .expect("a random logit is a number")
+            .then(left.cmp(right))
+    });
+    let expected_values = order[..KEEP as usize]
+        .iter()
+        .map(|at| held[*at as usize])
+        .collect::<Vec<f32>>();
+    let expected_indices = order[..KEEP as usize]
+        .iter()
+        .map(|at| *at as f32)
+        .collect::<Vec<f32>>();
+    assert_close(&runtime.read(&program, values), &expected_values, 1e-6);
+    assert_eq!(runtime.read(&program, indices), expected_indices);
+}
+
 fn peaked(rows: u32, columns: u32, sections: u32, peak: f32) -> Vec<f32> {
     let mut values = vec![-peak; (rows * columns) as usize];
     let span = columns / sections;

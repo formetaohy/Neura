@@ -1920,9 +1920,14 @@ fn choice_sections(
         return 1;
     }
     let words = u64::from(rows) * carried;
+    let layout = neura_profile::ChoiceLayout::of(profile.workgroup(), profile.body_scratch_bytes());
+    let width = match unit.kind {
+        Kind::TopK | Kind::Sample => u64::from(layout.sorted_width()),
+        _ => u64::from(choice_section_columns(unit)),
+    };
     let sections = u64::from(profile.workgroups())
         .div_ceil(row_tasks.max(1))
-        .min(u64::from(columns / choice_section_columns(unit)))
+        .min(u64::from(columns).div_ceil(width))
         .min(PARTIALS_CEILING / words.max(1))
         .min(u64::from(SPLITS_CEILING))
         .min(u64::from(neura_abi::CHOICE_SECTIONS))

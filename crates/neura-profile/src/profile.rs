@@ -40,6 +40,10 @@ impl ChoiceLayout {
         self.owners * self.local
     }
 
+    pub const fn sorted_width(self) -> u32 {
+        1 << (u32::BITS - 1 - self.entries().leading_zeros())
+    }
+
     pub const fn words(self, workgroup: u32) -> u32 {
         2 * workgroup
             + 2 * neura_abi::CANDIDATES

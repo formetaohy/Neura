@@ -13,6 +13,7 @@ pub(crate) fn install(compiler: &mut Compiler, geometry: &Geometry) {
     compiler.constant("CHOICE_OWNERS", layout.owners());
     compiler.constant("CHOICE_ENTRIES", layout.entries());
     compiler.constant("CHOICE_LEVELS", layout.levels());
+    compiler.constant("SORTED_WIDTH", layout.sorted_width());
     compiler.constant("CANDIDATES", neura_abi::CANDIDATES);
     compiler.constant("CHOICE_SECTIONS", neura_abi::CHOICE_SECTIONS);
     compiler.constant("CHOICE_ROUND", neura_abi::CHOICE_ROUND);
@@ -342,6 +343,104 @@ mod device {
             return true;
         }
         return value == other_value && index < other_index;
+    }
+
+    fn sorted_before(value: f32, index: u32, other_value: f32, other_index: u32) -> bool {
+        if value < other_value {
+            return true;
+        }
+        if value > other_value {
+            return false;
+        }
+        return index > other_index;
+    }
+
+    fn rank_sorted(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
+        let span = last - first;
+        if span == 0u32 {
+            return 0u32;
+        }
+        for slot in stride(lid, SORTED_WIDTH, WORKGROUP_SIZE) {
+            let inside = slot < span;
+            let column = first + min(slot, span - 1u32);
+            scratch[SCRATCH_UNION + slot] = select(
+                max_identity(),
+                read_flat(task, source, row * columns + column),
+                inside,
+            );
+            scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot] =
+                bitcast_f32(select(NO_VALUE, column, inside));
+        }
+        workgroup_barrier();
+        let mut size = 2u32;
+        loop {
+            if size > SORTED_WIDTH {
+                break;
+            }
+            let mut step = size / 2u32;
+            loop {
+                if step == 0u32 {
+                    break;
+                }
+                for slot in stride(lid, SORTED_WIDTH, WORKGROUP_SIZE) {
+                    let partner = slot ^ step;
+                    if partner > slot {
+                        let ascending = (slot & size) == 0u32;
+                        let value = scratch[SCRATCH_UNION + slot];
+                        let index = bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot]);
+                        let other = scratch[SCRATCH_UNION + partner];
+                        let other_index =
+                            bitcast_u32(scratch[SCRATCH_UNION + CHOICE_ENTRIES + partner]);
+                        let before = sorted_before(value, index, other, other_index);
+                        let after = sorted_before(other, other_index, value, index);
+                        if select(before, after, ascending) {
+                            scratch[SCRATCH_UNION + slot] = other;
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + slot] =
+                                bitcast_f32(other_index);
+                            scratch[SCRATCH_UNION + partner] = value;
+                            scratch[SCRATCH_UNION + CHOICE_ENTRIES + partner] = bitcast_f32(index);
+                        }
+                    }
+                }
+                workgroup_barrier();
+                step = step / 2u32;
+            }
+            size = size * 2u32;
+        }
+        let count = min(keep, min(span, SORTED_WIDTH));
+        for candidate in stride(lid, count, WORKGROUP_SIZE) {
+            let at = SORTED_WIDTH - 1u32 - candidate;
+            scratch[SCRATCH_SAMPLE + candidate] = scratch[SCRATCH_UNION + at];
+            scratch[SCRATCH_SAMPLE + CANDIDATES + candidate] =
+                scratch[SCRATCH_UNION + CHOICE_ENTRIES + at];
+        }
+        workgroup_barrier();
+        return count;
+    }
+
+    fn rank_band(
+        task: Task,
+        lid: u32,
+        source: Value,
+        row: u32,
+        columns: u32,
+        first: u32,
+        last: u32,
+        keep: u32,
+    ) -> u32 {
+        if last - first <= SORTED_WIDTH {
+            return rank_sorted(task, lid, source, row, columns, first, last, keep);
+        }
+        return rank_row(task, lid, source, row, columns, first, last, keep);
     }
 
     fn rank_row(
@@ -845,7 +944,7 @@ mod device {
             let total = row_mass(task, lid, source, row, columns, first, last);
             let row_max = scratch[0u32];
             workgroup_barrier();
-            let count = rank_row(task, lid, source, row, columns, first, last, keep);
+            let count = rank_band(task, lid, source, row, columns, first, last, keep);
             let base = (task.section * rows + row) * (2u32 * CANDIDATES + 4u32);
             if lid == 0u32 {
                 publish(carried, base + 2u32 * CANDIDATES, f32(count));
@@ -1194,7 +1293,7 @@ mod device {
         let first = columns * task.section / task.splits;
         let last = columns * (task.section + 1u32) / task.splits;
         for row in stride(task.first, task.first + task.count, 1u32) {
-            let count = rank_row(task, lid, source, row, columns, first, last, keep);
+            let count = rank_band(task, lid, source, row, columns, first, last, keep);
             let base = (task.section * rows + row) * (CANDIDATES + 4u32);
             if lid == 0u32 {
                 publish(carried, base + CANDIDATES, f32(count));
