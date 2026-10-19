@@ -133,6 +133,21 @@ fn a_sectioned_top_k_sorts_every_band_it_walks() {
     assert_eq!(runtime.read(&program, indices), expected_indices);
 }
 
+#[test]
+fn a_gated_wave_waits_for_every_wave_before_it() {
+    const ELEMENTS: u32 = 1 << 20;
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 1, ELEMENTS]), Element::Single);
+    let total = graph.sum(input);
+    graph.retain(total);
+    let runtime = open();
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(&program, input, &vec![1.0; ELEMENTS as usize]);
+    runtime.run(&program);
+    assert_close(&runtime.read(&program, total), &[ELEMENTS as f32], 0.0);
+}
+
 fn peaked(rows: u32, columns: u32, sections: u32, peak: f32) -> Vec<f32> {
     let mut values = vec![-peak; (rows * columns) as usize];
     let span = columns / sections;

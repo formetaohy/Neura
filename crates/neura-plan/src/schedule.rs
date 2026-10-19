@@ -294,17 +294,17 @@ impl Schedule {
 
     pub(crate) fn build_wave_table(&mut self) {
         let waves = self.count as usize;
-        let mut table = vec![0u32; (waves + 1) * 4];
+        let mut table = vec![0u32; 1 + waves * 4];
+        table[0] = waves as u32;
         for (segment, record) in self.segments.iter().enumerate() {
             let wave = record.wave as usize;
-            if table[wave * 4 + 1] == 0 {
-                table[wave * 4] = segment as u32;
+            if table[1 + wave * 4 + 1] == 0 {
+                table[1 + wave * 4] = segment as u32;
             }
-            table[wave * 4 + 1] += 1;
+            table[1 + wave * 4 + 1] += 1;
         }
         for wave in 0..waves {
-            table[wave * 4 + 2] = u32::from(self.gated[wave]);
-            table[wave * 4 + 3] = u32::from(self.gated.get(wave + 1).copied().unwrap_or(false));
+            table[1 + wave * 4 + 2] = u32::from(self.gated[wave]);
         }
         self.wave_table = table;
     }

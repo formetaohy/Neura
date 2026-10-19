@@ -7,8 +7,9 @@ pub const QUEUE: u32 = FIRST + 1;
 pub const GENERATION: u32 = QUEUE + 1;
 pub const WAVES: u32 = GENERATION + 1;
 pub const WAVE_TABLE: u32 = WAVES + 1;
-pub const HEADER_WORDS: u32 = WAVE_TABLE - CURSOR + 1;
-pub const COUNTERS: u32 = WAVE_TABLE + 1;
+pub const PREFIX: u32 = WAVE_TABLE + 1;
+pub const HEADER_WORDS: u32 = PREFIX - CURSOR + 1;
+pub const COUNTERS: u32 = PREFIX + 1;
 
 pub const ENTRY_SHIFT: u32 = 24;
 pub const ENTRY_MASK: u32 = (1 << ENTRY_SHIFT) - 1;
@@ -70,6 +71,7 @@ pub fn header(
         generation & 0xff,
         waves,
         wave_table,
+        0,
     ]
 }
 

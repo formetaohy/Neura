@@ -26,6 +26,7 @@ mod device {
         generation: u32,
         waves: u32,
         wave_table: u32,
+        wave_count: u32,
     ) {
         for index in stride(lid, segment.successors_count, WORKGROUP_SIZE) {
             let next = successors[segment.successors + index];
@@ -41,29 +42,46 @@ mod device {
         }
         if lid == 0u32 {
             atomic_store(&state[remaining(segment_id)], segment.predecessors);
+            claim[0u32] = atomic_sub(&state[wave_of(waves, segment.wave)], 1u32);
         }
-        let held = wave_table + segment.wave * 4u32;
-        let counted = successors[held + 3u32];
-        if counted != 0u32 {
-            if lid == 0u32 {
-                claim[0u32] = atomic_sub(&state[wave_of(waves, segment.wave)], 1u32);
-            }
-            let reached = workgroup_uniform_load(&claim[0u32]);
-            if reached == 1u32 {
-                let next = held + 4u32;
-                let wave_first = successors[next];
-                let wave_count = successors[next + 1u32];
-                let gated = successors[next + 2u32];
-                if gated != 0u32 {
-                    for offset in stride(lid, wave_count, WORKGROUP_SIZE) {
-                        let segment = wave_first + offset;
-                        let slot = atomic_add(&state[control::TAIL], 1u32);
-                        atomic_store(
-                            &state[queue + slot],
-                            (generation << control::ENTRY_SHIFT) | segment,
-                        );
+        let reached = workgroup_uniform_load(&claim[0u32]);
+        if reached != 1u32 {
+            return;
+        }
+        if lid == 0u32 {
+            let mut opened = NO_VALUE;
+            let prefix = atomic_add(&state[control::PREFIX], 0u32);
+            if segment.wave == prefix {
+                let mut next = prefix;
+                loop {
+                    if next >= wave_count {
+                        break;
                     }
+                    if atomic_add(&state[wave_of(waves, next)], 0u32) != 0u32 {
+                        let held = wave_table + 1u32 + next * 4u32;
+                        if successors[held + 2u32] != 0u32 {
+                            opened = next;
+                        }
+                        break;
+                    }
+                    next = next + 1u32;
                 }
+                atomic_store(&state[control::PREFIX], next);
+            }
+            claim[1u32] = opened;
+        }
+        let opened = workgroup_uniform_load(&claim[1u32]);
+        if opened != NO_VALUE {
+            let held = wave_table + 1u32 + opened * 4u32;
+            let wave_first = successors[held];
+            let wave_segments = successors[held + 1u32];
+            for offset in stride(lid, wave_segments, WORKGROUP_SIZE) {
+                let segment = wave_first + offset;
+                let slot = atomic_add(&state[control::TAIL], 1u32);
+                atomic_store(
+                    &state[queue + slot],
+                    (generation << control::ENTRY_SHIFT) | segment,
+                );
             }
         }
     }
@@ -83,6 +101,7 @@ mod device {
             claim[3u32] = state[control::GENERATION];
             claim[4u32] = state[control::WAVES];
             claim[5u32] = state[control::WAVE_TABLE];
+            claim[6u32] = successors[claim[5u32]];
         }
         let count = workgroup_uniform_load(&claim[0u32]);
         let first = workgroup_uniform_load(&claim[1u32]);
@@ -90,6 +109,7 @@ mod device {
         let generation = workgroup_uniform_load(&claim[3u32]);
         let waves = workgroup_uniform_load(&claim[4u32]);
         let wave_table = workgroup_uniform_load(&claim[5u32]);
+        let wave_count = workgroup_uniform_load(&claim[6u32]);
         let last = first + count;
         loop {
             if lid == 0u32 {
@@ -125,6 +145,7 @@ mod device {
             }
             finish(
                 segment_id, segment, lid, first, last, queue, generation, waves, wave_table,
+                wave_count,
             );
         }
     }

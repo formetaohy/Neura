@@ -1257,6 +1257,10 @@ impl Plan {
         if !self.paged {
             schedule.gate_dense_waves(tail);
         }
+        assert!(
+            !self.paged || schedule.gated().iter().all(|gated| !gated),
+            "a plan that streams its weights gates no wave, and this plan gates a wave it cannot open",
+        );
         schedule.build_wave_table();
         let work = ordered.iter().map(|task| task.work).sum();
         let mut dependencies = Vec::new();

@@ -317,6 +317,7 @@ impl Kernel {
             ("control::GENERATION", control::GENERATION),
             ("control::WAVES", control::WAVES),
             ("control::WAVE_TABLE", control::WAVE_TABLE),
+            ("control::PREFIX", control::PREFIX),
             ("control::COUNTERS", control::COUNTERS),
             ("control::ENTRY_SHIFT", control::ENTRY_SHIFT),
             ("control::ENTRY_MASK", control::ENTRY_MASK),
