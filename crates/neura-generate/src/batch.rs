@@ -133,10 +133,6 @@ impl Batch {
                 "a batch fills {chunk} rows of a context of {context}, and a chunk holds between two rows and the rows a prompt leaves for the answer",
             );
         }
-        assert!(
-            batch == 1 || chunks.is_empty(),
-            "a batch of {batch} planes walks its prompts token by token, and {chunks:?} names chunks for a batch of one plane",
-        );
         let widest = chunks.first().copied().unwrap_or(1).max(batch);
         let capacity = context
             .checked_add(widest)

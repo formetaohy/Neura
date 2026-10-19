@@ -22,7 +22,8 @@ model's own)` and builds one answer program whose `batch` planes each hold a seq
 are shared by every plane, while the kv caches, the convolution states and the gated delta net
 states advance one plane at a time. Each plane carries its own cursor and mask. A run of one
 sequence fills a prompt in the largest chunk of the ladder `32, 8` that leaves a token for the
-answer, while a batch of more planes walks each prompt one token at a time. Admitting a sequence
+answer, and every plane of a batch fills its own prompt in the same ladder; a plane whose prompt
+no longer fills a chunk walks its remaining tokens one at a time. Admitting a sequence
 runs a small reset program that zeroes the kv cache, the convolution state and the gated delta net
 state of its plane before the first prompt token; the other planes keep their state.
 

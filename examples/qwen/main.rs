@@ -110,14 +110,11 @@ fn main() {
         model.reset(graph, reset);
         reset
     };
-    let chunks = match sequences {
-        1 => CHUNKS
-            .iter()
-            .copied()
-            .filter(|chunk| *chunk < context)
-            .collect::<Vec<u32>>(),
-        _ => Vec::new(),
-    };
+    let chunks = CHUNKS
+        .iter()
+        .copied()
+        .filter(|chunk| *chunk < context)
+        .collect::<Vec<u32>>();
     let mut spec = BatchSpec::new(context, sequences, &chunks);
     if let Some(sampling) = sampling {
         spec = spec.sampled(sampling);

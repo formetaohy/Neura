@@ -276,13 +276,15 @@ fn walked_alone(
 
 #[test]
 fn a_batch_answers_every_plane_with_the_tokens_a_row_answers_with() {
-    for stagger in [false, true] {
-        let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, &[], stagger, None);
-        assert_eq!(
-            walked,
-            vec![vec![1, 1, 1, 1, 1], vec![2, 2, 2, 2, 2]],
-            "stagger {stagger}",
-        );
+    for chunks in [&[][..], &[4, 2]] {
+        for stagger in [false, true] {
+            let walked = batched(&[0, 1, 1, 2, 1], &[2, 2, 0], 5, chunks, stagger, None);
+            assert_eq!(
+                walked,
+                vec![vec![1, 1, 1, 1, 1], vec![2, 2, 2, 2, 2]],
+                "chunks {chunks:?} stagger {stagger}",
+            );
+        }
     }
 }
 

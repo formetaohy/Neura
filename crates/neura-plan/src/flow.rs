@@ -13,7 +13,7 @@ enum Query {
 
 #[derive(Clone, Default)]
 struct Cell {
-    writer: Option<u32>,
+    writers: Vec<u32>,
     readers: Vec<u32>,
 }
 
@@ -21,6 +21,12 @@ impl Cell {
     fn hold(&mut self, segment: u32) {
         if self.readers.last() != Some(&segment) {
             self.readers.push(segment);
+        }
+    }
+
+    fn write(&mut self, segment: u32) {
+        if self.writers.last() != Some(&segment) {
+            self.writers.push(segment);
         }
     }
 }
@@ -94,10 +100,8 @@ impl Store {
 }
 
 fn collect(cell: &Cell, query: Query, out: &mut Vec<u32>) {
-    if matches!(query, Query::Writers | Query::Both)
-        && let Some(segment) = cell.writer
-    {
-        out.push(segment);
+    if matches!(query, Query::Writers | Query::Both) {
+        out.extend_from_slice(&cell.writers);
     }
     if matches!(query, Query::Readers | Query::Both) {
         out.extend_from_slice(&cell.readers);
@@ -186,7 +190,7 @@ impl Flow {
                 values.elements(*storage),
                 quantized(values, *storage),
                 |cell| {
-                    cell.writer = Some(segment);
+                    cell.write(segment);
                     cell.readers.clear();
                 },
             );
@@ -329,7 +333,7 @@ pub(crate) fn arena_spans(
 
 #[cfg(test)]
 mod tests {
-    use super::arena_spans;
+    use super::{Query, Store, arena_spans};
     use crate::region::Region;
     use neura_abi::Element;
 
@@ -340,5 +344,16 @@ mod tests {
         assert_eq!(spans, vec![(68, 76)]);
         arena_spans(256, Element::Single, 64, Region::Whole, &mut spans);
         assert_eq!(spans, vec![(64, 128)]);
+    }
+
+    #[test]
+    fn a_reader_holds_every_writer_of_a_cell() {
+        let mut store = Store::default();
+        let region = Region::run(0, 8);
+        store.for_each_cell(region, 8, false, |cell| cell.write(0));
+        store.for_each_cell(region, 8, false, |cell| cell.write(1));
+        let mut held = Vec::new();
+        store.query(region, 8, false, Query::Writers, &mut held);
+        assert_eq!(held, vec![0, 1]);
     }
 }
