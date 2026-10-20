@@ -12,7 +12,9 @@ const PLAN_ROUNDS: u32 = 4;
 
 impl Runtime {
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
-        let scratch = graph.updates_weights().then(|| self.scratch_weights(graph));
+        let scratch = graph
+            .updates_parameters()
+            .then(|| self.scratch_weights(graph));
         let measuring = scratch.as_ref().unwrap_or(weights);
         let held = self.hold_state(measuring);
         let products = self.products(graph);

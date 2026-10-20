@@ -945,13 +945,13 @@ impl Graph {
         }
     }
 
-    pub fn updates_weights(&self) -> bool {
+    pub fn updates_parameters(&self) -> bool {
         let state = self.state.borrow();
         state.tasks.iter().any(|task| {
             task.in_place
                 && matches!(
                     state.values[task.out as usize].residency,
-                    Residency::Parameter | Residency::State
+                    Residency::Parameter
                 )
         })
     }
