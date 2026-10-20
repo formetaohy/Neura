@@ -7,6 +7,10 @@ pub(crate) const SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
 pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
 const NARROW_ROWS: u32 = 2;
+const WIDE_COLUMNS: u32 = 64;
+const WIDE_FLOOR: u32 = 2048;
+const SPLIT_COLUMNS_FLOOR: u32 = 1024;
+const SPLIT_DEPTH_FLOOR: u32 = 1024;
 const BARRIER_SLOTS: u128 = 16;
 const STREAMED_LOAD_WEIGHT: u128 = 6;
 const COALESCED_TRAFFIC_WEIGHT: u128 = 4;
@@ -137,6 +141,23 @@ impl Product {
             Contiguous::Reduction => MatmulStrategy::Folded,
             Contiguous::Output => MatmulStrategy::Streamed,
         };
+        let wide = self.columns >= WIDE_FLOOR
+            || (self.columns >= SPLIT_COLUMNS_FLOOR && self.depth > SPLIT_DEPTH_FLOOR);
+        if strategy == MatmulStrategy::Folded && wide && self.weight.element().stages_a_run() {
+            let widest = profile
+                .tiles()
+                .iter()
+                .copied()
+                .filter(|tile| {
+                    tile.strategy() == MatmulStrategy::Folded
+                        && tile.stages_a_run()
+                        && tile.columns() <= WIDE_COLUMNS
+                })
+                .max_by_key(|tile| tile.columns());
+            if let Some(tile) = widest {
+                return Some(tile);
+            }
+        }
         self.cheapest(profile, |tile| tile.strategy() == strategy)
     }
 
