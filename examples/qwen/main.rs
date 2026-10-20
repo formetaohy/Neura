@@ -189,6 +189,13 @@ fn main() {
         spec = spec.shared();
     }
     let mut batch = Batch::new(&runtime, loaded, spec, answer, fill, reset);
+    if sampling.is_some()
+        && let Some(temperature) = std::env::var("NEURA_TEMPERATURE")
+            .ok()
+            .map(|held| held.parse::<f32>().expect("a temperature is a number"))
+    {
+        batch.set_temperature(&runtime, temperature);
+    }
     match turns() {
         Some(prompts) => {
             assert!(

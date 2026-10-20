@@ -103,6 +103,8 @@ pub struct Batch {
     prefix_fills: Vec<(u32, PrefixEntry)>,
     reset: Program,
     reset_seed: BatchSeed,
+    temperature: Option<Value>,
+    temperatures: Vec<f32>,
     compile: fn(&Runtime, &Graph, &Weights) -> Program,
     batch: u32,
     context: u32,
@@ -221,6 +223,7 @@ impl Batch {
             false => Runtime::compile,
         };
         let seeded = sampling != Sampling::GREEDY;
+        let initial = sampling.temperature().unwrap_or(1.0);
         let mut fills = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
@@ -238,6 +241,7 @@ impl Batch {
             held_fill(&graph, &step, chunk, batch);
             if seeded {
                 graph.state(Shape::scalar(), Init::Zero, Element::Single);
+                temperature_state(&graph, batch, initial);
             }
             fills.push((
                 chunk,
@@ -263,6 +267,7 @@ impl Batch {
         held_answer(&answering, &step, batch);
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
         let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
+        let temperature = seeded.then(|| temperature_state(&answering, batch, initial));
         let store = weights(&answering);
         let mut answer = Pending {
             graph: answering,
@@ -271,6 +276,7 @@ impl Batch {
                 sampling,
                 seed,
                 advance,
+                temperature,
             },
             entry: None,
         };
@@ -290,6 +296,7 @@ impl Batch {
         held_seed(&clearing, &reset_seed, batch);
         if seeded {
             clearing.state(Shape::scalar(), Init::Zero, Element::Single);
+            temperature_state(&clearing, batch, initial);
         }
         let reset = compile(runtime, &clearing, &store);
         Self {
@@ -299,6 +306,8 @@ impl Batch {
             prefix_fills: Vec::new(),
             reset,
             reset_seed,
+            temperature,
+            temperatures: vec![initial; batch as usize],
             compile,
             batch,
             context,
@@ -327,6 +336,37 @@ impl Batch {
 
     pub fn chunks(&self) -> impl Iterator<Item = u32> + '_ {
         self.fills.iter().map(|(chunk, _)| *chunk)
+    }
+
+    pub fn set_temperature(&mut self, runtime: &Runtime, value: f32) {
+        assert!(
+            value > 0.0 && value.is_finite(),
+            "a sampling temperature of {value} spreads no logits",
+        );
+        self.temperatures.fill(value);
+        self.write_temperatures(runtime);
+    }
+
+    pub fn set_temperature_of(&mut self, runtime: &Runtime, slot: u32, value: f32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            value > 0.0 && value.is_finite(),
+            "a sampling temperature of {value} spreads no logits",
+        );
+        self.temperatures[slot as usize] = value;
+        self.write_temperatures(runtime);
+    }
+
+    fn write_temperatures(&mut self, runtime: &Runtime) {
+        let temperature = self
+            .temperature
+            .expect("a greedy batch draws no temperature");
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, temperature, &self.temperatures);
     }
 
     pub fn prefix(
@@ -391,6 +431,7 @@ impl Batch {
                     held_prefix(&graph, &step, rows);
                     if self.seeded {
                         graph.state(Shape::scalar(), Init::Zero, Element::Single);
+                        temperature_state(&graph, self.batch, 1.0);
                     }
                     let program = (self.compile)(runtime, &graph, &self.store);
                     self.prefix_fills
@@ -1033,6 +1074,14 @@ fn token_of(value: &f32) -> u32 {
         "the model chose {value} where a token stands",
     );
     *value as u32
+}
+
+fn temperature_state(graph: &Graph, batch: u32, temperature: f32) -> Value {
+    graph.state(
+        Shape::of([1, 1, batch, 1]),
+        Init::Constant(temperature),
+        Element::Single,
+    )
 }
 
 fn held_answer(graph: &Graph, step: &BatchStep, batch: u32) {

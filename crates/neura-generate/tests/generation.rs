@@ -8,6 +8,7 @@ use neura_gguf::Gguf;
 use neura_graph::Shape;
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
+use std::collections::BTreeSet;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -616,5 +617,52 @@ fn a_batch_keeps_only_the_window_of_tokens_it_declares() {
     assert_eq!(
         walked, expected,
         "a window of {WINDOW} tokens answers with the tokens its last keys choose",
+    );
+}
+
+#[test]
+fn a_temperature_the_host_writes_steers_the_next_draw_without_recompiling() {
+    let runtime = runtime();
+    let build = |graph: &neura_graph::Graph, _rows| {
+        let token = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
+        let cursor = graph.input(Shape::scalar(), Element::Single);
+        let parts = (0..CLASSES)
+            .map(|class| graph.fill(Shape::of([1, 1, 1, 1]), if class == 0 { 1.0 } else { 0.0 }))
+            .collect::<Vec<_>>();
+        let logits = graph.concat(&parts, 3);
+        Step {
+            token,
+            cursor,
+            logits,
+        }
+    };
+    let mut family = Family::sampled(
+        &runtime,
+        |graph| runtime.weights(graph),
+        &[1],
+        build,
+        Sampling::sampled(1.0, CLASSES, 1.0),
+    );
+    family.set_temperature(&runtime, 0.01);
+    for _ in 0..64 {
+        assert_eq!(
+            family.answer(&runtime, 0, 0),
+            0,
+            "a temperature of 0.01 keeps the largest logit of a row that holds one",
+        );
+    }
+    family.set_temperature(&runtime, 1000.0);
+    let mut drawn = BTreeSet::new();
+    for _ in 0..256 {
+        drawn.insert(family.answer(&runtime, 0, 0));
+    }
+    assert!(
+        drawn.len() > 1,
+        "a temperature of 1000 spreads a row of one largest logit over one class, and the draws stayed in {drawn:?}",
+    );
+    assert_eq!(
+        runtime.built_plans(),
+        1,
+        "writing a temperature reuses the program the family compiled",
     );
 }

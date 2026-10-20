@@ -37,6 +37,13 @@ impl Sampling {
             cumulative,
         }
     }
+
+    pub fn temperature(self) -> Option<f32> {
+        match self {
+            Self::Greedy => None,
+            Self::Sampled { temperature, .. } => Some(temperature),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -50,6 +57,7 @@ pub struct Family {
     store: Weights,
     fills: Vec<(u32, Pending)>,
     answer: Pending,
+    temperature: Option<Value>,
     compile: fn(&Runtime, &Graph, &Weights) -> Program,
 }
 
@@ -58,6 +66,7 @@ pub(crate) struct Draw {
     pub(crate) sampling: Sampling,
     pub(crate) seed: Option<Value>,
     pub(crate) advance: Option<Value>,
+    pub(crate) temperature: Option<Value>,
 }
 
 struct Pending {
@@ -153,6 +162,7 @@ impl Family {
             );
         }
         let seeded = sampling != Sampling::GREEDY;
+        let initial = sampling.temperature().unwrap_or(1.0);
         let mut graphs = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
@@ -160,6 +170,7 @@ impl Family {
             held(&graph, &step, *chunk);
             if seeded {
                 graph.state(Shape::scalar(), Init::Zero, Element::Single);
+                graph.knob(initial);
             }
             graphs.push((graph, step));
         }
@@ -177,6 +188,7 @@ impl Family {
                             sampling: Sampling::GREEDY,
                             seed: None,
                             advance: None,
+                            temperature: None,
                         },
                         entry: None,
                     },
@@ -188,10 +200,12 @@ impl Family {
         held(&answering, &step, 1);
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
         let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
+        let temperature = seeded.then(|| answering.knob(initial));
         let draw = Draw {
             sampling,
             seed,
             advance,
+            temperature,
         };
         let entry = Entry::of(runtime, &answering, &store, step, compile, draw);
         let answer = Pending {
@@ -204,12 +218,25 @@ impl Family {
             store,
             fills,
             answer,
+            temperature,
             compile,
         }
     }
 
     pub fn chunks(&self) -> impl Iterator<Item = u32> + '_ {
         self.fills.iter().map(|(chunk, _)| *chunk)
+    }
+
+    pub fn set_temperature(&mut self, runtime: &Runtime, value: f32) {
+        assert!(
+            value > 0.0 && value.is_finite(),
+            "a sampling temperature of {value} spreads no logits",
+        );
+        let temperature = self
+            .temperature
+            .expect("a greedy family draws no temperature");
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, temperature, &[value]);
     }
 
     pub fn fill(&mut self, runtime: &Runtime, tokens: &[u32], cursor: u32) {
@@ -312,7 +339,7 @@ pub(crate) fn chosen(graph: &Graph, logits: Value, draw: Draw) -> Value {
     let chosen = match draw.sampling {
         Sampling::Greedy => graph.argmax(logits),
         Sampling::Sampled {
-            temperature,
+            temperature: _,
             keep,
             cumulative,
         } => {
@@ -322,11 +349,10 @@ pub(crate) fn chosen(graph: &Graph, logits: Value, draw: Draw) -> Value {
             let advance = draw
                 .advance
                 .expect("a sampled program walks the steps it draws");
-            let logits = if temperature == 1.0 {
-                logits
-            } else {
-                graph.mul(logits, graph.fill(Shape::scalar(), 1.0 / temperature))
-            };
+            let temperature = draw
+                .temperature
+                .expect("a sampled program walks the temperature of its own");
+            let logits = graph.mul(logits, graph.recip(temperature));
             graph.add_into(seed, advance);
             graph.sample(
                 logits,
@@ -418,6 +444,10 @@ impl<'t> Generator<'t> {
             position: 0,
             context,
         }
+    }
+
+    pub fn set_temperature(&mut self, value: f32) {
+        self.family.set_temperature(&self.runtime, value);
     }
 
     pub fn run(&mut self, prompt: &[u32], wanted: usize, mut sink: impl FnMut(&str)) -> Report {
