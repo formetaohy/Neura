@@ -12,8 +12,8 @@ mod window;
 
 pub use autodiff::Gradients;
 pub use graph::{
-    AttentionOptions, Compacted, Graph, GraphSnapshot, GraphStamp, Prefixes, Ragged, Residency,
-    Revision, Rows, TaskInfo, Value, ValueInfo,
+    AttentionOptions, Compacted, DeltaInput, Graph, GraphSnapshot, GraphStamp, Prefixes, Ragged,
+    Residency, Revision, Rows, TaskInfo, Value, ValueInfo,
 };
 pub use init::{Fan, Init};
 pub use layout::Layout;

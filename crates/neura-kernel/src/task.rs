@@ -3,6 +3,7 @@ pub(crate) mod choice;
 pub(crate) mod clear;
 pub(crate) mod conv;
 pub(crate) mod convert;
+pub(crate) mod delta;
 pub(crate) mod layout;
 pub(crate) mod matmul;
 pub(crate) mod matmul_weight;

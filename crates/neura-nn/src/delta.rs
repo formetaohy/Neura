@@ -1,16 +1,7 @@
-use neura_abi::Element;
-use neura_graph::{Graph, Init, Shape, Triangle, Value};
+use neura_abi::{DELTA_WIDTH, Element};
+use neura_graph::{DeltaInput, Graph, Init, Shape, Triangle, Value};
 
 const DEFAULT_CHUNK: u32 = 64;
-
-#[derive(Clone, Copy)]
-pub struct DeltaInput {
-    pub query: Value,
-    pub key: Value,
-    pub value: Value,
-    pub beta: Value,
-    pub log_decay: Value,
-}
 
 struct Chunk {
     query: Value,
@@ -186,6 +177,45 @@ impl DeltaRule {
             return self.step(graph, input);
         }
         self.walk(graph, input)
+    }
+
+    pub fn advance(&self, graph: &Graph, input: DeltaInput, keep: Option<Value>) -> Value {
+        let DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay,
+        } = input;
+        assert_eq!(
+            self.rows, 1,
+            "a fused delta step advances one row, and this rule walks {} rows",
+            self.rows,
+        );
+        assert_eq!(
+            self.seat,
+            Seat::Planes,
+            "a fused delta step advances the planes it writes, and this rule walks a shared prefix",
+        );
+        assert!(
+            self.width <= DELTA_WIDTH,
+            "a fused delta step holds {} numbers of width where its kernel holds {DELTA_WIDTH}",
+            self.width,
+        );
+        self.holds(graph, "query", query);
+        self.holds(graph, "key", key);
+        self.holds(graph, "value", value);
+        graph.delta_step(
+            self.state,
+            DeltaInput {
+                query,
+                key,
+                value,
+                beta,
+                log_decay,
+            },
+            keep,
+        )
     }
 
     pub fn state(&self) -> Value {

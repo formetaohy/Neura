@@ -1,9 +1,13 @@
-use crate::graph::{AttentionOptions, Declaration, Graph, Ragged, Residency, TaskInfo, Value};
+use crate::graph::{
+    AttentionOptions, Declaration, DeltaInput, Graph, Ragged, Residency, TaskInfo, Value,
+};
 use crate::layout::Layout;
 use crate::pool::Pool;
 use crate::shape::{PlaneLayout, Shape};
 use crate::window::Window;
-use neura_abi::{CANDIDATES, Distribution, EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE};
+use neura_abi::{
+    CANDIDATES, DELTA_WIDTH, Distribution, EXACT_WALK_LIMIT, Element, Kind, MAX_RANK, NO_VALUE,
+};
 use neura_pointwise as op;
 
 const SEGMENT_CHUNK_ROWS: u32 = 512;
@@ -1502,6 +1506,92 @@ impl Graph {
         }
         self.scatter(kind, target, indices, updates);
         self.wrote_in_place(target);
+    }
+
+    pub fn delta_step(&self, state: Value, input: DeltaInput, keep: Option<Value>) -> Value {
+        let state = self.own(state);
+        let DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay,
+        } = input;
+        let query = self.own(query);
+        let key = self.own(key);
+        let value = self.own(value);
+        let beta = self.own(beta);
+        let log_decay = self.own(log_decay);
+        let dims = self.shape(state).dims();
+        let (heads, batch, width) = (dims[0], dims[1], dims[3]);
+        assert!(
+            heads > 0 && batch > 0 && width > 0 && width <= DELTA_WIDTH && dims[2] == width,
+            "a delta step walks a square state of {heads} heads over {batch} planes of {width} numbers, and value {} walks {:?}",
+            state.id(),
+            dims,
+        );
+        for (what, held) in [("query", query), ("key", key), ("value", value)] {
+            assert_eq!(
+                self.shape(held).dims(),
+                [heads, batch, 1, width],
+                "a delta step reads a {what} of {heads} heads over {batch} planes of {width} numbers, and value {} walks {:?}",
+                held.id(),
+                self.shape(held).dims(),
+            );
+        }
+        for (what, held) in [("beta", beta), ("log decay", log_decay)] {
+            assert_eq!(
+                self.shape(held).dims(),
+                [heads, batch, 1, 1],
+                "a delta step scales the {what} of {heads} heads over {batch} planes, and value {} walks {:?}",
+                held.id(),
+                self.shape(held).dims(),
+            );
+        }
+        if let Some(keep) = keep {
+            assert_eq!(
+                self.shape(keep).dims(),
+                [1, batch, 1, 1],
+                "a delta step keeps the planes of a {batch} plane batch, and value {} walks {:?}",
+                keep.id(),
+                self.shape(keep).dims(),
+            );
+        }
+        for held in [state, query, key, value, beta, log_decay] {
+            assert_eq!(
+                self.element(held),
+                Element::Single,
+                "a delta step walks single precision numbers, and value {} holds {}",
+                held.id(),
+                self.element(held).name(),
+            );
+        }
+        self.assert_in_place(state, state);
+        let out = self.stored(
+            Shape::from_axes([heads, batch, 1, width], [None, None, None, None]),
+            Element::Single,
+            1.0,
+            Residency::Derived,
+            self.tracked(&[state, query, key, value, beta, log_decay]),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Delta,
+            op::NONE,
+            out.id(),
+            [
+                state.id(),
+                query.id(),
+                key.id(),
+                value.id(),
+                beta.id(),
+                log_decay.id(),
+            ],
+        );
+        task.extra = state.id();
+        task.bias = keep.map_or(NO_VALUE, |keep| keep.id());
+        self.push(task);
+        self.wrote_in_place(state);
+        out
     }
 
     pub fn sum(&self, value: Value) -> Value {

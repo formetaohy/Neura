@@ -1356,6 +1356,18 @@ const _: () = assert!(
     "a run slot holds one code for every number of a block the element packs",
 );
 pub const FOLDED_STAGE: u32 = 1024;
+pub const DELTA_WIDTH: u32 = neura_abi::DELTA_WIDTH;
+pub const DELTA_TILE_ROWS: u32 = 32;
+pub const DELTA_TILE_STRIDE: u32 = DELTA_WIDTH + 1;
+pub const DELTA_TILE_WORDS: u32 = DELTA_TILE_ROWS * DELTA_TILE_STRIDE;
+pub const DELTA_KH: u32 = DELTA_TILE_WORDS;
+pub const DELTA_QH: u32 = DELTA_KH + DELTA_WIDTH;
+pub const DELTA_DELTA: u32 = DELTA_QH + DELTA_WIDTH;
+pub const DELTA_Q: u32 = DELTA_DELTA + DELTA_WIDTH;
+pub const DELTA_K: u32 = DELTA_Q + DELTA_WIDTH;
+pub const DELTA_V: u32 = DELTA_K + DELTA_WIDTH;
+pub const DELTA_REDUCE: u32 = DELTA_V + DELTA_WIDTH;
+pub const DELTA_SCRATCH_WORDS: u32 = DELTA_REDUCE + DELTA_WIDTH;
 const FOLDED_COLUMNS_FLOOR: u32 = 32;
 pub const FOLDED_FOLDS: u32 = 8;
 pub const FOLDED_RUN: u32 = match staged_block() {
@@ -2877,6 +2889,7 @@ impl Geometry {
                 .max()
                 .unwrap_or(0),
             DeviceModule::Scan => self.workgroup,
+            DeviceModule::Delta => DELTA_SCRATCH_WORDS,
             _ => 0,
         }
     }

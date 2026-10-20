@@ -73,6 +73,7 @@ pub(crate) trait Walk: Reads {
     fn chain(&self) -> impl Iterator<Item = u32>;
     fn depends(&self) -> impl Iterator<Item = u32>;
     fn split(&self) -> Split;
+    fn plane(&self) -> u32;
 }
 
 impl Walk for Task {
@@ -118,6 +119,10 @@ impl Walk for Task {
 
     fn split(&self) -> Split {
         self.split
+    }
+
+    fn plane(&self) -> u32 {
+        self.plane
     }
 }
 
@@ -579,6 +584,7 @@ fn narrow<W: Walk, V: Values>(
         Kind::ClassLogSoftmaxFold => {
             class_log_softmax_fold(values, task, first, count, &mut narrowed)
         }
+        Kind::Delta => delta(values, task, &mut narrowed),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
@@ -636,6 +642,24 @@ fn narrow<W: Walk, V: Values>(
     }
     for count in task.depends() {
         narrowed.read_whole(count);
+    }
+}
+
+fn delta<W: Walk, V: Values>(values: &V, task: &W, narrowed: &mut Narrowed<'_>) {
+    let state = task.input(0);
+    let dims = values.dims(state);
+    let width = dims[3];
+    let area = u64::from(width) * u64::from(width);
+    let plane = u64::from(task.plane());
+    if values.owned(state) && values.dense(state) {
+        narrowed.read(state, Region::run(plane * area, area));
+        narrowed.write(task.extra(), Region::run(plane * area, area));
+    }
+    let out = task.out();
+    let out_dims = values.dims(out);
+    if values.owned(out) && values.dense(out) {
+        let columns = u64::from(out_dims[3]);
+        narrowed.write(out, Region::run(plane * columns, columns));
     }
 }
 

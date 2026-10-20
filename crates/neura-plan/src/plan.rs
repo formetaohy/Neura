@@ -1539,6 +1539,10 @@ impl Walk for Walked<'_> {
     fn split(&self) -> Split {
         self.recorded.split()
     }
+
+    fn plane(&self) -> u32 {
+        self.recorded.plane()
+    }
 }
 
 impl schedule::Scheduled for Walked<'_> {
@@ -2239,7 +2243,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::Select
             | Kind::ChoiceFold
             | Kind::Clear
-            | Kind::Length => {}
+            | Kind::Length
+            | Kind::Delta => {}
         }
     }
 }

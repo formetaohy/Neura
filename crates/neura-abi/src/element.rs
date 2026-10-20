@@ -34,6 +34,7 @@ pub const QUANT_BLOCK: u32 = 32;
 pub const SUPER_BLOCK: u32 = 256;
 pub const SUPER_SUB_BLOCK: u32 = 32;
 pub const SUPER_SMALL_BLOCK: u32 = 16;
+pub const DELTA_WIDTH: u32 = 128;
 pub const SUPER_SCALE_BYTES: u32 = 12;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

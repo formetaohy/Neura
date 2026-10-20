@@ -16,6 +16,7 @@ pub enum DeviceModule {
     Rows,
     MatmulWeight,
     Noise,
+    Delta,
 }
 
 impl DeviceModule {
@@ -36,6 +37,7 @@ impl DeviceModule {
         Self::Rows,
         Self::MatmulWeight,
         Self::Noise,
+        Self::Delta,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -56,6 +58,7 @@ impl DeviceModule {
             Self::Rows => "rows",
             Self::MatmulWeight => "matmul_weight",
             Self::Noise => "noise",
+            Self::Delta => "delta",
         }
     }
 }
@@ -614,6 +617,14 @@ kinds! {
         geometry: Access,
         prelude: false,
         chain: true,
+        origin: false,
+    };
+    Delta DELTA = "delta" {
+        entry: "run_delta",
+        modules: [Delta],
+        geometry: None,
+        prelude: false,
+        chain: false,
         origin: false,
     };
     TopK TOP_K = "top_k" {

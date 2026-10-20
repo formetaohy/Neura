@@ -197,6 +197,15 @@ pub(crate) struct RaggedAxis {
     pub(crate) queries: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct DeltaInput {
+    pub query: Value,
+    pub key: Value,
+    pub value: Value,
+    pub beta: Value,
+    pub log_decay: Value,
+}
+
 pub struct GraphSnapshot {
     values: Vec<ValueInfo>,
     tasks: Vec<TaskInfo>,

@@ -635,6 +635,7 @@ fn schedule_unit(
                 "a fold of row statistics comes from the class log softmax whose columns are split"
             )
         }
+        Kind::Delta => delta_step(plan, unit, profile),
         Kind::Rope | Kind::RopeGrad => {
             let out = plan.shape(unit.out);
             if unit.segments != NO_VALUE {
@@ -2046,6 +2047,18 @@ fn clear(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
         task.in_place = true;
         task.prelude.clear();
         task.chain.clear();
+        plan.tasks.push(task);
+    }
+}
+
+fn delta_step(plan: &mut Plan, unit: &TaskInfo, _profile: Profile) {
+    let dims = plan.shape(unit.inputs[0]).dims();
+    let width = dims[3];
+    let planes = dims[0] * dims[1];
+    let work = 3 * u64::from(width) * u64::from(width) + 6 * u64::from(width);
+    for plane in 0..planes {
+        let mut task = Task::span(unit, 0, 1, work);
+        task.plane = plane;
         plan.tasks.push(task);
     }
 }

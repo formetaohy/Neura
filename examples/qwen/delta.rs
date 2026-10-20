@@ -233,17 +233,18 @@ impl Delta {
             graph.add(alpha, heads(graph, self.bias, self.heads, 1)),
         );
         let log_decay = graph.mul(heads(graph, self.decay, self.heads, 1), paced);
-        let attended = self.rule.forward(
-            graph,
-            DeltaInput {
-                query,
-                key,
-                value,
-                beta,
-                log_decay,
-            },
-            Some(mask),
-        );
+        let rule_input = DeltaInput {
+            query,
+            key,
+            value,
+            beta,
+            log_decay,
+        };
+        let attended = if self.rows == 1 && !self.prefix {
+            self.rule.advance(graph, rule_input, Some(mask))
+        } else {
+            self.rule.forward(graph, rule_input, Some(mask))
+        };
         let gated = graph.mul(
             rms(graph, attended, self.output_norm, self.floor),
             graph.silu(gate),

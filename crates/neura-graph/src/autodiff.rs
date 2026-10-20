@@ -848,6 +848,10 @@ impl Graph {
                     self.accumulate(grads, input, out);
                 }
             }
+            Kind::Delta => panic!(
+                "the {} task advances its state in place and carries no gradient; build the recurrent step from products to train through it",
+                task.kind.name(),
+            ),
             Kind::Fill
             | Kind::Noise
             | Kind::Layout

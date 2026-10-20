@@ -13,7 +13,7 @@ pub mod strategy;
 
 pub use digest::Digest;
 pub use element::{
-    Block, Element, FP4_BLOCK, FloatFormat, INT4_BLOCK, QUANT_BLOCK, SUPER_BLOCK,
+    Block, DELTA_WIDTH, Element, FP4_BLOCK, FloatFormat, INT4_BLOCK, QUANT_BLOCK, SUPER_BLOCK,
     SUPER_SCALE_BYTES, SUPER_SMALL_BLOCK, SUPER_SUB_BLOCK,
 };
 pub use kind::{DeviceModule, Geometry, KINDS, Kind, KindInfo};

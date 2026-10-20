@@ -469,5 +469,6 @@ fn install(
         DeviceModule::Scan => task::scan::install(compiler),
         DeviceModule::Rows => task::rows::install(compiler),
         DeviceModule::Noise => task::noise::install(compiler),
+        DeviceModule::Delta => task::delta::install(compiler),
     }
 }

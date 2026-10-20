@@ -175,6 +175,10 @@ impl Walk for Recorded<'_> {
     fn split(&self) -> Split {
         self.split()
     }
+
+    fn plane(&self) -> u32 {
+        self.record.plane
+    }
 }
 
 pub(crate) fn assert_records_hold_the_tasks_they_carry(
