@@ -17,3 +17,6 @@ workspace = true
 neura-abi = { workspace = true }
 neura-gguf = { workspace = true }
 neura-graph = { workspace = true }
+
+[dev-dependencies]
+neura-runtime = { workspace = true }

@@ -1,8 +1,8 @@
 use neura_abi::Element;
 use neura_decoder::Cache;
 use neura_generate::{
-    Batch, BatchFill, BatchPrefix, BatchSeed, BatchSpec, BatchStep, Family, Generator, Sampling,
-    Step,
+    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Family, Generator,
+    Sampling, Step,
 };
 use neura_gguf::Gguf;
 use neura_graph::Shape;
@@ -60,7 +60,7 @@ fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Fami
     let build = |graph: &neura_graph::Graph, rows| {
         let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
         let cursor = graph.input(Shape::scalar(), Element::Single);
-        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, 1, rows);
+        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, CAPACITY, 1, rows);
         let held = graph.one_hot(token, CLASSES);
         cache.write(graph, cursor, held, held);
         Step {
@@ -138,20 +138,58 @@ fn a_generator_samples_the_token_its_logits_and_seed_choose() {
     assert_eq!(walked, (5, "0112101111".to_owned(), false));
 }
 
-fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32, shared: bool) -> BatchStep {
-    let token = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
-    let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
-    let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let cache = match shared {
-        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, 1),
-        false => Cache::new(graph, 1, CLASSES, capacity, batch, 1),
-    };
+fn cache(shape: BatchShape, graph: &neura_graph::Graph, rows: u32, shared: bool) -> Cache {
+    match (shared, shape.bounded) {
+        (false, false) => Cache::new(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            rows,
+        ),
+        (false, true) => Cache::windowed(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            rows,
+        ),
+        (true, false) => Cache::with_shared(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            rows,
+        ),
+        (true, true) => Cache::windowed_with_shared(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            rows,
+        ),
+    }
+}
+
+fn batch_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
+    let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
+    let cursor = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
+    let reset = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+    let cache = cache(shape, graph, 1, shape.shared);
     let held = graph.mul(
         graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
         graph.permute(mask, [0, 2, 1, 3]),
     );
-    cache.write(graph, cursor, held, held);
+    cache.write_masked(graph, cursor, held, held, graph.permute(mask, [0, 2, 1, 3]));
     BatchStep {
         token,
         cursor,
@@ -159,30 +197,21 @@ fn batch_answer(graph: &neura_graph::Graph, batch: u32, capacity: u32, shared: b
         reset,
         logits: graph.reshape(
             graph.sum_axis(cache.states()[0], 2),
-            Shape::of([1, 1, batch, CLASSES]),
+            Shape::of([1, 1, shape.batch, CLASSES]),
         ),
     }
 }
 
-fn batch_fill(
-    graph: &neura_graph::Graph,
-    rows: u32,
-    batch: u32,
-    capacity: u32,
-    shared: bool,
-) -> BatchFill {
-    let token = graph.input(Shape::of([1, rows, batch, 1]), Element::Single);
-    let cursor = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let mask = graph.input(Shape::of([1, 1, batch, 1]), Element::Single);
-    let cache = match shared {
-        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, rows),
-        false => Cache::new(graph, 1, CLASSES, capacity, batch, rows),
-    };
+fn batch_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
+    let token = graph.input(Shape::of([1, shape.rows, shape.batch, 1]), Element::Single);
+    let cursor = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+    let mask = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
+    let cache = cache(shape, graph, shape.rows, shape.shared);
     let held = graph.mul(
         graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
         graph.permute(mask, [0, 2, 1, 3]),
     );
-    cache.write(graph, cursor, held, held);
+    cache.write_masked(graph, cursor, held, held, graph.permute(mask, [0, 2, 1, 3]));
     BatchFill {
         token,
         cursor,
@@ -190,23 +219,39 @@ fn batch_fill(
     }
 }
 
-fn batch_reset(graph: &neura_graph::Graph, batch: u32, capacity: u32, shared: bool) -> BatchSeed {
-    let reset = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let share = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let cache = match shared {
-        true => Cache::with_shared(graph, 1, CLASSES, capacity, batch, 1),
-        false => Cache::new(graph, 1, CLASSES, capacity, batch, 1),
-    };
-    cache.reset(graph, reset, shared.then_some(share));
+fn batch_reset(graph: &neura_graph::Graph, shape: BatchShape) -> BatchSeed {
+    let reset = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+    let share = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+    let cache = cache(shape, graph, 1, shape.shared);
+    cache.reset(graph, reset, shape.shared.then_some(share));
     BatchSeed { reset, share }
 }
 
-fn batch_prefix(graph: &neura_graph::Graph, rows: u32, batch: u32, capacity: u32) -> BatchPrefix {
-    let token = graph.input(Shape::of([1, rows, 1, 1]), Element::Single);
+fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
+    let token = graph.input(Shape::of([1, shape.rows, 1, 1]), Element::Single);
     let cursor = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
     let mask = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
     let reset = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
-    let cache = Cache::shared(graph, 1, CLASSES, capacity, batch, rows);
+    let cache = match shape.bounded {
+        true => Cache::windowed_shared(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            shape.rows,
+        ),
+        false => Cache::shared(
+            graph,
+            1,
+            CLASSES,
+            shape.capacity,
+            shape.window,
+            shape.batch,
+            shape.rows,
+        ),
+    };
     cache.clear_shared(graph, reset);
     let held = graph.mul(
         graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
@@ -426,4 +471,96 @@ fn a_batch_fills_a_single_prompt_in_the_chunks_its_model_takes() {
         Some(Sampling::sampled(1.0, 4, 1.0)),
     );
     assert_eq!(sampled.len(), 5);
+}
+
+#[test]
+fn a_suspended_plane_keeps_its_cache_while_another_plane_answers() {
+    let runtime = runtime();
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 2, &[]),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    let first = batch.admit(&runtime, &[0, 1, 1, 2, 1]);
+    let mut held = Vec::new();
+    while held.len() < 2 {
+        for emitted in batch.step(&runtime) {
+            if emitted.slot == first {
+                held.push(emitted.token);
+            }
+        }
+    }
+    batch.suspend(first);
+    let second = batch.admit(&runtime, &[2, 2, 0]);
+    let mut other = Vec::new();
+    while other.len() < 5 {
+        for emitted in batch.step(&runtime) {
+            if emitted.slot == second {
+                other.push(emitted.token);
+            }
+        }
+    }
+    batch.resume(first, &[2, 0]);
+    let mut resumed = Vec::new();
+    while resumed.len() < 2 {
+        for emitted in batch.step(&runtime) {
+            if emitted.slot == first {
+                resumed.push(emitted.token);
+            }
+        }
+    }
+    let mut history = vec![0, 1, 1, 2, 1];
+    history.extend(held);
+    history.extend([2, 0]);
+    assert_eq!(
+        resumed,
+        walked_alone(&history, 2, &[], None),
+        "a plane suspended while another plane answered resumes the state it kept",
+    );
+}
+
+#[test]
+fn a_batch_keeps_only_the_window_of_tokens_it_declares() {
+    const WINDOW: u32 = 4;
+    let runtime = runtime();
+    let prompt = [2, 2, 2, 2, 0, 0, 0, 0];
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 1, &[]).window(WINDOW),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    batch.admit(&runtime, &prompt);
+    let mut walked = Vec::new();
+    while walked.len() < 4 {
+        for emitted in batch.step(&runtime) {
+            walked.push(emitted.token);
+        }
+    }
+    batch.finish(0);
+    let mut history = prompt.to_vec();
+    let mut expected = Vec::new();
+    for _ in 0..4 {
+        let mut counts = [0u32; CLASSES as usize];
+        for token in history.iter().rev().take(WINDOW as usize) {
+            counts[*token as usize] += 1;
+        }
+        let mut next = 0u32;
+        for class in 1..CLASSES {
+            if counts[class as usize] > counts[next as usize] {
+                next = class;
+            }
+        }
+        expected.push(next);
+        history.push(next);
+    }
+    assert_eq!(
+        walked, expected,
+        "a window of {WINDOW} tokens answers with the tokens its last keys choose",
+    );
 }

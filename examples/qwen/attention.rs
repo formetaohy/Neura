@@ -37,6 +37,8 @@ impl Attention {
         let width = config.head_width;
         let Planes {
             capacity,
+            window,
+            bounded,
             batch,
             rows,
             shared,
@@ -74,14 +76,61 @@ impl Attention {
             ),
             query_norm: vector(graph, source, &at("attn_q_norm.weight"), width),
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
-            cache: match (shared, prefix) {
-                (false, _) => Cache::new(graph, config.key_heads, width, capacity, batch, rows),
-                (true, false) => {
-                    Cache::with_shared(graph, config.key_heads, width, capacity, batch, rows)
-                }
-                (true, true) => {
-                    Cache::shared(graph, config.key_heads, width, capacity, batch, rows)
-                }
+            cache: match (shared, prefix, bounded) {
+                (false, _, false) => Cache::new(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
+                (false, _, true) => Cache::windowed(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
+                (true, false, false) => Cache::with_shared(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
+                (true, false, true) => Cache::windowed_with_shared(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
+                (true, true, false) => Cache::shared(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
+                (true, true, true) => Cache::windowed_shared(
+                    graph,
+                    config.key_heads,
+                    width,
+                    capacity,
+                    window,
+                    batch,
+                    rows,
+                ),
             },
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
             floor: graph.fill(Shape::scalar(), config.floor),
@@ -102,7 +151,13 @@ impl Attention {
         self.cache.clear_shared(graph, reset);
     }
 
-    pub(crate) fn forward(&self, graph: &Graph, hidden: Value, cursor: Value) -> Value {
+    pub(crate) fn forward(
+        &self,
+        graph: &Graph,
+        hidden: Value,
+        cursor: Value,
+        mask: Value,
+    ) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let packed = graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2]));
         let query = as_planes(graph, interleaved(graph, packed, self.heads, self.width, 0));
@@ -142,7 +197,7 @@ impl Attention {
             self.base,
             self.rope,
         );
-        self.cache.write(graph, cursor, key, value);
+        self.cache.write_masked(graph, cursor, key, value, mask);
         let attended = self.cache.attend(graph, query, cursor, self.scale);
         let gated = graph.mul(
             as_rows(graph, joined(graph, attended, self.heads)),

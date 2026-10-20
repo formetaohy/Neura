@@ -16,6 +16,8 @@ pub(crate) fn as_rows(graph: &Graph, value: Value) -> Value {
 #[derive(Clone, Copy)]
 pub(crate) struct Planes {
     pub capacity: u32,
+    pub window: u32,
+    pub bounded: bool,
     pub batch: u32,
     pub rows: u32,
     pub shared: bool,
@@ -30,8 +32,8 @@ pub struct Model {
 }
 
 enum Layer {
-    Attend(Attention),
-    Delta(Delta),
+    Attend(Box<Attention>),
+    Delta(Box<Delta>),
 }
 
 impl Model {
@@ -39,9 +41,11 @@ impl Model {
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
-                    Layer::Attend(Attention::new(graph, source, config, layer, planes))
+                    Layer::Attend(Box::new(Attention::new(
+                        graph, source, config, layer, planes,
+                    )))
                 } else {
-                    Layer::Delta(Delta::new(graph, source, config, layer, planes))
+                    Layer::Delta(Box::new(Delta::new(graph, source, config, layer, planes)))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -94,7 +98,7 @@ impl Model {
         let mut hidden = graph.mul(graph.gather(self.embedding, token), mask);
         for layer in &self.layers {
             hidden = match layer {
-                Layer::Attend(attend) => attend.forward(graph, hidden, cursor),
+                Layer::Attend(attend) => attend.forward(graph, hidden, cursor, plane_mask),
                 Layer::Delta(delta) => delta.forward(graph, hidden, plane_mask),
             };
             hidden = graph.mul(hidden, mask);

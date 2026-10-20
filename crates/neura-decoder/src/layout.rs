@@ -7,21 +7,30 @@ pub fn heads(graph: &Graph, value: Value, count: u32, width: u32) -> Value {
     graph.concat(&parts, 0)
 }
 
-pub(crate) fn seat(graph: &Graph, heads: u32, batch: u32, capacity: u32, rows: u32) -> Value {
+pub(crate) fn base(graph: &Graph, heads: u32, batch: u32, stride: u32) -> Value {
     assert!(
-        heads > 0 && batch > 0 && capacity > 0 && rows > 0,
-        "a seat of {batch} planes of {rows} rows over {heads} heads of {capacity} slots names no slot",
+        heads > 0 && batch > 0 && stride > 0,
+        "a seat of {batch} planes of {heads} heads over {stride} slots names no slot",
     );
     let head = (0..heads)
-        .map(|at| graph.fill(Shape::scalar(), (at * batch * capacity) as f32))
+        .map(|at| graph.fill(Shape::scalar(), (at * batch * stride) as f32))
         .collect::<Vec<Value>>();
-    let row = (0..rows)
+    let plane = (0..batch)
+        .map(|at| graph.fill(Shape::scalar(), (at * stride) as f32))
+        .collect::<Vec<Value>>();
+    graph.add(graph.concat(&head, 0), graph.concat(&plane, 1))
+}
+
+pub(crate) fn rows(graph: &Graph, rows: u32) -> Value {
+    assert!(rows > 0, "a seat walks no row of {rows}");
+    let rows = (0..rows)
         .map(|at| graph.fill(Shape::scalar(), at as f32))
         .collect::<Vec<Value>>();
-    let head = graph.concat(&head, 0);
-    let row = graph.concat(&row, 2);
-    let plane = (0..batch)
-        .map(|at| graph.fill(Shape::scalar(), (at * capacity) as f32))
-        .collect::<Vec<Value>>();
-    graph.add(graph.add(head, graph.concat(&plane, 1)), row)
+    graph.concat(&rows, 2)
+}
+
+pub(crate) fn ring(graph: &Graph, window: Value, rows: Value, cursor: Value) -> Value {
+    let position = graph.add(cursor, rows);
+    let turns = graph.floor(graph.div(position, window));
+    graph.sub(position, graph.mul(turns, window))
 }

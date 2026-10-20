@@ -1,5 +1,6 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value};
+use std::cell::OnceCell;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Seat {
@@ -10,6 +11,8 @@ enum Seat {
 struct Shared {
     keys: Value,
     values: Value,
+    visible_keys: Value,
+    visible_values: Value,
 }
 
 #[derive(Clone, Copy)]
@@ -17,6 +20,7 @@ struct CacheShape {
     heads: u32,
     width: u32,
     capacity: u32,
+    window: u32,
     batch: u32,
     rows: u32,
 }
@@ -24,10 +28,18 @@ struct CacheShape {
 pub struct Cache {
     keys: Value,
     values: Value,
+    visible_keys: Value,
+    visible_values: Value,
     shared: Option<Shared>,
+    base: Value,
+    row: Value,
+    span: OnceCell<Value>,
+    scratch: OnceCell<Value>,
     heads: u32,
     width: u32,
     capacity: u32,
+    window: u32,
+    ring: bool,
     batch: u32,
     rows: u32,
     seat: Seat,
@@ -39,20 +51,34 @@ impl Cache {
         heads: u32,
         width: u32,
         capacity: u32,
+        window: u32,
         batch: u32,
         rows: u32,
     ) -> Self {
         Self::of(
             graph,
-            CacheShape {
-                heads,
-                width,
-                capacity,
-                batch,
-                rows,
-            },
+            Self::shape(heads, width, capacity, window, batch, rows),
             false,
             Seat::Planes,
+            false,
+        )
+    }
+
+    pub fn windowed(
+        graph: &Graph,
+        heads: u32,
+        width: u32,
+        capacity: u32,
+        window: u32,
+        batch: u32,
+        rows: u32,
+    ) -> Self {
+        Self::of(
+            graph,
+            Self::shape(heads, width, capacity, window, batch, rows),
+            false,
+            Seat::Planes,
+            true,
         )
     }
 
@@ -61,20 +87,34 @@ impl Cache {
         heads: u32,
         width: u32,
         capacity: u32,
+        window: u32,
         batch: u32,
         rows: u32,
     ) -> Self {
         Self::of(
             graph,
-            CacheShape {
-                heads,
-                width,
-                capacity,
-                batch,
-                rows,
-            },
+            Self::shape(heads, width, capacity, window, batch, rows),
             true,
             Seat::Planes,
+            false,
+        )
+    }
+
+    pub fn windowed_with_shared(
+        graph: &Graph,
+        heads: u32,
+        width: u32,
+        capacity: u32,
+        window: u32,
+        batch: u32,
+        rows: u32,
+    ) -> Self {
+        Self::of(
+            graph,
+            Self::shape(heads, width, capacity, window, batch, rows),
+            true,
+            Seat::Planes,
+            true,
         )
     }
 
@@ -83,28 +123,61 @@ impl Cache {
         heads: u32,
         width: u32,
         capacity: u32,
+        window: u32,
         batch: u32,
         rows: u32,
     ) -> Self {
         Self::of(
             graph,
-            CacheShape {
-                heads,
-                width,
-                capacity,
-                batch,
-                rows,
-            },
+            Self::shape(heads, width, capacity, window, batch, rows),
             true,
             Seat::Shared,
+            false,
         )
     }
 
-    fn of(graph: &Graph, shape: CacheShape, declares_shared: bool, seat: Seat) -> Self {
+    pub fn windowed_shared(
+        graph: &Graph,
+        heads: u32,
+        width: u32,
+        capacity: u32,
+        window: u32,
+        batch: u32,
+        rows: u32,
+    ) -> Self {
+        Self::of(
+            graph,
+            Self::shape(heads, width, capacity, window, batch, rows),
+            true,
+            Seat::Shared,
+            true,
+        )
+    }
+
+    fn shape(
+        heads: u32,
+        width: u32,
+        capacity: u32,
+        window: u32,
+        batch: u32,
+        rows: u32,
+    ) -> CacheShape {
+        CacheShape {
+            heads,
+            width,
+            capacity,
+            window,
+            batch,
+            rows,
+        }
+    }
+
+    fn of(graph: &Graph, shape: CacheShape, declares_shared: bool, seat: Seat, ring: bool) -> Self {
         let CacheShape {
             heads,
             width,
             capacity,
+            window,
             batch,
             rows,
         } = shape;
@@ -114,8 +187,12 @@ impl Cache {
         );
         assert!(capacity > 0, "a cache of {capacity} positions holds no key");
         assert!(
-            rows > 0 && rows <= capacity,
-            "a cache of {capacity} positions takes {rows} rows at a time, and a chunk of more rows than the cache holds walks past the slots it fills",
+            window > 0 && window <= capacity,
+            "a cache of {capacity} positions keeps a window of {window} positions",
+        );
+        assert!(
+            rows > 0 && rows <= window,
+            "a cache of a {window} position window takes {rows} rows at a time, and a chunk of more rows than the window holds walks past the slots it fills",
         );
         assert!(
             declares_shared || seat == Seat::Planes,
@@ -124,25 +201,54 @@ impl Cache {
         let held = Shape::of([heads, batch, capacity, width]);
         let keys = graph.state(held, Init::Zero, Element::Single);
         let values = graph.state(held, Init::Zero, Element::Single);
-        let shared = declares_shared.then(|| Shared {
-            keys: graph.state(
-                Shape::of([heads, 1, capacity, width]),
-                Init::Zero,
-                Element::Single,
-            ),
-            values: graph.state(
-                Shape::of([heads, 1, capacity, width]),
-                Init::Zero,
-                Element::Single,
-            ),
+        let shared = declares_shared.then(|| {
+            let held = Shape::of([heads, 1, capacity, width]);
+            let keys = graph.state(held, Init::Zero, Element::Single);
+            let values = graph.state(held, Init::Zero, Element::Single);
+            Shared {
+                keys,
+                values,
+                visible_keys: visible(graph, keys, window, capacity),
+                visible_values: visible(graph, values, window, capacity),
+            }
         });
+        let (visible_keys, visible_values) = match seat {
+            Seat::Planes => (
+                visible(graph, keys, window, capacity),
+                visible(graph, values, window, capacity),
+            ),
+            Seat::Shared => {
+                let shared = shared
+                    .as_ref()
+                    .expect("a shared cache declares the prefix it walks");
+                (shared.visible_keys, shared.visible_values)
+            }
+        };
+        let base = crate::layout::base(
+            graph,
+            heads,
+            match seat {
+                Seat::Planes => batch,
+                Seat::Shared => 1,
+            },
+            capacity,
+        );
+        let row = crate::layout::rows(graph, rows);
         Self {
             keys,
             values,
+            visible_keys,
+            visible_values,
             shared,
+            base,
+            row,
+            span: OnceCell::new(),
+            scratch: OnceCell::new(),
             heads,
             width,
             capacity,
+            window,
+            ring,
             batch: match seat {
                 Seat::Planes => batch,
                 Seat::Shared => 1,
@@ -153,13 +259,13 @@ impl Cache {
     }
 
     pub fn states(&self) -> [Value; 2] {
-        [self.keys, self.values]
+        [self.visible_keys, self.visible_values]
     }
 
     pub fn shared_states(&self) -> Option<[Value; 2]> {
         self.shared
             .as_ref()
-            .map(|shared| [shared.keys, shared.values])
+            .map(|shared| [shared.visible_keys, shared.visible_values])
     }
 
     pub fn rows(&self) -> u32 {
@@ -170,8 +276,8 @@ impl Cache {
         self.batch
     }
 
-    pub fn capacity(&self) -> u32 {
-        self.capacity
+    pub fn window(&self) -> u32 {
+        self.window
     }
 
     pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
@@ -191,7 +297,7 @@ impl Cache {
                 }
             }
             (None, None) => {
-                for held in self.states() {
+                for held in [self.keys, self.values] {
                     graph.copy_into(held, graph.select(reset, zero, held));
                 }
             }
@@ -209,15 +315,38 @@ impl Cache {
             "a shared cache clears the prefix it writes, and this cache walks the planes",
         );
         let zero = graph.fill(Shape::scalar(), 0.0);
-        for held in self
-            .shared_states()
-            .expect("a shared cache declares the prefix it clears")
-        {
+        let shared = self
+            .shared
+            .as_ref()
+            .expect("a shared cache declares the prefix it clears");
+        for held in [shared.keys, shared.values] {
             graph.copy_into(held, graph.select(reset, zero, held));
         }
     }
 
     pub fn write(&self, graph: &Graph, cursor: Value, keys: Value, values: Value) {
+        self.store(graph, cursor, keys, values, None);
+    }
+
+    pub fn write_masked(
+        &self,
+        graph: &Graph,
+        cursor: Value,
+        keys: Value,
+        values: Value,
+        active: Value,
+    ) {
+        self.store(graph, cursor, keys, values, Some(active));
+    }
+
+    fn store(
+        &self,
+        graph: &Graph,
+        cursor: Value,
+        keys: Value,
+        values: Value,
+        active: Option<Value>,
+    ) {
         for (held, what) in [(keys, "key"), (values, "value")] {
             assert_eq!(
                 graph.shape(held).dims(),
@@ -231,8 +360,43 @@ impl Cache {
                 self.rows,
             );
         }
-        let seat = crate::layout::seat(graph, self.heads, self.batch, self.capacity, self.rows);
-        let slots = graph.add(seat, cursor);
+        let cursor_shape = graph.shape(cursor);
+        assert!(
+            cursor_shape.elements() == 1 || cursor_shape.dims() == [1, self.batch, 1, 1],
+            "a cache of {} planes reads one cursor a plane or one cursor for every plane, and value {} walks {:?}",
+            self.batch,
+            cursor.id(),
+            cursor_shape.dims(),
+        );
+        let active_slots = match self.ring {
+            true => graph.add(
+                self.base,
+                crate::layout::ring(graph, self.span(graph), self.row, cursor),
+            ),
+            false => graph.add(self.base, graph.add(cursor, self.row)),
+        };
+        let slots = match active {
+            Some(active) => {
+                assert_eq!(
+                    graph.shape(active).dims(),
+                    [1, self.batch, 1, 1],
+                    "a cache of {} planes takes one active flag a plane, and value {} walks {:?}",
+                    self.batch,
+                    active.id(),
+                    graph.shape(active).dims(),
+                );
+                assert!(
+                    self.rows <= self.capacity - self.window,
+                    "a cache of {} positions keeps a {} position window, and a masked chunk of {} rows holds only {} scratch rows",
+                    self.capacity,
+                    self.window,
+                    self.rows,
+                    self.capacity - self.window,
+                );
+                graph.select(active, active_slots, self.scratch(graph))
+            }
+            None => active_slots,
+        };
         let (stored_keys, stored_values) = match self.seat {
             Seat::Planes => (self.keys, self.values),
             Seat::Shared => match &self.shared {
@@ -243,6 +407,18 @@ impl Cache {
         for (held, stored) in [(keys, stored_keys), (values, stored_values)] {
             graph.write_into(stored, slots, held);
         }
+    }
+
+    fn span(&self, graph: &Graph) -> Value {
+        *self
+            .span
+            .get_or_init(|| graph.fill(Shape::scalar(), self.window as f32))
+    }
+
+    fn scratch(&self, graph: &Graph) -> Value {
+        *self
+            .scratch
+            .get_or_init(|| graph.add(self.base, graph.add(self.span(graph), self.row)))
     }
 
     pub fn attend(&self, graph: &Graph, query: Value, cursor: Value, scale: Value) -> Value {
@@ -268,26 +444,29 @@ impl Cache {
             shape[0],
             self.heads,
         );
-        let (keys, values) = match self.seat {
-            Seat::Planes => (self.keys, self.values),
-            Seat::Shared => match &self.shared {
-                Some(shared) => (shared.keys, shared.values),
-                None => panic!("a cache that walks a shared prefix declares one"),
-            },
-        };
         graph.attention(
             query,
-            keys,
-            values,
+            self.visible_keys,
+            self.visible_values,
             AttentionOptions {
                 scale: Some(scale),
                 causal: true,
                 origin: Some(cursor),
                 segments: None,
-                reach: None,
+                reach: match self.ring {
+                    true => Some(self.window),
+                    false => None,
+                },
                 query_segments: None,
                 bias: None,
             },
         )
+    }
+}
+
+fn visible(graph: &Graph, value: Value, window: u32, capacity: u32) -> Value {
+    match window == capacity {
+        true => value,
+        false => graph.slice(value, 2, 0, window),
     }
 }

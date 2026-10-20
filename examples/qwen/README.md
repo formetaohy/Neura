@@ -17,8 +17,9 @@ cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capita
 ```
 
 `Qwen3.5-0.8B-Q4_K_M.gguf` and the other mainstream quants of that model (Q4_K_M, Q5_K_M, Q6_K,
-Q8_0) load as they are, without repacking on the host. The example runs a context of `min(1024, the
-model's own)` and builds one answer program whose `batch` planes each hold a sequence: the weights
+Q8_0) load as they are, without repacking on the host. The example runs 1024 tokens of context by
+default (`NEURA_CONTEXT` names another length, capped at the model's own) and builds one answer
+program whose `batch` planes each hold a sequence: the weights
 are shared by every plane, while the kv caches, the convolution states and the gated delta net
 states advance one plane at a time. Each plane carries its own cursor and mask. A run of one
 sequence fills a prompt in the largest chunk of the ladder `32, 8` that leaves a token for the
@@ -48,6 +49,18 @@ computed once instead of once a plane.
 
 ```sh
 NEURA_PREFIX=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
+```
+
+Every full-attention layer keeps its keys and values in a ring whose window is `NEURA_WINDOW`
+tokens; unset, the window is the whole context. A cursor past the window overwrites the oldest
+slots, so attention reads the last window of tokens while the gated delta net layers keep their
+recurrent state, and the kv cache stops growing with the conversation. A window at least as long
+as the context is the exact full attention the model was trained with; a shorter window is a
+sliding window and answers may differ. `NEURA_WINDOW` therefore lets a long conversation continue
+past the memory a full cache would need, while `NEURA_CONTEXT` still bounds each sequence.
+
+```sh
+NEURA_CONTEXT=8192 NEURA_WINDOW=1024 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
 ```
 
 Every run compiles the plan this device measured for the answer, fill and reset programs, and a

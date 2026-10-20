@@ -34,6 +34,16 @@ pub struct BatchSeed {
     pub share: Value,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct BatchShape {
+    pub batch: u32,
+    pub rows: u32,
+    pub capacity: u32,
+    pub window: u32,
+    pub bounded: bool,
+    pub shared: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchSpec {
     pub context: u32,
@@ -42,6 +52,7 @@ pub struct BatchSpec {
     pub sampling: Sampling,
     pub tune: bool,
     pub shared: bool,
+    pub window: Option<u32>,
 }
 
 impl BatchSpec {
@@ -53,6 +64,7 @@ impl BatchSpec {
             sampling: Sampling::GREEDY,
             tune: false,
             shared: false,
+            window: None,
         }
     }
 
@@ -68,6 +80,12 @@ impl BatchSpec {
 
     pub fn shared(mut self) -> Self {
         self.shared = true;
+        self
+    }
+
+    pub fn window(mut self, window: u32) -> Self {
+        assert!(window > 0, "a batch keeps a window of no token");
+        self.window = Some(window);
         self
     }
 }
@@ -89,6 +107,8 @@ pub struct Batch {
     batch: u32,
     context: u32,
     capacity: u32,
+    window: u32,
+    bounded: bool,
     seeded: bool,
     shared: bool,
     prefix: Option<Vec<u32>>,
@@ -147,9 +167,9 @@ impl Batch {
         runtime: &Runtime,
         weights: impl FnOnce(&Graph) -> Weights,
         spec: BatchSpec,
-        answer: impl Fn(&Graph, u32, u32, bool) -> BatchStep,
-        fill: impl Fn(&Graph, u32, u32, u32, bool) -> BatchFill,
-        reset: impl Fn(&Graph, u32, u32, bool) -> BatchSeed,
+        answer: impl Fn(&Graph, BatchShape) -> BatchStep,
+        fill: impl Fn(&Graph, BatchShape) -> BatchFill,
+        reset: impl Fn(&Graph, BatchShape) -> BatchSeed,
     ) -> Self {
         let BatchSpec {
             context,
@@ -158,6 +178,7 @@ impl Batch {
             sampling,
             tune,
             shared,
+            window,
         } = spec;
         assert!(batch > 0, "a batch of no plane answers nothing");
         assert!(context > 0, "a context of no token holds no batch");
@@ -175,10 +196,20 @@ impl Batch {
                 "a batch fills {chunk} rows of a context of {context}, and a chunk holds between two rows and the rows a prompt leaves for the answer",
             );
         }
-        let widest = chunks.first().copied().unwrap_or(1).max(batch);
-        let capacity = context
+        let widest = chunks.first().copied().unwrap_or(1);
+        let bounded = window.is_some();
+        let window = window.unwrap_or(context);
+        assert!(
+            window <= context,
+            "a batch keeps a window of {window} tokens over a context of {context}",
+        );
+        assert!(
+            widest <= window,
+            "a batch fills chunks of {widest} rows into a window of {window} tokens",
+        );
+        let capacity = window
             .checked_add(widest)
-            .expect("a cache of the context and one scratch chunk a plane fits");
+            .expect("a cache of the window and the scratch rows a masked chunk fills fits");
         let compile = match tune {
             true => Runtime::tuned,
             false => Runtime::compile,
@@ -187,7 +218,17 @@ impl Batch {
         let mut fills = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
-            let step = fill(&graph, chunk, batch, capacity, shared);
+            let step = fill(
+                &graph,
+                BatchShape {
+                    batch,
+                    rows: chunk,
+                    capacity,
+                    window,
+                    bounded,
+                    shared,
+                },
+            );
             held_fill(&graph, &step, chunk, batch);
             if seeded {
                 graph.state(Shape::scalar(), Init::Zero, Element::Single);
@@ -202,7 +243,17 @@ impl Batch {
             ));
         }
         let answering = Graph::new();
-        let step = answer(&answering, batch, capacity, shared);
+        let step = answer(
+            &answering,
+            BatchShape {
+                batch,
+                rows: 1,
+                capacity,
+                window,
+                bounded,
+                shared,
+            },
+        );
         held_answer(&answering, &step, batch);
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
         let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
@@ -219,7 +270,17 @@ impl Batch {
         };
         answer.entry(runtime, &store, compile);
         let clearing = Graph::new();
-        let reset_seed = reset(&clearing, batch, capacity, shared);
+        let reset_seed = reset(
+            &clearing,
+            BatchShape {
+                batch,
+                rows: 1,
+                capacity,
+                window,
+                bounded,
+                shared,
+            },
+        );
         held_seed(&clearing, &reset_seed, batch);
         if seeded {
             clearing.state(Shape::scalar(), Init::Zero, Element::Single);
@@ -236,6 +297,8 @@ impl Batch {
             batch,
             context,
             capacity,
+            window,
+            bounded,
             seeded,
             shared,
             prefix: None,
@@ -251,6 +314,10 @@ impl Batch {
         self.context
     }
 
+    pub fn window(&self) -> u32 {
+        self.window
+    }
+
     pub fn chunks(&self) -> impl Iterator<Item = u32> + '_ {
         self.fills.iter().map(|(chunk, _)| *chunk)
     }
@@ -259,7 +326,7 @@ impl Batch {
         &mut self,
         runtime: &Runtime,
         tokens: &[u32],
-        build: impl Fn(&Graph, u32, u32, u32) -> BatchPrefix,
+        build: impl Fn(&Graph, BatchShape) -> BatchPrefix,
     ) {
         assert!(
             self.shared,
@@ -299,7 +366,17 @@ impl Batch {
                 Some(position) => position,
                 None => {
                     let graph = Graph::new();
-                    let step = build(&graph, rows, self.batch, self.capacity);
+                    let step = build(
+                        &graph,
+                        BatchShape {
+                            batch: self.batch,
+                            rows,
+                            capacity: self.capacity,
+                            window: self.window,
+                            bounded: self.bounded,
+                            shared: true,
+                        },
+                    );
                     held_prefix(&graph, &step, rows);
                     if self.seeded {
                         graph.state(Shape::scalar(), Init::Zero, Element::Single);
@@ -516,7 +593,7 @@ impl Batch {
             let rows = chunk as usize;
             let planes = self.batch as usize;
             let mut tokens = vec![0.0f32; rows * planes];
-            let mut cursors = vec![self.context as f32; planes];
+            let mut cursors = vec![0.0f32; planes];
             let mut mask = vec![0.0f32; planes];
             for slot in &group {
                 let held = self.slots[*slot]
@@ -565,7 +642,7 @@ impl Batch {
         let mut drawn = false;
         for slot in 0..self.batch {
             let Some(held) = self.slots[slot as usize].as_ref() else {
-                cursor.push(self.context as f32);
+                cursor.push(0.0);
                 mask.push(0.0);
                 continue;
             };
@@ -598,7 +675,7 @@ impl Batch {
                     mask.push(1.0);
                 }
                 Phase::Suspended => {
-                    cursor.push(self.context as f32);
+                    cursor.push(0.0);
                     mask.push(0.0);
                 }
             }
