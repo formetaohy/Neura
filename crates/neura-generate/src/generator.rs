@@ -44,6 +44,20 @@ impl Sampling {
             Self::Sampled { temperature, .. } => Some(temperature),
         }
     }
+
+    pub fn keep(self) -> Option<u32> {
+        match self {
+            Self::Greedy => None,
+            Self::Sampled { keep, .. } => Some(keep),
+        }
+    }
+
+    pub fn cumulative(self) -> Option<f32> {
+        match self {
+            Self::Greedy => None,
+            Self::Sampled { cumulative, .. } => Some(cumulative),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -67,6 +81,8 @@ pub(crate) struct Draw {
     pub(crate) seed: Option<Value>,
     pub(crate) advance: Option<Value>,
     pub(crate) temperature: Option<Value>,
+    pub(crate) keep: Option<Value>,
+    pub(crate) cumulative: Option<Value>,
 }
 
 struct Pending {
@@ -189,6 +205,8 @@ impl Family {
                             seed: None,
                             advance: None,
                             temperature: None,
+                            keep: None,
+                            cumulative: None,
                         },
                         entry: None,
                     },
@@ -206,6 +224,8 @@ impl Family {
             seed,
             advance,
             temperature,
+            keep: None,
+            cumulative: None,
         };
         let entry = Entry::of(runtime, &answering, &store, step, compile, draw);
         let answer = Pending {
@@ -354,12 +374,13 @@ pub(crate) fn chosen(graph: &Graph, logits: Value, draw: Draw) -> Value {
                 .expect("a sampled program walks the temperature of its own");
             let logits = graph.mul(logits, graph.recip(temperature));
             graph.add_into(seed, advance);
-            graph.sample(
-                logits,
-                seed,
-                graph.fill(Shape::scalar(), keep as f32),
-                graph.fill(Shape::scalar(), cumulative),
-            )
+            let keep = draw
+                .keep
+                .unwrap_or_else(|| graph.fill(Shape::scalar(), keep as f32));
+            let cumulative = draw
+                .cumulative
+                .unwrap_or_else(|| graph.fill(Shape::scalar(), cumulative));
+            graph.sample(logits, seed, keep, cumulative)
         }
     };
     graph.retain(chosen);

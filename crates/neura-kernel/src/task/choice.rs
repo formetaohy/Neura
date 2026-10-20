@@ -732,18 +732,13 @@ mod device {
         return mass;
     }
 
-    fn sample_rows_by_thread(
-        task: Task,
-        lid: u32,
-        source: Value,
-        keep: u32,
-        cumulative: f32,
-        seed: u32,
-    ) {
+    fn sample_rows_by_thread(task: Task, lid: u32, source: Value, seed: u32) {
         let output = values[task.out];
         let columns = source.dims.w;
-        let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
         for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let keep = sample_keep_row(task, row);
+            let cumulative = sample_cumulative_row(task, row);
+            let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
             let largest = sample_largest_by_thread(source, row, columns);
             let total = sample_mass_by_thread(source, row, columns, largest);
             let mut previous_value = max_identity();
@@ -933,7 +928,61 @@ mod device {
         return chosen;
     }
 
-    fn sample_chunk(task: Task, lid: u32, source: Value, seed: u32, keep: u32, cumulative: f32) {
+    fn sample_keep_row(task: Task, row: u32) -> u32 {
+        let value = values[task.c];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        let declared = fetch(value, at);
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
+            return 1u32;
+        }
+        return u32(declared);
+    }
+
+    fn sample_cumulative_row(task: Task, row: u32) -> f32 {
+        let value = values[task.d];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        let cumulative = fetch(value, at);
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 1u32);
+            return 1.0;
+        }
+        return cumulative;
+    }
+
+    fn sample_keep_group(task: Task, lid: u32, row: u32) -> u32 {
+        let value = values[task.c];
+        if lid == 0u32 {
+            let at = select(0u32, row, value.dims.z > 1u32);
+            scratch[SCRATCH_SAMPLE] = fetch(value, at);
+        }
+        let declared = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE]);
+        let whole =
+            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
+        if !whole {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
+            return 1u32;
+        }
+        return u32(declared);
+    }
+
+    fn sample_cumulative_group(task: Task, lid: u32, row: u32) -> f32 {
+        let value = values[task.d];
+        if lid == 0u32 {
+            let at = select(0u32, row, value.dims.z > 1u32);
+            scratch[SCRATCH_SAMPLE + 1u32] = fetch(value, at);
+        }
+        let cumulative = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE + 1u32]);
+        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
+            refuse(kind::SAMPLE, refusal::SAMPLE, 1u32);
+            return 1.0;
+        }
+        return cumulative;
+    }
+
+    fn sample_chunk(task: Task, lid: u32, source: Value, seed: u32) {
         let kept_values = values[task.out];
         let carried = values[task.extra];
         let columns = source.dims.w;
@@ -941,6 +990,8 @@ mod device {
         let first = columns * task.section / task.splits;
         let last = columns * (task.section + 1u32) / task.splits;
         for row in stride(task.first, task.first + task.count, 1u32) {
+            let keep = sample_keep_group(task, lid, row);
+            let cumulative = sample_cumulative_group(task, lid, row);
             let total = row_mass(task, lid, source, row, columns, first, last);
             let row_max = scratch[0u32];
             workgroup_barrier();
@@ -976,10 +1027,12 @@ mod device {
         }
     }
 
-    fn sample_rows(task: Task, lid: u32, source: Value, seed: u32, keep: u32, cumulative: f32) {
+    fn sample_rows(task: Task, lid: u32, source: Value, seed: u32) {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first, task.first + task.count, 1u32) {
+            let keep = sample_keep_group(task, lid, row);
+            let cumulative = sample_cumulative_group(task, lid, row);
             let chosen = sample_row(task, lid, source, row, columns, keep, cumulative, seed);
             if lid == 0u32 {
                 publish(
@@ -995,32 +1048,13 @@ mod device {
     fn run_sample(task: Task, lid: u32) {
         let source = values[task.a];
         let seed = bitcast_u32(fetch(values[task.b], 0u32));
-        if lid == 0u32 {
-            scratch[SCRATCH_SAMPLE] = fetch(values[task.c], 0u32);
-            scratch[SCRATCH_SAMPLE + 1u32] = fetch(values[task.d], 0u32);
-        }
-        let declared = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE]);
-        let cumulative = workgroup_uniform_load(&scratch[SCRATCH_SAMPLE + 1u32]);
-        let whole =
-            declared > 0.0 && declared < f32(CANDIDATES + 1u32) && trunc(declared) == declared;
-        if !whole {
-            refuse(kind::SAMPLE, refusal::SAMPLE, 0u32);
-            return;
-        }
-        if !(cumulative > 0.0) || !(cumulative <= 1.0) {
-            refuse(kind::SAMPLE, refusal::SAMPLE, 1u32);
-            return;
-        }
-        let keep = u32(declared);
         match task.geometry {
-            strategy::THREAD_ROW => {
-                sample_rows_by_thread(task, lid, source, keep, cumulative, seed)
-            }
+            strategy::THREAD_ROW => sample_rows_by_thread(task, lid, source, seed),
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
-                    sample_chunk(task, lid, source, seed, keep, cumulative);
+                    sample_chunk(task, lid, source, seed);
                 } else {
-                    sample_rows(task, lid, source, seed, keep, cumulative);
+                    sample_rows(task, lid, source, seed);
                 }
             }
             _ => refuse(kind::SAMPLE, refusal::GEOMETRY, task.geometry),

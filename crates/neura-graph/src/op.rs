@@ -1235,6 +1235,7 @@ impl Graph {
 
     pub fn sample(&self, logits: Value, seed: Value, keep: Value, cumulative: Value) -> Value {
         let logits = self.own(logits);
+        let rows = self.shape(logits).dims()[2];
         let mut scalars = [NO_VALUE; 3];
         for (slot, (value, name)) in [
             (seed, "seed"),
@@ -1245,11 +1246,14 @@ impl Graph {
         .enumerate()
         {
             let value = self.own(value);
+            let shape = self.shape(value);
+            let scalar = shape.is_scalar();
+            let rowed = slot > 0 && shape.dims() == [1, 1, rows, 1];
             assert!(
-                self.shape(value).is_scalar(),
-                "a sample takes one {name}, and value {} holds {} elements",
+                scalar || rowed,
+                "a sample takes one {name} a row or one for the batch, and value {} walks {:?} where a batch of {rows} rows samples",
                 value.id(),
-                self.shape(value).elements(),
+                shape.dims(),
             );
             scalars[slot] = value.id();
         }

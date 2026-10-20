@@ -1,5 +1,5 @@
 use crate::generator::{Draw, Sampling, chosen};
-use neura_abi::Element;
+use neura_abi::{CANDIDATES, Element};
 use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Cursor, Program, Runtime, Weights};
 use std::collections::VecDeque;
@@ -104,7 +104,11 @@ pub struct Batch {
     reset: Program,
     reset_seed: BatchSeed,
     temperature: Option<Value>,
+    keep: Option<Value>,
+    cumulative: Option<Value>,
     temperatures: Vec<f32>,
+    keeps: Vec<f32>,
+    cumulatives: Vec<f32>,
     compile: fn(&Runtime, &Graph, &Weights) -> Program,
     batch: u32,
     context: u32,
@@ -224,6 +228,8 @@ impl Batch {
         };
         let seeded = sampling != Sampling::GREEDY;
         let initial = sampling.temperature().unwrap_or(1.0);
+        let initial_keep = sampling.keep().unwrap_or(1) as f32;
+        let initial_cumulative = sampling.cumulative().unwrap_or(1.0);
         let mut fills = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
@@ -242,6 +248,8 @@ impl Batch {
             if seeded {
                 graph.state(Shape::scalar(), Init::Zero, Element::Single);
                 temperature_state(&graph, batch, initial);
+                keep_state(&graph, batch, initial_keep);
+                cumulative_state(&graph, batch, initial_cumulative);
             }
             fills.push((
                 chunk,
@@ -268,6 +276,8 @@ impl Batch {
         let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
         let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
         let temperature = seeded.then(|| temperature_state(&answering, batch, initial));
+        let keep = seeded.then(|| keep_state(&answering, batch, initial_keep));
+        let cumulative = seeded.then(|| cumulative_state(&answering, batch, initial_cumulative));
         let store = weights(&answering);
         let mut answer = Pending {
             graph: answering,
@@ -277,6 +287,8 @@ impl Batch {
                 seed,
                 advance,
                 temperature,
+                keep,
+                cumulative,
             },
             entry: None,
         };
@@ -297,6 +309,8 @@ impl Batch {
         if seeded {
             clearing.state(Shape::scalar(), Init::Zero, Element::Single);
             temperature_state(&clearing, batch, initial);
+            keep_state(&clearing, batch, initial_keep);
+            cumulative_state(&clearing, batch, initial_cumulative);
         }
         let reset = compile(runtime, &clearing, &store);
         Self {
@@ -307,7 +321,11 @@ impl Batch {
             reset,
             reset_seed,
             temperature,
+            keep,
+            cumulative,
             temperatures: vec![initial; batch as usize],
+            keeps: vec![initial_keep; batch as usize],
+            cumulatives: vec![initial_cumulative; batch as usize],
             compile,
             batch,
             context,
@@ -367,6 +385,66 @@ impl Batch {
             .expect("a greedy batch draws no temperature");
         let answer = self.answer.entry(runtime, &self.store, self.compile);
         runtime.write(&answer.program, temperature, &self.temperatures);
+    }
+
+    pub fn set_keep(&mut self, runtime: &Runtime, keep: u32) {
+        assert!(
+            (1..=CANDIDATES).contains(&keep),
+            "a batch keeps {keep} candidates where a row holds between one and {CANDIDATES}",
+        );
+        self.keeps.fill(keep as f32);
+        self.write_keeps(runtime);
+    }
+
+    pub fn set_keep_of(&mut self, runtime: &Runtime, slot: u32, keep: u32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            (1..=CANDIDATES).contains(&keep),
+            "a batch keeps {keep} candidates where a row holds between one and {CANDIDATES}",
+        );
+        self.keeps[slot as usize] = keep as f32;
+        self.write_keeps(runtime);
+    }
+
+    fn write_keeps(&mut self, runtime: &Runtime) {
+        let keep = self.keep.expect("a greedy batch draws no candidate count");
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, keep, &self.keeps);
+    }
+
+    pub fn set_cumulative(&mut self, runtime: &Runtime, cumulative: f32) {
+        assert!(
+            cumulative > 0.0 && cumulative <= 1.0,
+            "a cumulative mass of {cumulative} keeps no candidate or names more than every candidate",
+        );
+        self.cumulatives.fill(cumulative);
+        self.write_cumulatives(runtime);
+    }
+
+    pub fn set_cumulative_of(&mut self, runtime: &Runtime, slot: u32, cumulative: f32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            cumulative > 0.0 && cumulative <= 1.0,
+            "a cumulative mass of {cumulative} keeps no candidate or names more than every candidate",
+        );
+        self.cumulatives[slot as usize] = cumulative;
+        self.write_cumulatives(runtime);
+    }
+
+    fn write_cumulatives(&mut self, runtime: &Runtime) {
+        let cumulative = self
+            .cumulative
+            .expect("a greedy batch draws no cumulative mass");
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, cumulative, &self.cumulatives);
     }
 
     pub fn prefix(
@@ -432,6 +510,8 @@ impl Batch {
                     if self.seeded {
                         graph.state(Shape::scalar(), Init::Zero, Element::Single);
                         temperature_state(&graph, self.batch, 1.0);
+                        keep_state(&graph, self.batch, 1.0);
+                        cumulative_state(&graph, self.batch, 1.0);
                     }
                     let program = (self.compile)(runtime, &graph, &self.store);
                     self.prefix_fills
@@ -1080,6 +1160,22 @@ fn temperature_state(graph: &Graph, batch: u32, temperature: f32) -> Value {
     graph.state(
         Shape::of([1, 1, batch, 1]),
         Init::Constant(temperature),
+        Element::Single,
+    )
+}
+
+fn keep_state(graph: &Graph, batch: u32, keep: f32) -> Value {
+    graph.state(
+        Shape::of([1, 1, batch, 1]),
+        Init::Constant(keep),
+        Element::Single,
+    )
+}
+
+fn cumulative_state(graph: &Graph, batch: u32, cumulative: f32) -> Value {
+    graph.state(
+        Shape::of([1, 1, batch, 1]),
+        Init::Constant(cumulative),
         Element::Single,
     )
 }

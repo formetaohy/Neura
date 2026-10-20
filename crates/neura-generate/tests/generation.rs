@@ -666,3 +666,92 @@ fn a_temperature_the_host_writes_steers_the_next_draw_without_recompiling() {
         "writing a temperature reuses the program the family compiled",
     );
 }
+
+#[test]
+fn a_candidate_count_the_host_writes_steers_one_plane_alone() {
+    let runtime = runtime();
+    let spec = BatchSpec::new(16, 2, &[2]).sampled(Sampling::sampled(1.0, CLASSES, 1.0));
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    batch.admit(&runtime, &[0, 1]);
+    batch.admit(&runtime, &[0, 1]);
+    let plans = runtime.built_plans();
+    batch.set_keep_of(&runtime, 0, 1);
+    let mut drew = false;
+    for _ in 0..64 {
+        for held in batch.step(&runtime) {
+            if held.slot == 0 {
+                assert_eq!(
+                    held.token, 0,
+                    "a plane that keeps one candidate answers with the class its logits rank first",
+                );
+            }
+            if held.slot == 1 && held.token != 0 {
+                drew = true;
+            }
+        }
+        if drew {
+            break;
+        }
+    }
+    assert!(
+        drew,
+        "the plane that keeps every candidate draws no class beyond the one its neighbor keeps",
+    );
+    assert_eq!(
+        runtime.built_plans(),
+        plans,
+        "writing a candidate count reuses the program the batch compiled",
+    );
+}
+
+#[test]
+fn a_cumulative_mass_the_host_writes_steers_one_plane_alone() {
+    let runtime = runtime();
+    let spec = BatchSpec::new(16, 2, &[2]).sampled(Sampling::sampled(1.0, CLASSES, 1.0));
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    batch.admit(&runtime, &[0, 1]);
+    batch.admit(&runtime, &[0, 1]);
+    let plans = runtime.built_plans();
+    batch.set_keep(&runtime, CLASSES);
+    batch.set_cumulative_of(&runtime, 0, 0.01);
+    let mut drew = false;
+    for _ in 0..64 {
+        for held in batch.step(&runtime) {
+            if held.slot == 0 {
+                assert_eq!(
+                    held.token, 0,
+                    "a plane whose cumulative mass holds one candidate answers with the class its logits rank first",
+                );
+            }
+            if held.slot == 1 && held.token != 0 {
+                drew = true;
+            }
+        }
+        if drew {
+            break;
+        }
+    }
+    assert!(
+        drew,
+        "the plane whose cumulative mass holds every candidate draws no class beyond the one its neighbor keeps",
+    );
+    assert_eq!(
+        runtime.built_plans(),
+        plans,
+        "writing a cumulative mass reuses the program the batch compiled",
+    );
+}
