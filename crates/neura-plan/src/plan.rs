@@ -1543,6 +1543,14 @@ impl Walk for Walked<'_> {
     fn plane(&self) -> u32 {
         self.recorded.plane()
     }
+
+    fn axis(&self) -> u32 {
+        self.recorded.axis()
+    }
+
+    fn offset(&self) -> u32 {
+        self.recorded.offset()
+    }
 }
 
 impl schedule::Scheduled for Walked<'_> {

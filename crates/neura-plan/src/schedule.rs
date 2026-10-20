@@ -1,5 +1,5 @@
 use crate::access::Access;
-use crate::flow::{Flow, WordFlow, arena_spans};
+use crate::flow::{Flow, WordFlow, WordWrite, arena_spans};
 use crate::hazard::{Hazard, Hazards};
 use crate::region::{self, GeometryTiles, Walk};
 use neura_abi::{SegmentFields, SegmentRecord, control};
@@ -252,7 +252,17 @@ impl Schedule {
                     *region,
                     &mut pages,
                 );
-                flow.write(&pages, segment, task.in_place(), &mut collected);
+                flow.write(
+                    &pages,
+                    WordWrite {
+                        segment,
+                        storage,
+                        in_place: task.in_place(),
+                        orders_writers: self.gated.iter().all(|gated| !gated),
+                        same_storage: task.kind() == neura_abi::Kind::Concat,
+                    },
+                    &mut collected,
+                );
             }
             collected.sort_unstable();
             collected.dedup();

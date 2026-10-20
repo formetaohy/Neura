@@ -74,6 +74,8 @@ pub(crate) trait Walk: Reads {
     fn depends(&self) -> impl Iterator<Item = u32>;
     fn split(&self) -> Split;
     fn plane(&self) -> u32;
+    fn axis(&self) -> u32;
+    fn offset(&self) -> u32;
 }
 
 impl Walk for Task {
@@ -123,6 +125,14 @@ impl Walk for Task {
 
     fn plane(&self) -> u32 {
         self.plane
+    }
+
+    fn axis(&self) -> u32 {
+        self.axis
+    }
+
+    fn offset(&self) -> u32 {
+        self.offset
     }
 }
 
@@ -609,6 +619,7 @@ fn narrow<W: Walk, V: Values>(
         }
         Kind::TopKFold | Kind::SampleFold => choice_fold(values, task, first, count, &mut narrowed),
         Kind::ChoiceFold => row_choice_fold(values, task, first, count, &mut narrowed),
+        Kind::Concat => concat(values, task, first, count, &mut narrowed),
         Kind::Attention
         | Kind::AttentionQueryGrad
         | Kind::AttentionKeyGrad
@@ -632,7 +643,6 @@ fn narrow<W: Walk, V: Values>(
         | Kind::PoolMax2dInputGrad
         | Kind::PoolMean2d
         | Kind::PoolMean2dInputGrad
-        | Kind::Concat
         | Kind::Slice
         | Kind::Rows
         | Kind::Clear
@@ -642,6 +652,59 @@ fn narrow<W: Walk, V: Values>(
     }
     for count in task.depends() {
         narrowed.read_whole(count);
+    }
+}
+
+fn concat<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let source = task.input(0);
+    let dims = values.dims(source);
+    let out_dims = values.dims(out);
+    let axis = task.axis() as usize;
+    let inner = dims[axis + 1..]
+        .iter()
+        .map(|dim| u64::from(*dim))
+        .product::<u64>();
+    let block = u64::from(dims[axis]) * inner;
+    let out_block = u64::from(out_dims[axis]) * inner;
+    let shift = u64::from(task.offset()) * inner;
+    let start = u64::from(first);
+    let end = start + u64::from(count);
+    let head = if start.is_multiple_of(block) {
+        0
+    } else {
+        (block - start % block).min(end - start)
+    };
+    if head > 0 {
+        narrowed.write(
+            out,
+            Region::run((start / block) * out_block + shift + start % block, head),
+        );
+    }
+    let middle = (end - start - head) / block;
+    if middle > 0 {
+        let at = start + head;
+        narrowed.write(
+            out,
+            Region::band((at / block) * out_block + shift, block, out_block, middle),
+        );
+    }
+    let tail = (end - start - head) % block;
+    if tail > 0 {
+        let at = end - tail;
+        narrowed.write(
+            out,
+            Region::run((at / block) * out_block + shift + at % block, tail),
+        );
     }
 }
 

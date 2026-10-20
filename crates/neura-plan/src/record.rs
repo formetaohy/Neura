@@ -179,6 +179,14 @@ impl Walk for Recorded<'_> {
     fn plane(&self) -> u32 {
         self.record.plane
     }
+
+    fn axis(&self) -> u32 {
+        self.record.axis
+    }
+
+    fn offset(&self) -> u32 {
+        self.record.offset
+    }
 }
 
 pub(crate) fn assert_records_hold_the_tasks_they_carry(
