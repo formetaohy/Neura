@@ -211,17 +211,15 @@ fn quantized<V: Values>(values: &V, storage: u32) -> bool {
 
 #[derive(Clone, Default)]
 struct WordCell {
-    writer: Option<(u32, u32)>,
+    writer: Option<u32>,
     readers: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct WordWrite {
     pub(crate) segment: u32,
-    pub(crate) storage: u32,
     pub(crate) in_place: bool,
     pub(crate) orders_writers: bool,
-    pub(crate) same_storage: bool,
 }
 
 #[derive(Default)]
@@ -252,7 +250,7 @@ impl WordFlow {
             self.split(*end);
             for (_, cell) in self.cells.range(*start..*end) {
                 if let Some(writer) = cell.writer {
-                    out.push(writer.0);
+                    out.push(writer);
                 }
             }
             for (_, cell) in self.cells.range_mut(*start..*end) {
@@ -266,10 +264,8 @@ impl WordFlow {
     pub(crate) fn write(&mut self, spans: &[(u64, u64)], write: WordWrite, out: &mut Vec<u32>) {
         let WordWrite {
             segment,
-            storage,
             in_place,
             orders_writers,
-            same_storage,
         } = write;
         for (start, end) in spans {
             if end <= start {
@@ -279,14 +275,15 @@ impl WordFlow {
             self.split(*end);
             for (_, cell) in self.cells.range(*start..*end) {
                 if let Some(writer) = cell.writer
-                    && (in_place || (orders_writers && (same_storage || writer.1 != storage)))
+                    && (in_place || orders_writers)
+                    && writer != segment
                 {
-                    out.push(writer.0);
+                    out.push(writer);
                 }
                 out.extend_from_slice(&cell.readers);
             }
             for (_, cell) in self.cells.range_mut(*start..*end) {
-                cell.writer = Some((segment, storage));
+                cell.writer = Some(segment);
                 cell.readers.clear();
             }
         }

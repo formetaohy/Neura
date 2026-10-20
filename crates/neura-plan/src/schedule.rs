@@ -256,10 +256,8 @@ impl Schedule {
                     &pages,
                     WordWrite {
                         segment,
-                        storage,
                         in_place: task.in_place(),
                         orders_writers: self.gated.iter().all(|gated| !gated),
-                        same_storage: task.kind() == neura_abi::Kind::Concat,
                     },
                     &mut collected,
                 );

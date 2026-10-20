@@ -620,6 +620,18 @@ fn narrow<W: Walk, V: Values>(
         Kind::TopKFold | Kind::SampleFold => choice_fold(values, task, first, count, &mut narrowed),
         Kind::ChoiceFold => row_choice_fold(values, task, first, count, &mut narrowed),
         Kind::Concat => concat(values, task, first, count, &mut narrowed),
+        Kind::MatmulWeightGrad => {
+            matmul_weight_grad(values, tiles.matmul, task, first, count, &mut narrowed)
+        }
+        Kind::PoolMax2d
+        | Kind::PoolMax2dInputGrad
+        | Kind::PoolMean2d
+        | Kind::PoolMean2dInputGrad => pool(values, task, first, count, &mut narrowed),
+        Kind::SumAxis => sum_axis(values, task, first, count, &mut narrowed),
+        Kind::Clear => clear(values, task, first, count, &mut narrowed),
+        Kind::Extend | Kind::Layout | Kind::Slice => {
+            linear(values, task, first, count, &mut narrowed)
+        }
         Kind::Attention
         | Kind::AttentionQueryGrad
         | Kind::AttentionKeyGrad
@@ -627,10 +639,7 @@ fn narrow<W: Walk, V: Values>(
         | Kind::PrefixChunk
         | Kind::PrefixScan
         | Kind::PrefixClose
-        | Kind::Layout
-        | Kind::Extend
         | Kind::SumChunk
-        | Kind::SumAxis
         | Kind::Argmax
         | Kind::Categorical
         | Kind::Sample
@@ -639,20 +648,125 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Scatter
         | Kind::ScatterWrite
         | Kind::Compact
-        | Kind::PoolMax2d
-        | Kind::PoolMax2dInputGrad
-        | Kind::PoolMean2d
-        | Kind::PoolMean2dInputGrad
-        | Kind::Slice
         | Kind::Rows
-        | Kind::Clear
-        | Kind::MatmulWeightGrad
         | Kind::SegmentSum
         | Kind::Length => {}
     }
     for count in task.depends() {
         narrowed.read_whole(count);
     }
+}
+
+fn matmul_weight_grad<W: Walk, V: Values>(
+    values: &V,
+    tiles: &[MatmulTile],
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count != 1 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let dims = values.dims(out);
+    let (planes, rows, columns) = (dims[0], dims[2], dims[3]);
+    let tile = tiles[task.geometry() as usize];
+    let column_blocks = u64::from(columns).div_ceil(u64::from(tile.columns()));
+    let tiles_per_plane = u64::from(rows).div_ceil(u64::from(tile.rows())) * column_blocks;
+    if tiles_per_plane == 0 {
+        return;
+    }
+    let plane = u64::from(task.plane()) % u64::from(planes.max(1));
+    let within = u64::from(first) % tiles_per_plane;
+    let base_row = (within / column_blocks) * u64::from(tile.rows());
+    let base_column = (within % column_blocks) * u64::from(tile.columns());
+    let band_rows = u64::from(tile.rows()).min(u64::from(rows) - base_row);
+    let band_columns = u64::from(tile.columns()).min(u64::from(columns) - base_column);
+    narrowed.write(
+        out,
+        spans(
+            plane * u64::from(rows) * u64::from(columns)
+                + base_row * u64::from(columns)
+                + base_column,
+            u64::from(columns),
+            1,
+            band_rows,
+            band_columns,
+        ),
+    );
+}
+
+fn pool<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    narrowed.write(out, Region::run(u64::from(first), u64::from(count)));
+}
+
+fn linear<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    narrowed.write(out, Region::run(u64::from(first), u64::from(count)));
+}
+
+fn sum_axis<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if task.geometry() == neura_abi::strategy::WORKGROUP_SPREAD {
+        if count == 0 || !values.owned(out) || !values.dense(out) {
+            return;
+        }
+        let width = u64::from(values.dims(out)[task.slot() as usize]);
+        narrowed.write(
+            out,
+            Region::band(u64::from(first) * width, width, width, u64::from(count)),
+        );
+        return;
+    }
+    fold(values, task, first, count, narrowed);
+}
+
+fn clear<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let element = values.element(out);
+    if element.block().is_some() {
+        return;
+    }
+    let per_word = element.elements_per_word();
+    narrowed.write(
+        out,
+        Region::run(u64::from(first) * per_word, u64::from(count) * per_word),
+    );
 }
 
 fn concat<W: Walk, V: Values>(
