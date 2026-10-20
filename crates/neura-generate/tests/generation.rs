@@ -755,3 +755,101 @@ fn a_cumulative_mass_the_host_writes_steers_one_plane_alone() {
         "writing a cumulative mass reuses the program the batch compiled",
     );
 }
+
+fn seeded_batch(prompts: &[&[u32]], seeds: &[u32], wanted: usize) -> Vec<Vec<u32>> {
+    let runtime = runtime();
+    let spec = BatchSpec::new(16, prompts.len() as u32, &[2])
+        .sampled(Sampling::sampled(1.0, CLASSES, 1.0));
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    for (slot, seed) in seeds.iter().enumerate() {
+        batch.set_seed_of(&runtime, slot as u32, *seed);
+    }
+    for prompt in prompts {
+        batch.admit(&runtime, prompt);
+    }
+    let mut walked = vec![Vec::new(); prompts.len()];
+    while walked.iter().any(|held| held.len() < wanted) && batch.active().next().is_some() {
+        for held in batch.step(&runtime) {
+            if held.token == END || walked[held.slot as usize].len() >= wanted {
+                batch.finish(held.slot);
+                continue;
+            }
+            walked[held.slot as usize].push(held.token);
+        }
+    }
+    walked
+}
+
+#[test]
+fn a_plane_draws_the_stream_its_own_seed_names_whatever_slot_it_holds() {
+    let prompt = [0u32, 1, 1];
+    let seeds = [0x1234_5678u32, 0x9abc_def0];
+    let pair = seeded_batch(&[&prompt, &prompt], &seeds, 6);
+    assert_eq!(
+        pair[0],
+        seeded_batch(&[&prompt], &seeds[..1], 6)[0],
+        "the first plane of a pair draws what the same seed draws alone",
+    );
+    assert_eq!(
+        pair[1],
+        seeded_batch(&[&prompt], &seeds[1..], 6)[0],
+        "the second plane of a pair draws what the same seed draws alone",
+    );
+    assert_ne!(pair[0], pair[1], "two seeds draw two streams");
+}
+
+#[test]
+fn a_suspended_plane_spends_no_seed_while_its_neighbor_draws() {
+    let runtime = runtime();
+    let spec = BatchSpec::new(16, 2, &[2]).sampled(Sampling::sampled(1.0, CLASSES, 1.0));
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    for _ in 0..2 {
+        batch.admit(&runtime, &[0, 1, 1]);
+    }
+    let plans = runtime.built_plans();
+    batch.set_seed_of(&runtime, 1, 0x2f0f_1a3b);
+    assert_eq!(
+        runtime.built_plans(),
+        plans,
+        "writing a seed reuses the program the batch compiled",
+    );
+    for _ in 0..3 {
+        batch.step(&runtime);
+    }
+    let plans = runtime.built_plans();
+    batch.suspend(1);
+    let held = batch.seed_of(1);
+    let walked = batch.seed_of(0);
+    for _ in 0..4 {
+        batch.step(&runtime);
+    }
+    assert_eq!(
+        batch.seed_of(1),
+        held,
+        "a suspended plane spends no seed while its neighbor draws",
+    );
+    assert_ne!(
+        batch.seed_of(0),
+        walked,
+        "the plane that draws spends the seed of every draw",
+    );
+    assert_eq!(
+        runtime.built_plans(),
+        plans,
+        "suspending a plane reuses the program the batch compiled",
+    );
+}

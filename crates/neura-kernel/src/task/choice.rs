@@ -78,10 +78,6 @@ mod device {
         return chosen;
     }
 
-    fn element_coordinates(source: Value, row: u32, column: u32) -> uvec4 {
-        return coordinates(row * source.dims.w + column, source.dims);
-    }
-
     fn gumbel_noise(seed: u32, at: uvec4) -> f32 {
         let mut hash = seed ^ (element_key(at) * 0x9e3779b9u32);
         hash = hash ^ (hash >> 16u32);
@@ -92,10 +88,29 @@ mod device {
         return -log(-log(f32(hash >> 8u32) * (1.0 / 16777216.0)));
     }
 
+    fn sample_seed(task: Task, row: u32) -> u32 {
+        let value = values[task.b];
+        let at = select(0u32, row, value.dims.z > 1u32);
+        return bitcast_u32(fetch(value, at));
+    }
+
+    fn sample_is_rowed(task: Task) -> bool {
+        let value = values[task.b];
+        return value.dims.z > 1u32;
+    }
+
+    fn sample_noise(seed: u32, per_row: bool, source: Value, row: u32, column: u32) -> f32 {
+        if per_row {
+            return gumbel_noise(seed, coordinates(column, source.dims));
+        }
+        return gumbel_noise(seed, coordinates(row * source.dims.w + column, source.dims));
+    }
+
     fn choice_weight(
         value: f32,
         seed: u32,
         noised: bool,
+        per_row: bool,
         source: Value,
         row: u32,
         column: u32,
@@ -103,7 +118,7 @@ mod device {
         if !noised {
             return value;
         }
-        return value + gumbel_noise(seed, element_coordinates(source, row, column));
+        return value + sample_noise(seed, per_row, source, row, column);
     }
 
     fn fold_row_by_workgroup(
@@ -116,6 +131,7 @@ mod device {
         last: u32,
         seed: u32,
         noised: bool,
+        per_row: bool,
     ) -> u32 {
         let mut local = max_identity();
         let mut local_index = 0u32;
@@ -124,6 +140,7 @@ mod device {
                 read_flat(task, source, row * columns + column),
                 seed,
                 noised,
+                per_row,
                 source,
                 row,
                 column,
@@ -145,6 +162,7 @@ mod device {
         last: u32,
         seed: u32,
         noised: bool,
+        per_row: bool,
     ) -> u32 {
         let mut local = max_identity();
         let mut local_index = 0u32;
@@ -157,6 +175,7 @@ mod device {
                     read_flat(task, source, row * columns + column),
                     seed,
                     noised,
+                    per_row,
                     source,
                     row,
                     column,
@@ -176,6 +195,7 @@ mod device {
                 read_flat(task, source, row * columns + column),
                 seed,
                 noised,
+                per_row,
                 source,
                 row,
                 column,
@@ -188,12 +208,24 @@ mod device {
         return local_index;
     }
 
-    fn fold_rows_by_workgroup(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
+    fn fold_rows_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first, task.first + task.count, 1u32) {
-            let chosen =
-                fold_row_by_workgroup(task, lid, source, row, columns, 0u32, columns, seed, noised);
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
+            let chosen = fold_row_by_workgroup(
+                task, lid, source, row, columns, 0u32, columns, seed, noised, per_row,
+            );
             if lid == 0u32 {
                 publish(
                     output,
@@ -205,10 +237,21 @@ mod device {
         }
     }
 
-    fn fold_rows_by_thread(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
+    fn fold_rows_by_thread(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
             publish(
                 output,
                 row,
@@ -216,7 +259,7 @@ mod device {
                     task,
                     coordinates(row, output.dims),
                     f32(fold_row_by_thread(
-                        task, source, row, columns, 0u32, columns, seed, noised,
+                        task, source, row, columns, 0u32, columns, seed, noised, per_row,
                     )),
                 ),
             );
@@ -233,6 +276,7 @@ mod device {
         last: u32,
         seed: u32,
         noised: bool,
+        per_row: bool,
     ) {
         let carried = values[task.out];
         let rows = carried.dims.z;
@@ -243,6 +287,7 @@ mod device {
                 read_flat(task, source, row * columns + column),
                 seed,
                 noised,
+                per_row,
                 source,
                 row,
                 column,
@@ -261,12 +306,25 @@ mod device {
         workgroup_barrier();
     }
 
-    fn fold_sections_by_workgroup(task: Task, lid: u32, source: Value, seed: u32, noised: bool) {
+    fn fold_sections_by_workgroup(
+        task: Task,
+        lid: u32,
+        source: Value,
+        seed: u32,
+        noised: bool,
+        per_row: bool,
+    ) {
         let columns = source.dims.w;
         let first = columns * task.section / task.splits;
         let last = columns * (task.section + 1u32) / task.splits;
         for row in stride(task.first, task.first + task.count, 1u32) {
-            fold_section_by_workgroup(task, lid, source, row, columns, first, last, seed, noised);
+            let mut seed = seed;
+            if noised {
+                seed = sample_seed(task, row);
+            }
+            fold_section_by_workgroup(
+                task, lid, source, row, columns, first, last, seed, noised, per_row,
+            );
         }
     }
 
@@ -297,12 +355,12 @@ mod device {
     fn run_argmax(task: Task, lid: u32) {
         let source = values[task.a];
         match task.geometry {
-            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, false),
+            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, false, false),
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
-                    fold_sections_by_workgroup(task, lid, source, 0u32, false);
+                    fold_sections_by_workgroup(task, lid, source, 0u32, false, false);
                 } else {
-                    fold_rows_by_workgroup(task, lid, source, 0u32, false);
+                    fold_rows_by_workgroup(task, lid, source, 0u32, false, false);
                 }
             }
             _ => refuse(kind::ARGMAX, refusal::GEOMETRY, task.geometry),
@@ -311,14 +369,14 @@ mod device {
 
     fn run_categorical(task: Task, lid: u32) {
         let source = values[task.a];
-        let seed = bitcast_u32(fetch(values[task.b], 0u32));
+        let per_row = sample_is_rowed(task);
         match task.geometry {
-            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, seed, true),
+            strategy::THREAD_ROW => fold_rows_by_thread(task, lid, source, 0u32, true, per_row),
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
-                    fold_sections_by_workgroup(task, lid, source, seed, true);
+                    fold_sections_by_workgroup(task, lid, source, 0u32, true, per_row);
                 } else {
-                    fold_rows_by_workgroup(task, lid, source, seed, true);
+                    fold_rows_by_workgroup(task, lid, source, 0u32, true, per_row);
                 }
             }
             _ => refuse(kind::CATEGORICAL, refusal::GEOMETRY, task.geometry),
@@ -732,10 +790,11 @@ mod device {
         return mass;
     }
 
-    fn sample_rows_by_thread(task: Task, lid: u32, source: Value, seed: u32) {
+    fn sample_rows_by_thread(task: Task, lid: u32, source: Value, per_row: bool) {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let seed = sample_seed(task, row);
             let keep = sample_keep_row(task, row);
             let cumulative = sample_cumulative_row(task, row);
             let rounds = (keep + CHOICE_ROUND - 1u32) / CHOICE_ROUND;
@@ -776,11 +835,7 @@ mod device {
                             previous_value = value;
                             previous_index = column;
                             running = running + softmax_exp(value - largest);
-                            let weight = value
-                                + gumbel_noise(
-                                    seed,
-                                    coordinates(row * columns + column, source.dims),
-                                );
+                            let weight = value + sample_noise(seed, per_row, source, row, column);
                             if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
                                 best = weight;
                                 chosen = column;
@@ -883,8 +938,14 @@ mod device {
         columns: u32,
         keep: u32,
         cumulative: f32,
-        seed: u32,
+        per_row: bool,
     ) -> u32 {
+        if keep == 1u32 && cumulative == 1.0 {
+            return fold_row_by_workgroup(
+                task, lid, source, row, columns, 0u32, columns, 0u32, false, false,
+            );
+        }
+        let seed = sample_seed(task, row);
         let total = row_mass(task, lid, source, row, columns, 0u32, columns);
         let row_max = scratch[0u32];
         workgroup_barrier();
@@ -914,8 +975,7 @@ mod device {
             for candidate in stride(0u32, boundary, 1u32) {
                 let value = scratch[SCRATCH_SAMPLE + candidate];
                 let column = bitcast_u32(scratch[SCRATCH_SAMPLE + CANDIDATES + candidate]);
-                let weight =
-                    value + gumbel_noise(seed, coordinates(row * columns + column, source.dims));
+                let weight = value + sample_noise(seed, per_row, source, row, column);
                 if chosen == NO_VALUE || choice_precedes(best, chosen, weight, column) {
                     best = weight;
                     chosen = column;
@@ -982,7 +1042,7 @@ mod device {
         return cumulative;
     }
 
-    fn sample_chunk(task: Task, lid: u32, source: Value, seed: u32) {
+    fn sample_chunk(task: Task, lid: u32, source: Value, per_row: bool) {
         let kept_values = values[task.out];
         let carried = values[task.extra];
         let columns = source.dims.w;
@@ -990,6 +1050,7 @@ mod device {
         let first = columns * task.section / task.splits;
         let last = columns * (task.section + 1u32) / task.splits;
         for row in stride(task.first, task.first + task.count, 1u32) {
+            let seed = sample_seed(task, row);
             let keep = sample_keep_group(task, lid, row);
             let cumulative = sample_cumulative_group(task, lid, row);
             let total = row_mass(task, lid, source, row, columns, first, last);
@@ -1020,20 +1081,20 @@ mod device {
                 publish(
                     carried,
                     base + 2u32 * candidate + 1u32,
-                    value + gumbel_noise(seed, coordinates(row * columns + column, source.dims)),
+                    value + sample_noise(seed, per_row, source, row, column),
                 );
             }
             workgroup_barrier();
         }
     }
 
-    fn sample_rows(task: Task, lid: u32, source: Value, seed: u32) {
+    fn sample_rows(task: Task, lid: u32, source: Value, per_row: bool) {
         let output = values[task.out];
         let columns = source.dims.w;
         for row in stride(task.first, task.first + task.count, 1u32) {
             let keep = sample_keep_group(task, lid, row);
             let cumulative = sample_cumulative_group(task, lid, row);
-            let chosen = sample_row(task, lid, source, row, columns, keep, cumulative, seed);
+            let chosen = sample_row(task, lid, source, row, columns, keep, cumulative, per_row);
             if lid == 0u32 {
                 publish(
                     output,
@@ -1047,14 +1108,14 @@ mod device {
 
     fn run_sample(task: Task, lid: u32) {
         let source = values[task.a];
-        let seed = bitcast_u32(fetch(values[task.b], 0u32));
+        let per_row = sample_is_rowed(task);
         match task.geometry {
-            strategy::THREAD_ROW => sample_rows_by_thread(task, lid, source, seed),
+            strategy::THREAD_ROW => sample_rows_by_thread(task, lid, source, per_row),
             strategy::WORKGROUP_ROW => {
                 if task.splits > 1u32 {
-                    sample_chunk(task, lid, source, seed);
+                    sample_chunk(task, lid, source, per_row);
                 } else {
-                    sample_rows(task, lid, source, seed);
+                    sample_rows(task, lid, source, per_row);
                 }
             }
             _ => refuse(kind::SAMPLE, refusal::GEOMETRY, task.geometry),

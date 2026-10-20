@@ -1185,12 +1185,14 @@ impl Graph {
 
     pub fn categorical(&self, logits: Value, seed: Value) -> Value {
         let logits = self.own(logits);
+        let rows = self.shape(logits).dims()[2];
         let seed = self.own(seed);
+        let shape = self.shape(seed);
         assert!(
-            self.shape(seed).is_scalar(),
-            "a categorical draw takes one seed, and value {} holds {} elements",
+            shape.is_scalar() || shape.dims() == [1, 1, rows, 1],
+            "a categorical draw takes one seed a row or one for the batch, and value {} walks {:?} where a batch of {rows} rows draws",
             seed.id(),
-            self.shape(seed).elements(),
+            shape.dims(),
         );
         self.choice(Kind::Categorical, logits, [seed.id(), NO_VALUE, NO_VALUE])
     }
@@ -1248,7 +1250,7 @@ impl Graph {
             let value = self.own(value);
             let shape = self.shape(value);
             let scalar = shape.is_scalar();
-            let rowed = slot > 0 && shape.dims() == [1, 1, rows, 1];
+            let rowed = shape.dims() == [1, 1, rows, 1];
             assert!(
                 scalar || rowed,
                 "a sample takes one {name} a row or one for the batch, and value {} walks {:?} where a batch of {rows} rows samples",

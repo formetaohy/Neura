@@ -366,14 +366,13 @@ pub(crate) fn chosen(graph: &Graph, logits: Value, draw: Draw) -> Value {
             let seed = draw
                 .seed
                 .expect("a sampled program walks a seed of its own");
-            let advance = draw
-                .advance
-                .expect("a sampled program walks the steps it draws");
             let temperature = draw
                 .temperature
                 .expect("a sampled program walks the temperature of its own");
             let logits = graph.mul(logits, graph.recip(temperature));
-            graph.add_into(seed, advance);
+            if let Some(advance) = draw.advance {
+                graph.add_into(seed, advance);
+            }
             let keep = draw
                 .keep
                 .unwrap_or_else(|| graph.fill(Shape::scalar(), keep as f32));

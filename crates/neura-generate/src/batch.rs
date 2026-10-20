@@ -103,9 +103,11 @@ pub struct Batch {
     prefix_fills: Vec<(u32, PrefixEntry)>,
     reset: Program,
     reset_seed: BatchSeed,
+    seed: Option<Value>,
     temperature: Option<Value>,
     keep: Option<Value>,
     cumulative: Option<Value>,
+    seeds: Vec<u32>,
     temperatures: Vec<f32>,
     keeps: Vec<f32>,
     cumulatives: Vec<f32>,
@@ -154,7 +156,6 @@ struct Pending {
 struct Entry {
     program: Program,
     step: BatchStep,
-    advance: Option<Value>,
     chosen: Value,
 }
 
@@ -246,7 +247,7 @@ impl Batch {
             );
             held_fill(&graph, &step, chunk, batch);
             if seeded {
-                graph.state(Shape::scalar(), Init::Zero, Element::Single);
+                seed_state(&graph, batch, 0);
                 temperature_state(&graph, batch, initial);
                 keep_state(&graph, batch, initial_keep);
                 cumulative_state(&graph, batch, initial_cumulative);
@@ -273,8 +274,7 @@ impl Batch {
             },
         );
         held_answer(&answering, &step, batch);
-        let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
-        let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
+        let seed = seeded.then(|| seed_state(&answering, batch, 0));
         let temperature = seeded.then(|| temperature_state(&answering, batch, initial));
         let keep = seeded.then(|| keep_state(&answering, batch, initial_keep));
         let cumulative = seeded.then(|| cumulative_state(&answering, batch, initial_cumulative));
@@ -285,7 +285,7 @@ impl Batch {
             draw: Draw {
                 sampling,
                 seed,
-                advance,
+                advance: None,
                 temperature,
                 keep,
                 cumulative,
@@ -307,22 +307,27 @@ impl Batch {
         );
         held_seed(&clearing, &reset_seed, batch);
         if seeded {
-            clearing.state(Shape::scalar(), Init::Zero, Element::Single);
+            seed_state(&clearing, batch, 0);
             temperature_state(&clearing, batch, initial);
             keep_state(&clearing, batch, initial_keep);
             cumulative_state(&clearing, batch, initial_cumulative);
         }
         let reset = compile(runtime, &clearing, &store);
-        Self {
+        let seeds = (0..batch)
+            .map(|slot| plane_seed(0, slot))
+            .collect::<Vec<_>>();
+        let held = Self {
             store,
             answer,
             fills,
             prefix_fills: Vec::new(),
             reset,
             reset_seed,
+            seed,
             temperature,
             keep,
             cumulative,
+            seeds,
             temperatures: vec![initial; batch as usize],
             keeps: vec![initial_keep; batch as usize],
             cumulatives: vec![initial_cumulative; batch as usize],
@@ -337,7 +342,9 @@ impl Batch {
             prefix: None,
             slots: (0..batch).map(|_| None).collect(),
             frame: None,
-        }
+        };
+        held.write_seeds(runtime);
+        held
     }
 
     pub fn batch(&self) -> u32 {
@@ -447,6 +454,62 @@ impl Batch {
         runtime.write(&answer.program, cumulative, &self.cumulatives);
     }
 
+    pub fn seed_of(&self, slot: u32) -> u32 {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(self.seeded, "a greedy batch draws no seed");
+        self.seeds[slot as usize]
+    }
+
+    pub fn set_seed(&mut self, runtime: &Runtime, seed: u32) {
+        assert!(
+            self.frame.is_none(),
+            "a batch sets the seed of a plane before it walks a frame",
+        );
+        assert!(self.seeded, "a greedy batch draws no seed");
+        for slot in 0..self.batch {
+            self.seeds[slot as usize] = plane_seed(seed, slot);
+        }
+        self.write_seeds(runtime);
+    }
+
+    pub fn set_seed_of(&mut self, runtime: &Runtime, slot: u32, seed: u32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            self.frame.is_none(),
+            "a batch sets the seed of a plane before it walks a frame",
+        );
+        assert!(self.seeded, "a greedy batch draws no seed");
+        self.seeds[slot as usize] = seed;
+        self.write_seeds(runtime);
+    }
+
+    fn write_seeds(&self, runtime: &Runtime) {
+        let Some(seed) = self.seed else {
+            return;
+        };
+        let values = self
+            .seeds
+            .iter()
+            .copied()
+            .map(seed_bits)
+            .map(f32::from_bits)
+            .collect::<Vec<f32>>();
+        let answer = self
+            .answer
+            .entry
+            .as_ref()
+            .expect("a written answer holds the program its seeds belong to");
+        runtime.write(&answer.program, seed, &values);
+    }
+
     pub fn prefix(
         &mut self,
         runtime: &Runtime,
@@ -508,7 +571,7 @@ impl Batch {
                     );
                     held_prefix(&graph, &step, rows);
                     if self.seeded {
-                        graph.state(Shape::scalar(), Init::Zero, Element::Single);
+                        seed_state(&graph, self.batch, 0);
                         temperature_state(&graph, self.batch, 1.0);
                         keep_state(&graph, self.batch, 1.0);
                         cumulative_state(&graph, self.batch, 1.0);
@@ -935,11 +998,10 @@ impl Batch {
         }
     }
 
-    fn answer_inputs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>, bool) {
+    fn answer_inputs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut tokens = vec![0.0f32; self.batch as usize];
         let mut cursor = Vec::with_capacity(self.batch as usize);
         let mut mask = Vec::with_capacity(self.batch as usize);
-        let mut drawn = false;
         for slot in 0..self.batch {
             let Some(held) = self.slots[slot as usize].as_ref() else {
                 cursor.push(0.0);
@@ -957,7 +1019,6 @@ impl Batch {
                     let token = *prompt
                         .front()
                         .expect("a prompting plane holds the token it feeds next");
-                    drawn |= prompt.len() == 1;
                     tokens[slot as usize] = token as f32;
                     cursor.push(held.cursor as f32);
                     mask.push(1.0);
@@ -969,7 +1030,6 @@ impl Batch {
                         held.cursor,
                         self.context,
                     );
-                    drawn = true;
                     tokens[slot as usize] = *feed as f32;
                     cursor.push(held.cursor as f32);
                     mask.push(1.0);
@@ -980,26 +1040,17 @@ impl Batch {
                 }
             }
         }
-        (tokens, cursor, mask, drawn)
+        (tokens, cursor, mask)
     }
 
-    fn write_answer(
-        &mut self,
-        runtime: &Runtime,
-        tokens: &[f32],
-        cursor: &[f32],
-        mask: &[f32],
-        drawn: bool,
-    ) {
+    fn write_answer(&mut self, runtime: &Runtime, tokens: &[f32], cursor: &[f32], mask: &[f32]) {
         let reset = vec![0.0f32; self.batch as usize];
+        self.write_seeds(runtime);
         let answer = self.answer.entry(runtime, &self.store, self.compile);
         runtime.write(&answer.program, answer.step.token, tokens);
         runtime.write(&answer.program, answer.step.cursor, cursor);
         runtime.write(&answer.program, answer.step.mask, mask);
         runtime.write(&answer.program, answer.step.reset, &reset);
-        if let Some(advance) = answer.advance {
-            runtime.write(&answer.program, advance, &[if drawn { 1.0 } else { 0.0 }]);
-        }
     }
 
     fn complete_answer(&mut self, chosen: &[f32]) -> Vec<Emitted> {
@@ -1009,6 +1060,11 @@ impl Batch {
                 continue;
             };
             let token = token_of(&chosen[slot as usize]);
+            let drew = match &held.phase {
+                Phase::Prompting(prompt) => prompt.len() == 1,
+                Phase::Generating(_) => true,
+                Phase::Suspended => false,
+            };
             match &mut held.phase {
                 Phase::Prompting(prompt) => {
                     prompt.pop_front();
@@ -1022,6 +1078,9 @@ impl Batch {
                 }
                 Phase::Suspended => {}
             }
+            if drew {
+                self.seeds[slot as usize] = self.seeds[slot as usize].wrapping_add(1);
+            }
             if held.phase.running() {
                 held.cursor += 1;
             }
@@ -1030,8 +1089,8 @@ impl Batch {
     }
 
     fn answer(&mut self, runtime: &Runtime) -> Vec<Emitted> {
-        let (tokens, cursor, mask, drawn) = self.answer_inputs();
-        self.write_answer(runtime, &tokens, &cursor, &mask, drawn);
+        let (tokens, cursor, mask) = self.answer_inputs();
+        self.write_answer(runtime, &tokens, &cursor, &mask);
         let chosen = {
             let answer = self.answer.entry(runtime, &self.store, self.compile);
             runtime.run(&answer.program);
@@ -1041,8 +1100,8 @@ impl Batch {
     }
 
     fn start_answer(&mut self, runtime: &Runtime, waves: u32) -> Vec<Emitted> {
-        let (tokens, cursor, mask, drawn) = self.answer_inputs();
-        self.write_answer(runtime, &tokens, &cursor, &mask, drawn);
+        let (tokens, cursor, mask) = self.answer_inputs();
+        self.write_answer(runtime, &tokens, &cursor, &mask);
         let (chosen, held) = {
             let held = self
                 .answer
@@ -1119,7 +1178,6 @@ impl Pending {
             self.entry = Some(Entry {
                 program: compile(runtime, &self.graph, weights),
                 step: self.step,
-                advance: self.draw.advance,
                 chosen,
             });
         }
@@ -1154,6 +1212,22 @@ fn token_of(value: &f32) -> u32 {
         "the model chose {value} where a token stands",
     );
     *value as u32
+}
+
+fn seed_state(graph: &Graph, batch: u32, seed: u32) -> Value {
+    graph.state(
+        Shape::of([1, 1, batch, 1]),
+        Init::Constant(f32::from_bits(seed)),
+        Element::Single,
+    )
+}
+
+fn plane_seed(seed: u32, slot: u32) -> u32 {
+    seed ^ slot.wrapping_add(1).wrapping_mul(0x9e37_79b9)
+}
+
+fn seed_bits(seed: u32) -> u32 {
+    0x3f80_0000 | ((seed ^ (seed >> 23)) & 0x007f_ffff)
 }
 
 fn temperature_state(graph: &Graph, batch: u32, temperature: f32) -> Value {
