@@ -75,13 +75,15 @@ mod device {
             let held = wave_table + 1u32 + opened * 4u32;
             let wave_first = successors[held];
             let wave_segments = successors[held + 1u32];
-            for offset in stride(lid, wave_segments, WORKGROUP_SIZE) {
-                let segment = wave_first + offset;
-                let slot = atomic_add(&state[control::TAIL], 1u32);
-                atomic_store(
-                    &state[queue + slot],
-                    (generation << control::ENTRY_SHIFT) | segment,
-                );
+            if wave_first >= first && wave_first + wave_segments <= last {
+                for offset in stride(lid, wave_segments, WORKGROUP_SIZE) {
+                    let segment = wave_first + offset;
+                    let slot = atomic_add(&state[control::TAIL], 1u32);
+                    atomic_store(
+                        &state[queue + slot],
+                        (generation << control::ENTRY_SHIFT) | segment,
+                    );
+                }
             }
         }
     }

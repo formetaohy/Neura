@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 mod choice;
+mod session;
 mod tune;
+
+pub use session::{Cursor, Session};
 
 pub const DEFAULT_READBACK_BYTES: u64 = 1 << 20;
 pub const DEFAULT_READBACK_SLOTS: usize = 2;
@@ -697,6 +700,7 @@ impl Runtime {
                     roots: encoding.roots(),
                     waves: encoding.wave_segments(),
                     wave_table: encoding.successors().len() as u32,
+                    wave: 0,
                 },
             );
             let group = program.group();
@@ -736,6 +740,7 @@ impl Runtime {
                     roots: window.roots(),
                     waves: encoding.wave_segments(),
                     wave_table: encoding.successors().len() as u32,
+                    wave: 0,
                 },
             );
             let group = program.group();

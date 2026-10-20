@@ -74,6 +74,17 @@ and a long run may choose a token a single precision run does not.
 NEURA_KV=half NEURA_CONTEXT=8192 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
 ```
 
+Setting `NEURA_FRAMES` to a wave count walks each program in slices of that many waves and waits for
+one slice a frame, so a prompt that needs 128ms of prefill can hold a 16ms frame budget instead of
+stalling the frame it starts in. The whole run walks the same plans and answers the same tokens as a
+run without it; the slice only decides how much of a plan a frame pays for. A slice longer than a
+frame is a budget the caller chose too large, and a multi-turn conversation answers one turn at a
+time and does not combine with it.
+
+```sh
+NEURA_FRAMES=256 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 24
+```
+
 Every run compiles the plan this device measured for the answer, fill and reset programs, and a
 device that has measured none walks the profile it balances on. Setting `NEURA_TUNE=1` measures
 every plan the device offers against the weights the programs walk, keeps the fastest of them, and

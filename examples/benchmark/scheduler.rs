@@ -14,6 +14,7 @@ pub(crate) fn section(runtime: &Runtime) {
         walk(runtime),
         gate(runtime),
         chained(runtime),
+        paced(runtime),
     ];
     measure::report("fixed costs", &rows);
 }
@@ -108,6 +109,55 @@ fn gate(runtime: &Runtime) -> measure::Row {
     let rate = measure::each(timing.step, program.wave_count(), "wave");
     measure::row(
         format!("a chain of {PAIRS} gated rounds of two pairs"),
+        &program,
+        timing,
+        rate,
+    )
+}
+
+fn paced(runtime: &Runtime) -> measure::Row {
+    const SLICE: u32 = 4;
+    let graph = Graph::new();
+    let data = graph.input(Shape::of([1, 1, 1, DEPTH]), Element::Single);
+    let stored = graph.block_quantized_parameter(
+        Shape::of([1, 1, DEPTH, DEPTH]),
+        Init::Uniform {
+            low: -0.1,
+            high: 0.1,
+        },
+        Element::Q8_0,
+    );
+    let weights = graph.permute(stored, [0, 1, 3, 2]);
+    let mut value = data;
+    for _ in 0..GEMVS {
+        value = graph.matmul(value, weights);
+    }
+    graph.retain(value);
+    let held = vec![0.5; DEPTH as usize];
+    let weights = runtime.weights(&graph);
+    let mut program = runtime.compile(&graph, &weights);
+    runtime.write(&program, data, &held);
+    runtime.run(&program);
+    let waves = program.wave_count();
+    let mut total = 0.0f64;
+    let mut longest = 0.0f64;
+    let mut slices = 0;
+    let mut session = runtime.session(&mut program);
+    while session.submit(SLICE) {
+        let seconds = session
+            .wait()
+            .expect("a session that submits a slice waits for its run");
+        total += seconds;
+        longest = longest.max(seconds);
+        slices += 1;
+    }
+    let timing = measure::Timing {
+        submit: 0.0,
+        step: total * 1e6,
+    };
+    let rate = format!("{:.2} ms a slice over {slices} slices", longest * 1e3,);
+    measure::row(
+        format!("{waves} waves walked {SLICE} at a time"),
         &program,
         timing,
         rate,

@@ -360,6 +360,66 @@ fn walked_alone(
     walked
 }
 
+fn framed(
+    first_prompt: &[u32],
+    second_prompt: &[u32],
+    wanted: usize,
+    chunks: &[u32],
+    waves: u32,
+    prefix: Option<&[u32]>,
+) -> Vec<Vec<u32>> {
+    let runtime = runtime();
+    let spec = BatchSpec::new(16, 2, chunks);
+    let spec = match prefix {
+        Some(_) => spec.shared(),
+        None => spec,
+    };
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        spec,
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    if let Some(prefix) = prefix {
+        batch.prefix(&runtime, prefix, batch_prefix);
+    }
+    batch.admit(&runtime, first_prompt);
+    batch.admit(&runtime, second_prompt);
+    let mut walked = vec![Vec::new(); batch.batch() as usize];
+    while walked.iter().any(|held| held.len() < wanted) && batch.active().next().is_some() {
+        for held in batch.advance(&runtime, waves) {
+            if held.token == END || walked[held.slot as usize].len() >= wanted {
+                batch.finish(held.slot);
+                continue;
+            }
+            walked[held.slot as usize].push(held.token);
+        }
+    }
+    walked
+}
+
+#[test]
+fn a_batch_walks_the_frames_of_a_plan_a_slice_at_a_time() {
+    let first = &[0, 1, 1, 2, 1];
+    let second = &[0, 1, 2];
+    let expected = batched(first, second, 5, &[4, 2], false, None, None);
+    for waves in [1, 2, 3, 8] {
+        assert_eq!(
+            framed(first, second, 5, &[4, 2], waves, None),
+            expected,
+            "a batch that walks {waves} waves a frame answers with the tokens a whole plan answers with",
+        );
+    }
+    let shared = batched(first, second, 5, &[4, 2], false, None, Some(&[0, 1]));
+    assert_eq!(
+        framed(first, second, 5, &[4, 2], 2, Some(&[0, 1])),
+        shared,
+        "a batch that walks a shared prefix a frame at a time answers with the tokens a whole plan answers with",
+    );
+}
+
 #[test]
 fn a_batch_answers_every_plane_with_the_tokens_a_row_answers_with() {
     for chunks in [&[][..], &[4, 2]] {

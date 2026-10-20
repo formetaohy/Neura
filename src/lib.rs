@@ -20,8 +20,9 @@ pub use neura_nn::{
 pub use neura_plan::{Arena, Layout, Seed, Span};
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};
 pub use neura_runtime::{
-    Checkpoint, CheckpointFile, CheckpointTensor, DEFAULT_HEAP_BYTES, DEFAULT_READBACK_BYTES,
-    DEFAULT_READBACK_SLOTS, MemoryRequest, Program, Readout, Run, Runtime, RuntimeRequest, Weights,
+    Checkpoint, CheckpointFile, CheckpointTensor, Cursor, DEFAULT_HEAP_BYTES,
+    DEFAULT_READBACK_BYTES, DEFAULT_READBACK_SLOTS, MemoryRequest, Program, Readout, Run, Runtime,
+    RuntimeRequest, Session, Weights,
 };
 pub use neura_source::{Placed, Source};
 pub use neura_template as template;

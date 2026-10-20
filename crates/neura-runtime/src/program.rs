@@ -13,10 +13,11 @@ use neura_kernel::{HEAP, TASKS, Tables, VALUES};
 use neura_plan::{Arena, Encoding, Plan, Span, TableRows, WeightPages};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 const REMEMBERED_WINDOWS: usize = 8;
+static INSTANCES: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
 pub struct Weights {
@@ -113,6 +114,7 @@ impl Weights {
 
 pub struct Program {
     pub(crate) resident: Arc<Resident>,
+    instance: u64,
     tables: Tables,
     cached: Mutex<Option<Vec<u32>>>,
     pub(crate) state: Recycled,
@@ -175,6 +177,7 @@ pub(crate) struct Dispatch<'a> {
     pub(crate) roots: &'a [u32],
     pub(crate) waves: &'a [u32],
     pub(crate) wave_table: u32,
+    pub(crate) wave: u32,
 }
 
 struct Successors {
@@ -543,6 +546,7 @@ impl Program {
         let encoding = (!plan.awaits_a_binding()).then(|| plan.bound_encoding());
         let program = Self {
             resident,
+            instance: INSTANCES.fetch_add(1, Ordering::Relaxed),
             tables,
             cached: Mutex::new(None),
             group: Mutex::new(None),
@@ -649,6 +653,13 @@ impl Program {
             .iter()
             .map(|root| control::entry(dispatch.generation, *root))
             .collect::<Vec<u32>>();
+        if dispatch.wave != 0 {
+            self.state.buffer().write_at(
+                queue,
+                u64::from(control::PREFIX) * WORD_BYTES,
+                bytemuck::cast_slice(&[dispatch.wave]),
+            );
+        }
         self.state.buffer().write_at(
             queue,
             u64::from(queue_base) * WORD_BYTES,
@@ -867,6 +878,14 @@ impl Program {
     pub(crate) fn span_with(&self, value: Value, extents: &[u32]) -> Span {
         let encoding = self.encoding();
         self.plan.span_at(&encoding, value, self.at(), extents)
+    }
+
+    pub(crate) fn plan(&self) -> Arc<Plan> {
+        self.plan.clone()
+    }
+
+    pub(crate) fn instance(&self) -> u64 {
+        self.instance
     }
 
     pub(crate) fn encoding(&self) -> Arc<Encoding> {

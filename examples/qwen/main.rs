@@ -99,6 +99,11 @@ fn main() {
     }
     let tuned = std::env::var("NEURA_TUNE").is_ok();
     let shared = std::env::var("NEURA_PREFIX").is_ok();
+    let frames = std::env::var("NEURA_FRAMES").ok().map(|held| {
+        let waves = held.parse::<u32>().expect("a frame of waves");
+        assert!(waves > 0, "a frame walks at least one wave");
+        waves
+    });
     let kv = match std::env::var("NEURA_KV").as_deref() {
         Ok("half") => Element::Half,
         Ok("single") | Err(_) => Element::Single,
@@ -190,6 +195,10 @@ fn main() {
                 !shared,
                 "a multi-turn conversation keeps the state of each turn, and a shared prefix fills one prompt",
             );
+            assert!(
+                frames.is_none(),
+                "a multi-turn conversation answers each turn in one step, and NEURA_FRAMES walks a single prompt",
+            );
             assert_eq!(
                 sequences, 1,
                 "a multi-turn conversation answers one sequence at a time",
@@ -202,12 +211,19 @@ fn main() {
             if shared && tokens.len() > 1 {
                 batch.prefix(&runtime, &tokens[..tokens.len() - 1], prefix);
             }
-            run(&runtime, &tokenizer, &mut batch, &tokens, wanted);
+            run(&runtime, &tokenizer, &mut batch, &tokens, wanted, frames);
         }
     }
 }
 
-fn run(runtime: &Runtime, tokenizer: &Tokenizer, batch: &mut Batch, tokens: &[u32], wanted: usize) {
+fn run(
+    runtime: &Runtime,
+    tokenizer: &Tokenizer,
+    batch: &mut Batch,
+    tokens: &[u32],
+    wanted: usize,
+    frames: Option<u32>,
+) {
     let started = Instant::now();
     let context = batch.context();
     for _ in 0..batch.batch() {
@@ -217,8 +233,23 @@ fn run(runtime: &Runtime, tokenizer: &Tokenizer, batch: &mut Batch, tokens: &[u3
     let end = tokenizer.end_of_turn();
     let mut produced = 0usize;
     let mut reached_context = false;
+    let mut walked = 0u32;
+    let mut first = None;
+    let mut longest = 0.0f64;
     while produced < wanted && batch.active().next().is_some() {
-        let emitted = batch.step(runtime);
+        let started_frame = Instant::now();
+        let emitted = match frames {
+            Some(waves) => batch.advance(runtime, waves),
+            None => batch.step(runtime),
+        };
+        if frames.is_some() {
+            let elapsed = started_frame.elapsed().as_secs_f64();
+            match first {
+                None => first = Some(elapsed),
+                Some(_) => longest = longest.max(elapsed),
+            }
+            walked += 1;
+        }
         for held in emitted {
             let reached = batch
                 .cursor(held.slot)
@@ -256,6 +287,13 @@ fn run(runtime: &Runtime, tokenizer: &Tokenizer, batch: &mut Batch, tokens: &[u3
     );
     if reached_context {
         println!("(the model reached its {context} token context)");
+    }
+    if let Some(first) = first {
+        println!(
+            "({walked} frames, first {:.2} ms, longest {:.2} ms)",
+            first * 1e3,
+            longest * 1e3,
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::generator::{Draw, Sampling, chosen};
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{Program, Runtime, Weights};
+use neura_runtime::{Cursor, Program, Runtime, Weights};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
@@ -113,6 +113,12 @@ pub struct Batch {
     shared: bool,
     prefix: Option<Vec<u32>>,
     slots: Vec<Option<Slot>>,
+    frame: Option<Frame>,
+}
+
+struct Frame {
+    fill: Option<(usize, Vec<u32>)>,
+    cursor: Cursor,
 }
 
 struct Slot {
@@ -303,6 +309,7 @@ impl Batch {
             shared,
             prefix: None,
             slots: (0..batch).map(|_| None).collect(),
+            frame: None,
         }
     }
 
@@ -328,6 +335,10 @@ impl Batch {
         tokens: &[u32],
         build: impl Fn(&Graph, BatchShape) -> BatchPrefix,
     ) {
+        assert!(
+            self.frame.is_none(),
+            "a batch fills a shared prefix before it walks a frame",
+        );
         assert!(
             self.shared,
             "a batch fills a shared prefix only when it declares one",
@@ -410,6 +421,10 @@ impl Batch {
     }
 
     pub fn admit(&mut self, runtime: &Runtime, tokens: &[u32]) -> u32 {
+        assert!(
+            self.frame.is_none(),
+            "a batch admits a sequence before it walks a frame",
+        );
         let slot = self
             .slots
             .iter()
@@ -421,6 +436,10 @@ impl Batch {
     }
 
     pub fn resume(&mut self, slot: u32, tokens: &[u32]) {
+        assert!(
+            self.frame.is_none(),
+            "a batch resumes a sequence before it walks a frame",
+        );
         let held = self.slots[slot as usize]
             .as_ref()
             .unwrap_or_else(|| panic!("plane {slot} of this batch holds no sequence"));
@@ -459,6 +478,10 @@ impl Batch {
 
     pub fn restart(&mut self, runtime: &Runtime, slot: u32, tokens: &[u32]) {
         assert!(
+            self.frame.is_none(),
+            "a batch restarts a sequence before it walks a frame",
+        );
+        assert!(
             slot < self.batch,
             "a batch of {} planes names no plane {slot}",
             self.batch,
@@ -490,6 +513,7 @@ impl Batch {
             }
             None => (0, tokens.to_vec(), 0.0f32),
         };
+        self.compile_fills(runtime, &prompt);
         let mut reset = vec![0.0f32; self.batch as usize];
         reset[slot as usize] = 1.0;
         let mut shared = vec![0.0f32; self.batch as usize];
@@ -504,6 +528,10 @@ impl Batch {
     }
 
     pub fn suspend(&mut self, slot: u32) {
+        assert!(
+            self.frame.is_none(),
+            "a batch suspends a sequence before it walks a frame",
+        );
         let held = self.slots[slot as usize]
             .as_mut()
             .unwrap_or_else(|| panic!("plane {slot} of this batch holds no sequence"));
@@ -518,6 +546,10 @@ impl Batch {
     }
 
     pub fn step(&mut self, runtime: &Runtime) -> Vec<Emitted> {
+        assert!(
+            self.frame.is_none(),
+            "a batch steps a whole plan, and this batch walks a frame of one; advance the frame or finish it first",
+        );
         if self.active().next().is_none() {
             return Vec::new();
         }
@@ -526,6 +558,10 @@ impl Batch {
     }
 
     pub fn finish(&mut self, slot: u32) {
+        assert!(
+            self.frame.is_none(),
+            "a batch finishes a sequence before it walks a frame",
+        );
         assert!(
             slot < self.batch,
             "a batch of {} planes names no plane {slot}",
@@ -558,7 +594,53 @@ impl Batch {
         self.cursor(slot).map(|cursor| self.context - cursor)
     }
 
-    fn prefill(&mut self, runtime: &Runtime) {
+    pub fn advance(&mut self, runtime: &Runtime, waves: u32) -> Vec<Emitted> {
+        assert!(waves > 0, "a batch walks at least one wave a frame");
+        if self.active().next().is_none() {
+            assert!(
+                self.frame.is_none(),
+                "a batch with no running sequence holds no frame",
+            );
+            return Vec::new();
+        }
+        if let Some(frame) = self.frame.take() {
+            return self.walk(runtime, frame, waves);
+        }
+        match self.next_fill() {
+            Some((index, slots)) => self.start_fill(runtime, index, slots, waves),
+            None => self.start_answer(runtime, waves),
+        }
+    }
+
+    fn walk(&mut self, runtime: &Runtime, frame: Frame, waves: u32) -> Vec<Emitted> {
+        match frame.fill {
+            Some((index, slots)) => self.resume_fill(runtime, index, slots, frame.cursor, waves),
+            None => self.resume_answer(runtime, frame.cursor, waves),
+        }
+    }
+
+    fn compile_fills(&mut self, runtime: &Runtime, tokens: &[u32]) {
+        let mut left = tokens.len();
+        while left > 1 {
+            let Some(index) = self
+                .fills
+                .iter()
+                .position(|(chunk, _)| (*chunk as usize) < left)
+            else {
+                break;
+            };
+            let Self {
+                fills,
+                store,
+                compile,
+                ..
+            } = self;
+            fills[index].1.entry(runtime, store, *compile);
+            left -= fills[index].0 as usize;
+        }
+    }
+
+    fn next_fill(&self) -> Option<(usize, Vec<u32>)> {
         let mut groups = vec![Vec::new(); self.fills.len()];
         for (slot, held) in self.slots.iter().enumerate() {
             let Some(held) = held else {
@@ -582,32 +664,66 @@ impl Batch {
                 .iter()
                 .position(|(chunk, _)| (*chunk as usize) < left)
             {
-                groups[index].push(slot);
+                groups[index].push(slot as u32);
             }
         }
-        for (index, group) in groups.into_iter().enumerate() {
-            if group.is_empty() {
-                continue;
+        groups
+            .into_iter()
+            .enumerate()
+            .find(|(_, group)| !group.is_empty())
+    }
+
+    fn prepare_fill(&mut self, runtime: &Runtime, index: usize, group: &[u32]) {
+        let chunk = self.fills[index].0;
+        let rows = chunk as usize;
+        let planes = self.batch as usize;
+        let mut tokens = vec![0.0f32; rows * planes];
+        let mut cursors = vec![0.0f32; planes];
+        let mut mask = vec![0.0f32; planes];
+        for slot in group {
+            let held = self.slots[*slot as usize]
+                .as_ref()
+                .expect("a plane of a fill group holds a sequence");
+            cursors[*slot as usize] = held.cursor as f32;
+            mask[*slot as usize] = 1.0;
+            let Phase::Prompting(prompt) = &held.phase else {
+                panic!("a plane of a fill group feeds a prompt");
+            };
+            for (row, token) in prompt.iter().take(rows).enumerate() {
+                tokens[row * planes + *slot as usize] = *token as f32;
             }
-            let chunk = self.fills[index].0;
-            let rows = chunk as usize;
-            let planes = self.batch as usize;
-            let mut tokens = vec![0.0f32; rows * planes];
-            let mut cursors = vec![0.0f32; planes];
-            let mut mask = vec![0.0f32; planes];
-            for slot in &group {
-                let held = self.slots[*slot]
-                    .as_ref()
-                    .expect("a plane of a fill group holds a sequence");
-                cursors[*slot] = held.cursor as f32;
-                mask[*slot] = 1.0;
-                let Phase::Prompting(prompt) = &held.phase else {
-                    panic!("a plane of a fill group feeds a prompt");
-                };
-                for (row, token) in prompt.iter().take(rows).enumerate() {
-                    tokens[row * planes + *slot] = *token as f32;
-                }
+        }
+        let Self {
+            fills,
+            store,
+            compile,
+            ..
+        } = self;
+        let fill = fills[index].1.entry(runtime, store, *compile);
+        runtime.write(&fill.program, fill.step.token, &tokens);
+        runtime.write(&fill.program, fill.step.cursor, &cursors);
+        runtime.write(&fill.program, fill.step.mask, &mask);
+    }
+
+    fn complete_fill(&mut self, index: usize, group: &[u32]) {
+        let chunk = self.fills[index].0;
+        for slot in group {
+            let held = self.slots[*slot as usize]
+                .as_mut()
+                .expect("a plane of a fill group holds a sequence");
+            held.cursor += chunk;
+            let Phase::Prompting(prompt) = &mut held.phase else {
+                panic!("a plane of a fill group feeds a prompt");
+            };
+            for _ in 0..chunk {
+                prompt.pop_front();
             }
+        }
+    }
+
+    fn fill(&mut self, runtime: &Runtime, index: usize, group: Vec<u32>) {
+        self.prepare_fill(runtime, index, &group);
+        {
             let Self {
                 fills,
                 store,
@@ -615,27 +731,90 @@ impl Batch {
                 ..
             } = self;
             let fill = fills[index].1.entry(runtime, store, *compile);
-            runtime.write(&fill.program, fill.step.token, &tokens);
-            runtime.write(&fill.program, fill.step.cursor, &cursors);
-            runtime.write(&fill.program, fill.step.mask, &mask);
             runtime.run(&fill.program);
-            for slot in group {
-                let held = self.slots[slot]
-                    .as_mut()
-                    .expect("a plane of a fill group holds a sequence");
-                held.cursor += chunk;
-                let Phase::Prompting(prompt) = &mut held.phase else {
-                    panic!("a plane of a fill group feeds a prompt");
-                };
-                for _ in 0..chunk {
-                    prompt.pop_front();
-                }
+        }
+        self.complete_fill(index, &group);
+    }
+
+    fn start_fill(
+        &mut self,
+        runtime: &Runtime,
+        index: usize,
+        slots: Vec<u32>,
+        waves: u32,
+    ) -> Vec<Emitted> {
+        self.prepare_fill(runtime, index, &slots);
+        let held = {
+            let program = &mut self.fills[index]
+                .1
+                .entry
+                .as_mut()
+                .expect("a prepared fill holds the program it walks")
+                .program;
+            let mut session = runtime.session(program);
+            session.submit(waves);
+            if session.done() {
+                session.wait();
+                None
+            } else {
+                Some(session.pause())
             }
+        };
+        match held {
+            Some(cursor) => {
+                self.frame = Some(Frame {
+                    fill: Some((index, slots)),
+                    cursor,
+                })
+            }
+            None => self.complete_fill(index, &slots),
+        }
+        Vec::new()
+    }
+
+    fn resume_fill(
+        &mut self,
+        runtime: &Runtime,
+        index: usize,
+        slots: Vec<u32>,
+        cursor: Cursor,
+        waves: u32,
+    ) -> Vec<Emitted> {
+        let held = {
+            let program = &mut self.fills[index]
+                .1
+                .entry
+                .as_mut()
+                .expect("a resumed fill holds the program it walks")
+                .program;
+            let mut session = runtime.resume(program, cursor);
+            session.submit(waves);
+            if session.done() {
+                session.wait();
+                None
+            } else {
+                Some(session.pause())
+            }
+        };
+        match held {
+            Some(cursor) => {
+                self.frame = Some(Frame {
+                    fill: Some((index, slots)),
+                    cursor,
+                })
+            }
+            None => self.complete_fill(index, &slots),
+        }
+        Vec::new()
+    }
+
+    fn prefill(&mut self, runtime: &Runtime) {
+        while let Some((index, group)) = self.next_fill() {
+            self.fill(runtime, index, group);
         }
     }
 
-    fn answer(&mut self, runtime: &Runtime) -> Vec<Emitted> {
-        let answer = self.answer.entry(runtime, &self.store, self.compile);
+    fn answer_inputs(&self) -> (Vec<f32>, Vec<f32>, Vec<f32>, bool) {
         let mut tokens = vec![0.0f32; self.batch as usize];
         let mut cursor = Vec::with_capacity(self.batch as usize);
         let mut mask = Vec::with_capacity(self.batch as usize);
@@ -680,16 +859,29 @@ impl Batch {
                 }
             }
         }
+        (tokens, cursor, mask, drawn)
+    }
+
+    fn write_answer(
+        &mut self,
+        runtime: &Runtime,
+        tokens: &[f32],
+        cursor: &[f32],
+        mask: &[f32],
+        drawn: bool,
+    ) {
         let reset = vec![0.0f32; self.batch as usize];
-        runtime.write(&answer.program, answer.step.token, &tokens);
-        runtime.write(&answer.program, answer.step.cursor, &cursor);
-        runtime.write(&answer.program, answer.step.mask, &mask);
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, answer.step.token, tokens);
+        runtime.write(&answer.program, answer.step.cursor, cursor);
+        runtime.write(&answer.program, answer.step.mask, mask);
         runtime.write(&answer.program, answer.step.reset, &reset);
         if let Some(advance) = answer.advance {
             runtime.write(&answer.program, advance, &[if drawn { 1.0 } else { 0.0 }]);
         }
-        runtime.run(&answer.program);
-        let chosen = runtime.read(&answer.program, answer.chosen);
+    }
+
+    fn complete_answer(&mut self, chosen: &[f32]) -> Vec<Emitted> {
         let mut emitted = Vec::new();
         for slot in 0..self.batch {
             let Some(held) = self.slots[slot as usize].as_mut() else {
@@ -714,6 +906,83 @@ impl Batch {
             }
         }
         emitted
+    }
+
+    fn answer(&mut self, runtime: &Runtime) -> Vec<Emitted> {
+        let (tokens, cursor, mask, drawn) = self.answer_inputs();
+        self.write_answer(runtime, &tokens, &cursor, &mask, drawn);
+        let chosen = {
+            let answer = self.answer.entry(runtime, &self.store, self.compile);
+            runtime.run(&answer.program);
+            runtime.read(&answer.program, answer.chosen)
+        };
+        self.complete_answer(&chosen)
+    }
+
+    fn start_answer(&mut self, runtime: &Runtime, waves: u32) -> Vec<Emitted> {
+        let (tokens, cursor, mask, drawn) = self.answer_inputs();
+        self.write_answer(runtime, &tokens, &cursor, &mask, drawn);
+        let (chosen, held) = {
+            let held = self
+                .answer
+                .entry
+                .as_ref()
+                .expect("a written answer holds a program")
+                .chosen;
+            let program = &mut self
+                .answer
+                .entry
+                .as_mut()
+                .expect("a written answer holds a program")
+                .program;
+            let mut session = runtime.session(program);
+            session.submit(waves);
+            if session.done() {
+                session.wait();
+                (Some(runtime.read(program, held)), None)
+            } else {
+                (None, Some(session.pause()))
+            }
+        };
+        match held {
+            Some(cursor) => {
+                self.frame = Some(Frame { fill: None, cursor });
+                Vec::new()
+            }
+            None => self.complete_answer(&chosen.expect("a finished answer holds its choice")),
+        }
+    }
+
+    fn resume_answer(&mut self, runtime: &Runtime, cursor: Cursor, waves: u32) -> Vec<Emitted> {
+        let (chosen, held) = {
+            let held = self
+                .answer
+                .entry
+                .as_ref()
+                .expect("a resumed answer holds a program")
+                .chosen;
+            let program = &mut self
+                .answer
+                .entry
+                .as_mut()
+                .expect("a resumed answer holds a program")
+                .program;
+            let mut session = runtime.resume(program, cursor);
+            session.submit(waves);
+            if session.done() {
+                session.wait();
+                (Some(runtime.read(program, held)), None)
+            } else {
+                (None, Some(session.pause()))
+            }
+        };
+        match held {
+            Some(cursor) => {
+                self.frame = Some(Frame { fill: None, cursor });
+                Vec::new()
+            }
+            None => self.complete_answer(&chosen.expect("a finished answer holds its choice")),
+        }
     }
 }
 

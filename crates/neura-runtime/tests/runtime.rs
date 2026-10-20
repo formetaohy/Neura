@@ -142,10 +142,51 @@ fn a_gated_wave_waits_for_every_wave_before_it() {
     graph.retain(total);
     let runtime = open();
     let weights = runtime.weights(&graph);
-    let program = runtime.compile(&graph, &weights);
-    runtime.write(&program, input, &vec![1.0; ELEMENTS as usize]);
+    let mut program = runtime.compile(&graph, &weights);
+    let values = vec![1.0; ELEMENTS as usize];
+    runtime.write(&program, input, &values);
     runtime.run(&program);
     assert_close(&runtime.read(&program, total), &[ELEMENTS as f32], 0.0);
+    assert!(program.wave_count() > 1);
+    runtime.write(&program, input, &values);
+    {
+        let mut session = runtime.session(&mut program);
+        while session.submit(1) {}
+        session.wait();
+    }
+    assert_close(&runtime.read(&program, total), &[ELEMENTS as f32], 0.0);
+}
+
+#[test]
+fn a_session_walks_a_plan_a_slice_at_a_time() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 8, 8192]), Element::Single);
+    let first = graph.softmax(input);
+    let second = graph.softmax(first);
+    graph.retain(second);
+    let weights = runtime.weights(&graph);
+    let mut program = runtime.compile(&graph, &weights);
+    let values = random(8 * 8192, 41);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let expected = runtime.read(&program, second);
+    let waves = program.wave_count();
+    assert!(
+        waves > 1,
+        "a pair of softmaxes walks {waves} waves over {} tasks",
+        program.task_count(),
+    );
+    for budget in [1, 2, 3] {
+        runtime.write(&program, input, &values);
+        {
+            let mut session = runtime.session(&mut program);
+            while session.submit(budget) {}
+            session.wait();
+            assert_eq!(session.wave(), waves);
+        }
+        assert_close(&runtime.read(&program, second), &expected, 1e-6);
+    }
 }
 
 fn peaked(rows: u32, columns: u32, sections: u32, peak: f32) -> Vec<f32> {
