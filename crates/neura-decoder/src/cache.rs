@@ -16,13 +16,26 @@ struct Shared {
 }
 
 #[derive(Clone, Copy)]
-struct CacheShape {
+pub struct CacheShape {
     heads: u32,
     width: u32,
     capacity: u32,
     window: u32,
     batch: u32,
     rows: u32,
+}
+
+impl CacheShape {
+    pub fn new(heads: u32, width: u32, capacity: u32, window: u32, batch: u32, rows: u32) -> Self {
+        Self {
+            heads,
+            width,
+            capacity,
+            window,
+            batch,
+            rows,
+        }
+    }
 }
 
 pub struct Cache {
@@ -43,136 +56,42 @@ pub struct Cache {
     batch: u32,
     rows: u32,
     seat: Seat,
+    element: Element,
 }
 
 impl Cache {
-    pub fn new(
+    pub fn new(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, false, Seat::Planes, false, element)
+    }
+
+    pub fn windowed(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, false, Seat::Planes, true, element)
+    }
+
+    pub fn with_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, true, Seat::Planes, false, element)
+    }
+
+    pub fn windowed_with_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, true, Seat::Planes, true, element)
+    }
+
+    pub fn shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, true, Seat::Shared, false, element)
+    }
+
+    pub fn windowed_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, shape, true, Seat::Shared, true, element)
+    }
+
+    fn of(
         graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
+        shape: CacheShape,
+        declares_shared: bool,
+        seat: Seat,
+        ring: bool,
+        element: Element,
     ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            false,
-            Seat::Planes,
-            false,
-        )
-    }
-
-    pub fn windowed(
-        graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            false,
-            Seat::Planes,
-            true,
-        )
-    }
-
-    pub fn with_shared(
-        graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            true,
-            Seat::Planes,
-            false,
-        )
-    }
-
-    pub fn windowed_with_shared(
-        graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            true,
-            Seat::Planes,
-            true,
-        )
-    }
-
-    pub fn shared(
-        graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            true,
-            Seat::Shared,
-            false,
-        )
-    }
-
-    pub fn windowed_shared(
-        graph: &Graph,
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> Self {
-        Self::of(
-            graph,
-            Self::shape(heads, width, capacity, window, batch, rows),
-            true,
-            Seat::Shared,
-            true,
-        )
-    }
-
-    fn shape(
-        heads: u32,
-        width: u32,
-        capacity: u32,
-        window: u32,
-        batch: u32,
-        rows: u32,
-    ) -> CacheShape {
-        CacheShape {
-            heads,
-            width,
-            capacity,
-            window,
-            batch,
-            rows,
-        }
-    }
-
-    fn of(graph: &Graph, shape: CacheShape, declares_shared: bool, seat: Seat, ring: bool) -> Self {
         let CacheShape {
             heads,
             width,
@@ -198,13 +117,18 @@ impl Cache {
             declares_shared || seat == Seat::Planes,
             "a cache that walks a shared prefix declares the prefix it walks",
         );
+        assert!(
+            matches!(element, Element::Single | Element::Half | Element::Bfloat16),
+            "a cache holds keys and values in single, half or bfloat16 storage, and {} storage carries another grid",
+            element.name(),
+        );
         let held = Shape::of([heads, batch, capacity, width]);
-        let keys = graph.state(held, Init::Zero, Element::Single);
-        let values = graph.state(held, Init::Zero, Element::Single);
+        let keys = graph.state(held, Init::Zero, element);
+        let values = graph.state(held, Init::Zero, element);
         let shared = declares_shared.then(|| {
             let held = Shape::of([heads, 1, capacity, width]);
-            let keys = graph.state(held, Init::Zero, Element::Single);
-            let values = graph.state(held, Init::Zero, Element::Single);
+            let keys = graph.state(held, Init::Zero, element);
+            let values = graph.state(held, Init::Zero, element);
             Shared {
                 keys,
                 values,
@@ -255,6 +179,7 @@ impl Cache {
             },
             rows,
             seat,
+            element,
         }
     }
 
@@ -280,6 +205,10 @@ impl Cache {
         self.window
     }
 
+    pub fn element(&self) -> Element {
+        self.element
+    }
+
     pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
         assert_eq!(
             self.seat,
@@ -293,12 +222,13 @@ impl Cache {
                 for (held, shared) in [(self.keys, shared.keys), (self.values, shared.values)] {
                     let prefix = graph.broadcast_to(graph.slice(shared, 1, 0, 1), shape);
                     let blank = graph.select(reset, zero, held);
-                    graph.copy_into(held, graph.select(share, prefix, blank));
+                    let chosen = graph.cast(graph.select(share, prefix, blank), self.element);
+                    graph.copy_into(held, chosen);
                 }
             }
             (None, None) => {
                 for held in [self.keys, self.values] {
-                    graph.copy_into(held, graph.select(reset, zero, held));
+                    graph.clear_where(held, reset);
                 }
             }
             _ => panic!(
@@ -314,13 +244,12 @@ impl Cache {
             Seat::Shared,
             "a shared cache clears the prefix it writes, and this cache walks the planes",
         );
-        let zero = graph.fill(Shape::scalar(), 0.0);
         let shared = self
             .shared
             .as_ref()
             .expect("a shared cache declares the prefix it clears");
         for held in [shared.keys, shared.values] {
-            graph.copy_into(held, graph.select(reset, zero, held));
+            graph.clear_where(held, reset);
         }
     }
 
@@ -404,6 +333,8 @@ impl Cache {
                 None => panic!("a cache that walks a shared prefix declares one"),
             },
         };
+        let keys = graph.cast(keys, self.element);
+        let values = graph.cast(values, self.element);
         for (held, stored) in [(keys, stored_keys), (values, stored_values)] {
             graph.write_into(stored, slots, held);
         }

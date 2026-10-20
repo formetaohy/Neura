@@ -1,5 +1,5 @@
 use crate::measure;
-use neura::decoder::Cache;
+use neura::decoder::{Cache, CacheShape};
 use neura::{AttentionOptions, Element, Graph, Init, Runtime, Shape, Value};
 
 const HEADS: u32 = 8;
@@ -116,7 +116,11 @@ fn prefill(runtime: &Runtime) -> measure::Row {
 
 fn stepped(runtime: &Runtime) -> measure::Row {
     let graph = Graph::new();
-    let cache = Cache::new(&graph, KEY_HEADS, WIDTH, CACHE, CACHE, 1, 1);
+    let cache = Cache::new(
+        &graph,
+        CacheShape::new(KEY_HEADS, WIDTH, CACHE, CACHE, 1, 1),
+        Element::Single,
+    );
     let query = plane(&graph, Shape::of([HEADS, 1, 1, WIDTH]));
     let keys = plane(&graph, Shape::of([KEY_HEADS, 1, 1, WIDTH]));
     let values = plane(&graph, Shape::of([KEY_HEADS, 1, 1, WIDTH]));

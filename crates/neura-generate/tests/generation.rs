@@ -1,5 +1,5 @@
 use neura_abi::Element;
-use neura_decoder::Cache;
+use neura_decoder::{Cache, CacheShape};
 use neura_generate::{
     Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Family, Generator,
     Sampling, Step,
@@ -60,7 +60,11 @@ fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Fami
     let build = |graph: &neura_graph::Graph, rows| {
         let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
         let cursor = graph.input(Shape::scalar(), Element::Single);
-        let cache = Cache::new(graph, 1, CLASSES, CAPACITY, CAPACITY, 1, rows);
+        let cache = Cache::new(
+            graph,
+            CacheShape::new(1, CLASSES, CAPACITY, CAPACITY, 1, rows),
+            Element::Single,
+        );
         let held = graph.one_hot(token, CLASSES);
         cache.write(graph, cursor, held, held);
         Step {
@@ -142,39 +146,23 @@ fn cache(shape: BatchShape, graph: &neura_graph::Graph, rows: u32, shared: bool)
     match (shared, shape.bounded) {
         (false, false) => Cache::new(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            rows,
+            CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
+            Element::Single,
         ),
         (false, true) => Cache::windowed(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            rows,
+            CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
+            Element::Single,
         ),
         (true, false) => Cache::with_shared(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            rows,
+            CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
+            Element::Single,
         ),
         (true, true) => Cache::windowed_with_shared(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            rows,
+            CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
+            Element::Single,
         ),
     }
 }
@@ -235,21 +223,27 @@ fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
     let cache = match shape.bounded {
         true => Cache::windowed_shared(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            shape.rows,
+            CacheShape::new(
+                1,
+                CLASSES,
+                shape.capacity,
+                shape.window,
+                shape.batch,
+                shape.rows,
+            ),
+            Element::Single,
         ),
         false => Cache::shared(
             graph,
-            1,
-            CLASSES,
-            shape.capacity,
-            shape.window,
-            shape.batch,
-            shape.rows,
+            CacheShape::new(
+                1,
+                CLASSES,
+                shape.capacity,
+                shape.window,
+                shape.batch,
+                shape.rows,
+            ),
+            Element::Single,
         ),
     };
     cache.clear_shared(graph, reset);

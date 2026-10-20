@@ -1814,6 +1814,20 @@ fn assert_writes_match_their_element(values: &[ValueInfo], tasks: &[Task]) {
                 }
                 continue;
             }
+            if task.kind == Kind::Clear && out.element.narrow() {
+                assert!(
+                    !out.element.sidecar(),
+                    "a clear writes the {} words of tensor {}, and {} storage keeps the quantum of every {} numbers in a table of its own",
+                    out.element.name(),
+                    task.out,
+                    out.element.name(),
+                    out.element
+                        .block()
+                        .expect("a sidecar tensor carries its block")
+                        .elements,
+                );
+                continue;
+            }
             if task.kind == Kind::ScatterWrite && out.element.narrow() {
                 let updates = &values[task.inputs[2] as usize];
                 assert!(
@@ -2224,6 +2238,7 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::MatmulWeightGrad
             | Kind::Select
             | Kind::ChoiceFold
+            | Kind::Clear
             | Kind::Length => {}
         }
     }

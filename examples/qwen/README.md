@@ -63,6 +63,17 @@ past the memory a full cache would need, while `NEURA_CONTEXT` still bounds each
 NEURA_CONTEXT=8192 NEURA_WINDOW=1024 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
 ```
 
+Setting `NEURA_KV=half` stores the keys and values of every full-attention layer in half precision
+and keeps the convolution and gated delta net states at single precision. The cache takes half the
+memory and every attention step reads half the bytes. An 8192-token context of eight sequences does
+not fit the default 2GB heap in single precision and fits at half, so a long conversation can keep
+exact full attention instead of a sliding window. Attention answers from rounded keys and values,
+and a long run may choose a token a single precision run does not.
+
+```sh
+NEURA_KV=half NEURA_CONTEXT=8192 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
+```
+
 Every run compiles the plan this device measured for the answer, fill and reset programs, and a
 device that has measured none walks the profile it balances on. Setting `NEURA_TUNE=1` measures
 every plan the device offers against the weights the programs walk, keeps the fastest of them, and

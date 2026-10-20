@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::mlp::Mlp;
 use crate::model::{Planes, as_planes, as_rows};
 use crate::ops::interleaved;
-use neura::decoder::{Cache, heads, joined, matrix, partial, rms, vector};
+use neura::decoder::{Cache, CacheShape, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
 use neura::{Graph, Shape, Value};
 
@@ -43,6 +43,7 @@ impl Attention {
             rows,
             shared,
             prefix,
+            kv,
         } = planes;
         Self {
             norm: vector(graph, source, &at("attn_norm.weight"), config.hidden),
@@ -79,57 +80,33 @@ impl Attention {
             cache: match (shared, prefix, bounded) {
                 (false, _, false) => Cache::new(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
                 (false, _, true) => Cache::windowed(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
                 (true, false, false) => Cache::with_shared(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
                 (true, false, true) => Cache::windowed_with_shared(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
                 (true, true, false) => Cache::shared(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
                 (true, true, true) => Cache::windowed_shared(
                     graph,
-                    config.key_heads,
-                    width,
-                    capacity,
-                    window,
-                    batch,
-                    rows,
+                    CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
+                    kv,
                 ),
             },
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),

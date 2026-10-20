@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::delta::Delta;
 use neura::decoder::{matrix, rms, vector};
 use neura::gguf::Archive;
-use neura::{Graph, Shape, Value};
+use neura::{Element, Graph, Shape, Value};
 
 pub(crate) fn as_planes(graph: &Graph, value: Value) -> Value {
     graph.permute(value, [0, 2, 1, 3])
@@ -22,6 +22,7 @@ pub(crate) struct Planes {
     pub rows: u32,
     pub shared: bool,
     pub prefix: bool,
+    pub kv: Element,
 }
 
 pub struct Model {

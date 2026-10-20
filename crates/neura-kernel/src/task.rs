@@ -1,5 +1,6 @@
 pub(crate) mod attention;
 pub(crate) mod choice;
+pub(crate) mod clear;
 pub(crate) mod conv;
 pub(crate) mod convert;
 pub(crate) mod layout;

@@ -357,6 +357,7 @@ impl Kernel {
         dot::install(&mut compiler, matmul_elements);
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
+        task::clear::install(&mut compiler);
         for module in DeviceModule::ALL {
             if kinds.iter().any(|kind| kind.carries(*module)) {
                 install(&mut compiler, *module, elements, &geometry, strategies);

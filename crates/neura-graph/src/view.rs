@@ -16,7 +16,10 @@ impl Graph {
     fn view_source(&self, value: u32) -> Option<Source> {
         let state = self.state.borrow();
         let info = &state.values[value as usize];
-        if info.element != Element::Single {
+        if !matches!(
+            info.element,
+            Element::Single | Element::Half | Element::Bfloat16
+        ) {
             return None;
         }
         if info.shape.dynamic() || state.values[info.storage as usize].shape.dynamic() {
@@ -42,6 +45,9 @@ impl Graph {
         let source = self.view_source(value.id())?;
         let shape = self.shape(value).fixed_axis(axis, length);
         let origin = source.origin + u64::from(start) * u64::from(source.strides[axis as usize]);
+        if !aligned(source.element, origin) {
+            return None;
+        }
         Some(self.declare(Declaration::viewed(
             shape,
             Layout::strided(shape.dims(), source.strides, origin),
@@ -101,6 +107,9 @@ impl Graph {
                 return None;
             }
         }
+        if !aligned(first.element, base as u64) || !aligned_step(first.element, stride) {
+            return None;
+        }
         let mut strides = first.strides;
         strides[axis] = stride;
         Some(self.declare(Declaration::viewed(
@@ -112,4 +121,12 @@ impl Graph {
             first.tracked,
         )))
     }
+}
+
+fn aligned(element: Element, origin: u64) -> bool {
+    element == Element::Single || origin.is_multiple_of(element.elements_per_word())
+}
+
+fn aligned_step(element: Element, stride: u32) -> bool {
+    element == Element::Single || u64::from(stride).is_multiple_of(element.elements_per_word())
 }

@@ -629,6 +629,7 @@ fn narrow<W: Walk, V: Values>(
         | Kind::Concat
         | Kind::Slice
         | Kind::Rows
+        | Kind::Clear
         | Kind::MatmulWeightGrad
         | Kind::SegmentSum
         | Kind::Length => {}

@@ -881,6 +881,7 @@ impl Graph {
             | Kind::MatmulWeightGrad
             | Kind::Rows
             | Kind::ChoiceFold
+            | Kind::Clear
             | Kind::Length => {}
             Kind::Argmax | Kind::Categorical | Kind::Sample | Kind::OneHot => {
                 panic!(

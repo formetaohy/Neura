@@ -680,4 +680,12 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Clear CLEAR = "clear" {
+        entry: "run_clear",
+        modules: [],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
 }

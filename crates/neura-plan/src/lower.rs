@@ -224,6 +224,9 @@ fn strides_one_number_a_step_at_every_binding(info: &ValueInfo) -> bool {
 }
 
 fn writes_narrow(values: &[ValueInfo], task: &TaskInfo) -> bool {
+    if task.kind == Kind::Clear {
+        return false;
+    }
     let out = &values[task.out as usize];
     if !out.element.narrow() {
         return false;
@@ -482,6 +485,7 @@ fn schedule_unit(
 ) {
     let target = device_workgroups(profile);
     match unit.kind {
+        Kind::Clear => clear(plan, unit, profile),
         Kind::Matmul => matmul(plan, unit, profile, chosen),
         Kind::Attention => {
             let rows = plan.shape(unit.out).dims();
@@ -2021,6 +2025,27 @@ fn grouped(plan: &mut Plan, unit: &TaskInfo, profile: Profile, chosen: &[(Produc
         task.splits = splits;
         task.prelude.clear();
         task.split = split;
+        plan.tasks.push(task);
+    }
+}
+
+fn clear(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let target = unit.out;
+    let elements = plan.shape(target).elements();
+    let words = plan.values[target as usize]
+        .element
+        .payload_words(u64::from(elements));
+    let words = u32::try_from(words).expect("a tensor of words fits the device word space");
+    let per_task = task_elements(words, profile.workgroup(), device_workgroups(profile));
+    let measure = measured(plan, target, Measure::Words);
+    for (first, count, split) in span::chunks(words, per_task, measure) {
+        let mut task = Task::span(unit, first, count, u64::from(count));
+        task.kind = Kind::Clear;
+        task.out = target;
+        task.split = split;
+        task.in_place = true;
+        task.prelude.clear();
+        task.chain.clear();
         plan.tasks.push(task);
     }
 }

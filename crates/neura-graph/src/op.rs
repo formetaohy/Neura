@@ -1650,4 +1650,34 @@ impl Graph {
         self.push(task);
         self.wrote_in_place(target);
     }
+
+    pub fn clear_where(&self, target: Value, condition: Value) {
+        let target = self.own(target);
+        let condition = self.own(condition);
+        self.assert_in_place(target, target);
+        assert_eq!(
+            self.shape(target).combined(self.shape(condition)),
+            self.shape(target),
+            "a masked clear walks the {} numbers of its target, and condition {} walks {:?}",
+            self.shape(target).elements(),
+            condition.id(),
+            self.shape(condition).dims(),
+        );
+        let mut task = TaskInfo::of(
+            Kind::Clear,
+            op::NONE,
+            target.id(),
+            [
+                condition.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.in_place = true;
+        self.push(task);
+        self.wrote_in_place(target);
+    }
 }

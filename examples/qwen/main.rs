@@ -99,6 +99,12 @@ fn main() {
     }
     let tuned = std::env::var("NEURA_TUNE").is_ok();
     let shared = std::env::var("NEURA_PREFIX").is_ok();
+    let kv = match std::env::var("NEURA_KV").as_deref() {
+        Ok("half") => Element::Half,
+        Ok("single") | Err(_) => Element::Single,
+        Ok(other) => panic!("a kv storage names half or single, and NEURA_KV names {other}"),
+    };
+    println!("kv: {}", kv.name());
 
     let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
     let planes = |shape: BatchShape, prefix: bool| Planes {
@@ -109,6 +115,7 @@ fn main() {
         rows: shape.rows,
         shared: shape.shared,
         prefix,
+        kv,
     };
     let answer = |graph: &neura::Graph, shape: BatchShape| {
         let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
