@@ -363,6 +363,58 @@ fn a_batch_reuses_the_prefix_its_planes_share() {
 }
 
 #[test]
+fn a_batch_resumes_the_state_a_suspended_plane_kept() {
+    let runtime = runtime();
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 1, &[]),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    let slot = batch.admit(&runtime, &[0, 1, 1, 2, 1]);
+    let mut first = Vec::new();
+    while first.len() < 2 {
+        for held in batch.step(&runtime) {
+            first.push(held.token);
+        }
+    }
+    batch.suspend(slot);
+    assert!(batch.active().next().is_none());
+    assert_eq!(batch.occupied().count(), 1);
+    batch.resume(slot, &[2, 0]);
+    let mut second = Vec::new();
+    while second.len() < 2 {
+        for held in batch.step(&runtime) {
+            second.push(held.token);
+        }
+    }
+    let mut resumed = vec![0, 1, 1, 2, 1];
+    resumed.extend_from_slice(&first);
+    resumed.extend_from_slice(&[2, 0]);
+    assert_eq!(
+        second,
+        walked_alone(&resumed, 2, &[], None),
+        "a resumed plane answers with the tokens a plane that walked the whole history answers with",
+    );
+    batch.suspend(slot);
+    batch.restart(&runtime, slot, &[2, 2, 0]);
+    let mut restarted = Vec::new();
+    while restarted.len() < 2 {
+        for held in batch.step(&runtime) {
+            restarted.push(held.token);
+        }
+    }
+    batch.finish(slot);
+    assert_eq!(
+        restarted,
+        walked_alone(&[2, 2, 0], 2, &[], None),
+        "a restarted plane answers with the tokens a plane admitted afresh answers with",
+    );
+}
+
+#[test]
 fn a_batch_fills_a_single_prompt_in_the_chunks_its_model_takes() {
     let plain = walked_alone(&[0, 1, 1, 2, 1], 5, &[], None);
     let chunked = walked_alone(&[0, 1, 1, 2, 1], 5, &[8, 4, 2], None);

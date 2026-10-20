@@ -4,18 +4,51 @@ use std::path::{Component, Path, PathBuf};
 
 const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const PRIME: u64 = 0x0000_0100_0000_01b3;
+const STACK: &[&str] = &[
+    "neura-abi",
+    "neura-ast",
+    "neura-compiler",
+    "neura-graph",
+    "neura-kernel",
+    "neura-macro",
+    "neura-plan",
+    "neura-pointwise",
+    "neura-precision",
+    "neura-profile",
+    "neura-shader",
+];
 
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("a manifest"));
+    let workspace = manifest
+        .parent()
+        .expect("a planner manifest lies under the workspace");
     let mut files = Vec::new();
-    collect(&manifest.join("src"), &mut files);
-    files.push(manifest.join("Cargo.toml"));
-    files.push(manifest.join("build.rs"));
+    for name in STACK {
+        let crate_manifest = match *name {
+            "neura-plan" => manifest.clone(),
+            _ => workspace.join(name),
+        };
+        let src = crate_manifest.join("src");
+        if !src.is_dir() {
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", src.display());
+        collect(&src, &mut files);
+        let manifest_file = crate_manifest.join("Cargo.toml");
+        if manifest_file.is_file() {
+            files.push(manifest_file);
+        }
+        let build = crate_manifest.join("build.rs");
+        if build.is_file() {
+            files.push(build);
+        }
+    }
     let mut sources = files
         .into_iter()
         .map(|file| {
             println!("cargo:rerun-if-changed={}", file.display());
-            let name = relative(&manifest, &file);
+            let name = relative(workspace, &file);
             (name, file)
         })
         .collect::<Vec<_>>();
@@ -29,7 +62,6 @@ fn main() {
         digest = feed_source(digest, &source);
         digest = feed(digest, &[0]);
     }
-    println!("cargo:rerun-if-changed=build.rs");
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("an output directory"));
     fs::write(
         out.join("plan_build.rs"),
@@ -52,9 +84,9 @@ fn collect(directory: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn relative(manifest: &Path, file: &Path) -> String {
-    file.strip_prefix(manifest)
-        .expect("a planner source lies under its manifest")
+fn relative(workspace: &Path, file: &Path) -> String {
+    file.strip_prefix(workspace)
+        .expect("a planner source lies under the workspace")
         .components()
         .filter_map(|component| match component {
             Component::Normal(name) => Some(name.to_string_lossy().into_owned()),

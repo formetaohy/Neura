@@ -27,6 +27,19 @@ no longer fills a chunk walks its remaining tokens one at a time. Admitting a se
 runs a small reset program that zeroes the kv cache, the convolution state and the gated delta net
 state of its plane before the first prompt token; the other planes keep their state.
 
+Setting `NEURA_TURNS` to user prompts separated by `|` answers them as one conversation. The first
+turn admits its whole rendered prompt; every later turn suspends the plane after its answer and
+resumes it with only the rendered user message it appends, so the kv cache, convolution states and
+gated delta net states of the earlier turns stay in place instead of being prefilled again. When
+the next turn no longer fits the context, the example drops the oldest user and assistant messages
+and restarts the plane with the shortened conversation; a restart zeroes the plane and prefills the
+whole shortened prompt. A conversation answers one sequence at a time and does not combine with
+`NEURA_PREFIX`.
+
+```sh
+NEURA_TURNS="What is the capital of France?|What river runs through it?|How many people live there?" cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf ignored 64
+```
+
 Setting `NEURA_PREFIX=1` fills the prompt except its last token once, on a prefix plane, and every
 sequence of the batch copies that plane's kv cache, convolution states and gated delta net states
 before it walks its own last token. The copy is a state copy, not a replay: the sequences answer the

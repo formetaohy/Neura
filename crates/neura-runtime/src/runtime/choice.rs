@@ -5,7 +5,7 @@ use neura_graph::Graph;
 use neura_plan::{Contiguous, Product, Weight};
 use neura_profile::{MatmulStrategy, MatmulTile, Profile};
 
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const HEAD_WORDS: usize = 4;
 const PRODUCT_WORDS: usize = 7;
 const TILE_WORDS: usize = 8;
@@ -47,6 +47,7 @@ impl Choice {
             ],
         );
         bytes.extend_from_slice(&self.profile.shared_bytes().to_le_bytes());
+        bytes.extend_from_slice(&neura_plan::PLAN_BUILD.to_le_bytes());
         for (product, tile) in &self.chosen {
             let walked = menu
                 .iter()
@@ -78,6 +79,9 @@ impl Choice {
             return None;
         }
         let shared_bytes = held.long()?;
+        if held.long()? != neura_plan::PLAN_BUILD {
+            return None;
+        }
         let profile = profiles.iter().copied().find(|profile| {
             profile.workgroup() == head[1]
                 && profile.registers() == head[2]
@@ -117,6 +121,7 @@ impl Choice {
 pub(crate) fn key(device: &AdapterInfo, fingerprint: u64, profiles: &[Profile]) -> String {
     let mut digest = Digest::new();
     digest.word(FORMAT);
+    digest.long(neura_plan::PLAN_BUILD);
     digest.text(&device.name);
     digest.text(&device.id.to_string());
     digest.word(backend(device));

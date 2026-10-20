@@ -97,9 +97,19 @@ pub struct Batch {
 
 struct Slot {
     cursor: u32,
-    prompt: VecDeque<u32>,
-    feed: u32,
-    generating: bool,
+    phase: Phase,
+}
+
+enum Phase {
+    Prompting(VecDeque<u32>),
+    Generating(u32),
+    Suspended,
+}
+
+impl Phase {
+    fn running(&self) -> bool {
+        !matches!(self, Self::Suspended)
+    }
 }
 
 struct Pending {
@@ -323,6 +333,59 @@ impl Batch {
     }
 
     pub fn admit(&mut self, runtime: &Runtime, tokens: &[u32]) -> u32 {
+        let slot = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .unwrap_or_else(|| panic!("all {} planes of this batch hold a sequence", self.batch));
+        let slot = slot as u32;
+        self.restart(runtime, slot, tokens);
+        slot
+    }
+
+    pub fn resume(&mut self, slot: u32, tokens: &[u32]) {
+        let held = self.slots[slot as usize]
+            .as_ref()
+            .unwrap_or_else(|| panic!("plane {slot} of this batch holds no sequence"));
+        assert!(
+            matches!(held.phase, Phase::Suspended),
+            "plane {slot} resumes only after it is suspended, and it is {} its sequence",
+            match held.phase {
+                Phase::Prompting(_) => "still feeding",
+                Phase::Generating(_) => "still answering",
+                Phase::Suspended => "holding",
+            },
+        );
+        assert!(
+            !tokens.is_empty(),
+            "a sequence resumes with at least one token",
+        );
+        assert!(
+            held.cursor < self.context,
+            "a sequence at cursor {} of a context of {} resumes only after the application restarts or releases it",
+            held.cursor,
+            self.context,
+        );
+        assert!(
+            tokens.len() < (self.context - held.cursor) as usize,
+            "a sequence at cursor {} resumes with {} tokens where this batch holds {} of context",
+            held.cursor,
+            tokens.len(),
+            self.context,
+        );
+        let cursor = held.cursor;
+        self.slots[slot as usize] = Some(Slot {
+            cursor,
+            phase: Phase::Prompting(tokens.iter().copied().collect()),
+        });
+    }
+
+    pub fn restart(&mut self, runtime: &Runtime, slot: u32, tokens: &[u32]) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
         assert!(
             !tokens.is_empty(),
             "a batch admits a prompt of at least one token",
@@ -350,12 +413,6 @@ impl Batch {
             }
             None => (0, tokens.to_vec(), 0.0f32),
         };
-        let slot = self
-            .slots
-            .iter()
-            .position(Option::is_none)
-            .unwrap_or_else(|| panic!("all {} planes of this batch hold a sequence", self.batch));
-        let slot = slot as u32;
         let mut reset = vec![0.0f32; self.batch as usize];
         reset[slot as usize] = 1.0;
         let mut shared = vec![0.0f32; self.batch as usize];
@@ -365,15 +422,26 @@ impl Batch {
         runtime.run(&self.reset);
         self.slots[slot as usize] = Some(Slot {
             cursor,
-            prompt: prompt.into_iter().collect(),
-            feed: 0,
-            generating: false,
+            phase: Phase::Prompting(prompt.into_iter().collect()),
         });
-        slot
+    }
+
+    pub fn suspend(&mut self, slot: u32) {
+        let held = self.slots[slot as usize]
+            .as_mut()
+            .unwrap_or_else(|| panic!("plane {slot} of this batch holds no sequence"));
+        match &held.phase {
+            Phase::Generating(_) => held.phase = Phase::Suspended,
+            Phase::Prompting(prompt) => panic!(
+                "a sequence suspends after it has fed its prompt, and plane {slot} still holds {} prompt tokens",
+                prompt.len(),
+            ),
+            Phase::Suspended => panic!("plane {slot} of this batch is already suspended"),
+        }
     }
 
     pub fn step(&mut self, runtime: &Runtime) -> Vec<Emitted> {
-        if self.slots.iter().all(Option::is_none) {
+        if self.active().next().is_none() {
             return Vec::new();
         }
         self.prefill(runtime);
@@ -393,6 +461,14 @@ impl Batch {
         self.slots
             .iter()
             .enumerate()
+            .filter(|(_, slot)| slot.as_ref().is_some_and(|held| held.phase.running()))
+            .map(|(slot, _)| slot as u32)
+    }
+
+    pub fn occupied(&self) -> impl Iterator<Item = u32> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
             .filter(|(_, slot)| slot.is_some())
             .map(|(slot, _)| slot as u32)
     }
@@ -401,16 +477,29 @@ impl Batch {
         self.slots[slot as usize].as_ref().map(|held| held.cursor)
     }
 
+    pub fn remaining(&self, slot: u32) -> Option<u32> {
+        self.cursor(slot).map(|cursor| self.context - cursor)
+    }
+
     fn prefill(&mut self, runtime: &Runtime) {
         let mut groups = vec![Vec::new(); self.fills.len()];
         for (slot, held) in self.slots.iter().enumerate() {
             let Some(held) = held else {
                 continue;
             };
-            let left = held.prompt.len();
+            let Phase::Prompting(prompt) = &held.phase else {
+                continue;
+            };
+            let left = prompt.len();
             if left <= 1 {
                 continue;
             }
+            assert!(
+                held.cursor < self.context,
+                "a sequence at cursor {} of a context of {} no longer reaches the prompt it holds",
+                held.cursor,
+                self.context,
+            );
             if let Some(index) = self
                 .fills
                 .iter()
@@ -435,7 +524,10 @@ impl Batch {
                     .expect("a plane of a fill group holds a sequence");
                 cursors[*slot] = held.cursor as f32;
                 mask[*slot] = 1.0;
-                for (row, token) in held.prompt.iter().take(rows).enumerate() {
+                let Phase::Prompting(prompt) = &held.phase else {
+                    panic!("a plane of a fill group feeds a prompt");
+                };
+                for (row, token) in prompt.iter().take(rows).enumerate() {
                     tokens[row * planes + *slot] = *token as f32;
                 }
             }
@@ -455,8 +547,11 @@ impl Batch {
                     .as_mut()
                     .expect("a plane of a fill group holds a sequence");
                 held.cursor += chunk;
+                let Phase::Prompting(prompt) = &mut held.phase else {
+                    panic!("a plane of a fill group feeds a prompt");
+                };
                 for _ in 0..chunk {
-                    held.prompt.pop_front();
+                    prompt.pop_front();
                 }
             }
         }
@@ -467,24 +562,44 @@ impl Batch {
         let mut tokens = vec![0.0f32; self.batch as usize];
         let mut cursor = Vec::with_capacity(self.batch as usize);
         let mut mask = Vec::with_capacity(self.batch as usize);
-        let mut feeding = Vec::with_capacity(self.batch as usize);
         let mut drawn = false;
         for slot in 0..self.batch {
-            match self.slots[slot as usize].as_mut() {
-                Some(held) => {
-                    let prompt = held.prompt.pop_front();
-                    let last = prompt.is_some() && held.prompt.is_empty();
-                    drawn |= held.generating || last;
-                    let token = prompt.unwrap_or(held.feed);
+            let Some(held) = self.slots[slot as usize].as_ref() else {
+                cursor.push(self.context as f32);
+                mask.push(0.0);
+                continue;
+            };
+            match &held.phase {
+                Phase::Prompting(prompt) => {
+                    assert!(
+                        held.cursor < self.context,
+                        "a sequence at cursor {} of a context of {} no longer feeds the prompt it holds",
+                        held.cursor,
+                        self.context,
+                    );
+                    let token = *prompt
+                        .front()
+                        .expect("a prompting plane holds the token it feeds next");
+                    drawn |= prompt.len() == 1;
                     tokens[slot as usize] = token as f32;
                     cursor.push(held.cursor as f32);
                     mask.push(1.0);
-                    feeding.push(prompt.is_some());
                 }
-                None => {
+                Phase::Generating(feed) => {
+                    assert!(
+                        held.cursor < self.context,
+                        "a sequence at cursor {} of a context of {} no longer answers; suspend or release it",
+                        held.cursor,
+                        self.context,
+                    );
+                    drawn = true;
+                    tokens[slot as usize] = *feed as f32;
+                    cursor.push(held.cursor as f32);
+                    mask.push(1.0);
+                }
+                Phase::Suspended => {
                     cursor.push(self.context as f32);
                     mask.push(0.0);
-                    feeding.push(false);
                 }
             }
         }
@@ -504,19 +619,22 @@ impl Batch {
                 continue;
             };
             let token = token_of(&chosen[slot as usize]);
-            let feeding_prompt = feeding[slot as usize];
-            let prompt_left = !held.prompt.is_empty();
-            if held.generating {
-                emitted.push(Emitted {
-                    slot,
-                    token: held.feed,
-                });
-                held.feed = token;
-            } else if feeding_prompt && !prompt_left {
-                held.feed = token;
-                held.generating = true;
+            match &mut held.phase {
+                Phase::Prompting(prompt) => {
+                    prompt.pop_front();
+                    if prompt.is_empty() {
+                        held.phase = Phase::Generating(token);
+                    }
+                }
+                Phase::Generating(feed) => {
+                    emitted.push(Emitted { slot, token: *feed });
+                    *feed = token;
+                }
+                Phase::Suspended => {}
             }
-            held.cursor += 1;
+            if held.phase.running() {
+                held.cursor += 1;
+            }
         }
         emitted
     }
