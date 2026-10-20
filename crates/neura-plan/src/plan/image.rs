@@ -12,13 +12,15 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 const MAGIC: u32 = 0x4e_50_4c_41;
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 impl Plan {
     pub fn image(&self) -> Vec<u8> {
         let mut out = Writer::default();
         out.word(MAGIC);
         out.word(FORMAT);
+        out.long(crate::PLAN_BUILD);
+        out.long(self.fingerprint);
         out.long(self.alignment);
         out.word(self.paged_word());
         out.word(self.profile.workgroup());
@@ -122,6 +124,9 @@ impl Plan {
     ) -> Option<Self> {
         let mut held = Reader::of(image);
         if held.word()? != MAGIC || held.word()? != FORMAT {
+            return None;
+        }
+        if held.long()? != crate::PLAN_BUILD || held.long()? != graph.fingerprint() {
             return None;
         }
         let header_alignment = held.long()?;
@@ -247,6 +252,7 @@ impl Plan {
         let extents = Extents::of(values, profile.tiles(), &convolution, &measures);
         let plan = Self {
             profile,
+            fingerprint: graph.fingerprint(),
             kinds,
             elements,
             matmul_elements,

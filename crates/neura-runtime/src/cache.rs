@@ -331,7 +331,7 @@ pub(crate) fn signature(plan: &Plan, profile: neura_profile::Profile, alignment:
     bytes
 }
 
-const PLAN_FORMAT: u32 = 1;
+const PLAN_FORMAT: u32 = 2;
 pub(crate) const PLAN_IMAGE_FLOOR: u32 = 1024;
 
 pub(crate) fn plan_key(
@@ -346,6 +346,7 @@ pub(crate) fn plan_key(
     let fingerprint = graph.fingerprint();
     let mut digest = Digest::new();
     digest.word(PLAN_FORMAT);
+    digest.long(neura_plan::PLAN_BUILD);
     digest.text(&device.name);
     digest.text(&device.id.to_string());
     digest.word(backend(device));
@@ -381,7 +382,8 @@ pub(crate) fn plan_key(
         }
     }
     format!(
-        "plan-image/{PLAN_FORMAT}-{fingerprint:016x}-{:016x}",
+        "plan-image/{:016x}/{PLAN_FORMAT}-{fingerprint:016x}-{:016x}",
+        neura_plan::PLAN_BUILD,
         digest.finish()
     )
 }

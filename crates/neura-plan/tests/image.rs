@@ -5,6 +5,11 @@ use neura_profile::{Budget, Profile};
 
 #[test]
 fn an_image_restores_every_walk_the_plan_delivers_at_each_binding() {
+    assert_ne!(
+        neura_plan::PLAN_BUILD,
+        0,
+        "a plan build identity names the sources it hashes",
+    );
     let profile = Profile::ladder(Budget::BASELINE, None)
         .into_iter()
         .find(|profile| profile.workgroup() == Budget::BALANCED_THREADS)
@@ -34,15 +39,23 @@ fn an_image_restores_every_walk_the_plan_delivers_at_each_binding() {
     graph.retain(product);
     graph.retain(attended);
     let plan = Plan::chosen(&graph, 256, profile, &[], DEFAULT_ENCODING_BYTES, 0);
-    let restored = Plan::restore(
-        &graph,
-        256,
-        profile,
-        DEFAULT_ENCODING_BYTES,
-        0,
-        &plan.image(),
-    )
-    .expect("a plan image restores the plan it names");
+    let again = Plan::chosen(&graph, 256, profile, &[], DEFAULT_ENCODING_BYTES, 0);
+    assert_eq!(
+        plan.image(),
+        again.image(),
+        "a plan image is what every compile of its graph writes",
+    );
+    let image = plan.image();
+    for at in [8usize, 16usize] {
+        let mut changed = image.clone();
+        changed[at] ^= 1;
+        assert!(
+            Plan::restore(&graph, 256, profile, DEFAULT_ENCODING_BYTES, 0, &changed).is_none(),
+            "a plan image built by another planner or for another graph is refused",
+        );
+    }
+    let restored = Plan::restore(&graph, 256, profile, DEFAULT_ENCODING_BYTES, 0, &image)
+        .expect("a plan image restores the plan it names");
 
     assert_eq!(plan.slot_bounds(), restored.slot_bounds());
     assert_eq!(plan.tasks(), restored.tasks());

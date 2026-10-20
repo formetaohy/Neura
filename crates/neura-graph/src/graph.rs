@@ -240,6 +240,10 @@ pub(crate) fn advance(state: &mut GraphState) {
 }
 
 impl GraphSnapshot {
+    pub fn fingerprint(&self) -> u64 {
+        crate::fingerprint::of(&self.values, &self.tasks)
+    }
+
     pub fn values(&self) -> &[ValueInfo] {
         &self.values
     }

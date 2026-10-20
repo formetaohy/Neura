@@ -320,6 +320,7 @@ pub(crate) struct Placed {
 
 pub struct Plan {
     profile: Profile,
+    fingerprint: u64,
     kinds: Vec<Kind>,
     elements: Vec<Element>,
     matmul_elements: Vec<Element>,
@@ -402,6 +403,7 @@ impl Plan {
             alignment.is_power_of_two() && alignment >= 4,
             "an arena alignment of {alignment} bytes is not usable",
         );
+        let fingerprint = state.fingerprint();
         let fused = fuse::fuse(state);
         let authored_slots = state.authored().to_vec();
         let lowered = lower::lower(
@@ -739,6 +741,7 @@ impl Plan {
         depends_at.push(depends.len() as u32);
         let mut plan = Self {
             profile,
+            fingerprint,
             kinds,
             elements,
             matmul_elements,

@@ -1,3 +1,5 @@
+include!(concat!(env!("OUT_DIR"), "/plan_build.rs"));
+
 mod access;
 mod authored;
 mod flow;
