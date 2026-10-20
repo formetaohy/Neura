@@ -110,6 +110,9 @@ fn collect(cell: &Cell, query: Query, out: &mut Vec<u32>) {
 
 pub(crate) struct Flow {
     stores: Vec<Store>,
+    partition_stores: Vec<std::collections::BTreeMap<u32, Store>>,
+    partitioned_readers: Vec<Vec<u32>>,
+    partitioned_writers: Vec<Vec<u32>>,
     written: Vec<bool>,
 }
 
@@ -124,6 +127,11 @@ impl Flow {
         }
         Self {
             stores: (0..values.len()).map(|_| Store::default()).collect(),
+            partition_stores: (0..values.len())
+                .map(|_| std::collections::BTreeMap::new())
+                .collect(),
+            partitioned_readers: (0..values.len()).map(|_| Vec::new()).collect(),
+            partitioned_writers: (0..values.len()).map(|_| Vec::new()).collect(),
             written,
         }
     }
@@ -133,6 +141,7 @@ impl Flow {
         values: &V,
         touches: &Touches,
         in_place: bool,
+        partition: Option<u32>,
         out: &mut Vec<u32>,
     ) {
         out.clear();
@@ -148,6 +157,20 @@ impl Flow {
                 Query::Writers,
                 out,
             );
+            match partition {
+                Some(partition) => {
+                    if let Some(store) = self.partition_stores[*storage as usize].get(&partition) {
+                        store.query(
+                            *region,
+                            values.elements(*storage),
+                            quantized(values, *storage),
+                            Query::Writers,
+                            out,
+                        );
+                    }
+                }
+                None => out.extend_from_slice(&self.partitioned_writers[*storage as usize]),
+            }
         }
         let query = if in_place {
             Query::Both
@@ -163,17 +186,73 @@ impl Flow {
                 query,
                 out,
             );
+            match partition {
+                Some(partition) => {
+                    if let Some(store) = self.partition_stores[*storage as usize].get(&partition) {
+                        store.query(
+                            *region,
+                            values.elements(*storage),
+                            quantized(values, *storage),
+                            query,
+                            out,
+                        );
+                    }
+                }
+                None => {
+                    out.extend_from_slice(&self.partitioned_readers[*storage as usize]);
+                    if in_place {
+                        out.extend_from_slice(&self.partitioned_writers[*storage as usize]);
+                    }
+                }
+            }
         }
         out.sort_unstable();
         out.dedup();
     }
 
-    pub(crate) fn record<V: Values>(&mut self, values: &V, touches: &Touches, segment: u32) {
+    pub(crate) fn record<V: Values>(
+        &mut self,
+        values: &V,
+        touches: &Touches,
+        segment: u32,
+        partition: Option<u32>,
+    ) {
+        let Some(partition) = partition else {
+            for (storage, region) in &touches.reads {
+                if !self.written[*storage as usize] {
+                    continue;
+                }
+                let store = &mut self.stores[*storage as usize];
+                store.for_each_cell(
+                    *region,
+                    values.elements(*storage),
+                    quantized(values, *storage),
+                    |cell| {
+                        cell.hold(segment);
+                    },
+                );
+            }
+            for (storage, region) in &touches.writes {
+                let store = &mut self.stores[*storage as usize];
+                store.for_each_cell(
+                    *region,
+                    values.elements(*storage),
+                    quantized(values, *storage),
+                    |cell| {
+                        cell.write(segment);
+                        cell.readers.clear();
+                    },
+                );
+            }
+            return;
+        };
         for (storage, region) in &touches.reads {
             if !self.written[*storage as usize] {
                 continue;
             }
-            let store = &mut self.stores[*storage as usize];
+            let store = self.partition_stores[*storage as usize]
+                .entry(partition)
+                .or_default();
             store.for_each_cell(
                 *region,
                 values.elements(*storage),
@@ -182,9 +261,15 @@ impl Flow {
                     cell.hold(segment);
                 },
             );
+            let collected = &mut self.partitioned_readers[*storage as usize];
+            if collected.last() != Some(&segment) {
+                collected.push(segment);
+            }
         }
         for (storage, region) in &touches.writes {
-            let store = &mut self.stores[*storage as usize];
+            let store = self.partition_stores[*storage as usize]
+                .entry(partition)
+                .or_default();
             store.for_each_cell(
                 *region,
                 values.elements(*storage),
@@ -194,6 +279,10 @@ impl Flow {
                     cell.readers.clear();
                 },
             );
+            let collected = &mut self.partitioned_writers[*storage as usize];
+            if collected.last() != Some(&segment) {
+                collected.push(segment);
+            }
         }
     }
 }
@@ -220,40 +309,43 @@ pub(crate) struct WordWrite {
     pub(crate) segment: u32,
     pub(crate) in_place: bool,
     pub(crate) orders_writers: bool,
+    pub(crate) partition: Option<u32>,
 }
+
+type Cells = std::collections::BTreeMap<u64, WordCell>;
 
 #[derive(Default)]
 pub(crate) struct WordFlow {
-    cells: std::collections::BTreeMap<u64, WordCell>,
+    cells: Cells,
+    partition_cells: std::collections::BTreeMap<u32, Cells>,
 }
 
 impl WordFlow {
-    fn split(&mut self, at: u64) {
-        if self.cells.contains_key(&at) {
+    fn split(cells: &mut Cells, at: u64) {
+        if cells.contains_key(&at) {
             return;
         }
-        let inherited = self
-            .cells
+        let inherited = cells
             .range(..at)
             .next_back()
             .map(|(_, cell)| cell.clone())
             .unwrap_or_default();
-        self.cells.insert(at, inherited);
+        cells.insert(at, inherited);
     }
 
-    pub(crate) fn read(&mut self, spans: &[(u64, u64)], segment: u32, out: &mut Vec<u32>) {
+    fn read_cells(cells: &mut Cells, spans: &[(u64, u64)], segment: u32, out: &mut Vec<u32>) {
         for (start, end) in spans {
             if end <= start {
                 continue;
             }
-            self.split(*start);
-            self.split(*end);
-            for (_, cell) in self.cells.range(*start..*end) {
+            Self::split(cells, *start);
+            Self::split(cells, *end);
+            for (_, cell) in cells.range(*start..*end) {
                 if let Some(writer) = cell.writer {
                     out.push(writer);
                 }
             }
-            for (_, cell) in self.cells.range_mut(*start..*end) {
+            for (_, cell) in cells.range_mut(*start..*end) {
                 if !cell.readers.contains(&segment) {
                     cell.readers.push(segment);
                 }
@@ -261,19 +353,25 @@ impl WordFlow {
         }
     }
 
-    pub(crate) fn write(&mut self, spans: &[(u64, u64)], write: WordWrite, out: &mut Vec<u32>) {
+    fn inspect_write_cells(
+        cells: &mut Cells,
+        spans: &[(u64, u64)],
+        write: WordWrite,
+        out: &mut Vec<u32>,
+    ) {
         let WordWrite {
             segment,
             in_place,
             orders_writers,
+            ..
         } = write;
         for (start, end) in spans {
             if end <= start {
                 continue;
             }
-            self.split(*start);
-            self.split(*end);
-            for (_, cell) in self.cells.range(*start..*end) {
+            Self::split(cells, *start);
+            Self::split(cells, *end);
+            for (_, cell) in cells.range(*start..*end) {
                 if let Some(writer) = cell.writer
                     && (in_place || orders_writers)
                     && writer != segment
@@ -282,9 +380,61 @@ impl WordFlow {
                 }
                 out.extend_from_slice(&cell.readers);
             }
-            for (_, cell) in self.cells.range_mut(*start..*end) {
+        }
+    }
+
+    fn record_write_cells(cells: &mut Cells, spans: &[(u64, u64)], segment: u32) {
+        for (start, end) in spans {
+            if end <= start {
+                continue;
+            }
+            Self::split(cells, *start);
+            Self::split(cells, *end);
+            for (_, cell) in cells.range_mut(*start..*end) {
                 cell.writer = Some(segment);
                 cell.readers.clear();
+            }
+        }
+    }
+
+    fn write_cells(cells: &mut Cells, spans: &[(u64, u64)], write: WordWrite, out: &mut Vec<u32>) {
+        Self::inspect_write_cells(cells, spans, write, out);
+        Self::record_write_cells(cells, spans, write.segment);
+    }
+
+    pub(crate) fn read(
+        &mut self,
+        spans: &[(u64, u64)],
+        partition: Option<u32>,
+        segment: u32,
+        out: &mut Vec<u32>,
+    ) {
+        Self::read_cells(&mut self.cells, spans, segment, out);
+        match partition {
+            Some(partition) => {
+                if let Some(cells) = self.partition_cells.get_mut(&partition) {
+                    Self::read_cells(cells, spans, segment, out);
+                }
+            }
+            None => {
+                for cells in self.partition_cells.values_mut() {
+                    Self::read_cells(cells, spans, segment, out);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn write(&mut self, spans: &[(u64, u64)], write: WordWrite, out: &mut Vec<u32>) {
+        match write.partition {
+            Some(partition) => {
+                let cells = self.partition_cells.entry(partition).or_default();
+                Self::write_cells(cells, spans, write, out);
+            }
+            None => {
+                Self::write_cells(&mut self.cells, spans, write, out);
+                for cells in self.partition_cells.values_mut() {
+                    Self::inspect_write_cells(cells, spans, write, out);
+                }
             }
         }
     }

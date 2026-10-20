@@ -219,6 +219,10 @@ pub(crate) fn quanta(region: Region, quantized: bool) -> Quanta {
 pub(crate) struct Hazards {
     readers: Vec<Accesses>,
     writers: Vec<Accesses>,
+    partition_readers: Vec<std::collections::BTreeMap<u32, Accesses>>,
+    partition_writers: Vec<std::collections::BTreeMap<u32, Accesses>>,
+    partitioned_readers: Vec<Hazard>,
+    partitioned_writers: Vec<Hazard>,
 }
 
 impl Hazards {
@@ -226,6 +230,14 @@ impl Hazards {
         Self {
             readers: (0..values).map(|_| Accesses::default()).collect(),
             writers: (0..values).map(|_| Accesses::default()).collect(),
+            partition_readers: (0..values)
+                .map(|_| std::collections::BTreeMap::new())
+                .collect(),
+            partition_writers: (0..values)
+                .map(|_| std::collections::BTreeMap::new())
+                .collect(),
+            partitioned_readers: vec![Hazard::default(); values],
+            partitioned_writers: vec![Hazard::default(); values],
         }
     }
 
@@ -234,36 +246,98 @@ impl Hazards {
         values: &V,
         touches: &Touches,
         in_place: bool,
+        partition: Option<u32>,
     ) -> Hazard {
         let mut hazard = Hazard::default();
         for (storage, region) in &touches.reads {
             let quantized = quantized(values, *storage);
             hazard.join(&self.writers[*storage as usize].query(*region, quantized));
+            match partition {
+                Some(partition) => {
+                    if let Some(accesses) =
+                        self.partition_writers[*storage as usize].get(&partition)
+                    {
+                        hazard.join(&accesses.query(*region, quantized));
+                    }
+                }
+                None => hazard.join(&self.partitioned_writers[*storage as usize]),
+            }
         }
         for (storage, region) in &touches.writes {
             let quantized = quantized(values, *storage);
             hazard.join(&self.readers[*storage as usize].query(*region, quantized));
+            match partition {
+                Some(partition) => {
+                    if let Some(accesses) =
+                        self.partition_readers[*storage as usize].get(&partition)
+                    {
+                        hazard.join(&accesses.query(*region, quantized));
+                    }
+                }
+                None => {
+                    hazard.join(&self.partitioned_readers[*storage as usize]);
+                    if in_place {
+                        hazard.join(&self.partitioned_writers[*storage as usize]);
+                    }
+                }
+            }
         }
         if in_place {
             for (storage, region) in &touches.writes {
                 let quantized = quantized(values, *storage);
                 hazard.join(&self.writers[*storage as usize].query(*region, quantized));
+                if let Some(partition) = partition
+                    && let Some(accesses) =
+                        self.partition_writers[*storage as usize].get(&partition)
+                {
+                    hazard.join(&accesses.query(*region, quantized));
+                }
             }
         }
         hazard
     }
 
-    pub(crate) fn record<V: Values>(&mut self, values: &V, touches: &Touches, hazard: &Hazard) {
+    pub(crate) fn record<V: Values>(
+        &mut self,
+        values: &V,
+        touches: &Touches,
+        hazard: &Hazard,
+        partition: Option<u32>,
+    ) {
+        let Some(partition) = partition else {
+            for (storage, region) in &touches.reads {
+                let quantized = quantized(values, *storage);
+                self.readers[*storage as usize].record(*region, hazard, quantized);
+            }
+            for (storage, region) in &touches.writes {
+                let quantized = quantized(values, *storage);
+                self.writers[*storage as usize].record(*region, hazard, quantized);
+                if covers(values, *storage, *region) {
+                    self.readers[*storage as usize].clear();
+                }
+            }
+            return;
+        };
         for (storage, region) in &touches.reads {
             let quantized = quantized(values, *storage);
-            self.readers[*storage as usize].record(*region, hazard, quantized);
+            self.partition_readers[*storage as usize]
+                .entry(partition)
+                .or_default()
+                .record(*region, hazard, quantized);
+            self.partitioned_readers[*storage as usize].join(hazard);
         }
         for (storage, region) in &touches.writes {
             let quantized = quantized(values, *storage);
-            self.writers[*storage as usize].record(*region, hazard, quantized);
-            if covers(values, *storage, *region) {
-                self.readers[*storage as usize].clear();
+            self.partition_writers[*storage as usize]
+                .entry(partition)
+                .or_default()
+                .record(*region, hazard, quantized);
+            if covers(values, *storage, *region)
+                && let Some(readers) = self.partition_readers[*storage as usize].get_mut(&partition)
+            {
+                readers.clear();
             }
+            self.partitioned_writers[*storage as usize].join(hazard);
         }
     }
 }

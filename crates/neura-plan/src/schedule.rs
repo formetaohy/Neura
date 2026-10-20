@@ -2,6 +2,7 @@ use crate::access::Access;
 use crate::flow::{Flow, WordFlow, WordWrite, arena_spans};
 use crate::hazard::{Hazard, Hazards};
 use crate::region::{self, GeometryTiles, Walk};
+use crate::span::Split;
 use neura_abi::{SegmentFields, SegmentRecord, control};
 use neura_profile::{ConvolutionInputTile, ConvolutionTile, MatmulTile};
 
@@ -10,6 +11,13 @@ const GATE_EDGES: u64 = 4096;
 
 pub(crate) trait Scheduled: Walk {
     fn span(&self) -> (u32, u32);
+}
+
+fn partition<T: Scheduled>(task: &T) -> Option<u32> {
+    match task.split() {
+        Split::Segment { plane, .. } => Some(plane),
+        _ => None,
+    }
 }
 
 pub(crate) struct Schedule {
@@ -238,7 +246,7 @@ impl Schedule {
                     *region,
                     &mut pages,
                 );
-                flow.read(&pages, segment, &mut collected);
+                flow.read(&pages, partition(task), segment, &mut collected);
             }
             for (storage, region) in &touches.writes {
                 let storage = *storage;
@@ -258,6 +266,7 @@ impl Schedule {
                         segment,
                         in_place: task.in_place(),
                         orders_writers: self.gated.iter().all(|gated| !gated),
+                        partition: partition(task),
                     },
                     &mut collected,
                 );
@@ -377,14 +386,15 @@ fn depths<T: Scheduled, V: region::Values>(
     let mut touches = region::Touches::default();
     for (index, task) in tasks.iter().enumerate() {
         region::touches(values, tiles, task, task.span(), &mut touches);
-        let evidence = hazards.inspect(values, &touches, task.in_place());
+        let partition = partition(task);
+        let evidence = hazards.inspect(values, &touches, task.in_place(), partition);
         let mut deepest = evidence.deepest.map(|deepest| deepest + 1);
         for dependency in &barriers[index] {
             let carried = depths[*dependency as usize] + 1;
             deepest = Some(deepest.map_or(carried, |deepest| deepest.max(carried)));
         }
         depths[index] = deepest.unwrap_or(0);
-        hazards.record(values, &touches, &Hazard::deep(depths[index]));
+        hazards.record(values, &touches, &Hazard::deep(depths[index]), partition);
     }
     depths
 }
@@ -551,10 +561,12 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             self.stage = self.prefix + 1;
         }
         self.in_recompute = recomputed;
+        let partition = partition(task);
         self.flow.inspect(
             self.values,
             &self.touches,
             task.in_place(),
+            partition,
             &mut self.collected,
         );
         for dependency in &self.barriers[index as usize] {
@@ -625,7 +637,8 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             }
         }
         self.prefix = self.prefix.max(wave);
-        self.flow.record(self.values, &self.touches, segment);
+        self.flow
+            .record(self.values, &self.touches, segment, partition);
     }
 }
 

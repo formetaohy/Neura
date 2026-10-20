@@ -377,7 +377,8 @@ pub(crate) fn bounded<W: Walk, V: Values>(values: &V, task: &W) -> bool {
     let out = task.out();
     values.owned(out)
         && values.bounded(out)
-        && !matches!(task.split(), Split::Ragged { .. } | Split::Segment { .. })
+        && !matches!(task.split(), Split::Ragged { .. })
+        && (task.splits() == 1 || !matches!(task.split(), Split::Segment { .. }))
         && task
             .reads()
             .chain(task.writes())

@@ -99,6 +99,81 @@ fn a_wide_product_walks_the_quantized_weight_a_gguf_stores() {
 }
 
 #[test]
+fn a_grouped_product_walks_the_rows_each_segment_closes() {
+    let runtime = open();
+    let (bound, depth, columns, segments) = (16u32, 8u32, 4u32, 4u32);
+    let lengths = [2.0f32, 0.0, 5.0, 1.0];
+    let graph = Graph::new();
+    let lengths_value = graph.input(Shape::vector(segments), Element::Single);
+    let ragged = graph.ragged(bound, lengths_value);
+    let input = graph.input(
+        Shape::of([1, 1, bound, depth]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let first = graph.named_parameter(
+        "first",
+        Shape::of([segments, 1, depth, columns]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let second = graph.named_parameter(
+        "second",
+        Shape::of([segments, 1, columns, depth]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let middle = graph.grouped_matmul(input, first, ragged.offsets);
+    let total = graph.sum(graph.grouped_matmul(middle, second, ragged.offsets));
+    for value in [middle, total, first, second] {
+        graph.retain(value);
+    }
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let held = random(bound * depth, 17);
+    runtime.write(&program, input, &held);
+    runtime.write(&program, lengths_value, &lengths);
+    runtime.run(&program);
+    let first_held = runtime.read(&program, first);
+    let second_held = runtime.read(&program, second);
+    let starts = [0usize, 2, 2, 7];
+    let total_rows = lengths.iter().map(|length| *length as usize).sum::<usize>();
+    let mut middle_expected = vec![0.0f32; total_rows * columns as usize];
+    for segment in 0..segments as usize {
+        for row in 0..lengths[segment] as usize {
+            for column in 0..columns as usize {
+                let mut sum = 0.0;
+                for step in 0..depth as usize {
+                    sum += held[(starts[segment] + row) * depth as usize + step]
+                        * first_held[(segment * depth as usize + step) * columns as usize + column];
+                }
+                middle_expected[(starts[segment] + row) * columns as usize + column] = sum;
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, middle), &middle_expected, 1e-4);
+    let mut total_expected = 0.0;
+    for segment in 0..segments as usize {
+        for row in 0..lengths[segment] as usize {
+            for column in 0..depth as usize {
+                for step in 0..columns as usize {
+                    total_expected += middle_expected
+                        [(starts[segment] + row) * columns as usize + step]
+                        * second_held
+                            [(segment * columns as usize + step) * depth as usize + column];
+                }
+            }
+        }
+    }
+    assert_close(&runtime.read(&program, total), &[total_expected], 1e-3);
+}
+
+#[test]
 fn a_sectioned_top_k_sorts_every_band_it_walks() {
     const ROWS: u32 = 1;
     const WIDTH: u32 = 32768;
