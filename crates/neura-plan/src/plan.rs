@@ -1551,6 +1551,14 @@ impl Walk for Walked<'_> {
     fn offset(&self) -> u32 {
         self.recorded.offset()
     }
+
+    fn segments(&self) -> u32 {
+        self.recorded.segments()
+    }
+
+    fn queries(&self) -> u32 {
+        self.recorded.queries()
+    }
 }
 
 impl schedule::Scheduled for Walked<'_> {

@@ -187,6 +187,14 @@ impl Walk for Recorded<'_> {
     fn offset(&self) -> u32 {
         self.record.offset
     }
+
+    fn segments(&self) -> u32 {
+        self.record.segment
+    }
+
+    fn queries(&self) -> u32 {
+        self.record.queries
+    }
 }
 
 pub(crate) fn assert_records_hold_the_tasks_they_carry(

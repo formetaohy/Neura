@@ -76,6 +76,8 @@ pub(crate) trait Walk: Reads {
     fn plane(&self) -> u32;
     fn axis(&self) -> u32;
     fn offset(&self) -> u32;
+    fn segments(&self) -> u32;
+    fn queries(&self) -> u32;
 }
 
 impl Walk for Task {
@@ -133,6 +135,14 @@ impl Walk for Task {
 
     fn offset(&self) -> u32 {
         self.offset
+    }
+
+    fn segments(&self) -> u32 {
+        self.segments
+    }
+
+    fn queries(&self) -> u32 {
+        self.queries
     }
 }
 
@@ -570,7 +580,7 @@ fn narrow<W: Walk, V: Values>(
             convolution_weight_grad(values, task, first, count, &mut narrowed)
         }
         Kind::Convert => convert(values, task, first, count, &mut narrowed),
-        Kind::Gather => gather(values, task, rows, &mut narrowed),
+        Kind::Gather => gather(values, task, first, count, rows, &mut narrowed),
         Kind::Rope | Kind::RopeGrad => rope(values, task, first, count, &mut narrowed),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
             if task.splits() > 1 && task.input(2) != NO_VALUE =>
@@ -612,11 +622,18 @@ fn narrow<W: Walk, V: Values>(
         Kind::AttentionFold | Kind::AttentionQueryGradFold => {
             attention_fold(values, task, first, count, &mut narrowed)
         }
+        Kind::Attention
+        | Kind::AttentionQueryGrad
+        | Kind::AttentionKeyGrad
+        | Kind::AttentionValueGrad => rowed(values, task, first, count, &mut narrowed),
         Kind::TopK | Kind::Sample if task.splits() > 1 => {
             choice_chunk(values, task, first, count, &mut narrowed)
         }
         Kind::Argmax | Kind::Categorical if task.splits() > 1 => {
             row_choice_section(values, task, first, count, &mut narrowed)
+        }
+        Kind::TopK | Kind::Sample | Kind::Argmax | Kind::Categorical => {
+            rowed(values, task, first, count, &mut narrowed)
         }
         Kind::TopKFold | Kind::SampleFold => choice_fold(values, task, first, count, &mut narrowed),
         Kind::ChoiceFold => row_choice_fold(values, task, first, count, &mut narrowed),
@@ -633,24 +650,14 @@ fn narrow<W: Walk, V: Values>(
         Kind::Extend | Kind::Layout | Kind::Slice => {
             linear(values, task, first, count, &mut narrowed)
         }
-        Kind::Attention
-        | Kind::AttentionQueryGrad
-        | Kind::AttentionKeyGrad
-        | Kind::AttentionValueGrad
-        | Kind::PrefixChunk
-        | Kind::PrefixScan
-        | Kind::PrefixClose
-        | Kind::SumChunk
-        | Kind::Argmax
-        | Kind::Categorical
-        | Kind::Sample
-        | Kind::TopK
-        | Kind::OneHot
+        Kind::OneHot | Kind::PrefixScan => element_run(values, task, first, count, &mut narrowed),
+        Kind::SumChunk | Kind::PrefixChunk => slot(values, task, &mut narrowed),
+        Kind::SegmentSum => segment_sum(values, task, &mut narrowed),
+        Kind::PrefixClose
         | Kind::Scatter
         | Kind::ScatterWrite
         | Kind::Compact
         | Kind::Rows
-        | Kind::SegmentSum
         | Kind::Length => {}
     }
     for count in task.depends() {
@@ -997,9 +1004,12 @@ fn walks_its_range<V: Values>(values: &V, value: u32, out: u32) -> bool {
 fn gather<W: Walk, V: Values>(
     values: &V,
     task: &W,
+    first: u32,
+    count: u32,
     rows: &[TableRows<'_>],
     narrowed: &mut Narrowed<'_>,
 ) {
+    element_run(values, task, first, count, narrowed);
     let table = task.input(0);
     let Some(declared) = rows
         .iter()
@@ -1026,6 +1036,76 @@ fn gather<W: Walk, V: Values>(
         last = row;
     }
     narrowed.read(table, row_span(first, last, columns, held));
+}
+
+fn element_run<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count != 0 && values.owned(out) && values.dense(out) {
+        narrowed.write(out, Region::run(u64::from(first), u64::from(count)));
+    }
+}
+
+fn rowed<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if matches!(task.split(), Split::Segment { .. } | Split::Ragged { .. })
+        || task.segments() != NO_VALUE
+        || task.queries() != NO_VALUE
+    {
+        return;
+    }
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let columns = u64::from(values.dims(out)[3]);
+    narrowed.write(
+        out,
+        Region::run(u64::from(first) * columns, u64::from(count) * columns),
+    );
+    let statistic = task.extra();
+    if statistic != NO_VALUE && values.owned(statistic) && values.dense(statistic) {
+        let columns = u64::from(values.dims(statistic)[3]);
+        narrowed.write(
+            statistic,
+            Region::run(u64::from(first) * columns, u64::from(count) * columns),
+        );
+    }
+}
+
+fn slot<W: Walk, V: Values>(values: &V, task: &W, narrowed: &mut Narrowed<'_>) {
+    let out = task.out();
+    let at = u64::from(task.slot());
+    if values.owned(out) && values.dense(out) && at < values.elements(out) {
+        narrowed.write(out, Region::run(at, 1));
+    }
+}
+
+fn segment_sum<W: Walk, V: Values>(values: &V, task: &W, narrowed: &mut Narrowed<'_>) {
+    let Split::Ragged { index, .. } = task.split() else {
+        return;
+    };
+    let out = task.out();
+    if !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let dims = values.dims(out);
+    let width = u64::from(dims[3]);
+    let chunks = u64::from(dims[2]);
+    let first = (u64::from(task.plane()) * chunks + u64::from(index)) * width;
+    if first < values.elements(out) {
+        narrowed.write(out, Region::run(first, width));
+    }
 }
 
 fn row_span(first: u64, last: u64, columns: u64, held: u64) -> Region {

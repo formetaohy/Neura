@@ -174,6 +174,83 @@ fn a_grouped_product_walks_the_rows_each_segment_closes() {
 }
 
 #[test]
+fn a_gather_copies_the_rows_its_indices_name() {
+    let (rows, vocabulary, width) = (64u32, 4096u32, 128u32);
+    let runtime = open();
+    let graph = Graph::new();
+    let table = graph.parameter(
+        Shape::of([1, 1, vocabulary, width]),
+        Init::Uniform {
+            low: -0.5,
+            high: 0.5,
+        },
+        Element::Single,
+    );
+    let indices = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
+    let gathered = graph.gather(table, indices);
+    graph.retain(gathered);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let stored = (0..vocabulary * width)
+        .map(|at| (at as f32 * 0.001).sin())
+        .collect::<Vec<f32>>();
+    let walked = (0..rows)
+        .map(|at| ((at * 97 + 13) % vocabulary) as f32)
+        .collect::<Vec<f32>>();
+    runtime.write(&program, table, &stored);
+    runtime.write(&program, indices, &walked);
+    runtime.run(&program);
+    let expected = walked
+        .iter()
+        .flat_map(|row| {
+            let start = *row as usize * width as usize;
+            stored[start..start + width as usize].iter().copied()
+        })
+        .collect::<Vec<f32>>();
+    assert_close(&runtime.read(&program, gathered), &expected, 0.0);
+}
+
+#[test]
+fn a_segment_sum_adds_the_rows_each_plane_closes() {
+    let columns = 128u32;
+    let lengths = [
+        37.0f32, 23.0, 41.0, 17.0, 31.0, 29.0, 43.0, 19.0, 37.0, 11.0, 47.0, 13.0, 31.0, 23.0,
+        41.0, 19.0,
+    ];
+    let bound = lengths.iter().sum::<f32>() as u32;
+    let planes = lengths.len() as u32;
+    let runtime = open();
+    let graph = Graph::new();
+    let lengths_value = graph.input(Shape::vector(planes), Element::Single);
+    let ragged = graph.ragged(bound, lengths_value);
+    let values = graph.input(
+        Shape::of([1, 1, bound, columns]).freed(&[(2, ragged.extent)]),
+        Element::Single,
+    );
+    let summed = graph.segment_sum(values, ragged);
+    graph.retain(summed);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let stored = random(bound * columns, 31);
+    runtime.write(&program, values, &stored);
+    runtime.write(&program, lengths_value, &lengths);
+    runtime.run(&program);
+    let mut expected = Vec::with_capacity((planes * columns) as usize);
+    let mut start = 0usize;
+    for length in lengths {
+        for column in 0..columns as usize {
+            let mut total = 0.0;
+            for row in 0..length as usize {
+                total += stored[(start + row) * columns as usize + column];
+            }
+            expected.push(total);
+        }
+        start += length as usize;
+    }
+    assert_close(&runtime.read(&program, summed), &expected, 1e-4);
+}
+
+#[test]
 fn a_sectioned_top_k_sorts_every_band_it_walks() {
     const ROWS: u32 = 1;
     const WIDTH: u32 = 32768;
