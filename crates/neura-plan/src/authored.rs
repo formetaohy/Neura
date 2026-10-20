@@ -13,7 +13,37 @@ pub(crate) struct Authored {
     measures: Vec<MeasureRecord>,
 }
 
+pub(crate) type ImageParts<'a> = (
+    &'a [u32],
+    &'a [Vec<u32>],
+    &'a [Vec<u32>],
+    &'a [MeasureRecord],
+);
+
 impl Authored {
+    pub(crate) fn image_parts(&self) -> ImageParts<'_> {
+        (
+            &self.slots,
+            &self.value_slots,
+            &self.measure_slots,
+            &self.measures,
+        )
+    }
+
+    pub(crate) fn of_image_parts(
+        slots: Vec<u32>,
+        value_slots: Vec<Vec<u32>>,
+        measure_slots: Vec<Vec<u32>>,
+        measures: Vec<MeasureRecord>,
+    ) -> Self {
+        Self {
+            slots,
+            value_slots,
+            measure_slots,
+            measures,
+        }
+    }
+
     pub(crate) fn carries(&self) -> bool {
         self.slots.iter().any(|count| *count != NO_VALUE)
     }
@@ -128,6 +158,43 @@ pub(crate) struct Counted {
 pub(crate) struct Patches {
     pub(crate) owners: Vec<u32>,
     pub(crate) counted: Vec<Counted>,
+}
+
+impl Patches {
+    pub(crate) fn of_image_parts(owners: Vec<u32>, counted: Vec<Counted>) -> Self {
+        Self { owners, counted }
+    }
+}
+
+impl Counted {
+    pub(crate) fn image_parts(&self) -> (u32, u32, &[u32], u32, &[u32], &[u32]) {
+        (
+            self.count,
+            self.writer,
+            &self.slots,
+            self.segment,
+            &self.values,
+            &self.tasks,
+        )
+    }
+
+    pub(crate) fn of_image_parts(
+        count: u32,
+        writer: u32,
+        slots: Vec<u32>,
+        segment: u32,
+        values: Vec<u32>,
+        tasks: Vec<u32>,
+    ) -> Self {
+        Self {
+            count,
+            writer,
+            slots,
+            segment,
+            values,
+            tasks,
+        }
+    }
 }
 
 pub(crate) struct Tables {

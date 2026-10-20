@@ -24,6 +24,8 @@ use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+mod image;
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Quantum {
     pub offset: u64,

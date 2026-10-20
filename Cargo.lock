@@ -293,6 +293,7 @@ name = "neura-runtime"
 version = "0.7.4"
 dependencies = [
  "bytemuck",
+ "flate2",
  "neura-abi",
  "neura-gguf",
  "neura-gpu",

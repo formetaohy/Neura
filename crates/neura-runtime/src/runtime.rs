@@ -519,14 +519,43 @@ impl Runtime {
         paged: bool,
         weight_slots: u32,
     ) -> Assembly {
-        let plan = Arc::new(Plan::chosen(
+        let key = cache::plan_key(
+            self.context.adapter_info(),
             graph,
-            self.alignment,
             profile,
             chosen,
-            self.encoding_bytes,
+            self.alignment,
+            paged,
             weight_slots,
-        ));
+        );
+        let artifacts = self.context.artifact_cache();
+        let plan = artifacts
+            .load(&key)
+            .and_then(|payload| {
+                cache::unpack_plan(
+                    &payload,
+                    graph,
+                    self.alignment,
+                    profile,
+                    self.encoding_bytes,
+                    weight_slots,
+                )
+            })
+            .map(Arc::new)
+            .unwrap_or_else(|| {
+                let plan = Arc::new(Plan::chosen(
+                    graph,
+                    self.alignment,
+                    profile,
+                    chosen,
+                    self.encoding_bytes,
+                    weight_slots,
+                ));
+                if plan.task_count() >= cache::PLAN_IMAGE_FLOOR {
+                    artifacts.store(&key, &cache::pack_plan(&plan));
+                }
+                plan
+            });
         let signature = cache::signature(&plan, profile, self.alignment);
         let kernel = self.kernel(&plan, profile, paged);
         Assembly {

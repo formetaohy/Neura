@@ -99,6 +99,17 @@ impl Shape {
         Self::from_axes(padded, [None; 4])
     }
 
+    pub fn with_frees(dims: [u32; 4], frees: [Option<u32>; 4]) -> Self {
+        let mut shape = Self::of(dims);
+        for (axis, slot) in frees.iter().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            shape = shape.freed(&[(axis as u32, Free::of(*slot, dims[axis]))]);
+        }
+        shape
+    }
+
     pub fn freed(self, frees: &[(u32, Free)]) -> Self {
         let mut shape = self;
         for (axis, free) in frees {

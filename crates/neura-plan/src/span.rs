@@ -100,6 +100,10 @@ impl Extents {
         self.values[value as usize].recomputes
     }
 
+    pub(crate) fn measures(&self) -> &[Measure] {
+        &self.measures
+    }
+
     pub(crate) fn sealed(&self, value: u32, authored: &[u32]) -> bool {
         (0..neura_abi::MAX_RANK).all(|axis| {
             self.values[value as usize]

@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 bytemuck = { workspace = true }
+flate2 = { workspace = true }
 neura-abi = { workspace = true }
 neura-profile = { workspace = true }
 neura-precision = { workspace = true }

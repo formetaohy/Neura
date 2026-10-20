@@ -255,6 +255,42 @@ impl AttentionTile {
         self.panels
     }
 
+    pub const fn words(self) -> [u32; 5] {
+        [self.keys, self.width, self.slices, self.groups, self.panels]
+    }
+
+    pub fn of_words(words: [u32; 5]) -> Option<Self> {
+        let [keys, width, slices, groups, panels] = words;
+        let ceiling = if groups == 1 {
+            Self::KEYS_CEILING
+        } else {
+            Self::GROUP_KEYS_CEILING
+        };
+        if keys == 0
+            || keys > ceiling
+            || width == 0
+            || slices == 0
+            || groups == 0
+            || groups > Self::GROUPS_CEILING
+            || !keys.is_multiple_of(groups)
+            || !(Self::PANELS..=Self::RECOMPUTED_PANELS).contains(&panels)
+        {
+            return None;
+        }
+        let slice_width = width.div_ceil(slices);
+        let key_group = keys / groups;
+        if 3 * slice_width + 2 * key_group > Self::REGISTER_CEILING {
+            return None;
+        }
+        Some(Self {
+            keys,
+            width,
+            slices,
+            groups,
+            panels,
+        })
+    }
+
     pub const fn slice_width(self) -> u32 {
         self.width.div_ceil(self.slices)
     }
@@ -382,6 +418,45 @@ impl ConvolutionWindow {
 
     pub const fn dilation_columns(self) -> u32 {
         self.dilation_columns
+    }
+
+    pub const fn words(self) -> [u32; 6] {
+        [
+            self.reach_rows,
+            self.reach_columns,
+            self.stride_rows,
+            self.stride_columns,
+            self.dilation_rows,
+            self.dilation_columns,
+        ]
+    }
+
+    pub fn of_words(words: [u32; 6]) -> Option<Self> {
+        let [
+            reach_rows,
+            reach_columns,
+            stride_rows,
+            stride_columns,
+            dilation_rows,
+            dilation_columns,
+        ] = words;
+        if reach_rows == 0
+            || reach_columns == 0
+            || stride_rows == 0
+            || stride_columns == 0
+            || dilation_rows == 0
+            || dilation_columns == 0
+        {
+            return None;
+        }
+        Some(Self {
+            reach_rows,
+            reach_columns,
+            stride_rows,
+            stride_columns,
+            dilation_rows,
+            dilation_columns,
+        })
     }
 
     pub const fn taps(self) -> u32 {
@@ -622,6 +697,53 @@ impl ConvolutionTile {
         self.thread_outputs
     }
 
+    pub const fn words(self) -> [u32; 12] {
+        let window = self.window.words();
+        [
+            window[0],
+            window[1],
+            window[2],
+            window[3],
+            window[4],
+            window[5],
+            self.rows,
+            self.columns,
+            self.channels,
+            self.outputs,
+            self.thread_columns,
+            self.thread_outputs,
+        ]
+    }
+
+    pub fn of_words(words: [u32; 12]) -> Option<Self> {
+        let window = ConvolutionWindow::of_words(words[..6].try_into().ok()?)?;
+        let [
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_columns,
+            thread_outputs,
+        ] = words[6..].try_into().ok()?;
+        if rows == 0
+            || columns == 0
+            || channels == 0
+            || outputs == 0
+            || !Self::THREAD_STEPS.contains(&(thread_columns, thread_outputs))
+        {
+            return None;
+        }
+        Some(Self {
+            window,
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_columns,
+            thread_outputs,
+        })
+    }
+
     pub const fn span_rows(self) -> u32 {
         self.window.span_rows(self.rows)
     }
@@ -840,6 +962,53 @@ impl ConvolutionInputTile {
 
     pub const fn thread_locals(self) -> u32 {
         self.thread_locals
+    }
+
+    pub const fn words(self) -> [u32; 12] {
+        let window = self.window.words();
+        [
+            window[0],
+            window[1],
+            window[2],
+            window[3],
+            window[4],
+            window[5],
+            self.rows,
+            self.columns,
+            self.channels,
+            self.locals,
+            self.thread_columns,
+            self.thread_locals,
+        ]
+    }
+
+    pub fn of_words(words: [u32; 12]) -> Option<Self> {
+        let window = ConvolutionWindow::of_words(words[..6].try_into().ok()?)?;
+        let [
+            rows,
+            columns,
+            channels,
+            locals,
+            thread_columns,
+            thread_locals,
+        ] = words[6..].try_into().ok()?;
+        if rows == 0
+            || columns == 0
+            || channels == 0
+            || locals == 0
+            || !Self::THREAD_STEPS.contains(&(thread_columns, thread_locals))
+        {
+            return None;
+        }
+        Some(Self {
+            window,
+            rows,
+            columns,
+            channels,
+            locals,
+            thread_columns,
+            thread_locals,
+        })
     }
 
     pub const fn span_rows(self) -> u32 {
@@ -1061,6 +1230,56 @@ impl ConvolutionWeightTile {
 
     pub const fn thread_slices(self) -> u32 {
         self.thread_slices
+    }
+
+    pub const fn words(self) -> [u32; 12] {
+        let window = self.window.words();
+        [
+            window[0],
+            window[1],
+            window[2],
+            window[3],
+            window[4],
+            window[5],
+            self.rows,
+            self.columns,
+            self.channels,
+            self.outputs,
+            self.thread_outputs,
+            self.thread_slices,
+        ]
+    }
+
+    pub fn of_words(words: [u32; 12]) -> Option<Self> {
+        let window = ConvolutionWindow::of_words(words[..6].try_into().ok()?)?;
+        let [
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_outputs,
+            thread_slices,
+        ] = words[6..].try_into().ok()?;
+        if rows == 0
+            || columns == 0
+            || channels == 0
+            || outputs == 0
+            || thread_outputs == 0
+            || thread_outputs > outputs
+            || !Self::THREAD_SLICES.contains(&thread_slices)
+            || thread_outputs * thread_slices > Self::REGISTER_CEILING
+        {
+            return None;
+        }
+        Some(Self {
+            window,
+            rows,
+            columns,
+            channels,
+            outputs,
+            thread_outputs,
+            thread_slices,
+        })
     }
 
     pub const fn output_groups(self) -> u32 {
