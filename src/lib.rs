@@ -9,13 +9,13 @@ pub use neura_gpu::{
     QueueLock,
 };
 pub use neura_graph::{
-    AttentionOptions, Fan, Free, Gradients, Graph, GraphStamp, Init, Pool, Revision, Shape, Value,
-    Window,
+    AttentionOptions, Fan, Free, Gradients, Graph, GraphStamp, Init, Pool, Residency, Revision,
+    Shape, Value, Window,
 };
 pub use neura_nn::{
-    AdamW, Adapter, AdapterShape, Conv2d, ConvTranspose2d, DeltaInput, DeltaRule, Embedding,
-    GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, RmsNorm, Sgd,
-    cross_entropy, mse_loss, policy_loss,
+    AdamW, Adapter, AdapterShape, Conv2d, ConvTranspose2d, DeltaInput, DeltaRule, DeltaScan,
+    Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, RmsNorm,
+    Sgd, cross_entropy, mse_loss, policy_loss,
 };
 pub use neura_plan::{Arena, Layout, Seed, Span};
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};

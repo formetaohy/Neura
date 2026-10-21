@@ -115,3 +115,24 @@ shared prefix holds the states of the persona that filled it, and planes of othe
 reuse them. Routing runs two small products per projection, so a persona batch answers more slowly
 than the base model; the tables also take rank × (inputs + outputs) numbers of memory per persona
 per projection.
+
+Setting `NEURA_TRAIN` to a text file trains a persona table while every base weight stays frozen. The
+example tokenizes the corpus as one stream, draws windows of `NEURA_ROWS` tokens (16 by default),
+predicts the next token at every position, and descends `NEURA_STEPS` steps (16 by default) at
+`NEURA_RATE` (1e-3 by default). `NEURA_PERSONA_INDEX` picks the persona that learns (0 by default),
+and `NEURA_SAVE` names the file the tables are written to (`persona.neura` by default). Only the
+adapter tensors are written, so the tables of one rank 2 persona take about 5 MB. The training graph
+weighs every full attention layer over the whole window and walks the gated delta rule as a
+differentiable chunked scan, so gradients reach every adapter without a cache.
+
+```sh
+NEURA_TRAIN=corpus.txt NEURA_PERSONAS=4 NEURA_RANK=4 NEURA_ROWS=32 NEURA_STEPS=256 NEURA_RATE=5e-4 NEURA_SAVE=personas.neura cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf ignored
+```
+
+Point `NEURA_PERSONA` at a checkpoint while `NEURA_TRAIN` runs to continue a table, and name the row
+to continue with `NEURA_PERSONA_INDEX`. A training run leaves the other personas at the table it
+started from, so each persona can learn its own corpus before a batch routes them together.
+
+```sh
+NEURA_PERSONAS=4 NEURA_PERSONA=personas.neura NEURA_PERSONA_OF=0,1,2,3 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
+```

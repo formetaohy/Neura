@@ -1,7 +1,7 @@
 use neura::gguf::GgufFile;
 use neura::{
-    Adapter, AdapterShape, CheckpointFile, Element, Graph, Init, Overlay, Placed, Shape, Source,
-    Value,
+    Adapter, AdapterShape, CheckpointFile, Element, Graph, Init, Overlay, Placed, Residency, Shape,
+    Source, Value,
 };
 use std::path::Path;
 
@@ -36,13 +36,37 @@ impl Plan {
 pub(crate) struct Route {
     plan: Option<Plan>,
     selection: Option<Value>,
+    training: bool,
+    init: Init,
 }
 
 impl Route {
     pub(crate) fn new(graph: &Graph, batch: u32, plan: Option<Plan>) -> Self {
         let selection =
             plan.map(|_| graph.state(Shape::of([1, 1, batch, 1]), Init::Zero, Element::Single));
-        Self { plan, selection }
+        Self {
+            plan,
+            selection,
+            training: false,
+            init: Init::Zero,
+        }
+    }
+
+    pub(crate) fn training(graph: &Graph, plan: Plan, persona: u32) -> Self {
+        assert!(
+            persona < plan.count,
+            "a training route names persona {persona} of {} personas",
+            plan.count,
+        );
+        Self {
+            plan: Some(plan),
+            selection: Some(graph.fill(Shape::of([1, 1, 1, 1]), persona as f32)),
+            training: true,
+            init: Init::Uniform {
+                low: -0.1,
+                high: 0.1,
+            },
+        }
     }
 
     pub(crate) fn selection(self) -> Option<Value> {
@@ -61,7 +85,7 @@ impl Route {
             graph,
             &format!("{PREFIX}{name}"),
             AdapterShape::new(plan.count, inputs, outputs, plan.rank),
-            Init::Zero,
+            self.init,
             Element::Single,
             1.0,
         ))
@@ -77,6 +101,9 @@ impl Route {
         let (Some(adapter), Some(selection)) = (adapter, self.selection) else {
             return base;
         };
+        if self.training {
+            return adapter.forward_shared(graph, input, base, selection);
+        }
         let wide_input = graph.permute(input, [2, 0, 1, 3]);
         let wide_base = graph.permute(base, [2, 0, 1, 3]);
         let picked = graph.permute(selection, [2, 0, 1, 3]);
@@ -106,7 +133,7 @@ impl Table {
                 .iter()
                 .filter_map(|held| {
                     let name = held.name.as_deref()?;
-                    name.starts_with(PREFIX)
+                    (held.residency == Residency::Parameter && name.starts_with(PREFIX))
                         .then(|| (name.to_owned(), u64::from(held.shape.elements())))
                 })
                 .collect(),

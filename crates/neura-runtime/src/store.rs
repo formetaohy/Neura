@@ -9,6 +9,27 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+fn pour_weights(
+    weights: &Arena,
+    words: u64,
+    source: &impl Source,
+    keep: &dyn Fn(&str) -> bool,
+    write: &mut dyn FnMut(u64, &[u8]),
+) {
+    for entry in weights.entries() {
+        let name = entry.name.as_deref().unwrap_or_else(|| {
+            panic!(
+                "the tensor at word {} of {} carries no name, and a source names every parameter it holds; declare it with a named parameter",
+                entry.word,
+                entry.element.name(),
+            )
+        });
+        if keep(name) {
+            pour_one(name, entry, words, source, write);
+        }
+    }
+}
+
 fn pour(
     weights: &Arena,
     state: &Arena,
@@ -887,6 +908,31 @@ impl WeightStore {
         self.materialize_all(&mut mirror, queue);
         mirror.vacuum();
         pour(weights, state, self.words, source, &mut |at, bytes| {
+            self.bounds(at / WORD_BYTES, bytes.len() as u64);
+            mirror.backing.write(at, bytes);
+        });
+        self.reload(queue, &mut mirror);
+    }
+
+    pub(crate) fn load_weights_named(
+        &self,
+        queue: &Queue,
+        weights: &Arena,
+        source: &impl Source,
+        keep: &dyn Fn(&str) -> bool,
+    ) {
+        let Some(mirror) = &self.mirror else {
+            let mut upload = Upload::of(self, queue);
+            pour_weights(weights, self.words, source, keep, &mut |at, bytes| {
+                upload.put(at, bytes);
+            });
+            upload.flush();
+            return;
+        };
+        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
+        self.materialize_all(&mut mirror, queue);
+        mirror.vacuum();
+        pour_weights(weights, self.words, source, keep, &mut |at, bytes| {
             self.bounds(at / WORD_BYTES, bytes.len() as u64);
             mirror.backing.write(at, bytes);
         });

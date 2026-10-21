@@ -328,6 +328,22 @@ impl Runtime {
         );
     }
 
+    pub fn restore_weights_named(
+        &self,
+        weights: &Weights,
+        source: &impl Source,
+        keep: &dyn Fn(&str) -> bool,
+    ) {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        weights
+            .store()
+            .load_weights_named(self.context.queue(), weights.region(), source, keep);
+    }
+
     pub fn checkpoint(&self, weights: &Weights) -> Checkpoint {
         self.context.assert_alive();
         assert!(
@@ -348,6 +364,33 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let container = container_of(weights);
+        let store = weights.store();
+        container.write(path, &mut |word, bytes, sink| {
+            store.stream(self.context.queue(), word, bytes, sink)
+        });
+        CheckpointFile::open(path)
+    }
+
+    pub fn save_weights_named(
+        &self,
+        weights: &Weights,
+        path: &Path,
+        keep: &dyn Fn(&str) -> bool,
+    ) -> CheckpointFile {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        let entries = checkpoint::described(weights.region(), "parameter")
+            .into_iter()
+            .filter(|entry| keep(entry.name))
+            .collect::<Vec<_>>();
+        assert!(
+            !entries.is_empty(),
+            "a container that names no tensor holds nothing to restore",
+        );
+        let container = Container::of(&entries);
         let store = weights.store();
         container.write(path, &mut |word, bytes, sink| {
             store.stream(self.context.queue(), word, bytes, sink)

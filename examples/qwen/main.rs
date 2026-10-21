@@ -7,6 +7,7 @@ mod ops;
 mod persona;
 mod text;
 mod tokenizer;
+mod train;
 
 use config::Config;
 use model::{Model, Planes};
@@ -17,7 +18,7 @@ use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::tokenizer::Text;
 use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokenizer::Tokenizer;
 
@@ -71,23 +72,34 @@ fn main() {
     );
 
     let template = Template::read(&source);
-    let rendered = match prompt.strip_prefix("raw:") {
-        Some(held) => held.to_owned(),
-        None => template.render(
-            &[Message::new("user", prompt.as_str())],
-            &[
-                ("add_generation_prompt", Value::Flag(true)),
-                ("enable_thinking", Value::Flag(false)),
-            ],
-        ),
+    let training = std::env::var("NEURA_TRAIN").ok();
+    let rendered = match &training {
+        Some(_) => String::new(),
+        None => match prompt.strip_prefix("raw:") {
+            Some(held) => held.to_owned(),
+            None => template.render(
+                &[Message::new("user", prompt.as_str())],
+                &[
+                    ("add_generation_prompt", Value::Flag(true)),
+                    ("enable_thinking", Value::Flag(false)),
+                ],
+            ),
+        },
     };
-    let tokens = tokenizer.encode(&rendered);
-    println!("prompt: {rendered:?}");
-    println!("tokens: {}", tokens.len());
-
+    let tokens = match &training {
+        Some(_) => Vec::new(),
+        None => tokenizer.encode(&rendered),
+    };
+    if training.is_none() {
+        println!("prompt: {rendered:?}");
+        println!("tokens: {}", tokens.len());
+    }
     let runtime = Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
-            heap_bytes: HEAP,
+            heap_bytes: match training {
+                Some(_) => 8 << 30,
+                None => HEAP,
+            },
             readback_bytes: READBACK,
             ..Default::default()
         },
@@ -152,6 +164,37 @@ fn main() {
             plan.count(),
         );
     }
+    if let Some(corpus) = training {
+        let plan = plan.expect("a training run names NEURA_PERSONAS");
+        let request = train::Request {
+            corpus: std::fs::read_to_string(&corpus).unwrap_or_else(|error| {
+                panic!("a training corpus at {corpus} could not be read: {error}")
+            }),
+            rows: std::env::var("NEURA_ROWS")
+                .ok()
+                .map(|held| held.parse::<u32>().expect("a training window of rows"))
+                .unwrap_or(16),
+            steps: std::env::var("NEURA_STEPS")
+                .ok()
+                .map(|held| held.parse::<u32>().expect("a training step count"))
+                .unwrap_or(16),
+            rate: std::env::var("NEURA_RATE")
+                .ok()
+                .map(|held| held.parse::<f32>().expect("a training rate"))
+                .unwrap_or(1e-3),
+            seed,
+            persona: std::env::var("NEURA_PERSONA_INDEX")
+                .ok()
+                .map(|held| held.parse::<u32>().expect("a persona index"))
+                .unwrap_or(0),
+            init: table_path.clone(),
+            save: PathBuf::from(
+                std::env::var("NEURA_SAVE").unwrap_or_else(|_| "persona.neura".to_owned()),
+            ),
+        };
+        train::run(&runtime, &source, &tokenizer, &config, plan, &request);
+        return;
+    }
     let loaded = |graph: &neura::Graph| persona::load(&runtime, graph, &source, table.as_ref());
     let planes = |shape: BatchShape, prefix: bool| Planes {
         capacity: shape.capacity,
@@ -163,6 +206,8 @@ fn main() {
         prefix,
         kv,
         persona: plan,
+        training: false,
+        training_persona: 0,
     };
     let answer = |graph: &neura::Graph, shape: BatchShape| {
         let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);

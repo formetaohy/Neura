@@ -1057,6 +1057,17 @@ impl Graph {
         advance(&mut state);
     }
 
+    pub fn parameters(&self) -> Vec<Value> {
+        let state = self.state.borrow();
+        state
+            .values
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| info.residency == Residency::Parameter)
+            .map(|(id, info)| Value::of(self.instance, id as u32, info.shape))
+            .collect()
+    }
+
     pub fn detach(&self, value: Value) -> Value {
         let value = self.own(value);
         let (shape, layout, storage, element, scale) = {

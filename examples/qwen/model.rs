@@ -25,6 +25,8 @@ pub(crate) struct Planes {
     pub prefix: bool,
     pub kv: Element,
     pub persona: Option<Plan>,
+    pub training: bool,
+    pub training_persona: u32,
 }
 
 pub struct Model {
@@ -42,7 +44,11 @@ enum Layer {
 
 impl Model {
     pub fn new(graph: &Graph, source: &impl Archive, config: &Config, planes: Planes) -> Self {
-        let route = Route::new(graph, planes.batch, planes.persona);
+        let route = match (planes.training, planes.persona) {
+            (true, Some(plan)) => Route::training(graph, plan, planes.training_persona),
+            (true, None) => panic!("a training graph routes the personas it trains"),
+            (false, plan) => Route::new(graph, planes.batch, plan),
+        };
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
@@ -94,7 +100,10 @@ impl Model {
     }
 
     pub fn step(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
-        let hidden = self.layers(graph, token, cursor, mask);
+        self.logits(graph, self.layers(graph, token, cursor, mask))
+    }
+
+    pub fn logits(&self, graph: &Graph, hidden: Value) -> Value {
         let normed = rms(graph, hidden, self.output_norm, self.floor);
         graph.matmul(normed, graph.permute(self.embedding, [0, 1, 3, 2]))
     }
@@ -105,7 +114,7 @@ impl Model {
         hidden
     }
 
-    fn layers(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
+    pub(crate) fn layers(&self, graph: &Graph, token: Value, cursor: Value, mask: Value) -> Value {
         let plane_mask = graph.permute(mask, [0, 2, 1, 3]);
         let mut hidden = graph.mul(graph.gather(self.embedding, token), mask);
         for layer in &self.layers {
