@@ -96,6 +96,12 @@ pub struct Run {
 }
 
 impl Run {
+    pub fn complete(&self) -> bool {
+        self.submissions
+            .last()
+            .is_none_or(|submission| self.queue.complete(*submission))
+    }
+
     pub fn seconds(self) -> f64 {
         self.submissions
             .iter()

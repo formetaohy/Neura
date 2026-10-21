@@ -1119,9 +1119,36 @@ impl Batch {
     }
 
     fn walk(&mut self, runtime: &Runtime, frame: Frame, waves: u32) -> Vec<Emitted> {
-        match frame.fill {
-            Some((index, slots)) => self.resume_fill(runtime, index, slots, frame.cursor, waves),
-            None => self.resume_answer(runtime, frame.cursor, waves),
+        let Frame { fill, cursor } = frame;
+        if cursor.done() {
+            if !cursor.ready() {
+                self.frame = Some(Frame { fill, cursor });
+                return Vec::new();
+            }
+            cursor.wait();
+            return match fill {
+                Some((index, slots)) => {
+                    self.complete_fill(index, &slots);
+                    Vec::new()
+                }
+                None => {
+                    let answer = self
+                        .answer
+                        .entry
+                        .as_ref()
+                        .expect("a finished answer holds a program");
+                    let chosen = runtime.read(&answer.program, answer.chosen);
+                    self.complete_answer(&chosen)
+                }
+            };
+        }
+        if !cursor.ready() {
+            self.frame = Some(Frame { fill, cursor });
+            return Vec::new();
+        }
+        match fill {
+            Some((index, slots)) => self.resume_fill(runtime, index, slots, cursor, waves),
+            None => self.resume_answer(runtime, cursor, waves),
         }
     }
 
@@ -1259,7 +1286,7 @@ impl Batch {
         waves: u32,
     ) -> Vec<Emitted> {
         self.prepare_fill(runtime, index, &slots);
-        let held = {
+        let cursor = {
             let program = &mut self.fills[index]
                 .1
                 .entry
@@ -1268,22 +1295,12 @@ impl Batch {
                 .program;
             let mut session = runtime.session(program);
             session.submit(waves);
-            if session.done() {
-                session.wait();
-                None
-            } else {
-                Some(session.pause())
-            }
+            session.pause()
         };
-        match held {
-            Some(cursor) => {
-                self.frame = Some(Frame {
-                    fill: Some((index, slots)),
-                    cursor,
-                })
-            }
-            None => self.complete_fill(index, &slots),
-        }
+        self.frame = Some(Frame {
+            fill: Some((index, slots)),
+            cursor,
+        });
         Vec::new()
     }
 
@@ -1295,7 +1312,7 @@ impl Batch {
         cursor: Cursor,
         waves: u32,
     ) -> Vec<Emitted> {
-        let held = {
+        let next = {
             let program = &mut self.fills[index]
                 .1
                 .entry
@@ -1304,22 +1321,12 @@ impl Batch {
                 .program;
             let mut session = runtime.resume(program, cursor);
             session.submit(waves);
-            if session.done() {
-                session.wait();
-                None
-            } else {
-                Some(session.pause())
-            }
+            session.pause()
         };
-        match held {
-            Some(cursor) => {
-                self.frame = Some(Frame {
-                    fill: Some((index, slots)),
-                    cursor,
-                })
-            }
-            None => self.complete_fill(index, &slots),
-        }
+        self.frame = Some(Frame {
+            fill: Some((index, slots)),
+            cursor: next,
+        });
         Vec::new()
     }
 
@@ -1438,13 +1445,7 @@ impl Batch {
     fn start_answer(&mut self, runtime: &Runtime, waves: u32) -> Vec<Emitted> {
         let (tokens, cursor, mask) = self.answer_inputs();
         self.write_answer(runtime, &tokens, &cursor, &mask);
-        let (chosen, held) = {
-            let held = self
-                .answer
-                .entry
-                .as_ref()
-                .expect("a written answer holds a program")
-                .chosen;
+        let next = {
             let program = &mut self
                 .answer
                 .entry
@@ -1453,30 +1454,17 @@ impl Batch {
                 .program;
             let mut session = runtime.session(program);
             session.submit(waves);
-            if session.done() {
-                session.wait();
-                (Some(runtime.read(program, held)), None)
-            } else {
-                (None, Some(session.pause()))
-            }
+            session.pause()
         };
-        match held {
-            Some(cursor) => {
-                self.frame = Some(Frame { fill: None, cursor });
-                Vec::new()
-            }
-            None => self.complete_answer(&chosen.expect("a finished answer holds its choice")),
-        }
+        self.frame = Some(Frame {
+            fill: None,
+            cursor: next,
+        });
+        Vec::new()
     }
 
     fn resume_answer(&mut self, runtime: &Runtime, cursor: Cursor, waves: u32) -> Vec<Emitted> {
-        let (chosen, held) = {
-            let held = self
-                .answer
-                .entry
-                .as_ref()
-                .expect("a resumed answer holds a program")
-                .chosen;
+        let next = {
             let program = &mut self
                 .answer
                 .entry
@@ -1485,20 +1473,13 @@ impl Batch {
                 .program;
             let mut session = runtime.resume(program, cursor);
             session.submit(waves);
-            if session.done() {
-                session.wait();
-                (Some(runtime.read(program, held)), None)
-            } else {
-                (None, Some(session.pause()))
-            }
+            session.pause()
         };
-        match held {
-            Some(cursor) => {
-                self.frame = Some(Frame { fill: None, cursor });
-                Vec::new()
-            }
-            None => self.complete_answer(&chosen.expect("a finished answer holds its choice")),
-        }
+        self.frame = Some(Frame {
+            fill: None,
+            cursor: next,
+        });
+        Vec::new()
     }
 }
 

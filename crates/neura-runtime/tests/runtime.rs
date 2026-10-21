@@ -310,6 +310,37 @@ fn a_gated_wave_waits_for_every_wave_before_it() {
 }
 
 #[test]
+fn a_cursor_resumes_the_slice_it_paused_once_that_slice_completes() {
+    let runtime = open();
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 8, 8192]), Element::Single);
+    let first = graph.softmax(input);
+    let second = graph.softmax(first);
+    graph.retain(second);
+    let weights = runtime.weights(&graph);
+    let mut program = runtime.compile(&graph, &weights);
+    let values = random(8 * 8192, 41);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let expected = runtime.read(&program, second);
+    let waves = program.wave_count();
+    assert!(waves > 1);
+    runtime.write(&program, input, &values);
+    let mut session = runtime.session(&mut program);
+    session.submit(1);
+    let cursor = session.pause();
+    assert!(cursor.wave() > 0 && !cursor.done());
+    while !cursor.ready() {
+        std::hint::spin_loop();
+    }
+    let mut resumed = runtime.resume(&mut program, cursor);
+    while resumed.submit(1) {}
+    resumed.wait();
+    assert_eq!(resumed.wave(), waves);
+    assert_close(&runtime.read(&program, second), &expected, 1e-6);
+}
+
+#[test]
 fn a_session_walks_a_plan_a_slice_at_a_time() {
     let runtime = open();
     let graph = Graph::new();

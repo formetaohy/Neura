@@ -8,11 +8,24 @@ pub struct Cursor {
     plan: Arc<Plan>,
     encoding: Arc<Encoding>,
     wave: u32,
+    held: Option<Run>,
 }
 
 impl Cursor {
     pub fn wave(&self) -> u32 {
         self.wave
+    }
+
+    pub fn done(&self) -> bool {
+        self.wave >= self.encoding.wave_count()
+    }
+
+    pub fn ready(&self) -> bool {
+        self.held.as_ref().is_none_or(Run::complete)
+    }
+
+    pub fn wait(mut self) -> Option<f64> {
+        self.held.take().map(Run::seconds)
     }
 }
 
@@ -38,6 +51,10 @@ impl Runtime {
         assert!(
             Arc::ptr_eq(&cursor.encoding, &program.encoding()),
             "a session resumes the binding it paused, and this program was bound again",
+        );
+        assert!(
+            cursor.ready(),
+            "a session resumes the slice it paused after that slice completes; poll Cursor::ready before resuming",
         );
         assert!(
             cursor.wave <= cursor.encoding.wave_count(),
@@ -97,12 +114,12 @@ impl Session<'_> {
     }
 
     pub fn pause(mut self) -> Cursor {
-        self.settle();
         Cursor {
             program: self.program.instance(),
             plan: self.program.plan(),
             encoding: self.encoding.clone(),
             wave: self.wave,
+            held: self.held.take(),
         }
     }
 
