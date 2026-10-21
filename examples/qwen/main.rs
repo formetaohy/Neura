@@ -12,7 +12,7 @@ mod train;
 use config::Config;
 use model::{Model, Planes};
 use neura::generate::{
-    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Persona, Sampling,
+    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Sampling,
 };
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
@@ -221,10 +221,7 @@ fn main() {
             mask,
             reset,
             logits: model.step(graph, token, cursor, mask),
-            persona: model.persona().map(|value| Persona {
-                value,
-                count: plan.expect("a routed model holds its persona plan").count(),
-            }),
+            states: model.persona().into_iter().collect(),
         }
     };
     let fill = |graph: &neura::Graph, shape: BatchShape| {
@@ -237,6 +234,7 @@ fn main() {
             token,
             cursor,
             mask,
+            states: model.persona().into_iter().collect(),
         }
     };
     let reset = |graph: &neura::Graph, shape: BatchShape| {
@@ -244,7 +242,11 @@ fn main() {
         let share = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
         let model = Model::new(graph, &source, &config, planes(shape, false));
         model.reset(graph, reset, shape.shared.then_some(share));
-        BatchSeed { reset, share }
+        BatchSeed {
+            reset,
+            share,
+            states: model.persona().into_iter().collect(),
+        }
     };
     let prefix = |graph: &neura::Graph, shape: BatchShape| {
         let token = graph.input(Shape::of([1, shape.rows, 1, 1]), Element::Single);
@@ -259,6 +261,7 @@ fn main() {
             cursor,
             mask,
             reset,
+            states: model.persona().into_iter().collect(),
         }
     };
     let chunks = CHUNKS
@@ -279,14 +282,12 @@ fn main() {
     if shared {
         spec = spec.shared();
     }
-    if let Some(plan) = plan {
-        spec = spec.personas(plan.count());
-    }
     let mut batch = Batch::new(&runtime, loaded, spec, answer, fill, reset);
     if let Some(plan) = plan {
+        let state = batch.state("persona");
         let held = personas(sequences, plan.count());
         for (slot, chosen) in held.iter().copied().enumerate() {
-            batch.set_persona_of(&runtime, slot as u32, chosen);
+            batch.set_state_of(&runtime, state, slot as u32, chosen as f32);
         }
         println!("persona of each plane: {held:?}");
     }

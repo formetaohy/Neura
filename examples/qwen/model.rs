@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::delta::Delta;
 use crate::persona::{Plan, Route};
 use neura::decoder::{matrix, rms, vector};
+use neura::generate::PlaneState;
 use neura::gguf::Archive;
 use neura::{Element, Graph, Shape, Value};
 
@@ -77,8 +78,10 @@ impl Model {
         }
     }
 
-    pub fn persona(&self) -> Option<Value> {
-        self.route.selection()
+    pub fn persona(&self) -> Option<PlaneState> {
+        self.route
+            .selection()
+            .map(|value| PlaneState::new("persona", value, 0.0))
     }
 
     pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {

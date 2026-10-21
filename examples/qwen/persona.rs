@@ -1,7 +1,7 @@
 use neura::gguf::GgufFile;
 use neura::{
-    Adapter, AdapterShape, CheckpointFile, Element, Graph, Init, Overlay, Placed, Residency, Shape,
-    Source, Value,
+    AdapterBank, AdapterBankShape, CheckpointFile, Element, Graph, Init, Overlay, Placed,
+    Residency, Shape, Source, Value,
 };
 use std::path::Path;
 
@@ -79,12 +79,12 @@ impl Route {
         name: &str,
         inputs: u32,
         outputs: u32,
-    ) -> Option<Adapter> {
+    ) -> Option<AdapterBank> {
         let plan = self.plan?;
-        Some(Adapter::new(
+        Some(AdapterBank::new(
             graph,
             &format!("{PREFIX}{name}"),
-            AdapterShape::new(plan.count, inputs, outputs, plan.rank),
+            AdapterBankShape::new(plan.count, inputs, outputs, plan.rank),
             self.init,
             Element::Single,
             1.0,
@@ -94,7 +94,7 @@ impl Route {
     pub(crate) fn apply(
         self,
         graph: &Graph,
-        adapter: Option<&Adapter>,
+        adapter: Option<&AdapterBank>,
         input: Value,
         base: Value,
     ) -> Value {

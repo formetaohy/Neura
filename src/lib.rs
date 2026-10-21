@@ -13,9 +13,9 @@ pub use neura_graph::{
     Shape, Value, Window,
 };
 pub use neura_nn::{
-    AdamW, Adapter, AdapterShape, Conv2d, ConvTranspose2d, DeltaInput, DeltaRule, DeltaScan,
-    Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments, MultiHeadAttention, RmsNorm,
-    Sgd, cross_entropy, mse_loss, policy_loss,
+    AdamW, AdapterBank, AdapterBankShape, Conv2d, ConvTranspose2d, DeltaInput, DeltaRule,
+    DeltaScan, Embedding, GroupNorm, HeadShape, LayerNorm, Linear, Mlp, Moments,
+    MultiHeadAttention, RmsNorm, Sgd, cross_entropy, mse_loss, policy_loss,
 };
 pub use neura_plan::{Arena, Layout, Seed, Span};
 pub use neura_profile::{Budget, MatmulStrategy, MatmulTile, Profile};

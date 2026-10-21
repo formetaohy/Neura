@@ -2,7 +2,7 @@ use neura_abi::Element;
 use neura_decoder::{Cache, CacheShape};
 use neura_generate::{
     Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Family, Generator,
-    Sampling, Step,
+    PlaneState, Sampling, Step,
 };
 use neura_gguf::Gguf;
 use neura_graph::{Init, Shape};
@@ -188,7 +188,7 @@ fn batch_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
             graph.sum_axis(cache.states()[0], 2),
             Shape::of([1, 1, shape.batch, CLASSES]),
         ),
-        persona: None,
+        states: Vec::new(),
     }
 }
 
@@ -206,6 +206,7 @@ fn batch_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
         token,
         cursor,
         mask,
+        states: Vec::new(),
     }
 }
 
@@ -214,7 +215,11 @@ fn batch_reset(graph: &neura_graph::Graph, shape: BatchShape) -> BatchSeed {
     let share = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
     let cache = cache(shape, graph, 1, shape.shared);
     cache.reset(graph, reset, shape.shared.then_some(share));
-    BatchSeed { reset, share }
+    BatchSeed {
+        reset,
+        share,
+        states: Vec::new(),
+    }
 }
 
 fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
@@ -259,6 +264,7 @@ fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
         cursor,
         mask,
         reset,
+        states: Vec::new(),
     }
 }
 
@@ -712,7 +718,7 @@ fn a_candidate_count_the_host_writes_steers_one_plane_alone() {
     );
 }
 
-fn persona_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
+fn state_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
     let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
     let cursor = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
     let mask = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
@@ -723,7 +729,7 @@ fn persona_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
         graph.permute(mask, [0, 2, 1, 3]),
     );
     cache.write_masked(graph, cursor, held, held, graph.permute(mask, [0, 2, 1, 3]));
-    let persona = graph.state(
+    let route = graph.state(
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
@@ -734,76 +740,61 @@ fn persona_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
         mask,
         reset,
         logits: graph.mul(
-            graph.one_hot(persona, CLASSES),
+            graph.one_hot(route, CLASSES),
             graph.fill(Shape::scalar(), 1e6),
         ),
-        persona: Some(neura_generate::Persona {
-            value: persona,
-            count: 4,
-        }),
+        states: vec![PlaneState::new("route", route, 0.0)],
     }
 }
 
-fn persona_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
-    let token = graph.input(Shape::of([1, shape.rows, shape.batch, 1]), Element::Single);
-    let cursor = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
-    let mask = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
-    let cache = cache(shape, graph, shape.rows, shape.shared);
-    let held = graph.mul(
-        graph.permute(graph.one_hot(token, CLASSES), [0, 2, 1, 3]),
-        graph.permute(mask, [0, 2, 1, 3]),
-    );
-    cache.write_masked(graph, cursor, held, held, graph.permute(mask, [0, 2, 1, 3]));
-    graph.state(
+fn state_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
+    let mut fill = batch_fill(graph, shape);
+    let route = graph.state(
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
     );
-    BatchFill {
-        token,
-        cursor,
-        mask,
-    }
+    fill.states = vec![PlaneState::new("route", route, 0.0)];
+    fill
 }
 
-fn persona_reset(graph: &neura_graph::Graph, shape: BatchShape) -> BatchSeed {
-    let reset = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
-    let share = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
-    let cache = cache(shape, graph, 1, shape.shared);
-    cache.reset(graph, reset, shape.shared.then_some(share));
-    graph.state(
+fn state_reset(graph: &neura_graph::Graph, shape: BatchShape) -> BatchSeed {
+    let mut seed = batch_reset(graph, shape);
+    let route = graph.state(
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
     );
-    BatchSeed { reset, share }
+    seed.states = vec![PlaneState::new("route", route, 0.0)];
+    seed
 }
 
 #[test]
-fn a_persona_the_host_writes_routes_one_plane_alone() {
+fn a_state_the_host_writes_routes_one_plane_alone() {
     let runtime = runtime();
-    let spec = BatchSpec::new(16, 2, &[2]).personas(4);
+    let spec = BatchSpec::new(16, 2, &[2]);
     let mut batch = Batch::new(
         &runtime,
         |graph| runtime.weights(graph),
         spec,
-        persona_answer,
-        persona_fill,
-        persona_reset,
+        state_answer,
+        state_fill,
+        state_reset,
     );
     batch.admit(&runtime, &[0, 1]);
     batch.admit(&runtime, &[0, 1]);
+    let state = batch.state("route");
     let plans = runtime.built_plans();
-    batch.set_persona_of(&runtime, 0, 2);
-    batch.set_persona_of(&runtime, 1, 1);
-    assert_eq!(batch.persona_of(0), 2);
-    assert_eq!(batch.persona_of(1), 1);
+    batch.set_state_of(&runtime, state, 0, 2.0);
+    batch.set_state_of(&runtime, state, 1, 1.0);
+    assert_eq!(batch.state_of(state, 0), 2.0);
+    assert_eq!(batch.state_of(state, 1), 1.0);
     for _ in 0..4 {
         for held in batch.step(&runtime) {
             assert_eq!(
-                held.token,
-                batch.persona_of(held.slot),
-                "plane {} answers with the class its own persona names",
+                held.token as f32,
+                batch.state_of(state, held.slot),
+                "plane {} answers with the class its own state names",
                 held.slot,
             );
         }
@@ -811,21 +802,21 @@ fn a_persona_the_host_writes_routes_one_plane_alone() {
     assert_eq!(
         runtime.built_plans(),
         plans,
-        "writing a persona reuses the program the batch compiled",
+        "writing a state reuses the program the batch compiled",
     );
-    batch.set_persona(&runtime, 3);
+    batch.set_state(&runtime, state, 3.0);
     batch.step(&runtime);
     let mut routed = false;
     for _ in 0..2 {
         for held in batch.step(&runtime) {
             assert_eq!(
                 held.token, 3,
-                "a persona written for every plane routes every plane",
+                "a state written for every plane routes every plane",
             );
             routed = true;
         }
     }
-    assert!(routed, "the planes answered after their persona changed");
+    assert!(routed, "the planes answered after their state changed");
 }
 
 #[test]

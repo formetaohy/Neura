@@ -2,21 +2,21 @@ use neura_abi::{Element, MAX_RANK};
 use neura_graph::{AttentionOptions, Fan, Graph, Init, Shape, Value, Window};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct AdapterShape {
-    personas: u32,
+pub struct AdapterBankShape {
+    count: u32,
     inputs: u32,
     outputs: u32,
     rank: u32,
 }
 
-impl AdapterShape {
-    pub fn new(personas: u32, inputs: u32, outputs: u32, rank: u32) -> Self {
+impl AdapterBankShape {
+    pub fn new(count: u32, inputs: u32, outputs: u32, rank: u32) -> Self {
         assert!(
-            personas > 0 && inputs > 0 && outputs > 0 && rank > 0,
-            "an adapter of {personas} personas over {inputs} by {outputs} and {rank} ranks carries no bypass",
+            count > 0 && inputs > 0 && outputs > 0 && rank > 0,
+            "an adapter bank of {count} adapters over {inputs} by {outputs} and {rank} ranks carries no bypass",
         );
         Self {
-            personas,
+            count,
             inputs,
             outputs,
             rank,
@@ -24,7 +24,7 @@ impl AdapterShape {
     }
 }
 
-pub struct Adapter {
+pub struct AdapterBank {
     down: Value,
     up: Value,
     scale: Value,
@@ -33,35 +33,35 @@ pub struct Adapter {
     rank: u32,
 }
 
-impl Adapter {
+impl AdapterBank {
     pub fn new(
         graph: &Graph,
         name: &str,
-        shape: AdapterShape,
+        shape: AdapterBankShape,
         init: Init,
         element: Element,
         scale: f32,
     ) -> Self {
-        let AdapterShape {
-            personas,
+        let AdapterBankShape {
+            count,
             inputs,
             outputs,
             rank,
         } = shape;
         assert!(
             scale > 0.0 && scale.is_finite(),
-            "an adapter scaled by {scale} contributes nothing",
+            "an adapter bank scaled by {scale} contributes nothing",
         );
         let down = inputs
             .checked_mul(rank)
-            .expect("the down adapter of a persona fits one tensor row");
+            .expect("the down adapter of one bank row fits one tensor row");
         let up = rank
             .checked_mul(outputs)
-            .expect("the up adapter of a persona fits one tensor row");
+            .expect("the up adapter of one bank row fits one tensor row");
         Self {
             down: graph.named_parameter(
                 &format!("{name}.down"),
-                Shape::of([1, 1, personas, down]),
+                Shape::of([1, 1, count, down]),
                 init.spread(Fan {
                     inputs,
                     outputs: rank,
@@ -70,13 +70,13 @@ impl Adapter {
             ),
             up: graph.named_parameter(
                 &format!("{name}.up"),
-                Shape::of([1, 1, personas, up]),
+                Shape::of([1, 1, count, up]),
                 Init::Zero,
                 element,
             ),
             scale: graph.named_parameter(
                 &format!("{name}.scale"),
-                Shape::of([1, 1, personas, 1]),
+                Shape::of([1, 1, count, 1]),
                 Init::Constant(scale),
                 Element::Single,
             ),
@@ -107,7 +107,7 @@ impl Adapter {
         assert_eq!(
             graph.shape(selection).dims(),
             [planes, rows, 1, 1],
-            "a persona selection names one index per row of {planes} planes of {rows} rows",
+            "an adapter bank selection names one index per row of {planes} planes of {rows} rows",
         );
         let left = graph.permute(input, [0, 2, 1, 3]);
         let down = graph.reshape(
@@ -151,7 +151,7 @@ impl Adapter {
         assert_eq!(
             graph.shape(selection).dims(),
             [planes, 1, 1, 1],
-            "a shared persona selection names one index per plane of {planes} planes",
+            "a shared adapter bank selection names one index per plane of {planes} planes",
         );
         let down = graph.reshape(
             graph.gather(self.down, selection),

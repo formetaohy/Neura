@@ -109,12 +109,12 @@ NEURA_PERSONAS=4 NEURA_PERSONA_OF=2,0,1,3 cargo run --release --example qwen -- 
 NEURA_PERSONAS=4 NEURA_PERSONA=personas.neura cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
 ```
 
-A batch chooses the persona of a plane between steps without rebuilding the plan, so a game hands a
-slot to another character by naming its persona. `NEURA_PREFIX` does not combine with personas: a
-shared prefix holds the states of the persona that filled it, and planes of other personas cannot
-reuse them. Routing runs two small products per projection, so a persona batch answers more slowly
-than the base model; the tables also take rank × (inputs + outputs) numbers of memory per persona
-per projection.
+The host writes the persona state of a plane between steps without rebuilding the plan, so a game
+hands a slot to another character by naming its persona. `NEURA_PREFIX` does not combine with
+personas: a shared prefix holds the states of the persona that filled it, and planes of other
+personas cannot reuse them. Routing runs two small products per projection, so a persona batch
+answers more slowly than the base model; the tables also take rank × (inputs + outputs) numbers of
+memory per persona per projection.
 
 Setting `NEURA_TRAIN` to a text file trains a persona table while every base weight stays frozen. The
 example tokenizes the corpus as one stream, draws windows of `NEURA_ROWS` tokens (16 by default),

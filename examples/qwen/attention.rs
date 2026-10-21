@@ -5,7 +5,7 @@ use crate::ops::interleaved;
 use crate::persona::Route;
 use neura::decoder::{Cache, CacheShape, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
-use neura::{Adapter, AttentionOptions, Graph, Shape, Value};
+use neura::{AdapterBank, AttentionOptions, Graph, Shape, Value};
 
 pub(crate) struct Attention {
     norm: Value,
@@ -18,10 +18,10 @@ pub(crate) struct Attention {
     cache: Option<Cache>,
     mlp: Mlp,
     route: Route,
-    query_route: Option<Adapter>,
-    key_route: Option<Adapter>,
-    value_route: Option<Adapter>,
-    output_route: Option<Adapter>,
+    query_route: Option<AdapterBank>,
+    key_route: Option<AdapterBank>,
+    value_route: Option<AdapterBank>,
+    output_route: Option<AdapterBank>,
     floor: Value,
     base: Value,
     scale: Value,

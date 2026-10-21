@@ -1,7 +1,7 @@
 use crate::persona::Route;
 use neura::decoder::{matrix, rms, vector};
 use neura::gguf::Archive;
-use neura::{Adapter, Graph, Value};
+use neura::{AdapterBank, Graph, Value};
 
 pub(crate) struct Mlp {
     norm: Value,
@@ -9,9 +9,9 @@ pub(crate) struct Mlp {
     up: Value,
     down: Value,
     route: Route,
-    gate_route: Option<Adapter>,
-    up_route: Option<Adapter>,
-    down_route: Option<Adapter>,
+    gate_route: Option<AdapterBank>,
+    up_route: Option<AdapterBank>,
+    down_route: Option<AdapterBank>,
 }
 
 impl Mlp {

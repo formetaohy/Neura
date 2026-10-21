@@ -1,9 +1,9 @@
 use neura_abi::Element;
 use neura_graph::{Graph, Init, Shape};
-use neura_nn::{Adapter, AdapterShape};
+use neura_nn::{AdapterBank, AdapterBankShape};
 use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
 
-const PERSONAS: u32 = 2;
+const ADAPTERS: u32 = 2;
 const INPUTS: u32 = 3;
 const OUTPUTS: u32 = 2;
 const RANK: u32 = 2;
@@ -43,10 +43,10 @@ fn a_batch_walks_the_adapter_of_each_row() {
     let input = graph.input(Shape::of([1, 1, ROWS, INPUTS]), Element::Single);
     let base = graph.input(Shape::of([1, 1, ROWS, OUTPUTS]), Element::Single);
     let selection = graph.input(Shape::of([1, ROWS, 1, 1]), Element::Single);
-    let adapter = Adapter::new(
+    let adapter = AdapterBank::new(
         &graph,
-        "persona",
-        AdapterShape::new(PERSONAS, INPUTS, OUTPUTS, RANK),
+        "adapter",
+        AdapterBankShape::new(ADAPTERS, INPUTS, OUTPUTS, RANK),
         Init::Zero,
         Element::Single,
         1.0,
@@ -117,7 +117,7 @@ fn a_batch_walks_the_adapter_of_each_row() {
     for (value, wanted) in walked.iter().zip(&expected_values) {
         assert!(
             (*value - *wanted).abs() <= 1e-5,
-            "the adapter returned {value} where {wanted} was expected after the personas swapped",
+            "the adapter returned {value} where {wanted} was expected after the adapters swapped",
         );
     }
     let loss = graph.sum(out);
@@ -125,18 +125,18 @@ fn a_batch_walks_the_adapter_of_each_row() {
     for parameter in adapter.parameters() {
         assert!(
             graph.trains(parameter),
-            "every persona table trains through the gather that selects it",
+            "every adapter table trains through the gather that selects it",
         );
         assert_eq!(
             graph.shape(gradients.of(parameter)).dims(),
             graph.shape(parameter).dims(),
-            "a persona table collects a gradient of its own shape",
+            "an adapter table collects a gradient of its own shape",
         );
     }
 }
 
 #[test]
-fn a_plane_walks_one_persona_of_its_own() {
+fn a_plane_walks_one_adapter_of_its_own() {
     let runtime = Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
             heap_bytes: 1 << 24,
@@ -151,10 +151,10 @@ fn a_plane_walks_one_persona_of_its_own() {
     let input = graph.input(Shape::of([planes, 1, 1, INPUTS]), Element::Single);
     let base = graph.input(Shape::of([planes, 1, 1, OUTPUTS]), Element::Single);
     let selection = graph.input(Shape::of([planes, 1, 1, 1]), Element::Single);
-    let adapter = Adapter::new(
+    let adapter = AdapterBank::new(
         &graph,
         "shared",
-        AdapterShape::new(PERSONAS, INPUTS, OUTPUTS, RANK),
+        AdapterBankShape::new(ADAPTERS, INPUTS, OUTPUTS, RANK),
         Init::Zero,
         Element::Single,
         1.0,
@@ -182,9 +182,9 @@ fn a_plane_walks_one_persona_of_its_own() {
         runtime.write(&program, selection, &[chosen, second]);
         runtime.run(&program);
         let walked = runtime.read(&program, out);
-        let personas = [chosen as usize, second as usize];
+        let adapters = [chosen as usize, second as usize];
         let mut wanted = Vec::new();
-        for (plane, persona) in personas.into_iter().enumerate() {
+        for (plane, adapter) in adapters.into_iter().enumerate() {
             let tables = [
                 (
                     &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0][..],
@@ -196,7 +196,7 @@ fn a_plane_walks_one_persona_of_its_own() {
                     &[2.0, 0.0, 0.0, 3.0][..],
                     2.0,
                 ),
-            ][persona];
+            ][adapter];
             wanted.extend(expected(
                 &inputs[plane * INPUTS as usize..(plane + 1) * INPUTS as usize],
                 &bases[plane * OUTPUTS as usize..(plane + 1) * OUTPUTS as usize],
@@ -208,7 +208,7 @@ fn a_plane_walks_one_persona_of_its_own() {
         for (value, held) in walked.iter().zip(&wanted) {
             assert!(
                 (*value - *held).abs() <= 1e-5,
-                "the plane returned {value} where {held} was expected for its persona",
+                "the plane returned {value} where {held} was expected for its adapter",
             );
         }
     }

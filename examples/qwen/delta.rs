@@ -4,7 +4,7 @@ use crate::model::{Planes, as_planes, as_rows};
 use crate::persona::Route;
 use neura::decoder::{heads, joined, l2, matrix, rms, softplus, vector};
 use neura::gguf::Archive;
-use neura::{Adapter, DeltaScan, Element, Graph, Init, Shape, Value};
+use neura::{AdapterBank, DeltaScan, Element, Graph, Init, Shape, Value};
 use neura::{DeltaInput, DeltaRule};
 
 pub(crate) struct Delta {
@@ -24,9 +24,9 @@ pub(crate) struct Delta {
     rule: Option<DeltaRule>,
     scan: Option<DeltaScan>,
     route: Route,
-    qkv_route: Option<Adapter>,
-    gate_route: Option<Adapter>,
-    output_route: Option<Adapter>,
+    qkv_route: Option<AdapterBank>,
+    gate_route: Option<AdapterBank>,
+    output_route: Option<AdapterBank>,
     floor: Value,
     scale: Value,
     heads: u32,

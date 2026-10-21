@@ -4,41 +4,69 @@ use neura_graph::{Graph, Init, Shape, Value};
 use neura_runtime::{Cursor, Program, Runtime, Weights};
 use std::collections::VecDeque;
 
-#[derive(Clone, Copy)]
-pub struct Persona {
-    pub value: Value,
-    pub count: u32,
+#[derive(Clone, Copy, Debug)]
+pub struct PlaneState {
+    name: &'static str,
+    value: Value,
+    initial: f32,
 }
 
-#[derive(Clone, Copy)]
+impl PlaneState {
+    pub fn new(name: &'static str, value: Value, initial: f32) -> Self {
+        assert!(!name.is_empty(), "a plane state names itself");
+        assert!(
+            initial.is_finite(),
+            "a plane state named {name} starts at {initial}",
+        );
+        Self {
+            name,
+            value,
+            initial,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    pub const fn value(self) -> Value {
+        self.value
+    }
+
+    pub const fn initial(self) -> f32 {
+        self.initial
+    }
+}
+
 pub struct BatchStep {
     pub token: Value,
     pub cursor: Value,
     pub mask: Value,
     pub reset: Value,
     pub logits: Value,
-    pub persona: Option<Persona>,
+    pub states: Vec<PlaneState>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct BatchFill {
     pub token: Value,
     pub cursor: Value,
     pub mask: Value,
+    pub states: Vec<PlaneState>,
 }
 
-#[derive(Clone, Copy)]
 pub struct BatchPrefix {
     pub token: Value,
     pub cursor: Value,
     pub mask: Value,
     pub reset: Value,
+    pub states: Vec<PlaneState>,
 }
 
-#[derive(Clone, Copy)]
 pub struct BatchSeed {
     pub reset: Value,
     pub share: Value,
+    pub states: Vec<PlaneState>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -60,7 +88,6 @@ pub struct BatchSpec {
     pub tune: bool,
     pub shared: bool,
     pub window: Option<u32>,
-    pub personas: u32,
 }
 
 impl BatchSpec {
@@ -73,17 +100,7 @@ impl BatchSpec {
             tune: false,
             shared: false,
             window: None,
-            personas: 0,
         }
-    }
-
-    pub fn personas(mut self, personas: u32) -> Self {
-        assert!(
-            personas > 0 && personas <= 1 << 24,
-            "a batch of {personas} personas routes none of them or names more personas than a device index holds exactly",
-        );
-        self.personas = personas;
-        self
     }
 
     pub fn sampled(mut self, sampling: Sampling) -> Self {
@@ -125,9 +142,8 @@ pub struct Batch {
     temperature: Option<Value>,
     keep: Option<Value>,
     cumulative: Option<Value>,
-    persona: Option<Value>,
-    personas: u32,
-    personas_of: Vec<u32>,
+    states: Vec<PlaneState>,
+    state_values: Vec<Vec<f32>>,
     seeds: Vec<u32>,
     temperatures: Vec<f32>,
     keeps: Vec<f32>,
@@ -176,7 +192,6 @@ struct Pending {
 
 struct Entry {
     program: Program,
-    step: BatchStep,
     chosen: Value,
 }
 
@@ -213,7 +228,6 @@ impl Batch {
             tune,
             shared,
             window,
-            personas,
         } = spec;
         assert!(batch > 0, "a batch of no plane answers nothing");
         assert!(context > 0, "a context of no token holds no batch");
@@ -253,6 +267,24 @@ impl Batch {
         let initial = sampling.temperature().unwrap_or(1.0);
         let initial_keep = sampling.keep().unwrap_or(1) as f32;
         let initial_cumulative = sampling.cumulative().unwrap_or(1.0);
+        let answering = Graph::new();
+        let mut step = answer(
+            &answering,
+            BatchShape {
+                batch,
+                rows: 1,
+                capacity,
+                window,
+                bounded,
+                shared,
+            },
+        );
+        held_answer(&answering, &step, batch);
+        let states = std::mem::take(&mut step.states);
+        let state_values = states
+            .iter()
+            .map(|state| vec![state.initial(); batch as usize])
+            .collect::<Vec<Vec<f32>>>();
         let mut fills = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             let graph = Graph::new();
@@ -268,6 +300,7 @@ impl Batch {
                 },
             );
             held_fill(&graph, &step, chunk, batch);
+            known_states(&states, &step.states, "fill");
             if seeded {
                 seed_state(&graph, batch, 0);
                 temperature_state(&graph, batch, initial);
@@ -283,39 +316,6 @@ impl Batch {
                 },
             ));
         }
-        let answering = Graph::new();
-        let step = answer(
-            &answering,
-            BatchShape {
-                batch,
-                rows: 1,
-                capacity,
-                window,
-                bounded,
-                shared,
-            },
-        );
-        held_answer(&answering, &step, batch);
-        assert!(
-            (personas == 0) == step.persona.is_none(),
-            "a batch of {personas} personas reads the value a model gathers them by, and this model {} one",
-            match step.persona {
-                Some(_) => "declares",
-                None => "declares no",
-            },
-        );
-        if let Some(persona) = step.persona {
-            assert!(
-                persona.count > 0,
-                "a model that routes personas declares at least one of them",
-            );
-            assert_eq!(
-                persona.count, personas,
-                "a model routes {} personas where this batch declares {personas}",
-                persona.count,
-            );
-        }
-        let persona = step.persona.map(|held| held.value);
         let seed = seeded.then(|| seed_state(&answering, batch, 0));
         let temperature = seeded.then(|| temperature_state(&answering, batch, initial));
         let keep = seeded.then(|| keep_state(&answering, batch, initial_keep));
@@ -348,6 +348,7 @@ impl Batch {
             },
         );
         held_seed(&clearing, &reset_seed, batch);
+        known_states(&states, &reset_seed.states, "reset");
         if seeded {
             seed_state(&clearing, batch, 0);
             temperature_state(&clearing, batch, initial);
@@ -358,7 +359,7 @@ impl Batch {
         let seeds = (0..batch)
             .map(|slot| plane_seed(0, slot))
             .collect::<Vec<_>>();
-        let mut held = Self {
+        let held = Self {
             store,
             answer,
             fills,
@@ -369,9 +370,8 @@ impl Batch {
             temperature,
             keep,
             cumulative,
-            persona,
-            personas,
-            personas_of: vec![0; batch as usize],
+            states,
+            state_values,
             seeds,
             temperatures: vec![initial; batch as usize],
             keeps: vec![initial_keep; batch as usize],
@@ -389,7 +389,7 @@ impl Batch {
             frame: None,
         };
         held.write_seeds(runtime);
-        held.write_personas(runtime);
+        held.write_states(runtime);
         held
     }
 
@@ -500,76 +500,99 @@ impl Batch {
         runtime.write(&answer.program, cumulative, &self.cumulatives);
     }
 
-    pub fn persona_count(&self) -> u32 {
-        self.personas
+    pub fn states(&self) -> &[PlaneState] {
+        &self.states
     }
 
-    pub fn persona_of(&self, slot: u32) -> u32 {
-        assert!(
-            slot < self.batch,
-            "a batch of {} planes names no plane {slot}",
-            self.batch,
-        );
-        assert!(
-            self.personas > 0,
-            "a batch that routes no persona holds none for plane {slot}",
-        );
-        self.personas_of[slot as usize]
-    }
-
-    pub fn set_persona(&mut self, runtime: &Runtime, persona: u32) {
-        assert!(
-            self.personas > 0,
-            "a batch that routes no persona gathers no table for {persona}",
-        );
-        assert!(
-            persona < self.personas,
-            "a batch of {} personas names no persona {persona}",
-            self.personas,
-        );
-        assert!(
-            self.frame.is_none(),
-            "a batch sets the persona of a plane before it walks a frame",
-        );
-        self.personas_of.fill(persona);
-        self.write_personas(runtime);
-    }
-
-    pub fn set_persona_of(&mut self, runtime: &Runtime, slot: u32, persona: u32) {
-        assert!(
-            slot < self.batch,
-            "a batch of {} planes names no plane {slot}",
-            self.batch,
-        );
-        assert!(
-            self.personas > 0,
-            "a batch that routes no persona gathers no table for {persona}",
-        );
-        assert!(
-            persona < self.personas,
-            "a batch of {} personas names no persona {persona}",
-            self.personas,
-        );
-        assert!(
-            self.frame.is_none(),
-            "a batch sets the persona of a plane before it walks a frame",
-        );
-        self.personas_of[slot as usize] = persona;
-        self.write_personas(runtime);
-    }
-
-    fn write_personas(&mut self, runtime: &Runtime) {
-        let Some(persona) = self.persona else {
-            return;
-        };
-        let values = self
-            .personas_of
+    pub fn state(&self, name: &str) -> PlaneState {
+        self.states
             .iter()
             .copied()
-            .map(|held| held as f32)
-            .collect::<Vec<f32>>();
-        let answer = self.answer.entry(runtime, &self.store, self.compile);
-        runtime.write(&answer.program, persona, &values);
+            .find(|held| held.name() == name)
+            .unwrap_or_else(|| panic!("a batch registers no state named {name}"))
+    }
+
+    pub fn state_of(&self, state: PlaneState, slot: u32) -> f32 {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        self.state_values[self.state_index(state)][slot as usize]
+    }
+
+    pub fn set_state(&mut self, runtime: &Runtime, state: PlaneState, value: f32) {
+        assert!(
+            self.frame.is_none(),
+            "a batch sets a state before it walks a frame",
+        );
+        let index = self.state_index(state);
+        self.state_values[index].fill(value);
+        self.write_states(runtime);
+    }
+
+    pub fn set_state_of(&mut self, runtime: &Runtime, state: PlaneState, slot: u32, value: f32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            self.frame.is_none(),
+            "a batch sets a state of a plane before it walks a frame",
+        );
+        let index = self.state_index(state);
+        self.state_values[index][slot as usize] = value;
+        self.write_states(runtime);
+    }
+
+    fn state_index(&self, state: PlaneState) -> usize {
+        self.states
+            .iter()
+            .position(|held| held.name() == state.name())
+            .unwrap_or_else(|| panic!("a batch registers no state named {}", state.name()))
+    }
+
+    fn write_states(&self, runtime: &Runtime) {
+        let answer = self
+            .answer
+            .entry
+            .as_ref()
+            .expect("a written answer holds the program its states belong to");
+        write_program_states(
+            runtime,
+            &answer.program,
+            &self.states,
+            &self.states,
+            &self.state_values,
+        );
+        for (_, fill) in &self.fills {
+            if let Some(entry) = &fill.entry {
+                write_program_states(
+                    runtime,
+                    &entry.program,
+                    &entry.step.states,
+                    &self.states,
+                    &self.state_values,
+                );
+            }
+        }
+        for (_, prefix) in &self.prefix_fills {
+            write_program_states(
+                runtime,
+                &prefix.program,
+                &prefix.step.states,
+                &self.states,
+                &self.state_values,
+            );
+        }
+        write_program_states(
+            runtime,
+            &self.reset,
+            &self.reset_seed.states,
+            &self.states,
+            &self.state_values,
+        );
     }
 
     pub fn seed_of(&self, slot: u32) -> u32 {
@@ -647,11 +670,6 @@ impl Batch {
             "a batch fills a shared prefix while no plane holds a sequence",
         );
         assert!(
-            self.personas == 0,
-            "a batch that routes {} personas shares no prefix, because the states a prefix fills hold the persona it filled them with",
-            self.personas,
-        );
-        assert!(
             !tokens.is_empty(),
             "a shared prefix holds at least one token",
         );
@@ -692,7 +710,8 @@ impl Batch {
                             shared: true,
                         },
                     );
-                    held_prefix(&graph, &step, rows);
+                    held_prefix(&graph, &step, rows, self.batch);
+                    known_states(&self.states, &step.states, "prefix");
                     if self.seeded {
                         seed_state(&graph, self.batch, 0);
                         temperature_state(&graph, self.batch, 1.0);
@@ -717,6 +736,13 @@ impl Batch {
                 &entry.program,
                 entry.step.reset,
                 &[if index == 0 { 1.0 } else { 0.0 }],
+            );
+            write_program_states(
+                runtime,
+                &entry.program,
+                &entry.step.states,
+                &self.states,
+                &self.state_values,
             );
             runtime.run(&entry.program);
         }
@@ -1004,12 +1030,21 @@ impl Batch {
             fills,
             store,
             compile,
+            states,
+            state_values,
             ..
         } = self;
         let fill = fills[index].1.entry(runtime, store, *compile);
         runtime.write(&fill.program, fill.step.token, &tokens);
         runtime.write(&fill.program, fill.step.cursor, &cursors);
         runtime.write(&fill.program, fill.step.mask, &mask);
+        write_program_states(
+            runtime,
+            &fill.program,
+            &fill.step.states,
+            states,
+            state_values,
+        );
     }
 
     fn complete_fill(&mut self, index: usize, group: &[u32]) {
@@ -1167,13 +1202,18 @@ impl Batch {
     }
 
     fn write_answer(&mut self, runtime: &Runtime, tokens: &[f32], cursor: &[f32], mask: &[f32]) {
+        let step = &self.answer.step;
+        let token = step.token;
+        let cursor_value = step.cursor;
+        let mask_value = step.mask;
+        let reset_value = step.reset;
         let reset = vec![0.0f32; self.batch as usize];
         self.write_seeds(runtime);
         let answer = self.answer.entry(runtime, &self.store, self.compile);
-        runtime.write(&answer.program, answer.step.token, tokens);
-        runtime.write(&answer.program, answer.step.cursor, cursor);
-        runtime.write(&answer.program, answer.step.mask, mask);
-        runtime.write(&answer.program, answer.step.reset, &reset);
+        runtime.write(&answer.program, token, tokens);
+        runtime.write(&answer.program, cursor_value, cursor);
+        runtime.write(&answer.program, mask_value, mask);
+        runtime.write(&answer.program, reset_value, &reset);
     }
 
     fn complete_answer(&mut self, chosen: &[f32]) -> Vec<Emitted> {
@@ -1300,7 +1340,6 @@ impl Pending {
             let chosen = chosen(&self.graph, self.step.logits, self.draw);
             self.entry = Some(Entry {
                 program: compile(runtime, &self.graph, weights),
-                step: self.step,
                 chosen,
             });
         }
@@ -1320,7 +1359,7 @@ impl PendingFill {
         if self.entry.is_none() {
             self.entry = Some(FillEntry {
                 program: compile(runtime, &self.graph, weights),
-                step: self.step,
+                step: self.step.clone(),
             });
         }
         self.entry
@@ -1409,15 +1448,7 @@ fn held_answer(graph: &Graph, step: &BatchStep, batch: u32) {
         step.logits.id(),
         logits,
     );
-    if let Some(persona) = step.persona {
-        assert_eq!(
-            graph.shape(persona.value).dims(),
-            [1, 1, batch, 1],
-            "an answer over {batch} planes gathers one persona a plane, and the persona value {} walks {:?}",
-            persona.value.id(),
-            graph.shape(persona.value).dims(),
-        );
-    }
+    held_states(graph, &step.states, batch);
 }
 
 fn held_fill(graph: &Graph, step: &BatchFill, rows: u32, batch: u32) {
@@ -1442,9 +1473,10 @@ fn held_fill(graph: &Graph, step: &BatchFill, rows: u32, batch: u32) {
         step.cursor.id(),
         graph.shape(step.cursor).dims(),
     );
+    held_states(graph, &step.states, batch);
 }
 
-fn held_prefix(graph: &Graph, step: &BatchPrefix, rows: u32) {
+fn held_prefix(graph: &Graph, step: &BatchPrefix, rows: u32, batch: u32) {
     assert_eq!(
         graph.shape(step.token).dims(),
         [1, rows, 1, 1],
@@ -1465,6 +1497,81 @@ fn held_prefix(graph: &Graph, step: &BatchPrefix, rows: u32) {
             graph.shape(value).dims(),
         );
     }
+    held_states(graph, &step.states, batch);
+}
+
+fn held_states(graph: &Graph, states: &[PlaneState], batch: u32) {
+    for (index, state) in states.iter().enumerate() {
+        assert!(
+            states[..index]
+                .iter()
+                .all(|held| held.name() != state.name()),
+            "a batch names state {} twice",
+            state.name(),
+        );
+        if let Some(held) = states[..index]
+            .iter()
+            .find(|held| held.value() == state.value())
+        {
+            panic!(
+                "a batch writes states {} and {} through one value",
+                held.name(),
+                state.name(),
+            );
+        }
+        assert_eq!(
+            graph.element(state.value()),
+            Element::Single,
+            "state {} holds {} numbers",
+            state.name(),
+            graph.element(state.value()).name(),
+        );
+        assert_eq!(
+            graph.shape(state.value()).elements(),
+            batch,
+            "state {} of {batch} planes walks {:?}",
+            state.name(),
+            graph.shape(state.value()).dims(),
+        );
+    }
+}
+
+fn known_states(registered: &[PlaneState], states: &[PlaneState], what: &str) {
+    assert_eq!(
+        states.len(),
+        registered.len(),
+        "a {what} declares {} states where the answer declares {}",
+        states.len(),
+        registered.len(),
+    );
+    for state in states {
+        assert!(
+            registered.iter().any(|held| held.name() == state.name()),
+            "a {what} names state {} that the answer registers no state for",
+            state.name(),
+        );
+    }
+}
+
+fn write_program_states(
+    runtime: &Runtime,
+    program: &Program,
+    states: &[PlaneState],
+    registered: &[PlaneState],
+    values: &[Vec<f32>],
+) {
+    for state in states {
+        let index = registered
+            .iter()
+            .position(|held| held.name() == state.name())
+            .unwrap_or_else(|| {
+                panic!(
+                    "a program names state {} that the batch does not register",
+                    state.name(),
+                )
+            });
+        runtime.write(program, state.value(), &values[index]);
+    }
 }
 
 fn held_seed(graph: &Graph, seed: &BatchSeed, batch: u32) {
@@ -1477,4 +1584,5 @@ fn held_seed(graph: &Graph, seed: &BatchSeed, batch: u32) {
             graph.shape(value).dims(),
         );
     }
+    held_states(graph, &seed.states, batch);
 }
