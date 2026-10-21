@@ -188,11 +188,9 @@ version = "0.7.4"
 dependencies = [
  "neura-abi",
  "neura-decoder",
- "neura-gguf",
  "neura-graph",
  "neura-runtime",
  "neura-source",
- "neura-tokenizer",
 ]
 
 [[package]]

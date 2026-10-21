@@ -1,4 +1,4 @@
-use crate::generator::{Draw, Sampling, chosen};
+use crate::sampling::{Draw, Sampling, chosen};
 use crate::snapshot::{BatchSnapshot, PhaseSnapshot, SlotSnapshot};
 use neura_abi::{CANDIDATES, Element};
 use neura_graph::{Graph, Init, Shape, Value};

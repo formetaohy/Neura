@@ -2,50 +2,15 @@ use neura_abi::Element;
 use neura_decoder::{Cache, CacheShape};
 use neura_generate::{
     Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSnapshot, BatchSpec, BatchStep,
-    Family, Generator, PlaneState, Sampling, Step,
+    PlaneState, Sampling,
 };
-use neura_gguf::Gguf;
 use neura_graph::{Init, Shape};
 use neura_runtime::{CheckpointFile, MemoryRequest, Runtime, RuntimeRequest};
-use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-#[path = "support/mod.rs"]
-mod support;
-
-use support::{Meta, build};
-
 const CLASSES: u32 = 8;
-const CAPACITY: u32 = 16;
 const END: u32 = 3;
-
-struct PerCharacter;
-
-impl Rule for PerCharacter {
-    fn pieces<'a>(&self, text: &'a str) -> Vec<&'a str> {
-        let mut pieces = Vec::new();
-        let mut at = 0usize;
-        for character in text.chars() {
-            let next = at + character.len_utf8();
-            pieces.push(&text[at..next]);
-            at = next;
-        }
-        pieces
-    }
-}
-
-fn tokenizer() -> Tokenizer {
-    let tokens = (0..8).map(|held| held.to_string()).collect::<Vec<String>>();
-    let held = tokens.iter().map(String::as_str).collect::<Vec<&str>>();
-    let bytes = build(&[
-        ("tokenizer.ggml.model", Meta::Text("gpt2")),
-        ("tokenizer.ggml.tokens", Meta::Texts(&held)),
-        ("tokenizer.ggml.token_type", Meta::Words(&[1; 8])),
-        ("tokenizer.ggml.merges", Meta::Texts(&[])),
-    ]);
-    Tokenizer::new(Vocabulary::read(&Gguf::decode(&bytes)), PerCharacter)
-}
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeRequest {
@@ -56,93 +21,6 @@ fn runtime() -> Runtime {
         ..Default::default()
     })
     .expect("a device that runs the tests")
-}
-
-fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Family {
-    let build = |graph: &neura_graph::Graph, rows| {
-        let token = graph.input(Shape::of([1, 1, rows, 1]), Element::Single);
-        let cursor = graph.input(Shape::scalar(), Element::Single);
-        let cache = Cache::new(
-            graph,
-            "cache",
-            CacheShape::new(1, CLASSES, CAPACITY, CAPACITY, 1, rows),
-            Element::Single,
-        );
-        let held = graph.one_hot(token, CLASSES);
-        cache.write(graph, cursor, held, held);
-        Step {
-            token,
-            cursor,
-            logits: graph.sum_axis(cache.states()[0], 2),
-        }
-    };
-    match sampling {
-        Some(sampling) => Family::sampled(
-            runtime,
-            |graph| runtime.weights(graph),
-            chunks,
-            build,
-            sampling,
-        ),
-        None => Family::of(runtime, |graph| runtime.weights(graph), chunks, build),
-    }
-}
-
-fn generate(
-    prompt: &[u32],
-    context: u32,
-    wanted: usize,
-    chunks: &[u32],
-    sampling: Option<Sampling>,
-) -> (usize, String, bool) {
-    let runtime = runtime();
-    let family = family(&runtime, chunks, sampling);
-    let tokenizer = tokenizer();
-    let mut generator = Generator::new(runtime, family, &tokenizer, END, context);
-    let mut text = String::new();
-    let report = generator.run(prompt, wanted, |held| text.push_str(held));
-    (report.produced(), text, report.reached_context())
-}
-
-#[test]
-fn a_generator_prefills_a_prompt_in_the_chunks_its_model_takes() {
-    let walked = generate(&[0, 1, 1, 2, 1], 16, 5, &[1], None);
-    assert_eq!(walked, (5, "0112111111".to_owned(), false));
-    for chunks in [&[2u32][..], &[3], &[4], &[8], &[4, 1], &[3, 2, 1]] {
-        assert_eq!(
-            generate(&[0, 1, 1, 2, 1], 16, 5, chunks, None),
-            walked,
-            "a prefill in the chunks {chunks:?} answers with the tokens a row at a time answers with",
-        );
-    }
-}
-
-#[test]
-fn a_generator_stops_at_the_token_count_it_was_asked_for() {
-    assert_eq!(
-        generate(&[0, 1, 1, 2, 1], 16, 2, &[3], None),
-        (2, "0112111".to_owned(), false),
-    );
-}
-
-#[test]
-fn a_generator_stops_at_the_context_it_holds() {
-    assert_eq!(
-        generate(&[0], 3, 5, &[2], None),
-        (2, "000".to_owned(), true)
-    );
-}
-
-#[test]
-fn a_generator_samples_the_token_its_logits_and_seed_choose() {
-    let walked = generate(
-        &[0, 1, 1, 2, 1],
-        16,
-        5,
-        &[3],
-        Some(Sampling::sampled(1.0, 4, 1.0)),
-    );
-    assert_eq!(walked, (5, "0112101111".to_owned(), false));
 }
 
 fn cache(shape: BatchShape, graph: &neura_graph::Graph, rows: u32, shared: bool) -> Cache {
@@ -683,38 +561,55 @@ fn a_batch_keeps_only_the_window_of_tokens_it_declares() {
 #[test]
 fn a_temperature_the_host_writes_steers_the_next_draw_without_recompiling() {
     let runtime = runtime();
-    let build = |graph: &neura_graph::Graph, _rows| {
-        let token = graph.input(Shape::of([1, 1, 1, 1]), Element::Single);
-        let cursor = graph.input(Shape::scalar(), Element::Single);
+    let answer = |graph: &neura_graph::Graph, shape: BatchShape| {
+        let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
+        let cursor = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+        let mask = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
+        let reset = graph.input(Shape::of([1, shape.batch, 1, 1]), Element::Single);
+        cache(shape, graph, 1, shape.shared);
         let parts = (0..CLASSES)
-            .map(|class| graph.fill(Shape::of([1, 1, 1, 1]), if class == 0 { 1.0 } else { 0.0 }))
+            .map(|class| {
+                graph.fill(
+                    Shape::of([1, 1, shape.batch, 1]),
+                    if class == 0 { 1.0 } else { 0.0 },
+                )
+            })
             .collect::<Vec<_>>();
-        let logits = graph.concat(&parts, 3);
-        Step {
+        BatchStep {
             token,
             cursor,
-            logits,
+            mask,
+            reset,
+            logits: graph.concat(&parts, 3),
+            states: Vec::new(),
         }
     };
-    let mut family = Family::sampled(
+    let spec = BatchSpec::new(512, 1, &[]).sampled(Sampling::sampled(1.0, CLASSES, 1.0));
+    let mut batch = Batch::new(
         &runtime,
         |graph| runtime.weights(graph),
-        &[1],
-        build,
-        Sampling::sampled(1.0, CLASSES, 1.0),
+        spec,
+        answer,
+        batch_fill,
+        batch_reset,
     );
-    family.set_temperature(&runtime, 0.01);
+    batch.admit(&runtime, &[0]);
+    let plans = runtime.built_plans();
+    batch.set_temperature(&runtime, 0.01);
     for _ in 0..64 {
-        assert_eq!(
-            family.answer(&runtime, 0, 0),
-            0,
-            "a temperature of 0.01 keeps the largest logit of a row that holds one",
-        );
+        for held in batch.step(&runtime) {
+            assert_eq!(
+                held.token, 0,
+                "a temperature of 0.01 keeps the largest logit of a row that holds one",
+            );
+        }
     }
-    family.set_temperature(&runtime, 1000.0);
+    batch.set_temperature(&runtime, 1000.0);
     let mut drawn = BTreeSet::new();
     for _ in 0..256 {
-        drawn.insert(family.answer(&runtime, 0, 0));
+        for held in batch.step(&runtime) {
+            drawn.insert(held.token);
+        }
     }
     assert!(
         drawn.len() > 1,
@@ -722,8 +617,8 @@ fn a_temperature_the_host_writes_steers_the_next_draw_without_recompiling() {
     );
     assert_eq!(
         runtime.built_plans(),
-        1,
-        "writing a temperature reuses the program the family compiled",
+        plans,
+        "writing a temperature reuses the program the batch compiled",
     );
 }
 
