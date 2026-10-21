@@ -1,35 +1,67 @@
 use neura_abi::{Element, MAX_RANK};
 use neura_graph::{AttentionOptions, Fan, Graph, Init, Shape, Value, Window};
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AdapterShape {
+    personas: u32,
+    inputs: u32,
+    outputs: u32,
+    rank: u32,
+}
+
+impl AdapterShape {
+    pub fn new(personas: u32, inputs: u32, outputs: u32, rank: u32) -> Self {
+        assert!(
+            personas > 0 && inputs > 0 && outputs > 0 && rank > 0,
+            "an adapter of {personas} personas over {inputs} by {outputs} and {rank} ranks carries no bypass",
+        );
+        Self {
+            personas,
+            inputs,
+            outputs,
+            rank,
+        }
+    }
+}
+
 pub struct Adapter {
     down: Value,
     up: Value,
     scale: Value,
+    inputs: u32,
+    outputs: u32,
+    rank: u32,
 }
 
 impl Adapter {
     pub fn new(
         graph: &Graph,
         name: &str,
-        planes: [u32; 2],
-        rank: u32,
+        shape: AdapterShape,
         init: Init,
         element: Element,
         scale: f32,
     ) -> Self {
-        let [inputs, outputs] = planes;
-        assert!(
-            inputs > 0 && outputs > 0 && rank > 0,
-            "an adapter of {inputs} by {outputs} over {rank} ranks carries no bypass",
-        );
+        let AdapterShape {
+            personas,
+            inputs,
+            outputs,
+            rank,
+        } = shape;
         assert!(
             scale > 0.0 && scale.is_finite(),
             "an adapter scaled by {scale} contributes nothing",
         );
+        let down = inputs
+            .checked_mul(rank)
+            .expect("the down adapter of a persona fits one tensor row");
+        let up = rank
+            .checked_mul(outputs)
+            .expect("the up adapter of a persona fits one tensor row");
         Self {
             down: graph.named_parameter(
                 &format!("{name}.down"),
-                Shape::matrix(inputs, rank),
+                Shape::of([1, 1, personas, down]),
                 init.spread(Fan {
                     inputs,
                     outputs: rank,
@@ -38,17 +70,58 @@ impl Adapter {
             ),
             up: graph.named_parameter(
                 &format!("{name}.up"),
-                Shape::matrix(rank, outputs),
+                Shape::of([1, 1, personas, up]),
                 Init::Zero,
                 element,
             ),
-            scale: graph.named_knob(&format!("{name}.scale"), scale),
+            scale: graph.named_parameter(
+                &format!("{name}.scale"),
+                Shape::of([1, 1, personas, 1]),
+                Init::Constant(scale),
+                Element::Single,
+            ),
+            inputs,
+            outputs,
+            rank,
         }
     }
 
-    pub fn forward(&self, graph: &Graph, input: Value, base: Value) -> Value {
-        let bypass = graph.matmul(graph.matmul(input, self.down), self.up);
-        graph.add(base, graph.mul(bypass, self.scale))
+    pub fn forward(&self, graph: &Graph, input: Value, base: Value, selection: Value) -> Value {
+        let dims = graph.shape(input).dims();
+        let (planes, rows) = (dims[0], dims[2]);
+        assert_eq!(
+            dims[1], 1,
+            "an adapter walks the rows of {dims:?} in one plane",
+        );
+        assert_eq!(
+            dims[3], self.inputs,
+            "an adapter of {} inputs walks a row of {dims:?}",
+            self.inputs,
+        );
+        assert_eq!(
+            graph.shape(base).dims(),
+            [planes, 1, rows, self.outputs],
+            "an adapter of {} outputs adds to {planes} planes of {rows} rows",
+            self.outputs,
+        );
+        assert_eq!(
+            graph.shape(selection).dims(),
+            [planes, rows, 1, 1],
+            "a persona selection names one index per row of {planes} planes of {rows} rows",
+        );
+        let left = graph.permute(input, [0, 2, 1, 3]);
+        let down = graph.reshape(
+            graph.gather(self.down, selection),
+            Shape::of([planes, rows, self.inputs, self.rank]),
+        );
+        let up = graph.reshape(
+            graph.gather(self.up, selection),
+            Shape::of([planes, rows, self.rank, self.outputs]),
+        );
+        let bypass = graph.matmul(graph.matmul(left, down), up);
+        let scaled = graph.mul(bypass, graph.gather(self.scale, selection));
+        let wide = graph.add(graph.permute(base, [0, 2, 1, 3]), scaled);
+        graph.identity(graph.permute(wide, [0, 2, 1, 3]))
     }
 
     pub fn down(&self) -> Value {
@@ -63,8 +136,8 @@ impl Adapter {
         self.scale
     }
 
-    pub fn parameters(&self) -> [Value; 2] {
-        [self.down, self.up]
+    pub fn parameters(&self) -> [Value; 3] {
+        [self.down, self.up, self.scale]
     }
 }
 
