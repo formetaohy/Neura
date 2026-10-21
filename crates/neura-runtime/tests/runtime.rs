@@ -2,6 +2,7 @@ use neura_abi::Element;
 use neura_gguf::Gguf;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_precision::{pack, unpack};
+use neura_profile::MatmulStrategy;
 use neura_runtime::MemoryRequest;
 use support::attention::{Shapes, attention_forward};
 use support::convolution::{conv2d_input_reference, conv2d_reference, conv2d_weight_reference};
@@ -11,39 +12,61 @@ mod support;
 
 #[test]
 fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
-    let (depth, columns) = (512u32, 64u32);
+    let (depth, columns) = (512u32, 2048u32);
     for element in [Element::Q8_0, Element::Q4K, Element::Q5K, Element::Q6K] {
         let runtime = open();
-        let graph = Graph::new();
-        let left = graph.input(Shape::matrix(1, depth), Element::Single);
-        let stored = graph.named_block_quantized_parameter(
-            element.name(),
-            Shape::matrix(columns, depth),
-            Init::Zero,
-            element,
-        );
-        let out = graph.matmul(left, graph.permute(stored, [0, 1, 3, 2]));
-        graph.retain(out);
+        let fused = runtime.profiles().iter().copied().find(|profile| {
+            profile
+                .tiles()
+                .iter()
+                .any(|tile| tile.strategy() == MatmulStrategy::Folded && tile.rows() == 2)
+        });
+        let profile = fused.unwrap_or_else(|| runtime.default_profile());
         let values = random(columns * depth, 23);
         let payload = pack(element, 1.0, &values);
         let shape = [u64::from(columns), u64::from(depth)];
-        let weights = runtime.load(
-            &graph,
-            &Gguf::decode(&gguf_bytes(32, &[(element, &shape, &payload)])),
-        );
-        let program = runtime.compile_with(&graph, &weights, runtime.profiles()[0]);
-        let inputs = random(depth, 29);
-        runtime.write(&program, left, &inputs);
-        runtime.run(&program);
         let weight = unpack(element, values.len(), &payload);
-        let expected = (0..columns as usize)
-            .map(|column| {
-                (0..depth as usize)
-                    .map(|step| weight[column * depth as usize + step] * inputs[step])
-                    .sum()
-            })
-            .collect::<Vec<f32>>();
-        assert_close(&runtime.read(&program, out), &expected, 1e-3);
+        for rows in [1u32, 2u32] {
+            let graph = Graph::new();
+            let left = graph.input(Shape::matrix(rows, depth), Element::Single);
+            let stored = graph.named_block_quantized_parameter(
+                element.name(),
+                Shape::matrix(columns, depth),
+                Init::Zero,
+                element,
+            );
+            let out = graph.matmul(left, graph.permute(stored, [0, 1, 3, 2]));
+            graph.retain(out);
+            let weights = runtime.load(
+                &graph,
+                &Gguf::decode(&gguf_bytes(32, &[(element, &shape, &payload)])),
+            );
+            let program = runtime.compile_with(&graph, &weights, profile);
+            if element == Element::Q8_0 && rows == 2 && fused.is_some() {
+                assert!(
+                    program
+                        .matmul_geometries()
+                        .iter()
+                        .any(|(tile, _)| tile.rows() == 2),
+                    "a two row q8_0 product folds both rows through one staged weight",
+                );
+            }
+            let inputs = random(rows * depth, 29);
+            runtime.write(&program, left, &inputs);
+            runtime.run(&program);
+            let mut expected = Vec::with_capacity((rows * columns) as usize);
+            for row in 0..rows as usize {
+                for column in 0..columns as usize {
+                    let mut total = 0.0;
+                    for step in 0..depth as usize {
+                        total += weight[column * depth as usize + step]
+                            * inputs[row * depth as usize + step];
+                    }
+                    expected.push(total);
+                }
+            }
+            assert_close(&runtime.read(&program, out), &expected, 1e-3);
+        }
     }
 }
 

@@ -1370,6 +1370,7 @@ pub const DELTA_REDUCE: u32 = DELTA_V + DELTA_WIDTH;
 pub const DELTA_PARTIALS: u32 = DELTA_REDUCE + 1;
 pub const DELTA_SCRATCH_WORDS: u32 = DELTA_PARTIALS + 2 * DELTA_SPLITS * DELTA_COLUMNS;
 const FOLDED_COLUMNS_FLOOR: u32 = 32;
+const FUSED_COLUMNS_FLOOR: u32 = 16;
 pub const FOLDED_FOLDS: u32 = 8;
 pub const FOLDED_RUN: u32 = match staged_block() {
     Some(block) => (FOLDED_LANES * block.bytes).div_ceil(neura_abi::WORD_BYTES as u32),
@@ -1460,14 +1461,39 @@ impl FoldedTile {
             false => 0,
         }
     }
+
+    pub const fn stage_words(self) -> u64 {
+        folded_stage_words(self.rows)
+    }
+
+    pub const fn partials_words(self) -> u64 {
+        folded_partials(self.columns(), self.rows)
+    }
+
+    pub const fn stage_region_words(self) -> u64 {
+        match self.run && self.rows > 1 {
+            true => {
+                let staged = self.stage_words();
+                let partials = self.partials_words();
+                if staged > partials { staged } else { partials }
+            }
+            false => self.stage_words() + self.partials_words(),
+        }
+    }
+
+    pub const fn scratch_words(self) -> u64 {
+        self.stage_region_words() + self.run_words()
+    }
 }
 
-pub const fn folded_stage_words() -> u64 {
-    FOLDED_STAGE as u64 + (FOLDED_STAGE / FOLDED_LANES) as u64
+pub const fn folded_stage_words(rows: u32) -> u64 {
+    assert!(rows > 0, "a folded tile stages no row");
+    rows as u64 * (FOLDED_STAGE as u64 + (FOLDED_STAGE / FOLDED_LANES) as u64)
 }
 
-pub const fn folded_partials(columns: u32) -> u64 {
-    FOLDED_LANES as u64 * (columns as u64 + 1)
+pub const fn folded_partials(columns: u32, rows: u32) -> u64 {
+    assert!(rows > 0, "a folded tile folds no row");
+    rows as u64 * FOLDED_LANES as u64 * (columns as u64 + 1)
 }
 
 pub const fn folded_splits(depth: u32) -> u32 {
@@ -1873,7 +1899,10 @@ impl MatmulTile {
         match self {
             Self::Staged(tile) | Self::Streamed(tile) => tile.registers(),
             Self::Cooperative(tile) => tile.registers(),
-            Self::Folded(tile) => tile.rows(),
+            Self::Folded(tile) => match tile.stages_a_run() && tile.rows() > 1 {
+                true => tile.rows() * tile.folds(),
+                false => tile.rows(),
+            },
         }
     }
 
@@ -1941,7 +1970,7 @@ impl MatmulTile {
             Self::Staged(tile) => tile.rows() as u64 * (tile.depth() + 1) as u64,
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.left_stage(),
-            Self::Folded(_) => folded_stage_words(),
+            Self::Folded(tile) => tile.stage_region_words(),
         }
     }
 
@@ -1953,7 +1982,7 @@ impl MatmulTile {
             },
             Self::Streamed(_) => 0,
             Self::Cooperative(tile) => tile.right_stage(),
-            Self::Folded(tile) => folded_partials(tile.columns()) + tile.run_words(),
+            Self::Folded(tile) => tile.run_words(),
         }
     }
 
@@ -1967,9 +1996,7 @@ impl MatmulTile {
     pub const fn shared_bytes(self) -> u64 {
         match self {
             Self::Cooperative(tile) => tile.half_bytes(),
-            Self::Folded(tile) => {
-                (folded_stage_words() + folded_partials(tile.columns())) * WORD_BYTES
-            }
+            Self::Folded(tile) => tile.scratch_words() * WORD_BYTES,
             _ => 2 * (self.left_stage() + self.right_stage()) * WORD_BYTES,
         }
     }
@@ -2228,7 +2255,7 @@ impl Profile {
                     copy = here;
                 }
             } else if let MatmulTile::Folded(held) = tile {
-                partials = partials.max(folded_stage_words() + folded_partials(held.columns()));
+                partials = partials.max(held.stage_region_words());
                 run = run.max(held.run_words());
             } else {
                 if tile.left_stage() > left_stage {
@@ -2284,7 +2311,7 @@ impl Profile {
             let mut run = 0u64;
             for tile in &tiles {
                 if let MatmulTile::Folded(held) = tile {
-                    partials = partials.max(folded_stage_words() + folded_partials(held.columns()));
+                    partials = partials.max(held.stage_region_words());
                     run = run.max(held.run_words());
                 }
             }
@@ -2418,37 +2445,40 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
     if warps == 0 {
         return Vec::new();
     }
-    let room = (pool.saturating_sub(CLAIM_BYTES) / WORD_BYTES).saturating_sub(folded_stage_words());
-    let ceiling = u64::from(FOLDED_FOLDS).min(room / u64::from(warps * (FOLDED_LANES + 1)));
+    let words = pool.saturating_sub(CLAIM_BYTES) / WORD_BYTES;
+    let room_one = words.saturating_sub(folded_stage_words(1));
+    let room_two = words.saturating_sub(folded_stage_words(2));
+    let ceiling_one = u64::from(FOLDED_FOLDS).min(room_one / u64::from(warps * (FOLDED_LANES + 1)));
+    let ceiling_two =
+        u64::from(FOLDED_FOLDS).min(room_two / u64::from(2 * warps * (FOLDED_LANES + 1)));
     let folds =
-        u32::try_from(ceiling).expect("a folded tile folds fewer columns than a word holds");
+        u32::try_from(ceiling_one).expect("a folded tile folds fewer columns than a word holds");
     if folds == 0 {
         return Vec::new();
     }
+    let fused_folds =
+        u32::try_from(ceiling_two).expect("a folded tile folds fewer columns than a word holds");
     let mut tiles = Vec::new();
-    let mut partials = folded_stage_words() + folded_partials(warps * folds);
-    let mut staged = 1u64;
-    while staged <= u64::from(folds) {
-        let held =
-            u32::try_from(staged).expect("a folded tile folds fewer columns than a word holds");
-        let here = folded_stage_words() + folded_partials(warps * held);
-        partials = partials.max(here);
-        staged = match staged {
-            1 => 2,
-            _ => staged * 2,
-        };
-    }
-    let run = partials + u64::from(warps * FOLDED_RUN);
-    let stages_a_run = run * WORD_BYTES + CLAIM_BYTES <= pool;
     let mut held = 1u64;
-    while held <= u64::from(folds) {
+    while held <= u64::from(folds.max(fused_folds)) {
         let fold =
             u32::try_from(held).expect("a folded tile folds fewer columns than a word holds");
-        if warps * fold >= FOLDED_COLUMNS_FLOOR {
-            tiles.push(FoldedTile::new(1, warps, fold, FOLDED_LANES));
+        let columns = warps * fold;
+        if held <= u64::from(folds) {
+            let staged = FoldedTile::staged(1, warps, fold, FOLDED_LANES);
+            let unrun = FoldedTile::new(1, warps, fold, FOLDED_LANES);
+            if columns >= FOLDED_COLUMNS_FLOOR {
+                tiles.push(unrun);
+            }
+            if staged.scratch_words() <= words {
+                tiles.push(staged);
+            }
         }
-        if stages_a_run {
-            tiles.push(FoldedTile::staged(1, warps, fold, FOLDED_LANES));
+        if held <= u64::from(fused_folds) && columns >= FUSED_COLUMNS_FLOOR {
+            let fused = FoldedTile::staged(2, warps, fold, FOLDED_LANES);
+            if fused.scratch_words() <= words {
+                tiles.push(fused);
+            }
         }
         held = match held {
             1 => 2,
@@ -2804,7 +2834,7 @@ impl Geometry {
                 half_stage = half_stage.max(cooperative.half_panels());
                 copy = copy.max(cooperative.copy());
             } else if let MatmulTile::Folded(held) = tile {
-                partials = partials.max(folded_stage_words() + folded_partials(held.columns()));
+                partials = partials.max(held.stage_region_words());
                 run = run.max(held.run_words());
             } else {
                 left_stage = left_stage.max(tile.left_stage());

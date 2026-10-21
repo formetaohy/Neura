@@ -118,6 +118,13 @@ pub(crate) fn wide_section(runtime: &Runtime) {
     rows.push(wide(
         runtime,
         Element::Q8_0,
+        2,
+        DEPTH,
+        format!("a 2x{DEPTH}x{DEPTH} product of q8_0 in gguf order"),
+    ));
+    rows.push(wide(
+        runtime,
+        Element::Q8_0,
         8,
         VOCABULARY,
         format!("an 8x{DEPTH}x{VOCABULARY} product of q8_0 in gguf order"),

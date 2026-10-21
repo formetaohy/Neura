@@ -172,9 +172,10 @@ impl Product {
                 .filter(|tile| {
                     tile.strategy() == MatmulStrategy::Folded
                         && tile.stages_a_run()
+                        && tile.rows() <= self.rows
                         && tile.columns() <= WIDE_COLUMNS
                 })
-                .max_by_key(|tile| tile.columns());
+                .max_by_key(|tile| (tile.rows(), tile.columns()));
             if let Some(tile) = widest {
                 return Some(tile);
             }
