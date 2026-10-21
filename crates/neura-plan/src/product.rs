@@ -7,6 +7,7 @@ pub(crate) const SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
 pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
 const NARROW_ROWS: u32 = 2;
+const PLAIN_NARROW_ROWS: u32 = 1;
 const WIDE_COLUMNS: u32 = 64;
 const WIDE_RUN_ROWS: u32 = 8;
 const WIDE_RUN_COLUMNS: u32 = 16384;
@@ -298,7 +299,11 @@ impl Product {
     }
 
     fn narrow(self, profile: Profile) -> bool {
-        self.rows <= NARROW_ROWS
+        let rows = match self.weight.element().block() {
+            Some(_) => NARROW_ROWS,
+            None => PLAIN_NARROW_ROWS,
+        };
+        self.rows <= rows
             && profile.tiles().iter().any(|tile| {
                 matches!(
                     tile.strategy(),

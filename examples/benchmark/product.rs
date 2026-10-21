@@ -97,7 +97,7 @@ fn product(
     measure::row(label, &program, timing, rate)
 }
 
-const WIDE_ROWS: [u32; 4] = [8, 32, 64, 512];
+const WIDE_ROWS: [u32; 6] = [2, 4, 8, 32, 64, 512];
 
 pub(crate) fn wide_section(runtime: &Runtime) {
     let mut rows = Vec::new();
