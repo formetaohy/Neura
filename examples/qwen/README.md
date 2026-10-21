@@ -1,138 +1,15 @@
-# QWEN
+# Qwen
 
-Runs a Qwen3.5 gguf through Neura, printing the answer to a prompt one token at a time.
+Runs a Qwen3.5 gguf as two characters with different personalities and prints their conversation as it happens.
 
-```sh
-cargo run --release --example qwen -- <model.gguf> "What is the capital of France?" 48
-```
-
-The arguments are the model file, the prompt, how many tokens to generate (48 by default), and how
-many sequences answer the prompt together (1 by default). A prompt that begins with `raw:` reaches
-the model without the chat template around it; every other prompt is wrapped in the template the
-gguf holds, its empty think block included. Tokens are chosen greedily, and generation ends at the
-end of turn or at the token count.
+Run from the repository root:
 
 ```sh
-cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
+cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf 8
 ```
 
-`Qwen3.5-0.8B-Q4_K_M.gguf` and the other mainstream quants of that model (Q4_K_M, Q5_K_M, Q6_K,
-Q8_0) load as they are, without repacking on the host. The example runs 1024 tokens of context by
-default (`NEURA_CONTEXT` names another length, capped at the model's own) and builds one answer
-program whose `batch` planes each hold a sequence: the weights
-are shared by every plane, while the kv caches, the convolution states and the gated delta net
-states advance one plane at a time. Each plane carries its own cursor and mask. A run of one
-sequence fills a prompt in the largest chunk of the ladder `32, 8` that leaves a token for the
-answer, and every plane of a batch fills its own prompt in the same ladder; a plane whose prompt
-no longer fills a chunk walks its remaining tokens one at a time. Admitting a sequence
-runs a small reset program that zeroes the kv cache, the convolution state and the gated delta net
-state of its plane before the first prompt token; the other planes keep their state.
+The arguments are the model file and the number of replies. Ada opens the conversation, and Ada and Ben alternate for the requested number of replies. Their personalities live only in the system prompts, so both characters share one set of weights and no extra weights are loaded.
 
-Setting `NEURA_TURNS` to user prompts separated by `|` answers them as one conversation. The first
-turn admits its whole rendered prompt; every later turn suspends the plane after its answer and
-resumes it with only the rendered user message it appends, so the kv cache, convolution states and
-gated delta net states of the earlier turns stay in place instead of being prefilled again. When
-the next turn no longer fits the context, the example drops the oldest user and assistant messages
-and restarts the plane with the shortened conversation; a restart zeroes the plane and prefills the
-whole shortened prompt. A conversation answers one sequence at a time and does not combine with
-`NEURA_PREFIX`.
+Each character keeps its own kv cache, convolution states and gated delta net states. After a reply the example suspends that character, and the next turn resumes it with only the other character's new line, so earlier turns are not prefilled again. When a character's context fills, the example drops its oldest exchange and restarts that plane with the shortened transcript.
 
-```sh
-NEURA_TURNS="What is the capital of France?|What river runs through it?|How many people live there?" cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf ignored 64
-```
-
-Setting `NEURA_PREFIX=1` fills the prompt except its last token once, on a prefix plane, and every
-sequence of the batch copies that plane's kv cache, convolution states and gated delta net states
-before it walks its own last token. The copy is a state copy, not a replay: the sequences answer the
-same tokens they answer without the shared prefix, sampled runs included, while the prompt is
-computed once instead of once a plane.
-
-```sh
-NEURA_PREFIX=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
-```
-
-Every full-attention layer keeps its keys and values in a ring whose window is `NEURA_WINDOW`
-tokens; unset, the window is the whole context. A cursor past the window overwrites the oldest
-slots, so attention reads the last window of tokens while the gated delta net layers keep their
-recurrent state, and the kv cache stops growing with the conversation. A window at least as long
-as the context is the exact full attention the model was trained with; a shorter window is a
-sliding window and answers may differ. `NEURA_WINDOW` therefore lets a long conversation continue
-past the memory a full cache would need, while `NEURA_CONTEXT` still bounds each sequence.
-
-```sh
-NEURA_CONTEXT=8192 NEURA_WINDOW=1024 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
-```
-
-Setting `NEURA_KV=half` stores the keys and values of every full-attention layer in half precision
-and keeps the convolution and gated delta net states at single precision. The cache takes half the
-memory and every attention step reads half the bytes. An 8192-token context of eight sequences does
-not fit the default 2GB heap in single precision and fits at half, so a long conversation can keep
-exact full attention instead of a sliding window. Attention answers from rounded keys and values,
-and a long run may choose a token a single precision run does not.
-
-```sh
-NEURA_KV=half NEURA_CONTEXT=8192 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48 8
-```
-
-Setting `NEURA_FRAMES` to a wave count walks each program in slices of that many waves and waits for
-one slice a frame, so a prompt that needs 128ms of prefill can hold a 16ms frame budget instead of
-stalling the frame it starts in. The whole run walks the same plans and answers the same tokens as a
-run without it; the slice only decides how much of a plan a frame pays for. A slice longer than a
-frame is a budget the caller chose too large, and a multi-turn conversation answers one turn at a
-time and does not combine with it.
-
-```sh
-NEURA_FRAMES=256 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 24
-```
-
-Every run compiles the plan this device measured for the answer, fill and reset programs, and a
-device that has measured none walks the profile it balances on. Setting `NEURA_TUNE=1` measures
-every plan the device offers against the weights the programs walk, keeps the fastest of them, and
-writes the choice into the artifact cache, so the run that measured it and every run after it walk
-the measured plan.
-
-```sh
-NEURA_TUNE=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48
-```
-
-Setting `NEURA_PERSONAS` to a count gives every projection of the model a low rank bypass per
-persona, and each plane answers through the persona it selects: the base weights stay shared, and a
-plane reads only the rows of the persona table its selection names. `NEURA_RANK` sets the rank of
-those tables (4 by default). `NEURA_PERSONA` names a checkpoint the tables are read from, and unset
-or `random` initializes an untrained table from `NEURA_PERSONA_SEED` (1 by default), so a run
-measures the routing before a trained table exists. A checkpoint of the whole training graph lays
-its base weights over the gguf as well. Each plane picks its persona in turn, and `NEURA_PERSONA_OF`
-names one persona per plane instead.
-
-```sh
-NEURA_PERSONAS=4 NEURA_PERSONA_OF=2,0,1,3 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
-NEURA_PERSONAS=4 NEURA_PERSONA=personas.neura cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
-```
-
-The host writes the persona state of a plane between steps without rebuilding the plan, so a game
-hands a slot to another character by naming its persona. `NEURA_PREFIX` does not combine with
-personas: a shared prefix holds the states of the persona that filled it, and planes of other
-personas cannot reuse them. Routing runs two small products per projection, so a persona batch
-answers more slowly than the base model; the tables also take rank × (inputs + outputs) numbers of
-memory per persona per projection.
-
-Setting `NEURA_TRAIN` to a text file trains a persona table while every base weight stays frozen. The
-example tokenizes the corpus as one stream, draws windows of `NEURA_ROWS` tokens (16 by default),
-predicts the next token at every position, and descends `NEURA_STEPS` steps (16 by default) at
-`NEURA_RATE` (1e-3 by default). `NEURA_PERSONA_INDEX` picks the persona that learns (0 by default),
-and `NEURA_SAVE` names the file the tables are written to (`persona.neura` by default). Only the
-adapter tensors are written, so the tables of one rank 2 persona take about 5 MB. The training graph
-weighs every full attention layer over the whole window and walks the gated delta rule as a
-differentiable chunked scan, so gradients reach every adapter without a cache.
-
-```sh
-NEURA_TRAIN=corpus.txt NEURA_PERSONAS=4 NEURA_RANK=4 NEURA_ROWS=32 NEURA_STEPS=256 NEURA_RATE=5e-4 NEURA_SAVE=personas.neura cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf ignored
-```
-
-Point `NEURA_PERSONA` at a checkpoint while `NEURA_TRAIN` runs to continue a table, and name the row
-to continue with `NEURA_PERSONA_INDEX`. A training run leaves the other personas at the table it
-started from, so each persona can learn its own corpus before a batch routes them together.
-
-```sh
-NEURA_PERSONAS=4 NEURA_PERSONA=personas.neura NEURA_PERSONA_OF=0,1,2,3 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
-```
+The example runs 1024 tokens of context or the model's own context if smaller, fills prompts in chunks of 32 and 8, and stops a reply at the end of turn or after 64 tokens.

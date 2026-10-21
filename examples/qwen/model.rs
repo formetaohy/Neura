@@ -1,9 +1,7 @@
 use crate::attention::Attention;
 use crate::config::Config;
 use crate::delta::Delta;
-use crate::persona::{Plan, Route};
 use neura::decoder::{matrix, rms, vector};
-use neura::generate::PlaneState;
 use neura::gguf::Archive;
 use neura::{Element, Graph, Shape, Value};
 
@@ -19,22 +17,15 @@ pub(crate) fn as_rows(graph: &Graph, value: Value) -> Value {
 pub(crate) struct Planes {
     pub capacity: u32,
     pub window: u32,
-    pub bounded: bool,
     pub batch: u32,
     pub rows: u32,
-    pub shared: bool,
-    pub prefix: bool,
     pub kv: Element,
-    pub persona: Option<Plan>,
-    pub training: bool,
-    pub training_persona: u32,
 }
 
 pub struct Model {
     embedding: Value,
     output_norm: Value,
     floor: Value,
-    route: Route,
     layers: Vec<Layer>,
 }
 
@@ -45,21 +36,14 @@ enum Layer {
 
 impl Model {
     pub fn new(graph: &Graph, source: &impl Archive, config: &Config, planes: Planes) -> Self {
-        let route = match (planes.training, planes.persona) {
-            (true, Some(plan)) => Route::training(graph, plan, planes.training_persona),
-            (true, None) => panic!("a training graph routes the personas it trains"),
-            (false, plan) => Route::new(graph, planes.batch, plan),
-        };
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
                     Layer::Attend(Box::new(Attention::new(
-                        graph, source, config, layer, planes, route,
+                        graph, source, config, layer, planes,
                     )))
                 } else {
-                    Layer::Delta(Box::new(Delta::new(
-                        graph, source, config, layer, planes, route,
-                    )))
+                    Layer::Delta(Box::new(Delta::new(graph, source, config, layer, planes)))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -73,31 +57,15 @@ impl Model {
             ),
             output_norm: vector(graph, source, "output_norm.weight", config.hidden),
             floor: graph.fill(Shape::scalar(), config.floor),
-            route,
             layers,
         }
     }
 
-    pub fn persona(&self) -> Option<PlaneState> {
-        self.route
-            .selection()
-            .map(|value| PlaneState::new("persona", value, 0.0))
-    }
-
-    pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
+    pub fn reset(&self, graph: &Graph, reset: Value) {
         for layer in &self.layers {
             match layer {
-                Layer::Attend(attend) => attend.reset(graph, reset, share),
-                Layer::Delta(delta) => delta.reset(graph, reset, share),
-            }
-        }
-    }
-
-    pub fn clear_shared(&self, graph: &Graph, reset: Value) {
-        for layer in &self.layers {
-            match layer {
-                Layer::Attend(attend) => attend.clear_shared(graph, reset),
-                Layer::Delta(delta) => delta.clear_shared(graph, reset),
+                Layer::Attend(attend) => attend.reset(graph, reset),
+                Layer::Delta(delta) => delta.reset(graph, reset),
             }
         }
     }
