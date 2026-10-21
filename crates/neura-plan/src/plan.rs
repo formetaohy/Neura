@@ -43,6 +43,7 @@ pub struct Encoding {
     tensor_bytes: u64,
     order: Vec<u32>,
     waves: Vec<u32>,
+    wave_work_at: Vec<u64>,
     segments: Vec<SegmentRecord>,
     wave_segments: Vec<u32>,
     dependencies: Vec<u32>,
@@ -66,6 +67,7 @@ impl Encoding {
             + self.lengths.len() as u64 * size_of::<u32>() as u64
             + self.order.len() as u64 * size_of::<u32>() as u64
             + self.waves.len() as u64 * size_of::<u32>() as u64
+            + self.wave_work_at.len() as u64 * size_of::<u64>() as u64
             + self.segments.len() as u64 * size_of::<SegmentRecord>() as u64
             + self.wave_segments.len() as u64 * size_of::<u32>() as u64
             + self.dependencies.len() as u64 * size_of::<u32>() as u64
@@ -90,6 +92,7 @@ impl Encoding {
             tensor_bytes: 0,
             order: Vec::new(),
             waves: Vec::new(),
+            wave_work_at: Vec::new(),
             segments: Vec::new(),
             wave_segments: Vec::new(),
             dependencies: Vec::new(),
@@ -138,6 +141,10 @@ impl Encoding {
 
     pub fn waves(&self) -> &[u32] {
         &self.waves
+    }
+
+    pub fn wave_work_at(&self) -> &[u64] {
+        &self.wave_work_at
     }
 
     pub fn segments(&self) -> &[SegmentRecord] {
@@ -1151,23 +1158,6 @@ impl Plan {
             .map(|position| emitted.sources[*position as usize])
             .collect::<Vec<u32>>();
         let tables = authored::tables(&self.patches, &order);
-        let mut task_bytes = Vec::with_capacity(schedule.order().len() * size_of::<TaskRecord>());
-        let mut waves = Vec::with_capacity(schedule.order().len());
-        for (position, index) in schedule.order().iter().enumerate() {
-            let walked = &emitted.walks[*index as usize];
-            let source = emitted.sources[*index as usize] as usize;
-            let mut record = walked.recorded.record();
-            if !matches!(walked.split(), Split::Range { .. }) {
-                record.first = walked.span.0;
-                record.count = walked.span.1;
-            }
-            record.wave = schedule.waves()[position];
-            record.patch = self.patches.owners[source];
-            record.planned_first = record.first;
-            record.planned_count = record.count;
-            task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
-            waves.push(schedule.waves()[position]);
-        }
         let ordered = schedule
             .order()
             .iter()
@@ -1175,8 +1165,13 @@ impl Plan {
             .collect::<Vec<_>>();
         let live_values = storage_liveness(&sized, &ordered);
         let reserved = self.layout.tensors().bytes();
-        let (offsets, tensor_bytes, placed) =
-            allocate(&sized, &live_values, &waves, self.alignment, reserved);
+        let (offsets, tensor_bytes, placed) = allocate(
+            &sized,
+            &live_values,
+            schedule.allocation_waves(),
+            self.alignment,
+            reserved,
+        );
         assert!(
             tensor_bytes.is_multiple_of(WORD_BYTES),
             "a plan of {tensor_bytes} bytes leaves the word grid the device indexes",
@@ -1263,12 +1258,48 @@ impl Plan {
         if !self.paged {
             schedule.gate_dense_waves(tail);
         }
+        if !self.paged {
+            schedule.balance(&emitted.walks);
+        }
         assert!(
             !self.paged || schedule.gated().iter().all(|gated| !gated),
             "a plan that streams its weights gates no wave, and this plan gates a wave it cannot open",
         );
         schedule.build_wave_table();
+        let mut task_bytes = Vec::with_capacity(schedule.order().len() * size_of::<TaskRecord>());
+        let mut waves = Vec::with_capacity(schedule.order().len());
+        for (position, index) in schedule.order().iter().enumerate() {
+            let walked = &emitted.walks[*index as usize];
+            let source = emitted.sources[*index as usize] as usize;
+            let mut record = walked.recorded.record();
+            if !matches!(walked.split(), Split::Range { .. }) {
+                record.first = walked.span.0;
+                record.count = walked.span.1;
+            }
+            record.wave = schedule.waves()[position];
+            record.patch = self.patches.owners[source];
+            record.planned_first = record.first;
+            record.planned_count = record.count;
+            task_bytes.extend_from_slice(bytemuck::bytes_of(&record));
+            waves.push(schedule.waves()[position]);
+        }
         let work = ordered.iter().map(|task| task.work).sum();
+        let mut wave_work = vec![0u64; schedule.wave_segments().len()];
+        for (position, task) in ordered.iter().enumerate() {
+            let wave = schedule.waves()[position] as usize;
+            wave_work[wave] = wave_work[wave].saturating_add(task.work);
+        }
+        let mut wave_work_at = Vec::with_capacity(wave_work.len() + 1);
+        wave_work_at.push(0u64);
+        for held in wave_work {
+            wave_work_at.push(
+                wave_work_at
+                    .last()
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(held),
+            );
+        }
         let mut dependencies = Vec::new();
         let mut dependencies_at = Vec::with_capacity(schedule.segments().len() + 1);
         for held in schedule.dependencies() {
@@ -1296,6 +1327,7 @@ impl Plan {
             tensor_bytes,
             order,
             waves,
+            wave_work_at,
             segments: schedule.segments().to_vec(),
             wave_segments: schedule.wave_segments(),
             dependencies,
@@ -1564,6 +1596,10 @@ impl Walk for Walked<'_> {
 impl schedule::Scheduled for Walked<'_> {
     fn span(&self) -> (u32, u32) {
         self.span
+    }
+
+    fn work(&self) -> u64 {
+        self.work
     }
 }
 

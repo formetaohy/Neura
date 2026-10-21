@@ -1246,6 +1246,20 @@ impl Program {
         self.stored_encoding().work()
     }
 
+    pub fn wave_work(&self, first: u32, count: u32) -> u64 {
+        let encoding = self.stored_encoding();
+        let at = encoding.wave_work_at();
+        let start = first as usize;
+        let end = start + count as usize;
+        assert!(
+            end < at.len(),
+            "waves {first} to {} of a program that walks {} waves",
+            first + count,
+            at.len() - 1,
+        );
+        at[end] - at[start]
+    }
+
     pub fn readable(&self, value: Value) -> bool {
         self.encoding().readable(value.id())
     }

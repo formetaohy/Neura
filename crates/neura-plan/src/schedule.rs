@@ -8,9 +8,12 @@ use neura_profile::{ConvolutionInputTile, ConvolutionTile, MatmulTile};
 
 const GATE_DEPTH: usize = 64;
 const GATE_EDGES: u64 = 4096;
+const SLICES_PER_PLAN: u64 = 64;
+const MIN_WAVE_WORK: u64 = 1 << 20;
 
 pub(crate) trait Scheduled: Walk {
     fn span(&self) -> (u32, u32);
+    fn work(&self) -> u64;
 }
 
 fn partition<T: Scheduled>(task: &T) -> Option<u32> {
@@ -24,6 +27,7 @@ pub(crate) struct Schedule {
     order: Vec<u32>,
     segments: Vec<SegmentRecord>,
     waves: Vec<u32>,
+    allocation_waves: Vec<u32>,
     dependencies: Vec<Vec<u32>>,
     successors: Vec<u32>,
     gated: Vec<bool>,
@@ -60,6 +64,84 @@ impl Schedule {
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
+    }
+
+    pub(crate) fn balance<T: Scheduled>(&mut self, tasks: &[T]) {
+        if self.segments.is_empty() {
+            return;
+        }
+        let mut prefix = Vec::with_capacity(self.order.len() + 1);
+        prefix.push(0u64);
+        for task in &self.order {
+            let work = tasks[*task as usize].work();
+            prefix.push(prefix.last().copied().unwrap_or(0).saturating_add(work));
+        }
+        let total = prefix.last().copied().unwrap_or(0);
+        if total <= MIN_WAVE_WORK {
+            return;
+        }
+        let cap = (total / SLICES_PER_PLAN).max(MIN_WAVE_WORK);
+        let any_gated = self.gated.iter().any(|gated| *gated);
+        let mut segment_wave = vec![0u32; self.segments.len()];
+        let mut gated = Vec::new();
+        let mut next = 0u32;
+        let mut at = 0usize;
+        while at < self.segments.len() {
+            let original = self.segments[at].wave;
+            let start = at;
+            while at < self.segments.len() && self.segments[at].wave == original {
+                at += 1;
+            }
+            let end = at;
+            let held = self.gated[original as usize];
+            let mut groups = Vec::new();
+            if !held && !any_gated {
+                let wave_cap = cap;
+                let mut group = start;
+                let mut work = 0u64;
+                for segment in start..end {
+                    let record = self.segments[segment];
+                    let first = record.first as usize;
+                    let last = first + record.count as usize;
+                    let here = prefix[last] - prefix[first];
+                    if segment > group && work.saturating_add(here) > wave_cap {
+                        groups.push((group, segment));
+                        group = segment;
+                        work = 0;
+                    }
+                    work = work.saturating_add(here);
+                }
+                groups.push((group, end));
+            }
+            if groups.len() <= 1 {
+                segment_wave[start..end].fill(next);
+                gated.push(held);
+                next += 1;
+                continue;
+            }
+            for (first, last) in groups {
+                segment_wave[first..last].fill(next);
+                gated.push(held);
+                next += 1;
+            }
+        }
+        assert!(
+            next as usize <= self.order.len(),
+            "a balanced schedule of {} tasks gates {next} waves, and every wave opens on a task of its own",
+            self.order.len(),
+        );
+        for (segment, wave) in self.segments.iter_mut().zip(&segment_wave) {
+            segment.wave = *wave;
+        }
+        for index in 0..self.segments.len() {
+            let segment = self.segments[index];
+            let first = segment.first as usize;
+            let end = first + segment.count as usize;
+            self.waves[first..end].fill(segment.wave);
+        }
+        self.gated = gated;
+        self.count = next;
+        self.wave_table.clear();
     }
 
     fn layout(packed: &Packed) -> Self {
@@ -144,6 +226,7 @@ impl Schedule {
         gated.resize(count as usize, false);
         let mut schedule = Self {
             order,
+            allocation_waves: Vec::new(),
             segments,
             waves,
             dependencies,
@@ -153,6 +236,7 @@ impl Schedule {
             count,
         };
         schedule.compact();
+        schedule.allocation_waves = schedule.waves.clone();
         schedule
     }
 
@@ -192,6 +276,10 @@ impl Schedule {
 
     pub(crate) fn waves(&self) -> &[u32] {
         &self.waves
+    }
+
+    pub(crate) fn allocation_waves(&self) -> &[u32] {
+        &self.allocation_waves
     }
 
     pub(crate) fn dependencies(&self) -> &[Vec<u32>] {

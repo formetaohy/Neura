@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 const MAGIC: u32 = 0x4e_50_4c_41;
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 
 impl Plan {
     pub fn image(&self) -> Vec<u8> {
@@ -318,6 +318,7 @@ impl Plan {
                 .order()
                 .iter()
                 .any(|at| *at as usize >= bound.task_count() as usize)
+            || bound.wave_work_at().len() != bound.wave_count() as usize + 1
             || bound
                 .waves()
                 .iter()
@@ -628,6 +629,7 @@ fn write_encoding(out: &mut Writer, encoding: &Encoding) {
     out.long(encoding.tensor_bytes);
     out.words(&encoding.order);
     out.words(&encoding.waves);
+    out.longs(&encoding.wave_work_at);
     out.pods(&encoding.segments);
     out.words(&encoding.wave_segments);
     out.words(&encoding.dependencies);
@@ -676,6 +678,7 @@ fn read_encoding(held: &mut Reader<'_>) -> Option<Encoding> {
     let tensor_bytes = held.long()?;
     let order = held.words()?;
     let waves = held.words()?;
+    let wave_work_at = held.longs()?;
     let segments: Vec<SegmentRecord> = held.pods()?;
     let wave_segments = held.words()?;
     let dependencies = held.words()?;
@@ -698,6 +701,7 @@ fn read_encoding(held: &mut Reader<'_>) -> Option<Encoding> {
         tensor_bytes,
         order,
         waves,
+        wave_work_at,
         segments,
         wave_segments,
         dependencies,

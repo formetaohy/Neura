@@ -331,7 +331,7 @@ pub(crate) fn signature(plan: &Plan, profile: neura_profile::Profile, alignment:
     bytes
 }
 
-const PLAN_FORMAT: u32 = 2;
+const PLAN_FORMAT: u32 = 3;
 pub(crate) const PLAN_IMAGE_FLOOR: u32 = 1024;
 
 pub(crate) fn plan_key(

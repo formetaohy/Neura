@@ -24,8 +24,12 @@ impl Cursor {
         self.held.as_ref().is_none_or(Run::complete)
     }
 
-    pub fn wait(mut self) -> Option<f64> {
+    pub fn settle(&mut self) -> Option<f64> {
         self.held.take().map(Run::seconds)
+    }
+
+    pub fn wait(mut self) -> Option<f64> {
+        self.settle()
     }
 }
 

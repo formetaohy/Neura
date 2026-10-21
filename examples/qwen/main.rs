@@ -15,7 +15,7 @@ use neura::template::{Message, Template, Value};
 use neura::tokenizer::Text;
 use neura::{Element, MemoryRequest, Runtime, RuntimeRequest, Shape};
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokenizer::Tokenizer;
 
 const CHUNKS: &[u32] = &[32, 8];
@@ -145,6 +145,13 @@ fn main() {
             states: Vec::new(),
         }
     };
+    let frame = std::env::var("NEURA_FRAME_US").ok().map(|held| {
+        let micros = held.parse::<u64>().unwrap_or_else(|_| {
+            panic!("NEURA_FRAME_US holds whole microseconds, and {held} is no such count")
+        });
+        assert!(micros > 0, "NEURA_FRAME_US walks a frame of no microsecond");
+        Duration::from_micros(micros)
+    });
     let mut batch = Batch::new(
         &runtime,
         |graph| runtime.load(graph, &source),
@@ -214,6 +221,7 @@ fn main() {
             slot,
             context,
             speakers[current].character.name,
+            frame,
         );
         generated += tokens;
         speakers[current].turns.push(("assistant", reply));
@@ -242,15 +250,31 @@ fn reply(
     slot: u32,
     context: u32,
     name: &str,
+    frame: Option<Duration>,
 ) -> (String, usize, bool) {
     let end = tokenizer.end_of_turn();
     let mut text = Text::new();
     let mut reply = String::new();
     let mut generated = 0usize;
     let mut ended = false;
+    let mut worst_host = Duration::ZERO;
+    let mut worst_slice = 0.0f64;
     print!("{name}: ");
     while generated < REPLY {
-        for held in batch.step(runtime) {
+        let emitted = match frame {
+            Some(budget) => {
+                let started = Instant::now();
+                let emitted = batch.advance_within(runtime, budget);
+                worst_host = worst_host.max(started.elapsed());
+                worst_slice = worst_slice.max(batch.last_slice_seconds().unwrap_or(0.0));
+                if emitted.is_empty() {
+                    std::thread::yield_now();
+                }
+                emitted
+            }
+            None => batch.step(runtime),
+        };
+        for held in emitted {
             if held.slot != slot {
                 continue;
             }
@@ -275,6 +299,14 @@ fn reply(
     reply.push_str(&tail);
     print!("{tail}");
     println!();
+    if let Some(budget) = frame {
+        println!(
+            "  frame {:.2}ms worst host {:.2}ms worst slice {:.2}ms",
+            budget.as_secs_f64() * 1e3,
+            worst_host.as_secs_f64() * 1e3,
+            worst_slice * 1e3,
+        );
+    }
     (reply, generated, ended)
 }
 

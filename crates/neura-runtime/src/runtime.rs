@@ -8,7 +8,7 @@ use crate::store::WeightStore;
 use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, HostDevice, Queue,
-    Readback, ReadbackLease, Submission, SubmissionIndex,
+    READBACK_TIMEOUT, Readback, ReadbackLease, Submission, SubmissionIndex,
 };
 use neura_graph::{Graph, Value};
 use neura_kernel::{Banks, Kernel, KernelRequest, binding_count};
@@ -39,6 +39,7 @@ pub struct Readout {
     lease: ReadbackLease,
     queue: Queue,
     submission: SubmissionIndex,
+    settled: bool,
     sources: Vec<Origin>,
     total: u64,
     refusal_at: u64,
@@ -51,11 +52,16 @@ enum Origin {
 }
 
 impl Readout {
-    pub fn collect(self) -> Vec<Vec<f32>> {
+    pub fn ready(&self) -> bool {
+        self.queue.complete(self.submission)
+    }
+
+    pub fn collect(mut self) -> Vec<Vec<f32>> {
         let bytes = self
             .lease
             .buffer()
             .read(&self.queue, self.submission, self.total);
+        self.settled = true;
         let refusal = u32::from_ne_bytes(
             bytes[self.refusal_at as usize..(self.refusal_at + WORD_BYTES) as usize]
                 .try_into()
@@ -67,7 +73,8 @@ impl Readout {
             submission.submit(&self.queue);
             panic!("{}", refusal_message(refusal));
         }
-        self.sources
+        let sources = std::mem::take(&mut self.sources);
+        sources
             .into_iter()
             .map(|source| match source {
                 Origin::Device {
@@ -87,6 +94,14 @@ impl Readout {
                 }
             })
             .collect()
+    }
+}
+
+impl Drop for Readout {
+    fn drop(&mut self) {
+        if !self.settled && !std::thread::panicking() {
+            self.queue.wait(self.submission, READBACK_TIMEOUT);
+        }
     }
 }
 
@@ -972,6 +987,7 @@ impl Runtime {
             lease,
             queue: self.context.queue().clone(),
             submission,
+            settled: false,
             sources,
             total,
             refusal_at: device_bytes,

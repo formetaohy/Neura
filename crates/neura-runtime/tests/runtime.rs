@@ -2,6 +2,7 @@ use neura_abi::Element;
 use neura_gguf::Gguf;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_precision::{pack, unpack};
+use neura_runtime::MemoryRequest;
 use support::attention::{Shapes, attention_forward};
 use support::convolution::{conv2d_input_reference, conv2d_reference, conv2d_weight_reference};
 use support::{assert_close, gguf_bytes, open, opened, random, rounded};
@@ -1129,4 +1130,41 @@ fn a_tiled_convolution_weight_walks_every_window_it_fits() {
             conv2d_weight_reference(&input_values, &slope_values, shape, outputs, groups, window);
         assert_close(&runtime.read(&program, walked), &expected, 1e-3);
     }
+}
+
+#[test]
+fn a_heavy_wave_walks_the_slices_its_work_names() {
+    const ELEMENTS: u32 = 1 << 22;
+    let runtime = opened(MemoryRequest {
+        readback_bytes: 32 << 20,
+        heap_bytes: 64 << 20,
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 1, ELEMENTS]), Element::Single);
+    let output = graph.relu(input);
+    graph.retain(output);
+    let weights = runtime.weights(&graph);
+    let mut program = runtime.compile(&graph, &weights);
+    let total = (0..program.wave_count())
+        .map(|wave| program.wave_work(wave, 1))
+        .sum::<u64>();
+    assert_eq!(total, program.work());
+    assert_eq!(program.wave_work(0, program.wave_count()), total);
+    assert!(program.wave_count() > 2);
+    let values = random(ELEMENTS, 53);
+    runtime.write(&program, input, &values);
+    runtime.run(&program);
+    let expected = values
+        .iter()
+        .map(|value| value.max(0.0))
+        .collect::<Vec<f32>>();
+    assert_close(&runtime.read(&program, output), &expected, 0.0);
+    runtime.write(&program, input, &values);
+    {
+        let mut session = runtime.session(&mut program);
+        while session.submit(1) {}
+        session.wait();
+    }
+    assert_close(&runtime.read(&program, output), &expected, 0.0);
 }
