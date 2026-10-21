@@ -5,6 +5,7 @@ use neura_graph::{Graph, Init, Shape};
 use neura_plan::{Contiguous, Layout, Plan, Product};
 use neura_profile::{MatmulTile, Profile};
 
+const TUNE_WORKGROUP: u32 = 512;
 const TILE_WARMUP: u32 = 1;
 const TILE_ROUNDS: u32 = 4;
 const PLAN_WARMUP: u32 = 1;
@@ -20,7 +21,11 @@ impl Runtime {
         let products = self.products(graph);
         let default = self.default_profile();
         let mut candidates = Vec::new();
-        for profile in self.profiles() {
+        for profile in self
+            .profiles()
+            .into_iter()
+            .filter(|profile| profile.workgroup() <= TUNE_WORKGROUP)
+        {
             let planned = planned_tiles(&products, profile);
             let measured = self.measured_tiles(&products, profile);
             candidates.push((profile, planned.clone()));

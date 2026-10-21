@@ -9,6 +9,7 @@ use neura_graph::{Init, Shape};
 use neura_runtime::{CheckpointFile, MemoryRequest, Runtime, RuntimeRequest};
 use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -413,6 +414,51 @@ fn framed(
         }
     }
     walked
+}
+
+fn budgeted(
+    first_prompt: &[u32],
+    second_prompt: &[u32],
+    wanted: usize,
+    chunks: &[u32],
+    budget: Duration,
+) -> Vec<Vec<u32>> {
+    let runtime = runtime();
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 2, chunks),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    batch.admit(&runtime, first_prompt);
+    batch.admit(&runtime, second_prompt);
+    let mut walked = vec![Vec::new(); batch.batch() as usize];
+    while walked.iter().any(|held| held.len() < wanted) && batch.active().next().is_some() {
+        for held in batch.advance_within(&runtime, budget) {
+            if held.token == END || walked[held.slot as usize].len() >= wanted {
+                batch.finish(held.slot);
+                continue;
+            }
+            walked[held.slot as usize].push(held.token);
+        }
+    }
+    walked
+}
+
+#[test]
+fn a_batch_walks_the_tokens_a_frame_budget_allows() {
+    let first = &[0, 1, 1, 2, 1];
+    let second = &[0, 1, 2];
+    let expected = batched(first, second, 5, &[4, 2], false, None, None);
+    for budget in [Duration::from_micros(1), Duration::from_millis(2)] {
+        assert_eq!(
+            budgeted(first, second, 5, &[4, 2], budget),
+            expected,
+            "a batch that walks {budget:?} a frame answers with the tokens a whole plan answers with",
+        );
+    }
 }
 
 #[test]

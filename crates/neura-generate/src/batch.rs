@@ -6,6 +6,7 @@ use neura_runtime::{CheckpointFile, Cursor, Program, Runtime, Weights};
 use neura_source::Source;
 use std::collections::VecDeque;
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlaneState {
@@ -134,6 +135,9 @@ pub struct Emitted {
     pub token: u32,
 }
 
+const FIRST_SLICE_WAVES: u32 = 4;
+const SLICE_SAFETY: f64 = 2.0;
+
 pub struct Batch {
     store: Weights,
     answer: Pending,
@@ -162,11 +166,13 @@ pub struct Batch {
     prefix: Option<Vec<u32>>,
     slots: Vec<Option<Slot>>,
     frame: Option<Frame>,
+    slice_seconds: Option<f64>,
 }
 
 struct Frame {
     fill: Option<(usize, Vec<u32>)>,
     cursor: Cursor,
+    waves: u32,
 }
 
 struct Slot {
@@ -383,6 +389,9 @@ impl Batch {
             cumulative_state(&clearing, batch, initial_cumulative);
         }
         let reset = compile(runtime, &clearing, &store);
+        for (_, fill) in fills.iter_mut() {
+            fill.entry(runtime, &store, compile);
+        }
         let seeds = (0..batch)
             .map(|slot| plane_seed(0, slot))
             .collect::<Vec<_>>();
@@ -414,6 +423,7 @@ impl Batch {
             prefix: None,
             slots: (0..batch).map(|_| None).collect(),
             frame: None,
+            slice_seconds: None,
         };
         held.write_seeds(runtime);
         held.write_states(runtime);
@@ -1118,14 +1128,43 @@ impl Batch {
         }
     }
 
+    pub fn advance_within(&mut self, runtime: &Runtime, budget: Duration) -> Vec<Emitted> {
+        assert!(
+            !budget.is_zero(),
+            "a batch walks a frame budget the frame it answers in lasts",
+        );
+        let waves = self.budget_waves(budget);
+        self.advance(runtime, waves)
+    }
+
+    fn budget_waves(&self, budget: Duration) -> u32 {
+        let Some(seconds) = self.slice_seconds else {
+            return FIRST_SLICE_WAVES;
+        };
+        let waves = (budget.as_secs_f64() / (seconds * SLICE_SAFETY)).floor();
+        if !waves.is_finite() || waves < 1.0 {
+            return 1;
+        }
+        u32::try_from(waves as u64).unwrap_or(u32::MAX)
+    }
+
     fn walk(&mut self, runtime: &Runtime, frame: Frame, waves: u32) -> Vec<Emitted> {
-        let Frame { fill, cursor } = frame;
+        let Frame {
+            fill,
+            cursor,
+            waves: walked,
+        } = frame;
         if cursor.done() {
             if !cursor.ready() {
-                self.frame = Some(Frame { fill, cursor });
+                self.frame = Some(Frame {
+                    fill,
+                    cursor,
+                    waves: walked,
+                });
                 return Vec::new();
             }
-            cursor.wait();
+            let seconds = cursor.wait();
+            self.record_slice(walked, seconds);
             return match fill {
                 Some((index, slots)) => {
                     self.complete_fill(index, &slots);
@@ -1143,13 +1182,31 @@ impl Batch {
             };
         }
         if !cursor.ready() {
-            self.frame = Some(Frame { fill, cursor });
+            self.frame = Some(Frame {
+                fill,
+                cursor,
+                waves: walked,
+            });
             return Vec::new();
         }
         match fill {
             Some((index, slots)) => self.resume_fill(runtime, index, slots, cursor, waves),
             None => self.resume_answer(runtime, cursor, waves),
         }
+    }
+
+    fn record_slice(&mut self, waves: u32, seconds: Option<f64>) {
+        let Some(seconds) = seconds else {
+            return;
+        };
+        if waves == 0 || !seconds.is_finite() || seconds <= 0.0 {
+            return;
+        }
+        let held = seconds / f64::from(waves);
+        self.slice_seconds = Some(match self.slice_seconds {
+            Some(previous) => previous * 0.5 + held * 0.5,
+            None => held,
+        });
     }
 
     fn compile_fills(&mut self, runtime: &Runtime, tokens: &[u32]) {
@@ -1297,9 +1354,11 @@ impl Batch {
             session.submit(waves);
             session.pause()
         };
+        let walked = cursor.wave();
         self.frame = Some(Frame {
             fill: Some((index, slots)),
             cursor,
+            waves: walked,
         });
         Vec::new()
     }
@@ -1312,6 +1371,7 @@ impl Batch {
         cursor: Cursor,
         waves: u32,
     ) -> Vec<Emitted> {
+        let start = cursor.wave();
         let next = {
             let program = &mut self.fills[index]
                 .1
@@ -1323,9 +1383,11 @@ impl Batch {
             session.submit(waves);
             session.pause()
         };
+        let walked = next.wave().saturating_sub(start);
         self.frame = Some(Frame {
             fill: Some((index, slots)),
             cursor: next,
+            waves: walked,
         });
         Vec::new()
     }
@@ -1456,14 +1518,17 @@ impl Batch {
             session.submit(waves);
             session.pause()
         };
+        let walked = next.wave();
         self.frame = Some(Frame {
             fill: None,
             cursor: next,
+            waves: walked,
         });
         Vec::new()
     }
 
     fn resume_answer(&mut self, runtime: &Runtime, cursor: Cursor, waves: u32) -> Vec<Emitted> {
+        let start = cursor.wave();
         let next = {
             let program = &mut self
                 .answer
@@ -1475,9 +1540,11 @@ impl Batch {
             session.submit(waves);
             session.pause()
         };
+        let walked = next.wave().saturating_sub(start);
         self.frame = Some(Frame {
             fill: None,
             cursor: next,
+            waves: walked,
         });
         Vec::new()
     }
