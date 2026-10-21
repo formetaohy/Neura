@@ -8,6 +8,9 @@ const MATMUL_SPLIT_BLOCKS: u32 = 4;
 pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
 const NARROW_ROWS: u32 = 2;
 const WIDE_COLUMNS: u32 = 64;
+const WIDE_RUN_ROWS: u32 = 8;
+const WIDE_RUN_COLUMNS: u32 = 16384;
+const WIDE_RUN_TILE_COLUMNS: u32 = 256;
 const WIDE_FLOOR: u32 = 2048;
 const SPLIT_COLUMNS_FLOOR: u32 = 1024;
 const SPLIT_DEPTH_FLOOR: u32 = 1024;
@@ -100,7 +103,8 @@ impl Product {
         if let Some(run) = self.run_walk(profile) {
             return run;
         }
-        self.narrow_walk(profile)
+        self.wide_run(profile)
+            .or_else(|| self.narrow_walk(profile))
             .or_else(|| {
                 self.cheapest(profile, |tile| {
                     tile.strategy() != MatmulStrategy::Cooperative
@@ -131,6 +135,22 @@ impl Product {
             Some(Run::Codes) => self.weight.element().packs_codes(),
             None => true,
         }
+    }
+
+    fn wide_run(self, profile: Profile) -> Option<MatmulTile> {
+        if self.rows != WIDE_RUN_ROWS
+            || self.columns < WIDE_RUN_COLUMNS
+            || self.weight.contiguous != Contiguous::Reduction
+        {
+            return None;
+        }
+        self.cheapest(profile, |tile| {
+            tile.strategy() == MatmulStrategy::Staged
+                && tile.run().is_some()
+                && tile.columns() >= WIDE_RUN_TILE_COLUMNS
+                && tile.rows() >= self.rows
+                && self.stages(*tile)
+        })
     }
 
     fn narrow_walk(self, profile: Profile) -> Option<MatmulTile> {
@@ -264,6 +284,7 @@ impl Product {
         match tile.strategy() {
             MatmulStrategy::Staged => {
                 !self.narrow(profile)
+                    && (tile.columns() < WIDE_RUN_TILE_COLUMNS || self.columns >= WIDE_RUN_COLUMNS)
                     && (!tile.stages_a_run()
                         || (self.weight.contiguous == Contiguous::Reduction && self.stages(tile)))
             }
