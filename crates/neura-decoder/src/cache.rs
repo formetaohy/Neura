@@ -60,38 +60,48 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn new(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, false, Seat::Planes, false, element)
+    pub fn new(graph: &Graph, name: &str, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, name, shape, false, Seat::Planes, false, element)
     }
 
-    pub fn windowed(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, false, Seat::Planes, true, element)
+    pub fn windowed(graph: &Graph, name: &str, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, name, shape, false, Seat::Planes, true, element)
     }
 
-    pub fn with_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, true, Seat::Planes, false, element)
+    pub fn with_shared(graph: &Graph, name: &str, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, name, shape, true, Seat::Planes, false, element)
     }
 
-    pub fn windowed_with_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, true, Seat::Planes, true, element)
+    pub fn windowed_with_shared(
+        graph: &Graph,
+        name: &str,
+        shape: CacheShape,
+        element: Element,
+    ) -> Self {
+        Self::of(graph, name, shape, true, Seat::Planes, true, element)
     }
 
-    pub fn shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, true, Seat::Shared, false, element)
+    pub fn shared(graph: &Graph, name: &str, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, name, shape, true, Seat::Shared, false, element)
     }
 
-    pub fn windowed_shared(graph: &Graph, shape: CacheShape, element: Element) -> Self {
-        Self::of(graph, shape, true, Seat::Shared, true, element)
+    pub fn windowed_shared(graph: &Graph, name: &str, shape: CacheShape, element: Element) -> Self {
+        Self::of(graph, name, shape, true, Seat::Shared, true, element)
     }
 
     fn of(
         graph: &Graph,
+        name: &str,
         shape: CacheShape,
         declares_shared: bool,
         seat: Seat,
         ring: bool,
         element: Element,
     ) -> Self {
+        assert!(
+            !name.is_empty(),
+            "a cache names the state it keeps so a checkpoint can hold it",
+        );
         let CacheShape {
             heads,
             width,
@@ -123,12 +133,13 @@ impl Cache {
             element.name(),
         );
         let held = Shape::of([heads, batch, capacity, width]);
-        let keys = graph.state(held, Init::Zero, element);
-        let values = graph.state(held, Init::Zero, element);
+        let keys = graph.named_state(&format!("{name}.key"), held, Init::Zero, element);
+        let values = graph.named_state(&format!("{name}.value"), held, Init::Zero, element);
         let shared = declares_shared.then(|| {
             let held = Shape::of([heads, 1, capacity, width]);
-            let keys = graph.state(held, Init::Zero, element);
-            let values = graph.state(held, Init::Zero, element);
+            let keys = graph.named_state(&format!("{name}.shared.key"), held, Init::Zero, element);
+            let values =
+                graph.named_state(&format!("{name}.shared.value"), held, Init::Zero, element);
             Shared {
                 keys,
                 values,

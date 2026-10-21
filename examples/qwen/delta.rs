@@ -70,12 +70,20 @@ impl Delta {
             bias: vector(graph, source, &at("ssm_dt.bias"), config.linear_heads),
             output_norm: vector(graph, source, &at("ssm_norm.weight"), width),
             mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
-            conv_state: graph.state(
+            conv_state: graph.named_state(
+                &format!("blk.{layer}.conv"),
                 Shape::of([1, batch, config.conv_kernel - 1, mixed]),
                 Init::Zero,
                 Element::Single,
             ),
-            rule: DeltaRule::new(graph, config.linear_heads, width, batch, rows),
+            rule: DeltaRule::new(
+                graph,
+                &format!("blk.{layer}.delta"),
+                config.linear_heads,
+                width,
+                batch,
+                rows,
+            ),
             floor: graph.fill(Shape::scalar(), config.floor),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
             heads: config.linear_heads,

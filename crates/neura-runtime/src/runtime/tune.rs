@@ -44,7 +44,7 @@ impl Runtime {
                 candidates[winner].clone(),
             )
         };
-        self.restore_state(measuring, &held);
+        self.restore_held_state(measuring, &held);
         self.remember(graph, &Choice::of(profile, &chosen));
         self.compile_chosen(graph, weights, profile, &chosen)
     }
@@ -59,7 +59,7 @@ impl Runtime {
             .get(self.context.queue(), first, words * WORD_BYTES)
     }
 
-    fn restore_state(&self, weights: &Weights, held: &[u8]) {
+    fn restore_held_state(&self, weights: &Weights, held: &[u8]) {
         let (first, words) = state_words(weights);
         if words == 0 || held.is_empty() {
             return;

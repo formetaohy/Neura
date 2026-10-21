@@ -344,6 +344,17 @@ impl Runtime {
             .load_weights_named(self.context.queue(), weights.region(), source, keep);
     }
 
+    pub fn restore_state(&self, weights: &Weights, source: &impl Source) {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        weights
+            .store()
+            .load_state_named(self.context.queue(), weights.state(), source, &|_| true);
+    }
+
     pub fn checkpoint(&self, weights: &Weights) -> Checkpoint {
         self.context.assert_alive();
         assert!(
@@ -364,6 +375,33 @@ impl Runtime {
             "this weight store lives on the device heap of another runtime",
         );
         let container = container_of(weights);
+        let store = weights.store();
+        container.write(path, &mut |word, bytes, sink| {
+            store.stream(self.context.queue(), word, bytes, sink)
+        });
+        CheckpointFile::open(path)
+    }
+
+    pub fn checkpoint_state(&self, weights: &Weights) -> Checkpoint {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        let container = container_of_state(weights);
+        let store = weights.store();
+        Checkpoint::pack(&container, &mut |word, bytes, sink| {
+            store.stream(self.context.queue(), word, bytes, sink)
+        })
+    }
+
+    pub fn save_state(&self, weights: &Weights, path: &Path) -> CheckpointFile {
+        self.context.assert_alive();
+        assert!(
+            weights.lives_on(&self.heap),
+            "this weight store lives on the device heap of another runtime",
+        );
+        let container = container_of_state(weights);
         let store = weights.store();
         container.write(path, &mut |word, bytes, sink| {
             store.stream(self.context.queue(), word, bytes, sink)
@@ -1007,6 +1045,15 @@ impl Runtime {
 fn container_of(weights: &Weights) -> Container {
     let mut entries = checkpoint::described(weights.region(), "parameter");
     entries.extend(checkpoint::described(weights.state(), "training state"));
+    Container::of(&entries)
+}
+
+fn container_of_state(weights: &Weights) -> Container {
+    let entries = checkpoint::described(weights.state(), "training state");
+    assert!(
+        !entries.is_empty(),
+        "a container that names no state holds nothing to restore",
+    );
     Container::of(&entries)
 }
 

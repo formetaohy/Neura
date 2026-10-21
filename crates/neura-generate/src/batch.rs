@@ -1,8 +1,11 @@
 use crate::generator::{Draw, Sampling, chosen};
+use crate::snapshot::{BatchSnapshot, PhaseSnapshot, SlotSnapshot};
 use neura_abi::{CANDIDATES, Element};
 use neura_graph::{Graph, Init, Shape, Value};
-use neura_runtime::{Cursor, Program, Runtime, Weights};
+use neura_runtime::{CheckpointFile, Cursor, Program, Runtime, Weights};
+use neura_source::Source;
 use std::collections::VecDeque;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlaneState {
@@ -180,6 +183,30 @@ enum Phase {
 impl Phase {
     fn running(&self) -> bool {
         !matches!(self, Self::Suspended)
+    }
+}
+
+impl Slot {
+    fn snapshot(&self) -> SlotSnapshot {
+        SlotSnapshot {
+            cursor: self.cursor,
+            phase: match &self.phase {
+                Phase::Prompting(tokens) => PhaseSnapshot::Prompting(tokens.clone()),
+                Phase::Generating(token) => PhaseSnapshot::Generating(*token),
+                Phase::Suspended => PhaseSnapshot::Suspended,
+            },
+        }
+    }
+
+    fn of(snapshot: SlotSnapshot) -> Self {
+        Self {
+            cursor: snapshot.cursor,
+            phase: match snapshot.phase {
+                PhaseSnapshot::Prompting(tokens) => Phase::Prompting(tokens),
+                PhaseSnapshot::Generating(token) => Phase::Generating(token),
+                PhaseSnapshot::Suspended => Phase::Suspended,
+            },
+        }
     }
 }
 
@@ -395,6 +422,152 @@ impl Batch {
 
     pub fn batch(&self) -> u32 {
         self.batch
+    }
+
+    pub fn snapshot(&self) -> BatchSnapshot {
+        assert!(
+            self.frame.is_none(),
+            "a batch snapshots a whole step, and this batch walks a frame of one; advance the frame or finish it first",
+        );
+        BatchSnapshot {
+            batch: self.batch,
+            context: self.context,
+            window: self.window,
+            sampled: self.seeded,
+            prefix: self.prefix.clone(),
+            slots: self
+                .slots
+                .iter()
+                .map(|slot| slot.as_ref().map(|held| held.snapshot()))
+                .collect(),
+            seeds: self.seeds.clone(),
+            temperatures: self.temperatures.clone(),
+            keeps: self.keeps.clone(),
+            cumulatives: self.cumulatives.clone(),
+            state_names: self
+                .states
+                .iter()
+                .map(|state| state.name().to_owned())
+                .collect(),
+            states: self.state_values.clone(),
+        }
+    }
+
+    pub fn save_state(&self, runtime: &Runtime, path: &Path) -> CheckpointFile {
+        assert!(
+            self.frame.is_none(),
+            "a batch saves the state it holds between frames",
+        );
+        runtime.save_state(&self.store, path)
+    }
+
+    pub fn restore_state(
+        &mut self,
+        runtime: &Runtime,
+        source: &impl Source,
+        snapshot: BatchSnapshot,
+    ) {
+        assert!(
+            self.frame.is_none(),
+            "a batch restores the state it holds between frames",
+        );
+        runtime.restore_state(&self.store, source);
+        self.restore(runtime, snapshot);
+    }
+
+    fn restore(&mut self, runtime: &Runtime, snapshot: BatchSnapshot) {
+        assert_eq!(
+            snapshot.batch, self.batch,
+            "a batch of {} planes restores a snapshot of {} planes",
+            self.batch, snapshot.batch,
+        );
+        assert_eq!(
+            snapshot.context, self.context,
+            "a batch of {} tokens of context restores a snapshot of {}",
+            self.context, snapshot.context,
+        );
+        assert_eq!(
+            snapshot.window, self.window,
+            "a batch of a {} token window restores a snapshot of a {} token window",
+            self.window, snapshot.window,
+        );
+        assert_eq!(
+            snapshot.sampled, self.seeded,
+            "a batch draws {} restores a snapshot of a batch that draws {}",
+            self.seeded, snapshot.sampled,
+        );
+        assert_eq!(
+            snapshot.slots.len(),
+            self.batch as usize,
+            "a snapshot of {} planes holds {} slots",
+            self.batch,
+            snapshot.slots.len(),
+        );
+        assert!(
+            snapshot.prefix.is_none() || self.shared,
+            "a snapshot holds a shared prefix where this batch declares none",
+        );
+        assert_eq!(
+            snapshot.state_names.len(),
+            self.states.len(),
+            "a snapshot names {} states where this batch registers {}",
+            snapshot.state_names.len(),
+            self.states.len(),
+        );
+        for (held, state) in snapshot.state_names.iter().zip(&self.states) {
+            assert_eq!(
+                held,
+                state.name(),
+                "a snapshot names state {held} where this batch registers {}",
+                state.name(),
+            );
+        }
+        assert_eq!(
+            snapshot.states.len(),
+            snapshot.state_names.len(),
+            "a snapshot names {} states and holds {} of them",
+            snapshot.state_names.len(),
+            snapshot.states.len(),
+        );
+        for values in &snapshot.states {
+            assert_eq!(
+                values.len(),
+                self.batch as usize,
+                "a state of {} planes holds {} values",
+                self.batch,
+                values.len(),
+            );
+        }
+        for (held, name) in [
+            (snapshot.seeds.len(), "seeds"),
+            (snapshot.temperatures.len(), "temperatures"),
+            (snapshot.keeps.len(), "keeps"),
+            (snapshot.cumulatives.len(), "cumulatives"),
+        ] {
+            assert_eq!(
+                held, self.batch as usize,
+                "a batch of {} planes restores {held} {name}",
+                self.batch,
+            );
+        }
+        self.slots = snapshot
+            .slots
+            .into_iter()
+            .map(|slot| slot.map(Slot::of))
+            .collect();
+        self.seeds = snapshot.seeds;
+        self.temperatures = snapshot.temperatures;
+        self.keeps = snapshot.keeps;
+        self.cumulatives = snapshot.cumulatives;
+        self.state_values = snapshot.states;
+        self.prefix = snapshot.prefix;
+        if self.seeded {
+            self.write_seeds(runtime);
+            self.write_temperatures(runtime);
+            self.write_keeps(runtime);
+            self.write_cumulatives(runtime);
+        }
+        self.write_states(runtime);
     }
 
     pub fn context(&self) -> u32 {
@@ -1377,7 +1550,8 @@ fn token_of(value: &f32) -> u32 {
 }
 
 fn seed_state(graph: &Graph, batch: u32, seed: u32) -> Value {
-    graph.state(
+    graph.named_state(
+        "batch.seed",
         Shape::of([1, 1, batch, 1]),
         Init::Constant(f32::from_bits(seed)),
         Element::Single,
@@ -1393,7 +1567,8 @@ fn seed_bits(seed: u32) -> u32 {
 }
 
 fn temperature_state(graph: &Graph, batch: u32, temperature: f32) -> Value {
-    graph.state(
+    graph.named_state(
+        "batch.temperature",
         Shape::of([1, 1, batch, 1]),
         Init::Constant(temperature),
         Element::Single,
@@ -1401,7 +1576,8 @@ fn temperature_state(graph: &Graph, batch: u32, temperature: f32) -> Value {
 }
 
 fn keep_state(graph: &Graph, batch: u32, keep: f32) -> Value {
-    graph.state(
+    graph.named_state(
+        "batch.keep",
         Shape::of([1, 1, batch, 1]),
         Init::Constant(keep),
         Element::Single,
@@ -1409,7 +1585,8 @@ fn keep_state(graph: &Graph, batch: u32, keep: f32) -> Value {
 }
 
 fn cumulative_state(graph: &Graph, batch: u32, cumulative: f32) -> Value {
-    graph.state(
+    graph.named_state(
+        "batch.cumulative",
         Shape::of([1, 1, batch, 1]),
         Init::Constant(cumulative),
         Element::Single,

@@ -191,6 +191,7 @@ dependencies = [
  "neura-gguf",
  "neura-graph",
  "neura-runtime",
+ "neura-source",
  "neura-tokenizer",
 ]
 

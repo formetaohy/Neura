@@ -14,31 +14,59 @@ pub struct DeltaRule {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Seat {
     Planes,
-    Shared,
+    PlanesWithPrefix,
+    Prefix,
 }
 
 impl DeltaRule {
-    pub fn new(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
-        Self::of(graph, heads, width, batch, rows, false, Seat::Planes)
+    pub fn new(graph: &Graph, name: &str, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
+        Self::of(graph, name, heads, width, batch, rows, Seat::Planes)
     }
 
-    pub fn with_shared(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
-        Self::of(graph, heads, width, batch, rows, true, Seat::Planes)
-    }
-
-    pub fn shared(graph: &Graph, heads: u32, width: u32, batch: u32, rows: u32) -> Self {
-        Self::of(graph, heads, width, batch, rows, true, Seat::Shared)
-    }
-
-    fn of(
+    pub fn with_shared(
         graph: &Graph,
+        name: &str,
         heads: u32,
         width: u32,
         batch: u32,
         rows: u32,
-        declares_shared: bool,
+    ) -> Self {
+        Self::of(
+            graph,
+            name,
+            heads,
+            width,
+            batch,
+            rows,
+            Seat::PlanesWithPrefix,
+        )
+    }
+
+    pub fn shared(
+        graph: &Graph,
+        name: &str,
+        heads: u32,
+        width: u32,
+        batch: u32,
+        rows: u32,
+    ) -> Self {
+        Self::of(graph, name, heads, width, batch, rows, Seat::Prefix)
+    }
+
+    fn of(
+        graph: &Graph,
+        name: &str,
+        heads: u32,
+        width: u32,
+        batch: u32,
+        rows: u32,
         seat: Seat,
     ) -> Self {
+        let declares_shared = seat != Seat::Planes;
+        assert!(
+            !name.is_empty(),
+            "a delta rule names the state it keeps so a checkpoint can hold it",
+        );
         assert!(
             heads > 0 && width > 0 && batch > 0,
             "a delta rule of {batch} planes of {heads} heads of {width} numbers carries no state",
@@ -48,17 +76,15 @@ impl DeltaRule {
             "a delta rule walks {width} numbers of width where its kernel holds {DELTA_WIDTH}",
         );
         assert!(rows > 0, "a delta rule walks no row of {rows}");
-        assert!(
-            declares_shared || seat == Seat::Planes,
-            "a delta rule that walks a shared prefix declares the prefix it walks",
-        );
-        let planes = graph.state(
+        let planes = graph.named_state(
+            &format!("{name}.state"),
             Shape::of([heads, batch, width, width]),
             Init::Zero,
             Element::Single,
         );
         let shared = declares_shared.then(|| {
-            graph.state(
+            graph.named_state(
+                &format!("{name}.shared.state"),
                 Shape::of([heads, 1, width, width]),
                 Init::Zero,
                 Element::Single,
@@ -66,15 +92,15 @@ impl DeltaRule {
         });
         Self {
             state: match seat {
-                Seat::Planes => planes,
-                Seat::Shared => shared.expect("a shared delta rule declares its prefix"),
+                Seat::Planes | Seat::PlanesWithPrefix => planes,
+                Seat::Prefix => shared.expect("a shared delta rule declares its prefix"),
             },
             shared,
             heads,
             width,
             batch: match seat {
-                Seat::Planes => batch,
-                Seat::Shared => 1,
+                Seat::Planes | Seat::PlanesWithPrefix => batch,
+                Seat::Prefix => 1,
             },
             rows,
             seat,
@@ -135,9 +161,9 @@ impl DeltaRule {
     }
 
     pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {
-        assert_eq!(
+        assert_ne!(
             self.seat,
-            Seat::Planes,
+            Seat::Prefix,
             "a delta rule resets the planes it walks, and this rule walks the shared prefix",
         );
         let zero = graph.fill(Shape::scalar(), 0.0);
@@ -161,7 +187,7 @@ impl DeltaRule {
     pub fn clear_shared(&self, graph: &Graph, reset: Value) {
         assert_eq!(
             self.seat,
-            Seat::Shared,
+            Seat::Prefix,
             "a shared delta rule clears the prefix it walks, and this rule walks the planes",
         );
         let zero = graph.fill(Shape::scalar(), 0.0);

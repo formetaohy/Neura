@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+type Pour<'a> = dyn Fn(&mut dyn FnMut(u64, &[u8])) + 'a;
+
 fn pour_weights(
     weights: &Arena,
     words: u64,
@@ -47,10 +49,27 @@ fn pour(
         });
         pour_one(name, entry, words, source, write);
     }
+    pour_state(state, words, source, &|_| true, true, write);
+}
+
+fn pour_state(
+    state: &Arena,
+    words: u64,
+    source: &impl Source,
+    keep: &dyn Fn(&str) -> bool,
+    missing: bool,
+    write: &mut dyn FnMut(u64, &[u8]),
+) {
     for entry in state.entries() {
         let Some(name) = entry.name.as_deref() else {
             continue;
         };
+        if !keep(name) {
+            continue;
+        }
+        if missing && source.placed(name).is_none() {
+            continue;
+        }
         pour_one(name, entry, words, source, write);
     }
 }
@@ -896,22 +915,9 @@ impl WeightStore {
     }
 
     pub(crate) fn load(&self, queue: &Queue, weights: &Arena, state: &Arena, source: &impl Source) {
-        let Some(mirror) = &self.mirror else {
-            let mut upload = Upload::of(self, queue);
-            pour(weights, state, self.words, source, &mut |at, bytes| {
-                upload.put(at, bytes);
-            });
-            upload.flush();
-            return;
-        };
-        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
-        self.materialize_all(&mut mirror, queue);
-        mirror.vacuum();
-        pour(weights, state, self.words, source, &mut |at, bytes| {
-            self.bounds(at / WORD_BYTES, bytes.len() as u64);
-            mirror.backing.write(at, bytes);
+        self.load_poured(queue, &|write| {
+            pour(weights, state, self.words, source, write)
         });
-        self.reload(queue, &mut mirror);
     }
 
     pub(crate) fn load_weights_named(
@@ -921,18 +927,34 @@ impl WeightStore {
         source: &impl Source,
         keep: &dyn Fn(&str) -> bool,
     ) {
+        self.load_poured(queue, &|write| {
+            pour_weights(weights, self.words, source, keep, write)
+        });
+    }
+
+    pub(crate) fn load_state_named(
+        &self,
+        queue: &Queue,
+        state: &Arena,
+        source: &impl Source,
+        keep: &dyn Fn(&str) -> bool,
+    ) {
+        self.load_poured(queue, &|write| {
+            pour_state(state, self.words, source, keep, false, write)
+        });
+    }
+
+    fn load_poured(&self, queue: &Queue, pour: &Pour<'_>) {
         let Some(mirror) = &self.mirror else {
             let mut upload = Upload::of(self, queue);
-            pour_weights(weights, self.words, source, keep, &mut |at, bytes| {
-                upload.put(at, bytes);
-            });
+            pour(&mut |at, bytes| upload.put(at, bytes));
             upload.flush();
             return;
         };
         let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
         self.materialize_all(&mut mirror, queue);
         mirror.vacuum();
-        pour_weights(weights, self.words, source, keep, &mut |at, bytes| {
+        pour(&mut |at, bytes| {
             self.bounds(at / WORD_BYTES, bytes.len() as u64);
             mirror.backing.write(at, bytes);
         });

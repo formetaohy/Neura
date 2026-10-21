@@ -118,6 +118,7 @@ fn stepped(runtime: &Runtime) -> measure::Row {
     let graph = Graph::new();
     let cache = Cache::new(
         &graph,
+        "attention.cache",
         CacheShape::new(KEY_HEADS, WIDTH, CACHE, CACHE, 1, 1),
         Element::Single,
     );

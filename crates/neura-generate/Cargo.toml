@@ -17,6 +17,7 @@ workspace = true
 neura-abi = { workspace = true }
 neura-graph = { workspace = true }
 neura-runtime = { workspace = true }
+neura-source = { workspace = true }
 neura-tokenizer = { workspace = true }
 
 [dev-dependencies]

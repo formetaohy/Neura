@@ -1,12 +1,12 @@
 use neura_abi::Element;
 use neura_decoder::{Cache, CacheShape};
 use neura_generate::{
-    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Family, Generator,
-    PlaneState, Sampling, Step,
+    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSnapshot, BatchSpec, BatchStep,
+    Family, Generator, PlaneState, Sampling, Step,
 };
 use neura_gguf::Gguf;
 use neura_graph::{Init, Shape};
-use neura_runtime::{MemoryRequest, Runtime, RuntimeRequest};
+use neura_runtime::{CheckpointFile, MemoryRequest, Runtime, RuntimeRequest};
 use neura_tokenizer::{Rule, Tokenizer, Vocabulary};
 use std::collections::BTreeSet;
 
@@ -63,6 +63,7 @@ fn family(runtime: &Runtime, chunks: &[u32], sampling: Option<Sampling>) -> Fami
         let cursor = graph.input(Shape::scalar(), Element::Single);
         let cache = Cache::new(
             graph,
+            "cache",
             CacheShape::new(1, CLASSES, CAPACITY, CAPACITY, 1, rows),
             Element::Single,
         );
@@ -147,21 +148,25 @@ fn cache(shape: BatchShape, graph: &neura_graph::Graph, rows: u32, shared: bool)
     match (shared, shape.bounded) {
         (false, false) => Cache::new(
             graph,
+            "cache",
             CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
             Element::Single,
         ),
         (false, true) => Cache::windowed(
             graph,
+            "cache",
             CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
             Element::Single,
         ),
         (true, false) => Cache::with_shared(
             graph,
+            "cache",
             CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
             Element::Single,
         ),
         (true, true) => Cache::windowed_with_shared(
             graph,
+            "cache",
             CacheShape::new(1, CLASSES, shape.capacity, shape.window, shape.batch, rows),
             Element::Single,
         ),
@@ -230,6 +235,7 @@ fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
     let cache = match shape.bounded {
         true => Cache::windowed_shared(
             graph,
+            "cache",
             CacheShape::new(
                 1,
                 CLASSES,
@@ -242,6 +248,7 @@ fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
         ),
         false => Cache::shared(
             graph,
+            "cache",
             CacheShape::new(
                 1,
                 CLASSES,
@@ -729,7 +736,8 @@ fn state_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
         graph.permute(mask, [0, 2, 1, 3]),
     );
     cache.write_masked(graph, cursor, held, held, graph.permute(mask, [0, 2, 1, 3]));
-    let route = graph.state(
+    let route = graph.named_state(
+        "route",
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
@@ -749,7 +757,8 @@ fn state_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
 
 fn state_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
     let mut fill = batch_fill(graph, shape);
-    let route = graph.state(
+    let route = graph.named_state(
+        "route",
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
@@ -760,7 +769,8 @@ fn state_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
 
 fn state_reset(graph: &neura_graph::Graph, shape: BatchShape) -> BatchSeed {
     let mut seed = batch_reset(graph, shape);
-    let route = graph.state(
+    let route = graph.named_state(
+        "route",
         Shape::of([1, 1, shape.batch, 1]),
         Init::Zero,
         Element::Single,
@@ -960,4 +970,50 @@ fn a_suspended_plane_spends_no_seed_while_its_neighbor_draws() {
         plans,
         "suspending a plane reuses the program the batch compiled",
     );
+}
+
+fn walked(batch: &mut Batch, runtime: &Runtime, slot: u32, count: usize) -> Vec<u32> {
+    let mut tokens = Vec::new();
+    while tokens.len() < count {
+        for held in batch.step(runtime) {
+            if held.slot == slot {
+                tokens.push(held.token);
+            }
+        }
+    }
+    tokens
+}
+
+#[test]
+fn a_batch_snapshot_walks_the_state_it_held() {
+    let runtime = runtime();
+    let mut batch = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 2, &[2]),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    let slot = batch.admit(&runtime, &[0, 1, 2]);
+    walked(&mut batch, &runtime, slot, 2);
+    let snapshot = batch.snapshot().to_bytes();
+    let path = std::env::temp_dir().join(format!("neura-batch-{}.neura", std::process::id()));
+    batch.save_state(&runtime, &path);
+    let expected = walked(&mut batch, &runtime, slot, 4);
+    let mut restored = Batch::new(
+        &runtime,
+        |graph| runtime.weights(graph),
+        BatchSpec::new(16, 2, &[2]),
+        batch_answer,
+        batch_fill,
+        batch_reset,
+    );
+    restored.restore_state(
+        &runtime,
+        &CheckpointFile::open(&path),
+        BatchSnapshot::from_bytes(&snapshot),
+    );
+    assert_eq!(walked(&mut restored, &runtime, slot, 4), expected);
+    std::fs::remove_file(&path).expect("a saved batch state leaves its file");
 }

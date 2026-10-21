@@ -185,8 +185,13 @@ impl Family {
             let step = build(&graph, *chunk);
             held(&graph, &step, *chunk);
             if seeded {
-                graph.state(Shape::scalar(), Init::Zero, Element::Single);
-                graph.knob(initial);
+                graph.named_state(
+                    "generate.seed",
+                    Shape::scalar(),
+                    Init::Zero,
+                    Element::Single,
+                );
+                graph.named_knob("generate.temperature", initial);
             }
             graphs.push((graph, step));
         }
@@ -216,9 +221,16 @@ impl Family {
         let answering = Graph::new();
         let step = build(&answering, 1);
         held(&answering, &step, 1);
-        let seed = seeded.then(|| answering.state(Shape::scalar(), Init::Zero, Element::Single));
+        let seed = seeded.then(|| {
+            answering.named_state(
+                "generate.seed",
+                Shape::scalar(),
+                Init::Zero,
+                Element::Single,
+            )
+        });
         let advance = seeded.then(|| answering.input(Shape::scalar(), Element::Single));
-        let temperature = seeded.then(|| answering.knob(initial));
+        let temperature = seeded.then(|| answering.named_knob("generate.temperature", initial));
         let draw = Draw {
             sampling,
             seed,

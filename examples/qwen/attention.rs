@@ -76,6 +76,7 @@ impl Attention {
             key_norm: vector(graph, source, &at("attn_k_norm.weight"), width),
             cache: Cache::new(
                 graph,
+                &format!("blk.{layer}.cache"),
                 CacheShape::new(config.key_heads, width, capacity, window, batch, rows),
                 kv,
             ),

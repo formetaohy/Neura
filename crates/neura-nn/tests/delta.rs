@@ -52,7 +52,7 @@ fn a_delta_walk_of_rows_matches_a_step_a_row() {
     let beta = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
     let decay = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
     let keep = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let rule = DeltaRule::new(&graph, heads, width, batch, rows);
+    let rule = DeltaRule::new(&graph, "rule", heads, width, batch, rows);
     let out = rule.forward(
         &graph,
         DeltaInput {
@@ -85,7 +85,7 @@ fn a_delta_walk_of_rows_matches_a_step_a_row() {
     let beta = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
     let decay = graph.input(Shape::of([heads, batch, rows, 1]), Element::Single);
     let keep = graph.input(Shape::of([1, batch, 1, 1]), Element::Single);
-    let rule = DeltaRule::new(&graph, heads, width, batch, 1);
+    let rule = DeltaRule::new(&graph, "rule", heads, width, batch, 1);
     let stepped = (0..rows)
         .map(|row| {
             rule.forward(
