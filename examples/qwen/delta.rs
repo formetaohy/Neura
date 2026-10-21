@@ -1,10 +1,11 @@
 use crate::config::Config;
 use crate::mlp::Mlp;
 use crate::model::{Planes, as_planes, as_rows};
+use crate::persona::Route;
 use neura::decoder::{heads, joined, l2, matrix, rms, softplus, vector};
 use neura::gguf::Archive;
+use neura::{Adapter, Element, Graph, Init, Shape, Value};
 use neura::{DeltaInput, DeltaRule};
-use neura::{Element, Graph, Init, Shape, Value};
 
 pub(crate) struct Delta {
     norm: Value,
@@ -21,6 +22,10 @@ pub(crate) struct Delta {
     conv_state: Value,
     conv_shared: Option<Value>,
     rule: DeltaRule,
+    route: Route,
+    qkv_route: Option<Adapter>,
+    gate_route: Option<Adapter>,
+    output_route: Option<Adapter>,
     floor: Value,
     scale: Value,
     heads: u32,
@@ -37,6 +42,7 @@ impl Delta {
         config: &Config,
         layer: u32,
         planes: Planes,
+        route: Route,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.linear_width;
@@ -78,7 +84,14 @@ impl Delta {
             decay: vector(graph, source, &at("ssm_a"), config.linear_heads),
             bias: vector(graph, source, &at("ssm_dt.bias"), config.linear_heads),
             output_norm: vector(graph, source, &at("ssm_norm.weight"), width),
-            mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
+            mlp: Mlp::new(
+                graph,
+                source,
+                layer,
+                config.hidden,
+                config.feed_forward,
+                route,
+            ),
             conv_state: graph.state(
                 Shape::of([1, batch, config.conv_kernel - 1, mixed]),
                 Init::Zero,
@@ -98,6 +111,10 @@ impl Delta {
                 }
                 (true, true) => DeltaRule::shared(graph, config.linear_heads, width, batch, rows),
             },
+            qkv_route: route.adapter(graph, &at("delta.qkv"), config.hidden, mixed),
+            gate_route: route.adapter(graph, &at("delta.gate"), config.hidden, held),
+            output_route: route.adapter(graph, &at("delta.output"), held, config.hidden),
+            route,
             floor: graph.fill(Shape::scalar(), config.floor),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
             heads: config.linear_heads,
@@ -147,7 +164,12 @@ impl Delta {
         let normed = rms(graph, hidden, self.norm, self.floor);
         let mixed = as_planes(
             graph,
-            graph.matmul(normed, graph.permute(self.qkv, [0, 1, 3, 2])),
+            self.route.apply(
+                graph,
+                self.qkv_route.as_ref(),
+                normed,
+                graph.matmul(normed, graph.permute(self.qkv, [0, 1, 3, 2])),
+            ),
         );
         let window = graph.concat(
             &(0..self.kernel - 1)
@@ -205,7 +227,12 @@ impl Delta {
             graph,
             heads(
                 graph,
-                graph.matmul(normed, graph.permute(self.gate, [0, 1, 3, 2])),
+                self.route.apply(
+                    graph,
+                    self.gate_route.as_ref(),
+                    normed,
+                    graph.matmul(normed, graph.permute(self.gate, [0, 1, 3, 2])),
+                ),
                 self.heads,
                 self.width,
             ),
@@ -249,9 +276,12 @@ impl Delta {
             rms(graph, attended, self.output_norm, self.floor),
             graph.silu(gate),
         );
-        let projected = graph.matmul(
-            as_rows(graph, joined(graph, gated, self.heads)),
-            graph.permute(self.output, [0, 1, 3, 2]),
+        let wide = as_rows(graph, joined(graph, gated, self.heads));
+        let projected = self.route.apply(
+            graph,
+            self.output_route.as_ref(),
+            wide,
+            graph.matmul(wide, graph.permute(self.output, [0, 1, 3, 2])),
         );
         self.mlp
             .forward(graph, graph.add(hidden, projected), self.floor)

@@ -4,13 +4,14 @@ mod delta;
 mod mlp;
 mod model;
 mod ops;
+mod persona;
 mod text;
 mod tokenizer;
 
 use config::Config;
 use model::{Model, Planes};
 use neura::generate::{
-    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Sampling,
+    Batch, BatchFill, BatchPrefix, BatchSeed, BatchShape, BatchSpec, BatchStep, Persona, Sampling,
 };
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
@@ -111,7 +112,47 @@ fn main() {
     };
     println!("kv: {}", kv.name());
 
-    let loaded = |graph: &neura::Graph| runtime.load(graph, &source);
+    let table_path = std::env::var("NEURA_PERSONA").ok();
+    let seed = std::env::var("NEURA_PERSONA_SEED")
+        .ok()
+        .map(|held| {
+            held.parse::<u64>()
+                .expect("a persona seed is a whole number")
+        })
+        .unwrap_or(1);
+    let plan = std::env::var("NEURA_PERSONAS").ok().map(|held| {
+        let count = held
+            .parse::<u32>()
+            .expect("a persona count is a whole number");
+        let rank = std::env::var("NEURA_RANK")
+            .ok()
+            .map(|held| {
+                held.parse::<u32>()
+                    .expect("a persona rank is a whole number")
+            })
+            .unwrap_or(4);
+        persona::Plan::new(count, rank)
+    });
+    let table = plan.map(|_| persona::Table::open(table_path.as_deref(), seed));
+    if let Some(plan) = plan {
+        println!(
+            "personas: {} of rank {}{}",
+            plan.count(),
+            plan.rank(),
+            match table_path.as_deref() {
+                None | Some("random") => format!(", initialized from seed {seed}"),
+                Some(path) => format!(", loaded from {path}"),
+            },
+        );
+    }
+    if let Some(plan) = plan {
+        assert!(
+            !shared,
+            "a shared prefix fills the states of one persona, and NEURA_PREFIX shares them across {} personas",
+            plan.count(),
+        );
+    }
+    let loaded = |graph: &neura::Graph| persona::load(&runtime, graph, &source, table.as_ref());
     let planes = |shape: BatchShape, prefix: bool| Planes {
         capacity: shape.capacity,
         window: shape.window,
@@ -121,6 +162,7 @@ fn main() {
         shared: shape.shared,
         prefix,
         kv,
+        persona: plan,
     };
     let answer = |graph: &neura::Graph, shape: BatchShape| {
         let token = graph.input(Shape::of([1, 1, shape.batch, 1]), Element::Single);
@@ -134,6 +176,10 @@ fn main() {
             mask,
             reset,
             logits: model.step(graph, token, cursor, mask),
+            persona: model.persona().map(|value| Persona {
+                value,
+                count: plan.expect("a routed model holds its persona plan").count(),
+            }),
         }
     };
     let fill = |graph: &neura::Graph, shape: BatchShape| {
@@ -188,7 +234,17 @@ fn main() {
     if shared {
         spec = spec.shared();
     }
+    if let Some(plan) = plan {
+        spec = spec.personas(plan.count());
+    }
     let mut batch = Batch::new(&runtime, loaded, spec, answer, fill, reset);
+    if let Some(plan) = plan {
+        let held = personas(sequences, plan.count());
+        for (slot, chosen) in held.iter().copied().enumerate() {
+            batch.set_persona_of(&runtime, slot as u32, chosen);
+        }
+        println!("persona of each plane: {held:?}");
+    }
     if sampling.is_some()
         && let Some(temperature) = std::env::var("NEURA_TEMPERATURE")
             .ok()
@@ -460,6 +516,34 @@ fn encode(template: &Template, tokenizer: &Tokenizer, messages: &[Message]) -> V
         ],
     );
     tokenizer.encode(&rendered)
+}
+
+fn personas(sequences: u32, count: u32) -> Vec<u32> {
+    match std::env::var("NEURA_PERSONA_OF") {
+        Ok(held) => {
+            let chosen = held
+                .split(',')
+                .map(|part| {
+                    part.parse::<u32>()
+                        .expect("a persona of a plane is a whole number")
+                })
+                .collect::<Vec<u32>>();
+            assert_eq!(
+                chosen.len(),
+                sequences as usize,
+                "NEURA_PERSONA_OF names {} personas for a run of {sequences} planes",
+                chosen.len(),
+            );
+            for persona in &chosen {
+                assert!(
+                    *persona < count,
+                    "a run of {count} personas names no persona {persona}",
+                );
+            }
+            chosen
+        }
+        Err(_) => (0..sequences).map(|slot| slot % count).collect(),
+    }
 }
 
 fn turns() -> Option<Vec<String>> {

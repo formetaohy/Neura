@@ -124,6 +124,61 @@ impl Adapter {
         graph.identity(graph.permute(wide, [0, 2, 1, 3]))
     }
 
+    pub fn forward_shared(
+        &self,
+        graph: &Graph,
+        input: Value,
+        base: Value,
+        selection: Value,
+    ) -> Value {
+        let dims = graph.shape(input).dims();
+        let (planes, rows) = (dims[0], dims[2]);
+        assert_eq!(
+            dims[1], 1,
+            "an adapter walks the rows of {dims:?} in one plane",
+        );
+        assert_eq!(
+            dims[3], self.inputs,
+            "an adapter of {} inputs walks a row of {dims:?}",
+            self.inputs,
+        );
+        assert_eq!(
+            graph.shape(base).dims(),
+            [planes, 1, rows, self.outputs],
+            "an adapter of {} outputs adds to {planes} planes of {rows} rows",
+            self.outputs,
+        );
+        assert_eq!(
+            graph.shape(selection).dims(),
+            [planes, 1, 1, 1],
+            "a shared persona selection names one index per plane of {planes} planes",
+        );
+        let down = graph.reshape(
+            graph.gather(self.down, selection),
+            Shape::of([planes, 1, self.inputs, self.rank]),
+        );
+        let up = graph.reshape(
+            graph.gather(self.up, selection),
+            Shape::of([planes, 1, self.rank, self.outputs]),
+        );
+        let scale = graph.broadcast_to(
+            graph.gather(self.scale, selection),
+            Shape::of([planes, rows, 1, 1]),
+        );
+        if rows == 1 {
+            let wide = graph.reshape(input, Shape::of([planes, 1, self.inputs, 1]));
+            let hidden = graph.sum_axis(graph.mul(wide, down), 2);
+            let hidden = graph.reshape(hidden, Shape::of([planes, 1, self.rank, 1]));
+            let bypass = graph.sum_axis(graph.mul(hidden, up), 2);
+            return graph.add(base, graph.mul(bypass, scale));
+        }
+        let left = graph.permute(input, [0, 2, 1, 3]);
+        let hidden = graph.matmul(left, down);
+        let bypass = graph.matmul(hidden, up);
+        let wide = graph.add(graph.permute(base, [0, 2, 1, 3]), graph.mul(bypass, scale));
+        graph.identity(graph.permute(wide, [0, 2, 1, 3]))
+    }
+
     pub fn down(&self) -> Value {
         self.down
     }

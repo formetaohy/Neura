@@ -2,9 +2,10 @@ use crate::config::Config;
 use crate::mlp::Mlp;
 use crate::model::{Planes, as_planes, as_rows};
 use crate::ops::interleaved;
+use crate::persona::Route;
 use neura::decoder::{Cache, CacheShape, heads, joined, matrix, partial, rms, vector};
 use neura::gguf::Archive;
-use neura::{Graph, Shape, Value};
+use neura::{Adapter, Graph, Shape, Value};
 
 pub(crate) struct Attention {
     norm: Value,
@@ -16,6 +17,11 @@ pub(crate) struct Attention {
     key_norm: Value,
     cache: Cache,
     mlp: Mlp,
+    route: Route,
+    query_route: Option<Adapter>,
+    key_route: Option<Adapter>,
+    value_route: Option<Adapter>,
+    output_route: Option<Adapter>,
     floor: Value,
     base: Value,
     scale: Value,
@@ -32,6 +38,7 @@ impl Attention {
         config: &Config,
         layer: u32,
         planes: Planes,
+        route: Route,
     ) -> Self {
         let at = |suffix: &str| format!("blk.{layer}.{suffix}");
         let width = config.head_width;
@@ -44,6 +51,7 @@ impl Attention {
             shared,
             prefix,
             kv,
+            persona: _,
         } = planes;
         Self {
             norm: vector(graph, source, &at("attn_norm.weight"), config.hidden),
@@ -109,7 +117,39 @@ impl Attention {
                     kv,
                 ),
             },
-            mlp: Mlp::new(graph, source, layer, config.hidden, config.feed_forward),
+            mlp: Mlp::new(
+                graph,
+                source,
+                layer,
+                config.hidden,
+                config.feed_forward,
+                route,
+            ),
+            query_route: route.adapter(
+                graph,
+                &at("attn.q"),
+                config.hidden,
+                config.heads * width * 2,
+            ),
+            key_route: route.adapter(
+                graph,
+                &at("attn.k"),
+                config.hidden,
+                config.key_heads * width,
+            ),
+            value_route: route.adapter(
+                graph,
+                &at("attn.v"),
+                config.hidden,
+                config.key_heads * width,
+            ),
+            output_route: route.adapter(
+                graph,
+                &at("attn.output"),
+                config.heads * width,
+                config.hidden,
+            ),
+            route,
             floor: graph.fill(Shape::scalar(), config.floor),
             base: graph.fill(Shape::scalar(), config.rope_base),
             scale: graph.fill(Shape::scalar(), 1.0 / (width as f32).sqrt()),
@@ -136,7 +176,12 @@ impl Attention {
         mask: Value,
     ) -> Value {
         let normed = rms(graph, hidden, self.norm, self.floor);
-        let packed = graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2]));
+        let packed = self.route.apply(
+            graph,
+            self.query_route.as_ref(),
+            normed,
+            graph.matmul(normed, graph.permute(self.query, [0, 1, 3, 2])),
+        );
         let query = as_planes(graph, interleaved(graph, packed, self.heads, self.width, 0));
         let gate = as_planes(
             graph,
@@ -146,7 +191,12 @@ impl Attention {
             graph,
             heads(
                 graph,
-                graph.matmul(normed, graph.permute(self.key, [0, 1, 3, 2])),
+                self.route.apply(
+                    graph,
+                    self.key_route.as_ref(),
+                    normed,
+                    graph.matmul(normed, graph.permute(self.key, [0, 1, 3, 2])),
+                ),
                 self.key_heads,
                 self.width,
             ),
@@ -155,7 +205,12 @@ impl Attention {
             graph,
             heads(
                 graph,
-                graph.matmul(normed, graph.permute(self.value, [0, 1, 3, 2])),
+                self.route.apply(
+                    graph,
+                    self.value_route.as_ref(),
+                    normed,
+                    graph.matmul(normed, graph.permute(self.value, [0, 1, 3, 2])),
+                ),
                 self.key_heads,
                 self.width,
             ),
@@ -180,7 +235,12 @@ impl Attention {
             as_rows(graph, joined(graph, attended, self.heads)),
             graph.sigmoid(as_rows(graph, joined(graph, gate, self.heads))),
         );
-        let projected = graph.matmul(gated, graph.permute(self.output, [0, 1, 3, 2]));
+        let projected = self.route.apply(
+            graph,
+            self.output_route.as_ref(),
+            gated,
+            graph.matmul(gated, graph.permute(self.output, [0, 1, 3, 2])),
+        );
         self.mlp
             .forward(graph, graph.add(hidden, projected), self.floor)
     }

@@ -94,3 +94,24 @@ the measured plan.
 ```sh
 NEURA_TUNE=1 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "What is the capital of France?" 48
 ```
+
+Setting `NEURA_PERSONAS` to a count gives every projection of the model a low rank bypass per
+persona, and each plane answers through the persona it selects: the base weights stay shared, and a
+plane reads only the rows of the persona table its selection names. `NEURA_RANK` sets the rank of
+those tables (4 by default). `NEURA_PERSONA` names a checkpoint the tables are read from, and unset
+or `random` initializes an untrained table from `NEURA_PERSONA_SEED` (1 by default), so a run
+measures the routing before a trained table exists. A checkpoint of the whole training graph lays
+its base weights over the gguf as well. Each plane picks its persona in turn, and `NEURA_PERSONA_OF`
+names one persona per plane instead.
+
+```sh
+NEURA_PERSONAS=4 NEURA_PERSONA_OF=2,0,1,3 cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
+NEURA_PERSONAS=4 NEURA_PERSONA=personas.neura cargo run --release --example qwen -- Qwen3.5-0.8B-Q8_0.gguf "Who are you?" 48 4
+```
+
+A batch chooses the persona of a plane between steps without rebuilding the plan, so a game hands a
+slot to another character by naming its persona. `NEURA_PREFIX` does not combine with personas: a
+shared prefix holds the states of the persona that filled it, and planes of other personas cannot
+reuse them. Routing runs two small products per projection, so a persona batch answers more slowly
+than the base model; the tables also take rank × (inputs + outputs) numbers of memory per persona
+per projection.

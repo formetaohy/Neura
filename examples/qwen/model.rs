@@ -1,6 +1,7 @@
 use crate::attention::Attention;
 use crate::config::Config;
 use crate::delta::Delta;
+use crate::persona::{Plan, Route};
 use neura::decoder::{matrix, rms, vector};
 use neura::gguf::Archive;
 use neura::{Element, Graph, Shape, Value};
@@ -23,12 +24,14 @@ pub(crate) struct Planes {
     pub shared: bool,
     pub prefix: bool,
     pub kv: Element,
+    pub persona: Option<Plan>,
 }
 
 pub struct Model {
     embedding: Value,
     output_norm: Value,
     floor: Value,
+    route: Route,
     layers: Vec<Layer>,
 }
 
@@ -39,14 +42,17 @@ enum Layer {
 
 impl Model {
     pub fn new(graph: &Graph, source: &impl Archive, config: &Config, planes: Planes) -> Self {
+        let route = Route::new(graph, planes.batch, planes.persona);
         let layers = (0..config.layers)
             .map(|layer| {
                 if config.attends(layer) {
                     Layer::Attend(Box::new(Attention::new(
-                        graph, source, config, layer, planes,
+                        graph, source, config, layer, planes, route,
                     )))
                 } else {
-                    Layer::Delta(Box::new(Delta::new(graph, source, config, layer, planes)))
+                    Layer::Delta(Box::new(Delta::new(
+                        graph, source, config, layer, planes, route,
+                    )))
                 }
             })
             .collect::<Vec<Layer>>();
@@ -60,8 +66,13 @@ impl Model {
             ),
             output_norm: vector(graph, source, "output_norm.weight", config.hidden),
             floor: graph.fill(Shape::scalar(), config.floor),
+            route,
             layers,
         }
+    }
+
+    pub fn persona(&self) -> Option<Value> {
+        self.route.selection()
     }
 
     pub fn reset(&self, graph: &Graph, reset: Value, share: Option<Value>) {

@@ -134,3 +134,82 @@ fn a_batch_walks_the_adapter_of_each_row() {
         );
     }
 }
+
+#[test]
+fn a_plane_walks_one_persona_of_its_own() {
+    let runtime = Runtime::open(RuntimeRequest {
+        memory: MemoryRequest {
+            heap_bytes: 1 << 24,
+            readback_bytes: 1 << 20,
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .expect("a device that walks adapters");
+    let graph = Graph::new();
+    let planes = 2;
+    let input = graph.input(Shape::of([planes, 1, 1, INPUTS]), Element::Single);
+    let base = graph.input(Shape::of([planes, 1, 1, OUTPUTS]), Element::Single);
+    let selection = graph.input(Shape::of([planes, 1, 1, 1]), Element::Single);
+    let adapter = Adapter::new(
+        &graph,
+        "shared",
+        AdapterShape::new(PERSONAS, INPUTS, OUTPUTS, RANK),
+        Init::Zero,
+        Element::Single,
+        1.0,
+    );
+    let out = adapter.forward_shared(&graph, input, base, selection);
+    graph.retain(out);
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    runtime.write(
+        &program,
+        adapter.down(),
+        &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, -1.0],
+    );
+    runtime.write(
+        &program,
+        adapter.up(),
+        &[1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 3.0],
+    );
+    runtime.write(&program, adapter.scale(), &[0.5, 2.0]);
+    let inputs = [1.0, 2.0, 3.0, -1.0, 0.0, 2.0];
+    let bases = [0.25, -0.5, 1.0, 2.0];
+    runtime.write(&program, input, &inputs);
+    runtime.write(&program, base, &bases);
+    for (chosen, second) in [(1.0f32, 0.0f32), (0.0, 1.0)] {
+        runtime.write(&program, selection, &[chosen, second]);
+        runtime.run(&program);
+        let walked = runtime.read(&program, out);
+        let personas = [chosen as usize, second as usize];
+        let mut wanted = Vec::new();
+        for (plane, persona) in personas.into_iter().enumerate() {
+            let tables = [
+                (
+                    &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0][..],
+                    &[1.0, 0.0, 0.0, 1.0][..],
+                    0.5,
+                ),
+                (
+                    &[0.0, 1.0, 1.0, 0.0, 1.0, -1.0][..],
+                    &[2.0, 0.0, 0.0, 3.0][..],
+                    2.0,
+                ),
+            ][persona];
+            wanted.extend(expected(
+                &inputs[plane * INPUTS as usize..(plane + 1) * INPUTS as usize],
+                &bases[plane * OUTPUTS as usize..(plane + 1) * OUTPUTS as usize],
+                tables.0,
+                tables.1,
+                tables.2,
+            ));
+        }
+        for (value, held) in walked.iter().zip(&wanted) {
+            assert!(
+                (*value - *held).abs() <= 1e-5,
+                "the plane returned {value} where {held} was expected for its persona",
+            );
+        }
+    }
+}

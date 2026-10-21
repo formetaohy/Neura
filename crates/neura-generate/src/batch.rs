@@ -5,12 +5,19 @@ use neura_runtime::{Cursor, Program, Runtime, Weights};
 use std::collections::VecDeque;
 
 #[derive(Clone, Copy)]
+pub struct Persona {
+    pub value: Value,
+    pub count: u32,
+}
+
+#[derive(Clone, Copy)]
 pub struct BatchStep {
     pub token: Value,
     pub cursor: Value,
     pub mask: Value,
     pub reset: Value,
     pub logits: Value,
+    pub persona: Option<Persona>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,6 +60,7 @@ pub struct BatchSpec {
     pub tune: bool,
     pub shared: bool,
     pub window: Option<u32>,
+    pub personas: u32,
 }
 
 impl BatchSpec {
@@ -65,7 +73,17 @@ impl BatchSpec {
             tune: false,
             shared: false,
             window: None,
+            personas: 0,
         }
+    }
+
+    pub fn personas(mut self, personas: u32) -> Self {
+        assert!(
+            personas > 0 && personas <= 1 << 24,
+            "a batch of {personas} personas routes none of them or names more personas than a device index holds exactly",
+        );
+        self.personas = personas;
+        self
     }
 
     pub fn sampled(mut self, sampling: Sampling) -> Self {
@@ -107,6 +125,9 @@ pub struct Batch {
     temperature: Option<Value>,
     keep: Option<Value>,
     cumulative: Option<Value>,
+    persona: Option<Value>,
+    personas: u32,
+    personas_of: Vec<u32>,
     seeds: Vec<u32>,
     temperatures: Vec<f32>,
     keeps: Vec<f32>,
@@ -192,6 +213,7 @@ impl Batch {
             tune,
             shared,
             window,
+            personas,
         } = spec;
         assert!(batch > 0, "a batch of no plane answers nothing");
         assert!(context > 0, "a context of no token holds no batch");
@@ -274,6 +296,26 @@ impl Batch {
             },
         );
         held_answer(&answering, &step, batch);
+        assert!(
+            (personas == 0) == step.persona.is_none(),
+            "a batch of {personas} personas reads the value a model gathers them by, and this model {} one",
+            match step.persona {
+                Some(_) => "declares",
+                None => "declares no",
+            },
+        );
+        if let Some(persona) = step.persona {
+            assert!(
+                persona.count > 0,
+                "a model that routes personas declares at least one of them",
+            );
+            assert_eq!(
+                persona.count, personas,
+                "a model routes {} personas where this batch declares {personas}",
+                persona.count,
+            );
+        }
+        let persona = step.persona.map(|held| held.value);
         let seed = seeded.then(|| seed_state(&answering, batch, 0));
         let temperature = seeded.then(|| temperature_state(&answering, batch, initial));
         let keep = seeded.then(|| keep_state(&answering, batch, initial_keep));
@@ -316,7 +358,7 @@ impl Batch {
         let seeds = (0..batch)
             .map(|slot| plane_seed(0, slot))
             .collect::<Vec<_>>();
-        let held = Self {
+        let mut held = Self {
             store,
             answer,
             fills,
@@ -327,6 +369,9 @@ impl Batch {
             temperature,
             keep,
             cumulative,
+            persona,
+            personas,
+            personas_of: vec![0; batch as usize],
             seeds,
             temperatures: vec![initial; batch as usize],
             keeps: vec![initial_keep; batch as usize],
@@ -344,6 +389,7 @@ impl Batch {
             frame: None,
         };
         held.write_seeds(runtime);
+        held.write_personas(runtime);
         held
     }
 
@@ -454,6 +500,78 @@ impl Batch {
         runtime.write(&answer.program, cumulative, &self.cumulatives);
     }
 
+    pub fn persona_count(&self) -> u32 {
+        self.personas
+    }
+
+    pub fn persona_of(&self, slot: u32) -> u32 {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            self.personas > 0,
+            "a batch that routes no persona holds none for plane {slot}",
+        );
+        self.personas_of[slot as usize]
+    }
+
+    pub fn set_persona(&mut self, runtime: &Runtime, persona: u32) {
+        assert!(
+            self.personas > 0,
+            "a batch that routes no persona gathers no table for {persona}",
+        );
+        assert!(
+            persona < self.personas,
+            "a batch of {} personas names no persona {persona}",
+            self.personas,
+        );
+        assert!(
+            self.frame.is_none(),
+            "a batch sets the persona of a plane before it walks a frame",
+        );
+        self.personas_of.fill(persona);
+        self.write_personas(runtime);
+    }
+
+    pub fn set_persona_of(&mut self, runtime: &Runtime, slot: u32, persona: u32) {
+        assert!(
+            slot < self.batch,
+            "a batch of {} planes names no plane {slot}",
+            self.batch,
+        );
+        assert!(
+            self.personas > 0,
+            "a batch that routes no persona gathers no table for {persona}",
+        );
+        assert!(
+            persona < self.personas,
+            "a batch of {} personas names no persona {persona}",
+            self.personas,
+        );
+        assert!(
+            self.frame.is_none(),
+            "a batch sets the persona of a plane before it walks a frame",
+        );
+        self.personas_of[slot as usize] = persona;
+        self.write_personas(runtime);
+    }
+
+    fn write_personas(&mut self, runtime: &Runtime) {
+        let Some(persona) = self.persona else {
+            return;
+        };
+        let values = self
+            .personas_of
+            .iter()
+            .copied()
+            .map(|held| held as f32)
+            .collect::<Vec<f32>>();
+        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        runtime.write(&answer.program, persona, &values);
+    }
+
     pub fn seed_of(&self, slot: u32) -> u32 {
         assert!(
             slot < self.batch,
@@ -527,6 +645,11 @@ impl Batch {
         assert!(
             self.slots.iter().all(Option::is_none),
             "a batch fills a shared prefix while no plane holds a sequence",
+        );
+        assert!(
+            self.personas == 0,
+            "a batch that routes {} personas shares no prefix, because the states a prefix fills hold the persona it filled them with",
+            self.personas,
         );
         assert!(
             !tokens.is_empty(),
@@ -1286,6 +1409,15 @@ fn held_answer(graph: &Graph, step: &BatchStep, batch: u32) {
         step.logits.id(),
         logits,
     );
+    if let Some(persona) = step.persona {
+        assert_eq!(
+            graph.shape(persona.value).dims(),
+            [1, 1, batch, 1],
+            "an answer over {batch} planes gathers one persona a plane, and the persona value {} walks {:?}",
+            persona.value.id(),
+            graph.shape(persona.value).dims(),
+        );
+    }
 }
 
 fn held_fill(graph: &Graph, step: &BatchFill, rows: u32, batch: u32) {
