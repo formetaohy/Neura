@@ -267,11 +267,7 @@ impl Delta {
             beta,
             log_decay,
         };
-        let attended = if self.rows == 1 && !self.prefix {
-            self.rule.advance(graph, rule_input, Some(mask))
-        } else {
-            self.rule.forward(graph, rule_input, Some(mask))
-        };
+        let attended = self.rule.forward(graph, rule_input, Some(mask));
         let gated = graph.mul(
             rms(graph, attended, self.output_norm, self.floor),
             graph.silu(gate),

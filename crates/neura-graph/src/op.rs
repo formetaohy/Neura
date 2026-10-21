@@ -1514,7 +1514,7 @@ impl Graph {
         self.wrote_in_place(target);
     }
 
-    pub fn delta_step(&self, state: Value, input: DeltaInput, keep: Option<Value>) -> Value {
+    pub fn delta(&self, state: Value, input: DeltaInput, keep: Option<Value>) -> Value {
         let state = self.own(state);
         let DeltaInput {
             query,
@@ -1530,17 +1530,23 @@ impl Graph {
         let log_decay = self.own(log_decay);
         let dims = self.shape(state).dims();
         let (heads, batch, width) = (dims[0], dims[1], dims[3]);
+        let rows = self.shape(query).dims()[2];
         assert!(
             heads > 0 && batch > 0 && width > 0 && width <= DELTA_WIDTH && dims[2] == width,
-            "a delta step walks a square state of {heads} heads over {batch} planes of {width} numbers, and value {} walks {:?}",
+            "a delta walks a square state of {heads} heads over {batch} planes of {width} numbers, and value {} walks {:?}",
             state.id(),
             dims,
+        );
+        assert!(
+            rows > 0,
+            "a delta walks at least one row, and value {} walks none",
+            query.id(),
         );
         for (what, held) in [("query", query), ("key", key), ("value", value)] {
             assert_eq!(
                 self.shape(held).dims(),
-                [heads, batch, 1, width],
-                "a delta step reads a {what} of {heads} heads over {batch} planes of {width} numbers, and value {} walks {:?}",
+                [heads, batch, rows, width],
+                "a delta reads a {what} of {heads} heads over {batch} planes of {rows} rows of {width} numbers, and value {} walks {:?}",
                 held.id(),
                 self.shape(held).dims(),
             );
@@ -1548,33 +1554,35 @@ impl Graph {
         for (what, held) in [("beta", beta), ("log decay", log_decay)] {
             assert_eq!(
                 self.shape(held).dims(),
-                [heads, batch, 1, 1],
-                "a delta step scales the {what} of {heads} heads over {batch} planes, and value {} walks {:?}",
+                [heads, batch, rows, 1],
+                "a delta scales the {what} of {heads} heads over {batch} planes of {rows} rows, and value {} walks {:?}",
                 held.id(),
                 self.shape(held).dims(),
             );
         }
         if let Some(keep) = keep {
-            assert_eq!(
-                self.shape(keep).dims(),
-                [1, batch, 1, 1],
-                "a delta step keeps the planes of a {batch} plane batch, and value {} walks {:?}",
+            let walked = self.shape(keep).dims();
+            assert!(
+                walked[0] == 1
+                    && walked[1] == batch
+                    && (walked[2] == 1 || walked[2] == rows)
+                    && walked[3] == 1,
+                "a delta keeps {walked:?} rows of a batch of {batch} planes walking {rows} rows, and value {} walks it",
                 keep.id(),
-                self.shape(keep).dims(),
             );
         }
         for held in [state, query, key, value, beta, log_decay] {
             assert_eq!(
                 self.element(held),
                 Element::Single,
-                "a delta step walks single precision numbers, and value {} holds {}",
+                "a delta walks single precision numbers, and value {} holds {}",
                 held.id(),
                 self.element(held).name(),
             );
         }
         self.assert_in_place(state, state);
         let out = self.stored(
-            Shape::from_axes([heads, batch, 1, width], [None, None, None, None]),
+            Shape::from_axes([heads, batch, rows, width], [None, None, None, None]),
             Element::Single,
             1.0,
             Residency::Derived,

@@ -605,7 +605,7 @@ fn narrow<W: Walk, V: Values>(
         Kind::ClassLogSoftmaxFold => {
             class_log_softmax_fold(values, task, first, count, &mut narrowed)
         }
-        Kind::Delta => delta(values, task, &mut narrowed),
+        Kind::Delta => delta(values, task, first, count, &mut narrowed),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
@@ -830,21 +830,33 @@ fn concat<W: Walk, V: Values>(
     }
 }
 
-fn delta<W: Walk, V: Values>(values: &V, task: &W, narrowed: &mut Narrowed<'_>) {
+fn delta<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
     let state = task.input(0);
     let dims = values.dims(state);
-    let width = dims[3];
-    let area = u64::from(width) * u64::from(width);
+    let width = u64::from(dims[3]);
+    let rows = u64::from(dims[2]);
+    let area = width * width;
     let plane = u64::from(task.plane());
+    let first = u64::from(first);
+    let count = u64::from(count);
     if values.owned(state) && values.dense(state) {
-        narrowed.read(state, Region::run(plane * area, area));
-        narrowed.write(task.extra(), Region::run(plane * area, area));
+        let start = plane * area + first;
+        narrowed.read(state, Region::band(start, count, width, rows));
+        narrowed.write(task.extra(), Region::band(start, count, width, rows));
     }
     let out = task.out();
     let out_dims = values.dims(out);
     if values.owned(out) && values.dense(out) {
         let columns = u64::from(out_dims[3]);
-        narrowed.write(out, Region::run(plane * columns, columns));
+        let out_rows = u64::from(out_dims[2]);
+        let start = plane * out_rows * columns + first;
+        narrowed.write(out, Region::band(start, count, columns, out_rows));
     }
 }
 

@@ -9,7 +9,7 @@ use neura_graph::{Shape, TaskInfo, ValueInfo, Window};
 use neura_pointwise as op;
 use neura_profile::{
     AttentionTile, ChoiceLayout, ConvolutionInputShape, ConvolutionInputTile, ConvolutionShape,
-    ConvolutionTile, ConvolutionWeightTile, ConvolutionWindow, MatmulTile, Profile,
+    ConvolutionTile, ConvolutionWeightTile, ConvolutionWindow, DELTA_COLUMNS, MatmulTile, Profile,
 };
 
 const TASK_ELEMENTS_PER_THREAD: u32 = 2;
@@ -40,6 +40,7 @@ const CHOICE_SECTION_FLOOR: u32 = 8192;
 const CHOICE_THREAD_ROUND_WEIGHT: u64 = 2;
 const CONV_TILE_FLOOR: u32 = 512;
 const CONV_WEIGHT_TILE_FLOOR: u64 = 4096;
+const DELTA_COLUMN_FLOOR: u32 = 8;
 
 #[derive(Clone, PartialEq, Debug)]
 pub(crate) struct Task {
@@ -2051,15 +2052,34 @@ fn clear(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     }
 }
 
-fn delta_step(plan: &mut Plan, unit: &TaskInfo, _profile: Profile) {
+fn delta_step(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let dims = plan.shape(unit.inputs[0]).dims();
     let width = dims[3];
     let planes = dims[0] * dims[1];
-    let work = 3 * u64::from(width) * u64::from(width) + 6 * u64::from(width);
+    let rows = plan.shape(unit.out).dims()[2];
+    let wanted = if rows > 1 {
+        profile.workgroups() / planes.max(1)
+    } else {
+        1
+    };
+    let mut groups = width.div_ceil(DELTA_COLUMNS);
+    while !width.is_multiple_of(groups) {
+        groups += 1;
+    }
+    while groups * 2 <= wanted
+        && width.is_multiple_of(groups * 2)
+        && width / (groups * 2) >= DELTA_COLUMN_FLOOR
+    {
+        groups *= 2;
+    }
+    let columns = width / groups;
+    let work = u64::from(rows) * (3 * u64::from(width) * u64::from(columns) + 2 * u64::from(width));
     for plane in 0..planes {
-        let mut task = Task::span(unit, 0, 1, work);
-        task.plane = plane;
-        plan.tasks.push(task);
+        for group in 0..groups {
+            let mut task = Task::span(unit, group * columns, columns, work);
+            task.plane = plane;
+            plan.tasks.push(task);
+        }
     }
 }
 
