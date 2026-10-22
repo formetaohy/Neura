@@ -12,6 +12,21 @@ const TILE_WORDS: usize = 8;
 const REDUCTION: u32 = 0;
 const OUTPUT: u32 = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ChoiceMode {
+    Settled,
+    Tuned,
+}
+
+impl ChoiceMode {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::Tuned => "tuned",
+        }
+    }
+}
+
 pub(crate) struct Choice {
     profile: Profile,
     chosen: Vec<(Product, MatmulTile)>,
@@ -118,7 +133,12 @@ impl Choice {
     }
 }
 
-pub(crate) fn key(device: &AdapterInfo, fingerprint: u64, profiles: &[Profile]) -> String {
+pub(crate) fn key(
+    device: &AdapterInfo,
+    fingerprint: u64,
+    profiles: &[Profile],
+    mode: ChoiceMode,
+) -> String {
     let mut digest = Digest::new();
     digest.word(FORMAT);
     digest.long(neura_plan::PLAN_BUILD);
@@ -136,27 +156,41 @@ pub(crate) fn key(device: &AdapterInfo, fingerprint: u64, profiles: &[Profile]) 
             }
         }
     }
-    format!("plan/{FORMAT}-{fingerprint:016x}-{:016x}", digest.finish())
+    format!(
+        "plan/{FORMAT}-{}-{fingerprint:016x}-{:016x}",
+        mode.name(),
+        digest.finish(),
+    )
 }
 
 impl Runtime {
     pub fn tuned(&self, graph: &Graph, weights: &Weights) -> Program {
-        match self.remembered(graph) {
+        match self.remembered(graph, ChoiceMode::Tuned) {
             Some(choice) => self.compile_chosen(graph, weights, choice.profile(), choice.chosen()),
             None => self.tune(graph, weights),
         }
     }
 
-    pub(crate) fn remembered(&self, graph: &Graph) -> Option<Choice> {
+    pub(crate) fn remembered(&self, graph: &Graph, mode: ChoiceMode) -> Option<Choice> {
         let profiles = self.profiles();
-        let key = key(self.context.adapter_info(), graph.fingerprint(), &profiles);
+        let key = key(
+            self.context.adapter_info(),
+            graph.fingerprint(),
+            &profiles,
+            mode,
+        );
         let bytes = self.context.device().artifact_cache().load(&key)?;
         Choice::decode(&bytes, &profiles)
     }
 
-    pub(crate) fn remember(&self, graph: &Graph, choice: &Choice) {
+    pub(crate) fn remember(&self, graph: &Graph, choice: &Choice, mode: ChoiceMode) {
         let profiles = self.profiles();
-        let key = key(self.context.adapter_info(), graph.fingerprint(), &profiles);
+        let key = key(
+            self.context.adapter_info(),
+            graph.fingerprint(),
+            &profiles,
+            mode,
+        );
         self.context
             .device()
             .artifact_cache()

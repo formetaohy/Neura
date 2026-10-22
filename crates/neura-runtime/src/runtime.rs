@@ -23,6 +23,7 @@ use std::sync::{Arc, OnceLock};
 
 mod choice;
 mod session;
+mod settle;
 mod tune;
 
 pub use session::{Cursor, Session};
@@ -289,7 +290,7 @@ impl Runtime {
             .expect("the device offers no workgroup the framework can schedule")
     }
 
-    fn planned_profile(&self, graph: &Graph) -> Profile {
+    pub(super) fn planned_profile(&self, graph: &Graph) -> Profile {
         let balanced = self.default_profile();
         let plan = Plan::sketch(graph, self.alignment, balanced, self.encoding_bytes);
         let mut work = 0u64;
@@ -495,7 +496,7 @@ impl Runtime {
     }
 
     pub fn compile(&self, graph: &Graph, weights: &Weights) -> Program {
-        match self.remembered(graph) {
+        match self.remembered(graph, choice::ChoiceMode::Tuned) {
             Some(choice) => self.compile_chosen(graph, weights, choice.profile(), choice.chosen()),
             None => self.compile_with(graph, weights, self.planned_profile(graph)),
         }

@@ -302,7 +302,7 @@ impl Batch {
             .expect("a cache of the window and the scratch rows a masked chunk fills fits");
         let compile = match tune {
             true => Runtime::tuned,
-            false => Runtime::compile,
+            false => Runtime::compile_measured,
         };
         let seeded = sampling != Sampling::GREEDY;
         let initial = sampling.temperature().unwrap_or(1.0);

@@ -1,4 +1,4 @@
-use super::choice::Choice;
+use super::choice::{Choice, ChoiceMode};
 use super::{Program, Runtime, Weights, resident_weight_slots};
 use neura_abi::{Element, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
@@ -50,11 +50,11 @@ impl Runtime {
             )
         };
         self.restore_held_state(measuring, &held);
-        self.remember(graph, &Choice::of(profile, &chosen));
+        self.remember(graph, &Choice::of(profile, &chosen), ChoiceMode::Tuned);
         self.compile_chosen(graph, weights, profile, &chosen)
     }
 
-    fn hold_state(&self, weights: &Weights) -> Vec<u8> {
+    pub(super) fn hold_state(&self, weights: &Weights) -> Vec<u8> {
         let (first, words) = state_words(weights);
         if words == 0 {
             return Vec::new();
@@ -64,7 +64,7 @@ impl Runtime {
             .get(self.context.queue(), first, words * WORD_BYTES)
     }
 
-    fn restore_held_state(&self, weights: &Weights, held: &[u8]) {
+    pub(super) fn restore_held_state(&self, weights: &Weights, held: &[u8]) {
         let (first, words) = state_words(weights);
         if words == 0 || held.is_empty() {
             return;
@@ -83,7 +83,7 @@ impl Runtime {
         .to_vec()
     }
 
-    fn fastest_plan(
+    pub(super) fn fastest_plan(
         &self,
         graph: &Graph,
         weights: &Weights,
@@ -164,7 +164,7 @@ impl Runtime {
         }
     }
 
-    fn verified(
+    pub(super) fn verified(
         &self,
         graph: &Graph,
         weights: &Weights,
@@ -298,7 +298,7 @@ fn state_words(weights: &Weights) -> (u64, u64) {
     (first, arena.words().saturating_sub(first))
 }
 
-fn planned_tiles(products: &[Product], profile: Profile) -> Vec<(Product, MatmulTile)> {
+pub(super) fn planned_tiles(products: &[Product], profile: Profile) -> Vec<(Product, MatmulTile)> {
     products
         .iter()
         .map(|product| (*product, product.planned(profile)))

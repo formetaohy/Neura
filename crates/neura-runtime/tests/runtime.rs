@@ -1191,3 +1191,34 @@ fn a_heavy_wave_walks_the_slices_its_work_names() {
     }
     assert_close(&runtime.read(&program, output), &expected, 0.0);
 }
+
+#[test]
+fn a_measured_plan_restores_the_state_it_timed() {
+    let runtime = open();
+    let graph = Graph::new();
+    let left = graph.input(Shape::matrix(2, 1024), Element::Single);
+    let weight = graph.named_block_quantized_parameter(
+        "weight",
+        Shape::matrix(8192, 1024),
+        Init::Zero,
+        Element::Q8_0,
+    );
+    let state = graph.named_state(
+        "state",
+        Shape::of([1, 1, 1, 1024]),
+        Init::Zero,
+        Element::Single,
+    );
+    let product = graph.matmul(left, graph.permute(weight, [0, 1, 3, 2]));
+    graph.retain(product);
+    graph.copy_into(
+        state,
+        graph.add(state, graph.fill(Shape::of([1, 1, 1, 1024]), 1.0)),
+    );
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile_measured(&graph, &weights);
+    assert_eq!(runtime.read(&program, state), vec![0.0; 1024]);
+    runtime.write(&program, left, &vec![0.5; 2048]);
+    runtime.run(&program);
+    assert_eq!(runtime.read(&program, state), vec![1.0; 1024]);
+}
