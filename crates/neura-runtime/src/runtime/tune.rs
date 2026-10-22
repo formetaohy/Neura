@@ -11,6 +11,14 @@ const TILE_ROUNDS: u32 = 4;
 const PLAN_WARMUP: u32 = 1;
 const PLAN_ROUNDS: u32 = 4;
 
+struct MeasuredProduct<'a> {
+    graph: &'a Graph,
+    weights: &'a Weights,
+    layout: u64,
+    stored: u64,
+    budget: u64,
+}
+
 impl Runtime {
     pub fn tune(&self, graph: &Graph, weights: &Weights) -> Program {
         let scratch = graph
@@ -20,17 +28,34 @@ impl Runtime {
         let held = self.hold_state(measuring);
         let products = self.products(graph);
         let default = self.default_profile();
-        let mut candidates = Vec::new();
-        for profile in self
+        let profiles = self
             .profiles()
             .into_iter()
             .filter(|profile| profile.workgroup() <= TUNE_WORKGROUP)
-        {
-            let planned = planned_tiles(&products, profile);
-            let measured = self.measured_tiles(&products, profile);
-            candidates.push((profile, planned.clone()));
+            .collect::<Vec<_>>();
+        let occupied = match scratch.is_some() {
+            true => weights.bytes().saturating_add(measuring.bytes()),
+            false => measuring.bytes(),
+        };
+        let budget = self.heap.bytes().saturating_sub(occupied) / WORD_BYTES;
+        let planned = profiles
+            .iter()
+            .map(|profile| planned_tiles(&products, *profile))
+            .collect::<Vec<_>>();
+        let measured = self.measured_tiles(&products, &profiles, budget);
+        let mut candidates = Vec::new();
+        for (index, profile) in profiles.iter().enumerate() {
+            let planned = planned[index].clone();
+            let measured = products
+                .iter()
+                .zip(&measured[index])
+                .map(|(product, tile)| {
+                    (*product, tile.unwrap_or_else(|| product.planned(*profile)))
+                })
+                .collect::<Vec<_>>();
+            candidates.push((*profile, planned.clone()));
             if measured != planned {
-                candidates.push((profile, measured));
+                candidates.push((*profile, measured));
             }
         }
         let index = candidates
@@ -193,37 +218,73 @@ impl Runtime {
         }
     }
 
-    fn measured_tiles(&self, products: &[Product], profile: Profile) -> Vec<(Product, MatmulTile)> {
-        products
-            .iter()
-            .map(|product| {
-                let tile = self
-                    .measured_tile(*product, profile)
-                    .unwrap_or_else(|| product.planned(profile));
-                (*product, tile)
-            })
-            .collect()
+    fn measured_tiles(
+        &self,
+        products: &[Product],
+        profiles: &[Profile],
+        budget: u64,
+    ) -> Vec<Vec<Option<MatmulTile>>> {
+        let mut measured = vec![vec![None; products.len()]; profiles.len()];
+        let mut ordered = (0..products.len()).collect::<Vec<_>>();
+        ordered.sort_by_key(|index| {
+            let product = products[*index];
+            std::cmp::Reverse(product.weight().element().payload_words(
+                u64::from(product.planes())
+                    * u64::from(product.columns())
+                    * u64::from(product.depth()),
+            ))
+        });
+        for index in ordered {
+            let product = products[index];
+            let graph = product_graph(product);
+            let layout = Layout::of(&graph, self.alignment);
+            let elements = u64::from(product.planes())
+                * u64::from(product.columns())
+                * u64::from(product.depth());
+            let stored = product.weight().element().storage_words(elements);
+            let wanted = layout.words().saturating_add(stored);
+            if wanted > budget || !self.heap.holds(wanted) {
+                continue;
+            }
+            let weights = self.weights(&graph);
+            let held = MeasuredProduct {
+                graph: &graph,
+                weights: &weights,
+                layout: layout.words(),
+                stored,
+                budget,
+            };
+            for (slot, profile) in profiles.iter().enumerate() {
+                measured[slot][index] = self.measured_tile(&held, product, *profile);
+            }
+        }
+        measured
     }
 
-    fn measured_tile(&self, product: Product, profile: Profile) -> Option<MatmulTile> {
-        let graph = product_graph(product);
-        let layout = Layout::of(&graph, self.alignment);
-        let tensors = Plan::of(&graph, self.alignment, profile, self.encoding_bytes).tensor_bytes()
+    fn measured_tile(
+        &self,
+        held: &MeasuredProduct<'_>,
+        product: Product,
+        profile: Profile,
+    ) -> Option<MatmulTile> {
+        let tensors = Plan::of(held.graph, self.alignment, profile, self.encoding_bytes)
+            .tensor_bytes()
             / WORD_BYTES;
         let tiles = product.shortlist(profile);
-        if !self.heap.holds(layout.words() + tensors) {
+        let wanted = held
+            .layout
+            .saturating_add(held.stored)
+            .saturating_add(tensors);
+        if wanted > held.budget || !self.heap.holds(wanted) {
             return None;
         }
-        let weights = self.weights(&graph);
         let mut fastest = None;
         let mut seconds = f64::MAX;
-        if self
-            .heap
-            .holds(layout.words() + tensors * tiles.len() as u64)
-        {
+        let staged = wanted.saturating_add(tensors.saturating_mul(tiles.len() as u64 - 1));
+        if staged <= held.budget && self.heap.holds(staged) {
             let programs = tiles
                 .iter()
-                .map(|tile| self.program(&graph, &weights, *tile))
+                .map(|tile| self.program(held.graph, held.weights, *tile))
                 .collect::<Vec<_>>();
             for program in &programs {
                 self.run(program);
@@ -244,7 +305,7 @@ impl Runtime {
             }
         } else {
             for tile in &tiles {
-                let program = self.program(&graph, &weights, *tile);
+                let program = self.program(held.graph, held.weights, *tile);
                 for _ in 0..TILE_WARMUP {
                     self.run(&program);
                 }
