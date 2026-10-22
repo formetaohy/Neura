@@ -139,10 +139,7 @@ impl Product {
     }
 
     fn wide_run(self, profile: Profile) -> Option<MatmulTile> {
-        if self.rows != WIDE_RUN_ROWS
-            || self.columns < WIDE_RUN_COLUMNS
-            || self.weight.contiguous != Contiguous::Reduction
-        {
+        if self.rows < WIDE_RUN_ROWS || self.weight.contiguous != Contiguous::Reduction {
             return None;
         }
         self.cheapest(profile, |tile| {
@@ -286,7 +283,9 @@ impl Product {
         match tile.strategy() {
             MatmulStrategy::Staged => {
                 !self.narrow(profile)
-                    && (tile.columns() < WIDE_RUN_TILE_COLUMNS || self.columns >= WIDE_RUN_COLUMNS)
+                    && (tile.columns() < WIDE_RUN_TILE_COLUMNS
+                        || self.columns >= WIDE_RUN_COLUMNS
+                        || tile.stages_a_run())
                     && (!tile.stages_a_run()
                         || (self.weight.contiguous == Contiguous::Reduction && self.stages(tile)))
             }
