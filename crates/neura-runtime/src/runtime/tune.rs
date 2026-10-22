@@ -5,7 +5,7 @@ use neura_graph::{Graph, Init, Shape};
 use neura_plan::{Contiguous, Layout, Plan, Product};
 use neura_profile::{MatmulTile, Profile};
 
-const TUNE_WORKGROUP: u32 = 512;
+const TUNE_WORKGROUP: u32 = 256;
 const TILE_WARMUP: u32 = 1;
 const TILE_ROUNDS: u32 = 4;
 const PLAN_WARMUP: u32 = 1;
@@ -28,6 +28,9 @@ impl Runtime {
         let held = self.hold_state(measuring);
         let products = self.products(graph);
         let default = self.default_profile();
+        if default.workgroup() > TUNE_WORKGROUP {
+            return self.compile_with(graph, weights, default);
+        }
         let profiles = self
             .profiles()
             .into_iter()

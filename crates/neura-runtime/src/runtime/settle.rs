@@ -4,8 +4,12 @@ use super::{Program, Runtime, Weights};
 use neura_graph::Graph;
 use neura_plan::{Plan, Product};
 
-const SETTLE_WORKGROUP: u32 = 512;
+const SETTLE_WORKGROUP: u32 = 256;
+const SETTLE_PREFILL_WORKGROUP: u32 = 512;
+const SETTLE_PREFILL_ROWS: u32 = 8;
 const SETTLE_WEIGHT_WORDS: u64 = 1 << 20;
+const SETTLE_WARMUP: u32 = 1;
+const SETTLE_ROUNDS: u32 = 4;
 
 impl Runtime {
     pub fn compile_measured(&self, graph: &Graph, weights: &Weights) -> Program {
@@ -24,12 +28,19 @@ impl Runtime {
             self.encoding_bytes,
         );
         let products = sketch.products().to_vec();
-        if sketch.dynamic() || !worth_measuring(&products) {
+        let ceiling = match products
+            .iter()
+            .all(|product| product.rows() >= SETTLE_PREFILL_ROWS)
+        {
+            true => SETTLE_PREFILL_WORKGROUP,
+            false => SETTLE_WORKGROUP,
+        };
+        if sketch.dynamic() || !worth_measuring(&products) || planned.workgroup() > ceiling {
             return self.compile_with(graph, weights, planned);
         }
         let mut profiles = vec![planned];
         for workgroup in [planned.workgroup() / 2, planned.workgroup() * 2] {
-            if !(32..=SETTLE_WORKGROUP).contains(&workgroup) {
+            if !(32..=ceiling).contains(&workgroup) {
                 continue;
             }
             let resident = self
@@ -43,24 +54,38 @@ impl Runtime {
                 profiles.push(profile);
             }
         }
-        let candidates = profiles
-            .into_iter()
-            .map(|profile| (profile, planned_tiles(&products, profile)))
-            .collect::<Vec<_>>();
         let held = self.hold_state(weights);
-        let winner = self.fastest_plan(graph, weights, &candidates);
-        let (profile, _) = match winner {
-            0 => candidates[0].clone(),
-            challenger => self.verified(
-                graph,
-                weights,
-                candidates[0].clone(),
-                candidates[challenger].clone(),
-            ),
-        };
+        let mut measured = Vec::new();
+        let mut fastest = f64::INFINITY;
+        let mut winner = 0;
+        for profile in profiles {
+            let chosen = planned_tiles(&products, profile);
+            let words = self.plan_words(graph, weights, profile, &chosen);
+            if !self.heap.holds(words) {
+                continue;
+            }
+            let program = self.compile_chosen(graph, weights, profile, &chosen);
+            for _ in 0..SETTLE_WARMUP {
+                self.run(&program);
+            }
+            let mut seconds = f64::INFINITY;
+            for _ in 0..SETTLE_ROUNDS {
+                seconds = seconds.min(self.run(&program).seconds());
+            }
+            if seconds < fastest {
+                fastest = seconds;
+                winner = measured.len();
+            }
+            measured.push((profile, chosen, program));
+        }
+        assert!(
+            !measured.is_empty(),
+            "a plan worth measuring fits the heap at one of its profiles",
+        );
+        let (profile, chosen, program) = measured.swap_remove(winner);
         self.restore_held_state(weights, &held);
-        self.remember(graph, &Choice::of(profile, &[]), ChoiceMode::Settled);
-        self.compile_chosen(graph, weights, profile, &[])
+        self.remember(graph, &Choice::of(profile, &chosen), ChoiceMode::Settled);
+        program
     }
 }
 
