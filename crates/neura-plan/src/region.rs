@@ -365,7 +365,7 @@ pub(crate) fn touches<W: Walk, V: Values>(
     span: (u32, u32),
     touched: &mut Touches,
 ) {
-    if exact(values, task) || bounded(values, task) {
+    if task.kind() == Kind::SegmentSum || exact(values, task) || bounded(values, task) {
         walked(touched, task, values, tiles, span, &[]);
     } else {
         whole(touched, task, values);
@@ -405,7 +405,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
 ) {
     touched.clear();
     let (first, count) = span;
-    if count == 0 {
+    if count == 0 && task.kind() != Kind::SegmentSum {
         empty(touched, task, values);
         return;
     }
