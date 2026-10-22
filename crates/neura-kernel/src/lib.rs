@@ -1,5 +1,6 @@
 mod authored;
 mod dot;
+mod dot_pair;
 mod fetch;
 mod pointwise;
 mod scheduler;

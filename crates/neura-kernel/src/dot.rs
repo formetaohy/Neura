@@ -90,6 +90,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
         );
     }
     compiler.select("codes_by_element", "codes");
+    crate::dot_pair::install(compiler, weights);
 }
 
 fn dispatch(compiler: &mut Compiler, weights: &[Element], by_element: &str, family: &str) {
@@ -121,7 +122,7 @@ fn dot_arguments() -> Vec<ast::Expression> {
         .collect()
 }
 
-fn symbol(element: Element) -> &'static str {
+pub(crate) fn symbol(element: Element) -> &'static str {
     match element {
         Element::Q8_0 => "q8_0",
         Element::Q4K => "q4_k",
@@ -387,6 +388,7 @@ mod panel {
 
 #[neura_compiler::module]
 mod device {
+
     fn generic_dot_by_element(
         right: Value,
         left: Value,

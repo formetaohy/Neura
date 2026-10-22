@@ -60,10 +60,10 @@ fn ty(source: &syn::Type) -> syn::Result<TokenStream> {
                 .get_ident()
                 .expect("a simple type has an identifier")
                 .to_string();
-            let name = if name == "Uvec3" {
-                "uvec3"
-            } else {
-                name.as_str()
+            let name = match name.as_str() {
+                "Uvec3" => "uvec3",
+                "Fvec2" => "fvec2",
+                _ => name.as_str(),
             };
             Ok(quote!(neura_ast::Type::Named(#name.into())))
         }

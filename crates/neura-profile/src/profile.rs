@@ -1471,13 +1471,17 @@ impl FoldedTile {
     }
 
     pub const fn stage_region_words(self) -> u64 {
-        match self.run && self.rows > 1 {
+        let staged = self.stage_words();
+        let partials = self.partials_words();
+        match self.rows > 1 {
             true => {
-                let staged = self.stage_words();
-                let partials = self.partials_words();
-                if staged > partials { staged } else { partials }
+                if staged > partials {
+                    staged
+                } else {
+                    partials
+                }
             }
-            false => self.stage_words() + self.partials_words(),
+            false => staged + partials,
         }
     }
 
@@ -2478,6 +2482,10 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
             let fused = FoldedTile::staged(2, warps, fold, FOLDED_LANES);
             if fused.scratch_words() <= words {
                 tiles.push(fused);
+            }
+            let paired = FoldedTile::new(2, warps, fold, FOLDED_LANES);
+            if paired.scratch_words() <= words {
+                tiles.push(paired);
             }
         }
         held = match held {

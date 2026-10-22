@@ -293,7 +293,11 @@ impl Product {
             MatmulStrategy::Folded => {
                 self.narrow(profile)
                     && self.weight.contiguous == Contiguous::Reduction
-                    && (!tile.stages_a_run() || self.weight.element().stages_a_run())
+                    && tile.rows() <= self.rows
+                    && match tile.rows() {
+                        0 | 1 => !tile.stages_a_run() || self.weight.element().stages_a_run(),
+                        _ => tile.stages_a_run() == self.weight.element().stages_a_run(),
+                    }
             }
         }
     }

@@ -50,17 +50,26 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                 ));
                 constants.push((
                     "MATMUL_FOLDED_PARTIALS",
-                    u32::try_from(neura_profile::folded_stage_words(tile.rows()))
-                        .expect("a staged left fits one device word"),
+                    match tile.rows() > 1 {
+                        true => 0u32,
+                        false => u32::try_from(neura_profile::folded_stage_words(tile.rows()))
+                            .expect("a staged left fits one device word"),
+                    },
                 ));
-                let (dot, stage, gate) = match tile.stages_a_run() {
-                    true => ("dot_run", "stage", "run_gate"),
-                    false => ("dot_staged", "stage_untouched", "run_gate_none"),
+                let (dot, stage, gate) = match (tile.rows() > 1, tile.stages_a_run()) {
+                    (true, true) => ("dot_pair", "stage", "run_gate"),
+                    (true, false) => ("dot_pair", "stage_untouched", "run_gate_none"),
+                    (false, true) => ("dot_run", "stage", "run_gate"),
+                    (false, false) => ("dot_staged", "stage_untouched", "run_gate_none"),
                 };
-                compiler.select(dot, &format!("dot_{suffix}"));
+                let dot_name = match dot {
+                    "dot_pair" => format!("dot_pair_{suffix}"),
+                    _ => format!("dot_{suffix}"),
+                };
+                compiler.select(dot, &dot_name);
                 compiler.select(stage, &format!("stage_{suffix}"));
                 compiler.select(gate, &format!("gate_{suffix}"));
-                let template = match tile.stages_a_run() && tile.rows() > 1 {
+                let template = match tile.rows() > 1 {
                     true => "template_run_matmul_folded_fused",
                     false => "template_run_matmul_folded",
                 };
@@ -584,19 +593,18 @@ mod device {
                     template_gate();
                     if step < blocks && at < depth {
                         let last = min(at + MATMUL_DEPTH, depth) - at;
-                        for row in unroll(0u32, MATMUL_ROWS, 1u32) {
-                            let inside = base_row + row < row_bound && column < columns;
-                            let register = row * MATMUL_FOLDS + fold;
-                            acc[register] = acc[register]
-                                + template_dot(
-                                    right,
-                                    left,
-                                    staged,
-                                    step * (MATMUL_DEPTH + 1u32) + row * FOLDED_ROW_STRIDE,
-                                    last,
-                                    inside,
-                                );
-                        }
+                        let inside = base_row < row_bound && column < columns;
+                        let paired = template_dot_pair(
+                            right,
+                            left,
+                            staged,
+                            step * (MATMUL_DEPTH + 1u32),
+                            step * (MATMUL_DEPTH + 1u32) + FOLDED_ROW_STRIDE,
+                            last,
+                            inside,
+                        );
+                        acc[fold] = acc[fold] + paired.x;
+                        acc[MATMUL_FOLDS + fold] = acc[MATMUL_FOLDS + fold] + paired.y;
                     }
                 }
             }

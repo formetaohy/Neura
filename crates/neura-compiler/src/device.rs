@@ -65,6 +65,7 @@ vocabulary! {
     Pow "pow" Kernel 2 true;
     Floor "floor" Kernel 1 true;
     Uvec4 "uvec4" Kernel 4 true;
+    Fvec2 "fvec2" Kernel 2 true;
     BitcastU32 "bitcast_u32" Kernel 1 true;
     BitcastF32 "bitcast_f32" Kernel 1 true;
     UnpackHalf2x16 "unpack2x16float" Kernel 1 true;
@@ -189,6 +190,10 @@ pub fn floor(_value: f32) -> f32 {
 }
 
 pub fn uvec4(_x: u32, _y: u32, _z: u32, _w: u32) -> Uvec4 {
+    unreachable!("a device intrinsic exists only on the device")
+}
+
+pub fn fvec2(_x: f32, _y: f32) -> Fvec2 {
     unreachable!("a device intrinsic exists only on the device")
 }
 

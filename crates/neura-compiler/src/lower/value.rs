@@ -506,6 +506,18 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
+            Intrinsic::Fvec2 => {
+                let ty = self.compiler.scalar("f32");
+                let constituents = args
+                    .iter()
+                    .map(|arg| self.value_with_hint(arg, Some(ty)).value)
+                    .collect::<Vec<_>>();
+                let ty = self.compiler.ty("fvec2");
+                self.emit(ty, |result| DeviceInstruction::Compose {
+                    constituents,
+                    result,
+                })
+            }
             Intrinsic::Select => {
                 let reject = self.value(&args[0]);
                 let accept = self.value_with_hint(&args[1], Some(reject.ty));

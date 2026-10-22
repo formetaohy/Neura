@@ -2,7 +2,6 @@ use neura_abi::Element;
 use neura_gguf::Gguf;
 use neura_graph::{AttentionOptions, Graph, Init, Shape, Value, Window};
 use neura_precision::{pack, unpack};
-use neura_profile::MatmulStrategy;
 use neura_runtime::MemoryRequest;
 use support::attention::{Shapes, attention_forward};
 use support::convolution::{conv2d_input_reference, conv2d_reference, conv2d_weight_reference};
@@ -12,16 +11,10 @@ mod support;
 
 #[test]
 fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
-    let (depth, columns) = (512u32, 2048u32);
+    let (depth, columns) = (2048u32, 1024u32);
     for element in [Element::Q8_0, Element::Q4K, Element::Q5K, Element::Q6K] {
         let runtime = open();
-        let fused = runtime.profiles().iter().copied().find(|profile| {
-            profile
-                .tiles()
-                .iter()
-                .any(|tile| tile.strategy() == MatmulStrategy::Folded && tile.rows() == 2)
-        });
-        let profile = fused.unwrap_or_else(|| runtime.default_profile());
+        let profile = runtime.default_profile();
         let values = random(columns * depth, 23);
         let payload = pack(element, 1.0, &values);
         let shape = [u64::from(columns), u64::from(depth)];
@@ -42,13 +35,14 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
                 &Gguf::decode(&gguf_bytes(32, &[(element, &shape, &payload)])),
             );
             let program = runtime.compile_with(&graph, &weights, profile);
-            if element == Element::Q8_0 && rows == 2 && fused.is_some() {
+            if rows == 2 && element.block().is_some() {
                 assert!(
                     program
                         .matmul_geometries()
                         .iter()
                         .any(|(tile, _)| tile.rows() == 2),
-                    "a two row q8_0 product folds both rows through one staged weight",
+                    "a two row {} product folds both rows through one weight read",
+                    element.name(),
                 );
             }
             let inputs = random(rows * depth, 29);
