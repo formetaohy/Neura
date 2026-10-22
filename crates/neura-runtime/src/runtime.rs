@@ -709,6 +709,7 @@ impl Runtime {
         );
         let authored = plan.carries_authored();
         let banks = self.heap.banks();
+        let gated = plan.has_gates();
         let tables = cache::tables(plan);
         self.assert_storage_bindings(banks, paged);
         self.artifacts.kernel(
@@ -721,6 +722,7 @@ impl Runtime {
                 authored,
                 banks,
                 paged,
+                gated,
                 tables,
             },
             || {
@@ -733,6 +735,7 @@ impl Runtime {
                     authored,
                     banks,
                     paged,
+                    gated,
                     tables,
                 })
             },

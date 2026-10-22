@@ -7,8 +7,8 @@ use crate::span::Split;
 use neura_abi::{SegmentFields, SegmentRecord, control};
 use neura_profile::{ConvolutionInputTile, ConvolutionTile, MatmulTile};
 
-const GATE_DEPTH: usize = 64;
-const GATE_EDGES: u64 = 4096;
+const GATE_DEPTH: usize = 1 << 16;
+const GATE_EDGES: u64 = 1 << 20;
 const SLICES_PER_PLAN: u64 = 64;
 const MIN_WAVE_WORK: u64 = 1 << 20;
 

@@ -85,6 +85,7 @@ pub(crate) struct KernelIdentity {
     pub(crate) authored: bool,
     pub(crate) banks: Banks,
     pub(crate) paged: bool,
+    pub(crate) gated: bool,
     pub(crate) tables: Tables,
 }
 

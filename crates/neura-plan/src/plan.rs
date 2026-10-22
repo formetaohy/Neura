@@ -175,6 +175,12 @@ impl Encoding {
         &self.wave_table
     }
 
+    pub fn has_gates(&self) -> bool {
+        self.wave_table
+            .get(1..)
+            .is_some_and(|table| table.as_chunks::<4>().0.iter().any(|held| held[2] != 0))
+    }
+
     pub fn roots(&self) -> &[u32] {
         &self.roots
     }
@@ -820,6 +826,10 @@ impl Plan {
 
     pub fn tiles(&self) -> &[MatmulTile] {
         self.profile.tiles()
+    }
+
+    pub fn has_gates(&self) -> bool {
+        self.dynamic() || self.bound.has_gates()
     }
 
     pub fn kinds(&self) -> &[Kind] {

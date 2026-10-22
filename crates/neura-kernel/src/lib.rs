@@ -203,6 +203,7 @@ pub struct KernelRequest<'a> {
     pub authored: bool,
     pub banks: Banks,
     pub paged: bool,
+    pub gated: bool,
     pub tables: Tables,
 }
 
@@ -217,6 +218,7 @@ impl Kernel {
             authored,
             banks,
             paged,
+            gated,
             tables,
         } = request;
         assert!(
@@ -232,6 +234,7 @@ impl Kernel {
             compiler.record(*record);
         }
         compiler.constant("WORKGROUP_SIZE", geometry.workgroup());
+        compiler.constant("SCHEDULER_GATED", u32::from(gated));
         compiler.constant("NO_VALUE", NO_VALUE);
         compiler.constant("NO_SLOT", neura_abi::NO_SLOT);
         compiler.constant("EXACT_WALK_LIMIT", neura_abi::EXACT_WALK_LIMIT);

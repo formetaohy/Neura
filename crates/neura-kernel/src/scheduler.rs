@@ -42,7 +42,10 @@ mod device {
         }
         if lid == 0u32 {
             atomic_store(&state[remaining(segment_id)], segment.predecessors);
-            claim[0u32] = atomic_sub(&state[wave_of(waves, segment.wave)], 1u32);
+            claim[0u32] = 1u32;
+            if SCHEDULER_GATED != 0u32 {
+                claim[0u32] = atomic_sub(&state[wave_of(waves, segment.wave)], 1u32);
+            }
         }
         let reached = workgroup_uniform_load(&claim[0u32]);
         if reached != 1u32 {
@@ -50,32 +53,34 @@ mod device {
         }
         if lid == 0u32 {
             let mut opened = NO_VALUE;
-            loop {
-                if atomic_add(&state[control::PREFIX_LOCK], 1u32) == 0u32 {
-                    break;
-                }
-            }
-            let prefix = atomic_add(&state[control::PREFIX], 0u32);
-            let mut next = prefix;
-            loop {
-                if next >= wave_count {
-                    break;
-                }
-                if atomic_add(&state[wave_of(waves, next)], 0u32) != 0u32 {
-                    break;
-                }
-                next = next + 1u32;
-            }
-            if next != prefix {
-                atomic_store(&state[control::PREFIX], next);
-                if next < wave_count {
-                    let held = wave_table + 1u32 + next * 4u32;
-                    if successors[held + 2u32] != 0u32 {
-                        opened = next;
+            if SCHEDULER_GATED != 0u32 {
+                loop {
+                    if atomic_add(&state[control::PREFIX_LOCK], 1u32) == 0u32 {
+                        break;
                     }
                 }
+                let prefix = atomic_add(&state[control::PREFIX], 0u32);
+                let mut next = prefix;
+                loop {
+                    if next >= wave_count {
+                        break;
+                    }
+                    if atomic_add(&state[wave_of(waves, next)], 0u32) != 0u32 {
+                        break;
+                    }
+                    next = next + 1u32;
+                }
+                if next != prefix {
+                    atomic_store(&state[control::PREFIX], next);
+                    if next < wave_count {
+                        let held = wave_table + 1u32 + next * 4u32;
+                        if successors[held + 2u32] != 0u32 {
+                            opened = next;
+                        }
+                    }
+                }
+                atomic_store(&state[control::PREFIX_LOCK], 0u32);
             }
-            atomic_store(&state[control::PREFIX_LOCK], 0u32);
             claim[1u32] = opened;
         }
         let opened = workgroup_uniform_load(&claim[1u32]);
