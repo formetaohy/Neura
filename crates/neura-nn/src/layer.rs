@@ -855,10 +855,7 @@ impl RmsNorm {
             self.columns,
             graph.shape(input).dims(),
         );
-        let squares = graph.mul(input, input);
-        let mean = graph.mean_axis(squares, MAX_RANK - 1);
-        let deviation = graph.sqrt(graph.add(mean, self.floor));
-        graph.mul(graph.mul(input, graph.recip(deviation)), self.scale)
+        graph.rms_norm(input, self.scale, self.floor)
     }
 
     pub fn scale(&self) -> Value {

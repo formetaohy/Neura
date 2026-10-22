@@ -555,6 +555,7 @@ fn schedule_unit(
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(plan, unit, profile);
         }
+        Kind::Norm | Kind::NormGrad => norm(plan, unit, profile),
         Kind::ClassLogSoftmax | Kind::ClassLogSoftmaxGrad => {
             class_log_softmax(plan, unit, profile);
         }
@@ -1334,6 +1335,29 @@ fn tiled_conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) ->
         plan.tasks.push(task);
     }
     true
+}
+
+fn norm(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
+    let out = plan.shape(unit.out);
+    let rows = out.rows();
+    let columns = out.columns();
+    if rows == 0 || columns == 0 {
+        return;
+    }
+    let target = device_workgroups(profile);
+    let per_task = rows.div_ceil(target).max(1);
+    let measure = measured(plan, unit.out, Measure::Rows);
+    for (first, count, split) in span::chunks(rows, per_task, measure) {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(columns) * 2,
+        );
+        task.geometry = strategy::WORKGROUP_ROW;
+        task.split = split;
+        plan.tasks.push(task);
+    }
 }
 
 fn softmax(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {

@@ -699,4 +699,20 @@ kinds! {
         chain: false,
         origin: false,
     };
+    Norm NORM = "norm" {
+        entry: "run_norm",
+        modules: [Reduce],
+        geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
+    NormGrad NORM_GRAD = "norm_grad" {
+        entry: "run_norm_grad",
+        modules: [Reduce],
+        geometry: Strategy,
+        prelude: false,
+        chain: true,
+        origin: false,
+    };
 }

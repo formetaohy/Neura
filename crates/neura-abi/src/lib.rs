@@ -42,6 +42,8 @@ pub const CHOICE_SECTIONS: u32 = 64;
 pub const CHOICE_STREAM: u32 = 4;
 pub const SOFTMAX_STREAM: u32 = 4;
 pub const CHOICE_MERGE_WORDS: u32 = 5 * CHOICE_SECTIONS + 3 * CANDIDATES;
+pub const NORM_RMS: u32 = 0;
+pub const NORM_L2: u32 = 1;
 
 const _: () = assert!(
     CHOICE_ROUND == MAX_RANK,

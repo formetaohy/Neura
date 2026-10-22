@@ -363,6 +363,7 @@ impl Kernel {
         pointwise::install(&mut compiler);
         task::rope::install(&mut compiler);
         task::clear::install(&mut compiler);
+        task::norm::install(&mut compiler);
         for module in DeviceModule::ALL {
             if kinds.iter().any(|kind| kind.carries(*module)) {
                 install(&mut compiler, *module, elements, &geometry, strategies);

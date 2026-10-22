@@ -564,6 +564,41 @@ impl Graph {
                     self.row_gradient(Kind::SoftmaxGrad, task, source, gradient, grads);
                 }
             }
+            Kind::Norm => {
+                let source = self.value_of(task.inputs[0]);
+                if self.tracked(&[source]) {
+                    let out = self.fresh(
+                        self.shape(source),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    );
+                    self.push(TaskInfo::of(
+                        Kind::NormGrad,
+                        task.op,
+                        out.id(),
+                        [
+                            task.inputs[0],
+                            task.inputs[1],
+                            task.extra,
+                            gradient.id(),
+                            NO_VALUE,
+                            NO_VALUE,
+                        ],
+                    ));
+                    self.accumulate(grads, source, out);
+                }
+                if task.inputs[1] != NO_VALUE {
+                    let weight = self.value_of(task.inputs[1]);
+                    if self.tracked(&[weight]) {
+                        let scale = self.value_of(task.extra);
+                        let product = self.mul(gradient, source);
+                        let scaled = self.mul(product, scale);
+                        let folded = self.sum_axis(self.sum_axis(self.sum_axis(scaled, 0), 1), 2);
+                        self.accumulate(grads, weight, folded);
+                    }
+                }
+            }
             Kind::Rope => {
                 let source = self.value_of(task.inputs[0]);
                 if self.tracked(&[source]) {
@@ -879,6 +914,7 @@ impl Graph {
             | Kind::SampleFold
             | Kind::SoftmaxFold
             | Kind::SoftmaxGradFold
+            | Kind::NormGrad
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite

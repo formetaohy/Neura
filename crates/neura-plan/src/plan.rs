@@ -2281,6 +2281,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::SegmentSum
             | Kind::Softmax
             | Kind::SoftmaxGrad
+            | Kind::Norm
+            | Kind::NormGrad
             | Kind::LogSoftmax
             | Kind::LogSoftmaxGrad
             | Kind::ClassLogSoftmax

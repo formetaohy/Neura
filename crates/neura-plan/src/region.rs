@@ -609,6 +609,7 @@ fn narrow<W: Walk, V: Values>(
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
+        Kind::Norm | Kind::NormGrad => rowed(values, task, first, count, &mut narrowed),
         Kind::Binary
         | Kind::Unary
         | Kind::Select

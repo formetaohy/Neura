@@ -1070,6 +1070,72 @@ impl Graph {
         self.elementwise(op::POW, base, exponent)
     }
 
+    pub fn rms_norm(&self, value: Value, weight: Value, floor: Value) -> Value {
+        self.norm(neura_abi::NORM_RMS, value, Some(weight), floor)
+    }
+
+    pub fn l2_norm(&self, value: Value, floor: Value) -> Value {
+        self.norm(neura_abi::NORM_L2, value, None, floor)
+    }
+
+    fn norm(&self, mode: u32, value: Value, weight: Option<Value>, floor: Value) -> Value {
+        let value = self.own(value);
+        let floor = self.own(floor);
+        let shape = self.shape(value);
+        let columns = shape.columns();
+        assert!(
+            shape.free(MAX_RANK - 1).is_none(),
+            "a norm folds {} numbers of a row whose length a binding names, and a free extent takes a length no norm holds",
+            columns,
+        );
+        assert!(
+            self.shape(floor).is_scalar(),
+            "a norm holds one floor, and value {} holds {} numbers",
+            floor.id(),
+            self.shape(floor).elements(),
+        );
+        let weight = weight.map(|weight| {
+            let weight = self.own(weight);
+            assert!(
+                self.contiguous(weight) && self.shape(weight).dims() == [1, 1, 1, columns],
+                "a norm of {columns} numbers weighs a vector of {columns} numbers, and value {} walks {:?}",
+                weight.id(),
+                self.shape(weight).dims(),
+            );
+            weight
+        });
+        let mut sources = vec![value];
+        if let Some(weight) = weight {
+            sources.push(weight);
+        }
+        let tracked = self.tracked(&sources);
+        let out = self.stored(shape, Element::Single, 1.0, Residency::Derived, tracked);
+        let rows = shape.rows();
+        let scale = self.stored(
+            Shape::of([1, 1, rows, 1]),
+            Element::Single,
+            1.0,
+            Residency::Derived,
+            false,
+        );
+        let mut task = TaskInfo::of(
+            Kind::Norm,
+            mode,
+            out.id(),
+            [
+                value.id(),
+                weight.map_or(NO_VALUE, |weight| weight.id()),
+                floor.id(),
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ],
+        );
+        task.extra = scale.id();
+        self.push(task);
+        out
+    }
+
     pub fn softmax(&self, value: Value) -> Value {
         let value = self.own(value);
         self.rowwise(Kind::Softmax, value)

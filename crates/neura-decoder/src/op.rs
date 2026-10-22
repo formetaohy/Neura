@@ -1,17 +1,11 @@
 use neura_graph::{Graph, Shape, Value};
 
 pub fn rms(graph: &Graph, value: Value, weight: Value, floor: Value) -> Value {
-    let squares = graph.mul(value, value);
-    let mean = graph.mean_axis(squares, 3);
-    let scale = graph.recip(graph.sqrt(graph.add(mean, floor)));
-    graph.mul(graph.mul(value, scale), weight)
+    graph.rms_norm(value, weight, floor)
 }
 
 pub fn l2(graph: &Graph, value: Value, floor: Value) -> Value {
-    let squares = graph.mul(value, value);
-    let total = graph.sum_axis(squares, 3);
-    let scale = graph.recip(graph.sqrt(graph.add(total, floor)));
-    graph.mul(value, scale)
+    graph.l2_norm(value, floor)
 }
 
 pub fn softplus(graph: &Graph, value: Value) -> Value {
