@@ -19,7 +19,7 @@ Neura is an **AI framework designed for games**. It lets you **train and run mod
 
 ## Features
 
-- **High Performance**: Designed for local devices with limited VRAM and compute.
+- **High Performance**: Runs efficiently on resource-constrained local devices.
 - **Game-loop Integration**: Run training and inference directly from your frame loop, without async/await.
 - **Cross-platform Deployment**: Neura runs wherever your game runs, using the same native graphics API.
 - **Kernel Compiler**: Custom kernels written in Rust are compiled by Neura's built-in AOT compiler into SPIR-V, HLSL, and MSL.
