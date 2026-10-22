@@ -50,24 +50,32 @@ mod device {
         }
         if lid == 0u32 {
             let mut opened = NO_VALUE;
-            let prefix = atomic_add(&state[control::PREFIX], 0u32);
-            if segment.wave == prefix {
-                let mut next = prefix;
-                loop {
-                    if next >= wave_count {
-                        break;
-                    }
-                    if atomic_add(&state[wave_of(waves, next)], 0u32) != 0u32 {
-                        let held = wave_table + 1u32 + next * 4u32;
-                        if successors[held + 2u32] != 0u32 {
-                            opened = next;
-                        }
-                        break;
-                    }
-                    next = next + 1u32;
+            loop {
+                if atomic_add(&state[control::PREFIX_LOCK], 1u32) == 0u32 {
+                    break;
                 }
-                atomic_store(&state[control::PREFIX], next);
             }
+            let prefix = atomic_add(&state[control::PREFIX], 0u32);
+            let mut next = prefix;
+            loop {
+                if next >= wave_count {
+                    break;
+                }
+                if atomic_add(&state[wave_of(waves, next)], 0u32) != 0u32 {
+                    break;
+                }
+                next = next + 1u32;
+            }
+            if next != prefix {
+                atomic_store(&state[control::PREFIX], next);
+                if next < wave_count {
+                    let held = wave_table + 1u32 + next * 4u32;
+                    if successors[held + 2u32] != 0u32 {
+                        opened = next;
+                    }
+                }
+            }
+            atomic_store(&state[control::PREFIX_LOCK], 0u32);
             claim[1u32] = opened;
         }
         let opened = workgroup_uniform_load(&claim[1u32]);
