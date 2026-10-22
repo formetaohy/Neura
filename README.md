@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Deep learning for games</strong>
+  <strong>Train and run AI in your game.</strong>
 </p>
 
 <p align="center">
@@ -15,13 +15,14 @@
 
 ## What is Neura?
 
-Neura is a **deep learning framework designed for games**, making it easy to build **AI-native games**. It uses your game's native graphics API, **without CUDA**.
+Neura is an **AI framework designed for games**. It lets you **train and run models such as Qwen locally inside your game**, using the game's native graphics API—**no CUDA required**.
 
 ## Features
 
+- **High Performance**: Designed for local devices with limited VRAM and compute.
 - **Game-loop Integration**: Run training and inference directly from your frame loop, without async/await.
-- **Cross-platform Deployment**: Use your game's native graphics API directly — Neura runs right alongside your game.
-- **Kernel Compiler**: Write custom kernels in Rust; Neura generates SPIR-V, HLSL, and MSL, so you do not maintain separate shader implementations.
+- **Cross-platform Deployment**: Neura runs wherever your game runs, using the same native graphics API.
+- **Kernel Compiler**: Custom kernels written in Rust are compiled by Neura's built-in AOT compiler into SPIR-V, HLSL, and MSL.
 
 ## Documents
 
