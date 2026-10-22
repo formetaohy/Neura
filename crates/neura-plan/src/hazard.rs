@@ -1,8 +1,10 @@
 use crate::region::{Region, Touches, Values};
 use neura_abi::PAGE_WORDS;
+use std::collections::BTreeMap;
 
 const QUANTUM: u64 = PAGE_WORDS;
 const QUANTUM_MASK: u64 = QUANTUM - 1;
+const EXACT_BAND_RUNS: u64 = 256;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Hazard {
@@ -26,30 +28,22 @@ impl Hazard {
 
 #[derive(Default)]
 pub(crate) struct Accesses {
-    cells: Vec<(u64, Hazard)>,
+    cells: BTreeMap<u64, Hazard>,
     whole: Hazard,
     every: Hazard,
 }
 
 impl Accesses {
     fn split(&mut self, at: u64) {
-        let position = match self.cells.binary_search_by_key(&at, |(start, _)| *start) {
-            Ok(_) => return,
-            Err(position) => position,
-        };
-        let inherited = match position {
-            0 => Hazard::default(),
-            _ => self.cells[position - 1].1,
-        };
-        self.cells.insert(position, (at, inherited));
-    }
-
-    fn first_cell(&self, at: u64) -> usize {
-        match self.cells.binary_search_by_key(&at, |(start, _)| *start) {
-            Ok(position) => position,
-            Err(0) => 0,
-            Err(position) => position - 1,
+        if self.cells.contains_key(&at) {
+            return;
         }
+        let inherited = self
+            .cells
+            .range(..at)
+            .next_back()
+            .map_or_else(Hazard::default, |(_, hazard)| *hazard);
+        self.cells.insert(at, inherited);
     }
 
     pub(crate) fn record(&mut self, region: Region, hazard: &Hazard, quantized: bool) {
@@ -71,11 +65,8 @@ impl Accesses {
         if let Some(end) = end {
             self.split(end);
         }
-        let from = self.first_cell(first);
-        for (start, cell) in &mut self.cells[from..] {
-            if end.is_some_and(|end| *start >= end) {
-                break;
-            }
+        let end = end.unwrap_or(u64::MAX);
+        for (_, cell) in self.cells.range_mut(first..end) {
             cell.join(hazard);
         }
     }
@@ -90,11 +81,13 @@ impl Accesses {
         let mut hazard = Hazard::default();
         hazard.join(&self.whole);
         for (first, end) in quanta(region, quantized) {
-            let from = self.first_cell(first);
-            for (start, cell) in &self.cells[from..] {
-                if end.is_some_and(|end| *start >= end) {
-                    break;
-                }
+            let from = self
+                .cells
+                .range(..=first)
+                .next_back()
+                .map_or(0, |(start, _)| *start);
+            let end = end.unwrap_or(u64::MAX);
+            for (_, cell) in self.cells.range(from..end) {
                 hazard.join(cell);
             }
         }
@@ -192,7 +185,7 @@ pub(crate) fn quanta(region: Region, quantized: bool) -> Quanta {
             span,
             stride,
             count,
-        } if quantized => QuantaState::Merged {
+        } if quantized && (stride >= QUANTUM || count > EXACT_BAND_RUNS) => QuantaState::Merged {
             at: first,
             span,
             stride,

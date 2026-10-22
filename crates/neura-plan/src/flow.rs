@@ -1,6 +1,7 @@
 use crate::hazard::{Quanta, quanta};
 use crate::region::{Region, Touches, Values};
 use neura_abi::PAGE_WORDS;
+use std::collections::BTreeMap;
 
 const QUANTUM: u64 = PAGE_WORDS;
 
@@ -33,28 +34,20 @@ impl Cell {
 
 #[derive(Default)]
 struct Store {
-    cells: Vec<(u64, Cell)>,
+    cells: BTreeMap<u64, Cell>,
 }
 
 impl Store {
     fn split(&mut self, at: u64) {
-        let position = match self.cells.binary_search_by_key(&at, |(start, _)| *start) {
-            Ok(_) => return,
-            Err(position) => position,
-        };
-        let inherited = match position {
-            0 => Cell::default(),
-            _ => self.cells[position - 1].1.clone(),
-        };
-        self.cells.insert(position, (at, inherited));
-    }
-
-    fn first_cell(&self, at: u64) -> usize {
-        match self.cells.binary_search_by_key(&at, |(start, _)| *start) {
-            Ok(position) => position,
-            Err(0) => 0,
-            Err(position) => position - 1,
+        if self.cells.contains_key(&at) {
+            return;
         }
+        let inherited = self
+            .cells
+            .range(..at)
+            .next_back()
+            .map_or_else(Cell::default, |(_, cell)| cell.clone());
+        self.cells.insert(at, inherited);
     }
 
     fn for_each_cell(
@@ -69,11 +62,8 @@ impl Store {
             if let Some(end) = end {
                 self.split(end);
             }
-            let from = self.first_cell(start);
-            for (cell_start, cell) in &mut self.cells[from..] {
-                if end.is_some_and(|end| *cell_start >= end) {
-                    break;
-                }
+            let end = end.unwrap_or(u64::MAX);
+            for (_, cell) in self.cells.range_mut(start..end) {
                 hold(cell);
             }
         }
@@ -88,11 +78,13 @@ impl Store {
         out: &mut Vec<u32>,
     ) {
         for (start, end) in spans(region, elements, quantized) {
-            let from = self.first_cell(start);
-            for (cell_start, cell) in &self.cells[from..] {
-                if end.is_some_and(|end| *cell_start >= end) {
-                    break;
-                }
+            let from = self
+                .cells
+                .range(..=start)
+                .next_back()
+                .map_or(0, |(start, _)| *start);
+            let end = end.unwrap_or(u64::MAX);
+            for (_, cell) in self.cells.range(from..end) {
                 collect(cell, query, out);
             }
         }
