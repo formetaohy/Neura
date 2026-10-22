@@ -2,6 +2,7 @@ include!(concat!(env!("OUT_DIR"), "/plan_build.rs"));
 
 mod access;
 mod authored;
+mod domain;
 mod flow;
 mod fuse;
 mod hazard;

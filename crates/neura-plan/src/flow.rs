@@ -1,7 +1,7 @@
+use crate::domain::{AccessDomain, AccessDomains};
 use crate::hazard::{Quanta, quanta};
 use crate::region::{Region, Touches, Values};
 use neura_abi::PAGE_WORDS;
-use std::collections::BTreeMap;
 
 const QUANTUM: u64 = PAGE_WORDS;
 
@@ -12,95 +12,130 @@ enum Query {
     Both,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy)]
 struct Cell {
-    writers: Vec<u32>,
-    readers: Vec<u32>,
+    writers: u32,
+    readers: u32,
 }
 
-impl Cell {
-    fn hold(&mut self, segment: u32) {
-        if self.readers.last() != Some(&segment) {
-            self.readers.push(segment);
-        }
-    }
+const NO_NODE: u32 = u32::MAX;
 
-    fn write(&mut self, segment: u32) {
-        if self.writers.last() != Some(&segment) {
-            self.writers.push(segment);
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            writers: NO_NODE,
+            readers: NO_NODE,
         }
     }
+}
+
+struct Node {
+    segment: u32,
+    next: u32,
+}
+
+#[derive(Clone, Copy)]
+enum Update {
+    Hold(u32),
+    Write(u32),
 }
 
 #[derive(Default)]
 struct Store {
-    cells: BTreeMap<u64, Cell>,
+    cells: Vec<Cell>,
+    nodes: Vec<Node>,
 }
 
 impl Store {
-    fn split(&mut self, at: u64) {
-        if self.cells.contains_key(&at) {
-            return;
+    fn ensure(&mut self, domain: &AccessDomain) {
+        if self.cells.len() < domain.cells() {
+            self.cells.resize(domain.cells(), Cell::default());
         }
-        let inherited = self
-            .cells
-            .range(..at)
-            .next_back()
-            .map_or_else(Cell::default, |(_, cell)| cell.clone());
-        self.cells.insert(at, inherited);
     }
 
     fn for_each_cell(
         &mut self,
+        domain: &AccessDomain,
         region: Region,
         elements: u64,
         quantized: bool,
-        mut hold: impl FnMut(&mut Cell),
+        update: Update,
     ) {
-        for (start, end) in spans(region, elements, quantized) {
-            self.split(start);
-            if let Some(end) = end {
-                self.split(end);
-            }
-            let end = end.unwrap_or(u64::MAX);
-            for (_, cell) in self.cells.range_mut(start..end) {
-                hold(cell);
+        if self.cells.len() != domain.cells() {
+            self.ensure(domain);
+        }
+        let Store { cells, nodes } = self;
+        for (first, end) in spans(region, elements, quantized) {
+            for cell in &mut cells[domain.range(first, end)] {
+                match update {
+                    Update::Hold(segment) => {
+                        if cell.readers != NO_NODE
+                            && nodes[cell.readers as usize].segment == segment
+                        {
+                            continue;
+                        }
+                        let next = cell.readers;
+                        nodes.push(Node { segment, next });
+                        cell.readers = (nodes.len() - 1) as u32;
+                    }
+                    Update::Write(segment) => {
+                        if cell.writers != NO_NODE
+                            && nodes[cell.writers as usize].segment == segment
+                        {
+                            cell.readers = NO_NODE;
+                            continue;
+                        }
+                        let next = cell.writers;
+                        nodes.push(Node { segment, next });
+                        cell.writers = (nodes.len() - 1) as u32;
+                        cell.readers = NO_NODE;
+                    }
+                }
             }
         }
     }
 
     fn query(
         &self,
+        domain: &AccessDomain,
         region: Region,
         elements: u64,
         quantized: bool,
         query: Query,
         out: &mut Vec<u32>,
     ) {
-        for (start, end) in spans(region, elements, quantized) {
-            let from = self
-                .cells
-                .range(..=start)
-                .next_back()
-                .map_or(0, |(start, _)| *start);
-            let end = end.unwrap_or(u64::MAX);
-            for (_, cell) in self.cells.range(from..end) {
-                collect(cell, query, out);
+        if self.cells.len() != domain.cells() {
+            return;
+        }
+        for (first, end) in spans(region, elements, quantized) {
+            for cell in &self.cells[domain.range(first, end)] {
+                collect(cell, &self.nodes, query, out);
             }
         }
     }
 }
 
-fn collect(cell: &Cell, query: Query, out: &mut Vec<u32>) {
+fn collect(cell: &Cell, nodes: &[Node], query: Query, out: &mut Vec<u32>) {
     if matches!(query, Query::Writers | Query::Both) {
-        out.extend_from_slice(&cell.writers);
+        let mut at = cell.writers;
+        while at != NO_NODE {
+            let held = &nodes[at as usize];
+            out.push(held.segment);
+            at = held.next;
+        }
     }
     if matches!(query, Query::Readers | Query::Both) {
-        out.extend_from_slice(&cell.readers);
+        let mut at = cell.readers;
+        while at != NO_NODE {
+            let held = &nodes[at as usize];
+            out.push(held.segment);
+            at = held.next;
+        }
     }
 }
 
-pub(crate) struct Flow {
+pub(crate) struct Flow<'a> {
+    domains: &'a AccessDomains,
     stores: Vec<Store>,
     partition_stores: Vec<std::collections::BTreeMap<u32, Store>>,
     partitioned_readers: Vec<Vec<u32>>,
@@ -108,8 +143,8 @@ pub(crate) struct Flow {
     written: Vec<bool>,
 }
 
-impl Flow {
-    pub(crate) fn of<V: Values, W>(values: &V, writes: W) -> Self
+impl<'a> Flow<'a> {
+    pub(crate) fn of<V: Values, W>(domains: &'a AccessDomains, values: &V, writes: W) -> Self
     where
         W: Iterator<Item = u32>,
     {
@@ -118,6 +153,7 @@ impl Flow {
             written[values.storage(value) as usize] = true;
         }
         Self {
+            domains,
             stores: (0..values.len()).map(|_| Store::default()).collect(),
             partition_stores: (0..values.len())
                 .map(|_| std::collections::BTreeMap::new())
@@ -141,8 +177,10 @@ impl Flow {
             if !self.written[*storage as usize] {
                 continue;
             }
+            let domain = self.domains.domain(*storage);
             let store = &self.stores[*storage as usize];
             store.query(
+                domain,
                 *region,
                 values.elements(*storage),
                 quantized(values, *storage),
@@ -153,6 +191,7 @@ impl Flow {
                 Some(partition) => {
                     if let Some(store) = self.partition_stores[*storage as usize].get(&partition) {
                         store.query(
+                            domain,
                             *region,
                             values.elements(*storage),
                             quantized(values, *storage),
@@ -170,8 +209,10 @@ impl Flow {
             Query::Readers
         };
         for (storage, region) in &touches.writes {
+            let domain = self.domains.domain(*storage);
             let store = &self.stores[*storage as usize];
             store.query(
+                domain,
                 *region,
                 values.elements(*storage),
                 quantized(values, *storage),
@@ -182,6 +223,7 @@ impl Flow {
                 Some(partition) => {
                     if let Some(store) = self.partition_stores[*storage as usize].get(&partition) {
                         store.query(
+                            domain,
                             *region,
                             values.elements(*storage),
                             quantized(values, *storage),
@@ -214,26 +256,25 @@ impl Flow {
                 if !self.written[*storage as usize] {
                     continue;
                 }
+                let domain = self.domains.domain(*storage);
                 let store = &mut self.stores[*storage as usize];
                 store.for_each_cell(
+                    domain,
                     *region,
                     values.elements(*storage),
                     quantized(values, *storage),
-                    |cell| {
-                        cell.hold(segment);
-                    },
+                    Update::Hold(segment),
                 );
             }
             for (storage, region) in &touches.writes {
+                let domain = self.domains.domain(*storage);
                 let store = &mut self.stores[*storage as usize];
                 store.for_each_cell(
+                    domain,
                     *region,
                     values.elements(*storage),
                     quantized(values, *storage),
-                    |cell| {
-                        cell.write(segment);
-                        cell.readers.clear();
-                    },
+                    Update::Write(segment),
                 );
             }
             return;
@@ -242,16 +283,16 @@ impl Flow {
             if !self.written[*storage as usize] {
                 continue;
             }
+            let domain = self.domains.domain(*storage);
             let store = self.partition_stores[*storage as usize]
                 .entry(partition)
                 .or_default();
             store.for_each_cell(
+                domain,
                 *region,
                 values.elements(*storage),
                 quantized(values, *storage),
-                |cell| {
-                    cell.hold(segment);
-                },
+                Update::Hold(segment),
             );
             let collected = &mut self.partitioned_readers[*storage as usize];
             if collected.last() != Some(&segment) {
@@ -259,17 +300,16 @@ impl Flow {
             }
         }
         for (storage, region) in &touches.writes {
+            let domain = self.domains.domain(*storage);
             let store = self.partition_stores[*storage as usize]
                 .entry(partition)
                 .or_default();
             store.for_each_cell(
+                domain,
                 *region,
                 values.elements(*storage),
                 quantized(values, *storage),
-                |cell| {
-                    cell.write(segment);
-                    cell.readers.clear();
-                },
+                Update::Write(segment),
             );
             let collected = &mut self.partitioned_writers[*storage as usize];
             if collected.last() != Some(&segment) {
@@ -484,7 +524,8 @@ pub(crate) fn arena_spans(
 
 #[cfg(test)]
 mod tests {
-    use super::{Query, Store, arena_spans};
+    use super::{Query, Store, Update, arena_spans};
+    use crate::domain::AccessDomain;
     use crate::region::Region;
     use neura_abi::Element;
 
@@ -500,11 +541,13 @@ mod tests {
     #[test]
     fn a_reader_holds_every_writer_of_a_cell() {
         let mut store = Store::default();
+        let domain = AccessDomain::of(vec![0, 8]);
         let region = Region::run(0, 8);
-        store.for_each_cell(region, 8, false, |cell| cell.write(0));
-        store.for_each_cell(region, 8, false, |cell| cell.write(1));
+        store.for_each_cell(&domain, region, 8, false, Update::Write(0));
+        store.for_each_cell(&domain, region, 8, false, Update::Write(1));
         let mut held = Vec::new();
-        store.query(region, 8, false, Query::Writers, &mut held);
+        store.query(&domain, region, 8, false, Query::Writers, &mut held);
+        held.sort_unstable();
         assert_eq!(held, vec![0, 1]);
     }
 }

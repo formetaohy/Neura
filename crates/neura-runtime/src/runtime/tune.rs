@@ -1,5 +1,5 @@
 use super::choice::{Choice, ChoiceMode};
-use super::{Program, Runtime, Weights, resident_weight_slots};
+use super::{Program, Runtime, Weights};
 use neura_abi::{Element, WORD_BYTES};
 use neura_graph::{Graph, Init, Shape};
 use neura_plan::{Contiguous, Layout, Plan, Product};
@@ -97,16 +97,7 @@ impl Runtime {
         let mut at = 1;
         while at < candidates.len() {
             let (profile, chosen) = &candidates[at];
-            let words = Plan::chosen(
-                graph,
-                self.alignment,
-                *profile,
-                chosen,
-                self.encoding_bytes,
-                resident_weight_slots(weights),
-            )
-            .tensor_bytes()
-                / WORD_BYTES;
+            let words = self.plan_words(graph, weights, *profile, chosen);
             if !self.heap.holds(words) {
                 self.score(&reference, &batch, &mut best, &mut seconds);
                 batch.clear();
@@ -171,26 +162,8 @@ impl Runtime {
         incumbent: (Profile, Vec<(Product, MatmulTile)>),
         challenger: (Profile, Vec<(Product, MatmulTile)>),
     ) -> (Profile, Vec<(Product, MatmulTile)>) {
-        let incumbent_words = Plan::chosen(
-            graph,
-            self.alignment,
-            incumbent.0,
-            &incumbent.1,
-            self.encoding_bytes,
-            resident_weight_slots(weights),
-        )
-        .tensor_bytes()
-            / WORD_BYTES;
-        let challenger_words = Plan::chosen(
-            graph,
-            self.alignment,
-            challenger.0,
-            &challenger.1,
-            self.encoding_bytes,
-            resident_weight_slots(weights),
-        )
-        .tensor_bytes()
-            / WORD_BYTES;
+        let incumbent_words = self.plan_words(graph, weights, incumbent.0, &incumbent.1);
+        let challenger_words = self.plan_words(graph, weights, challenger.0, &challenger.1);
         if !self.heap.holds(incumbent_words + challenger_words) {
             return challenger;
         }

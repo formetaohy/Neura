@@ -1,4 +1,5 @@
 use crate::access::Access;
+use crate::domain::AccessDomains;
 use crate::flow::{Flow, WordFlow, WordWrite, arena_spans};
 use crate::hazard::{Hazard, Hazards};
 use crate::region::{self, GeometryTiles, Walk};
@@ -58,9 +59,14 @@ impl Schedule {
             convolution: windows,
             convolution_input: input_windows,
         };
-        let depths = depths(values, geometry, tasks, &barriers);
-        let packed =
-            Packer::new(values, geometry, tasks, &barriers, &depths, declared, tail).pack();
+        let domains = AccessDomains::of(values, geometry, tasks);
+        let depths = depths(values, geometry, tasks, &barriers, &domains);
+        let packing = Packing {
+            values,
+            tiles: geometry,
+            domains: &domains,
+        };
+        let packed = Packer::new(packing, tasks, &barriers, &depths, declared, tail).pack();
         let schedule = Self::layout(&packed);
         assert_barriers(tasks, &barriers, &schedule);
         schedule
@@ -468,8 +474,9 @@ fn depths<T: Scheduled, V: region::Values>(
     tiles: GeometryTiles<'_>,
     tasks: &[T],
     barriers: &[Vec<u32>],
+    domains: &AccessDomains,
 ) -> Vec<u32> {
-    let mut hazards = Hazards::of(values.len());
+    let mut hazards = Hazards::of(domains);
     let mut depths = vec![0u32; tasks.len()];
     let mut touches = region::Touches::default();
     for (index, task) in tasks.iter().enumerate() {
@@ -531,14 +538,19 @@ fn barriers<T: Scheduled, V: region::Values>(values: &V, tasks: &[T]) -> Vec<Vec
     barriers
 }
 
-struct Packer<'a, T, V> {
+struct Packing<'a, V> {
     values: &'a V,
     tiles: GeometryTiles<'a>,
+    domains: &'a AccessDomains,
+}
+
+struct Packer<'a, T, V> {
+    packing: Packing<'a, V>,
     tasks: &'a [T],
     barriers: &'a [Vec<u32>],
     declared: &'a [u32],
     lonely: Vec<bool>,
-    flow: Flow,
+    flow: Flow<'a>,
     waves: Vec<u32>,
     segments: Vec<Vec<u32>>,
     segment_of: Vec<u32>,
@@ -559,8 +571,7 @@ struct Packer<'a, T, V> {
 
 impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
     fn new(
-        values: &'a V,
-        tiles: GeometryTiles<'a>,
+        packing: Packing<'a, V>,
         tasks: &'a [T],
         barriers: &'a [Vec<u32>],
         depths: &'a [u32],
@@ -568,13 +579,16 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         tail: bool,
     ) -> Self {
         Self {
-            values,
-            tiles,
+            flow: Flow::of(
+                packing.domains,
+                packing.values,
+                tasks.iter().flat_map(|task| task.writes()),
+            ),
+            packing,
             tasks,
             barriers,
             declared,
             lonely: lonely(depths),
-            flow: Flow::of(values, tasks.iter().flat_map(|task| task.writes())),
             waves: vec![0u32; tasks.len()],
             segments: Vec::new(),
             segment_of: vec![0u32; tasks.len()],
@@ -633,8 +647,8 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
     fn place(&mut self, index: u32) {
         let task = &self.tasks[index as usize];
         region::touches(
-            self.values,
-            self.tiles,
+            self.packing.values,
+            self.packing.tiles,
             task,
             task.span(),
             &mut self.touches,
@@ -644,14 +658,14 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
             .reads
             .iter()
             .chain(&self.touches.writes)
-            .any(|(storage, _)| self.values.recomputes(*storage).is_some());
+            .any(|(storage, _)| self.packing.values.recomputes(*storage).is_some());
         if recomputed && !self.in_recompute {
             self.stage = self.prefix + 1;
         }
         self.in_recompute = recomputed;
         let partition = partition(task);
         self.flow.inspect(
-            self.values,
+            self.packing.values,
             &self.touches,
             task.in_place(),
             partition,
@@ -726,7 +740,7 @@ impl<'a, T: Scheduled, V: region::Values> Packer<'a, T, V> {
         }
         self.prefix = self.prefix.max(wave);
         self.flow
-            .record(self.values, &self.touches, segment, partition);
+            .record(self.packing.values, &self.touches, segment, partition);
     }
 }
 

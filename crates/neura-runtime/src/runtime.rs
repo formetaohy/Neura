@@ -583,6 +583,29 @@ impl Runtime {
         )
     }
 
+    pub(super) fn plan_words(
+        &self,
+        graph: &Graph,
+        weights: &Weights,
+        profile: Profile,
+        chosen: &[(Product, MatmulTile)],
+    ) -> u64 {
+        let paged = weights.paged();
+        let weight_slots = resident_weight_slots(weights);
+        let assembly = self.artifacts.assemble(
+            cache::PlanRequest {
+                stamp: graph.stamp(),
+                profile,
+                alignment: self.alignment,
+                chosen: chosen.to_vec(),
+                paged,
+                weight_slots,
+            },
+            || self.assembly(graph, profile, chosen, paged, weight_slots),
+        );
+        assembly.plan.tensor_bytes() / WORD_BYTES
+    }
+
     fn assemble(
         &self,
         graph: &Graph,
