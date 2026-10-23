@@ -56,22 +56,28 @@ fn specialize(compiler: &mut Compiler, geometry: &Geometry) {
                             .expect("a staged left fits one device word"),
                     },
                 ));
-                let (dot, stage, gate) = match (tile.rows() > 1, tile.stages_a_run()) {
-                    (true, true) => ("dot_pair", "stage", "run_gate"),
-                    (true, false) => ("dot_pair", "stage_untouched", "run_gate_none"),
-                    (false, true) => ("dot_run", "stage", "run_gate"),
-                    (false, false) => ("dot_staged", "stage_untouched", "run_gate_none"),
+                let (dot, stage, gate) = match (tile.rows(), tile.stages_a_run()) {
+                    (1, true) => ("dot_run", "stage", "run_gate"),
+                    (1, false) => ("dot_staged", "stage_untouched", "run_gate_none"),
+                    (2, true) => ("dot_pair", "stage", "run_gate"),
+                    (2, false) => ("dot_pair", "stage_untouched", "run_gate_none"),
+                    (4, false) => ("dot_quad", "stage_untouched", "run_gate_none"),
+                    (rows, _) => panic!(
+                        "a folded tile folds {rows} rows, and this device folds one, two or four"
+                    ),
                 };
                 let dot_name = match dot {
                     "dot_pair" => format!("dot_pair_{suffix}"),
+                    "dot_quad" => format!("dot_quad_{suffix}"),
                     _ => format!("dot_{suffix}"),
                 };
                 compiler.select(dot, &dot_name);
                 compiler.select(stage, &format!("stage_{suffix}"));
                 compiler.select(gate, &format!("gate_{suffix}"));
-                let template = match tile.rows() > 1 {
-                    true => "template_run_matmul_folded_fused",
-                    false => "template_run_matmul_folded",
+                let template = match tile.rows() {
+                    1 => "template_run_matmul_folded",
+                    2 => "template_run_matmul_folded_fused",
+                    _ => "template_run_matmul_folded_quad",
                 };
                 compiler.specialize(template, &format!("run_matmul_{suffix}"), &constants);
             }
@@ -605,6 +611,151 @@ mod device {
                         );
                         acc[fold] = acc[fold] + paired.x;
                         acc[MATMUL_FOLDS + fold] = acc[MATMUL_FOLDS + fold] + paired.y;
+                    }
+                }
+            }
+            workgroup_barrier();
+            for fold in unroll(0u32, MATMUL_FOLDS, 1u32) {
+                let column = warp * MATMUL_FOLDS + fold;
+                for row in unroll(0u32, MATMUL_ROWS, 1u32) {
+                    scratch[row * FOLDED_LANES * (MATMUL_COLUMNS + 1u32)
+                        + lane * (MATMUL_COLUMNS + 1u32)
+                        + column] = acc[row * MATMUL_FOLDS + fold];
+                }
+            }
+            workgroup_barrier();
+            if lid < MATMUL_COLUMNS {
+                let column = base_column + lid;
+                for row in unroll(0u32, MATMUL_ROWS, 1u32) {
+                    let mut total = 0.0;
+                    for other in unroll(0u32, FOLDED_LANES, 1u32) {
+                        total = total
+                            + scratch[row * FOLDED_LANES * (MATMUL_COLUMNS + 1u32)
+                                + other * (MATMUL_COLUMNS + 1u32)
+                                + lid];
+                    }
+                    let out_row = base_row + row;
+                    if out_row < row_bound && column < columns {
+                        let index = out_row * columns + column;
+                        publish(
+                            output,
+                            out_plane + index,
+                            chained(
+                                task,
+                                uvec4(plane_row, plane_column, chain_row + out_row, column),
+                                total,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn template_run_matmul_folded_quad(task: Task, lid: u32) {
+        let left = values[task.a];
+        let right = values[task.b];
+        let output = values[task.out];
+        let rows = left.dims.z;
+        let depth = left.dims.w;
+        let columns = right.dims.w;
+        let plane_columns = max(left.dims.y, right.dims.y);
+        let planes = max(left.dims.x, right.dims.x) * plane_columns;
+        let row_blocks = (rows + MATMUL_ROWS - 1u32) / MATMUL_ROWS;
+        let column_blocks = (columns + MATMUL_COLUMNS - 1u32) / MATMUL_COLUMNS;
+        let depth_blocks = (depth + MATMUL_DEPTH - 1u32) / MATMUL_DEPTH;
+        let tiles_per_plane = row_blocks * column_blocks;
+        let first_block = (task.slot * depth_blocks) / task.splits;
+        let last_block = ((task.slot + 1u32) * depth_blocks) / task.splits;
+        let walked = (last_block - first_block) * MATMUL_DEPTH;
+        let lane = lid % FOLDED_LANES;
+        let warp = lid / FOLDED_LANES;
+        let segmented = task.split == split::SEGMENT;
+        let mut segment_start = 0u32;
+        if segmented {
+            if task.count == 0u32 {
+                return;
+            }
+            segment_start = whole_index(
+                fetch(values[task.segment], task.plane),
+                rows + 1u32,
+                kind::MATMUL,
+                refusal::INDEX,
+            );
+        }
+        for tile in stride(task.first, task.first + task.count, 1u32) {
+            let plane = tile / tiles_per_plane;
+            let mut plane_row = plane / plane_columns;
+            let mut plane_column = plane % plane_columns;
+            let within = tile % tiles_per_plane;
+            let mut base_row = (within / column_blocks) * MATMUL_ROWS;
+            let mut base_column = (within % column_blocks) * MATMUL_COLUMNS;
+            let mut left_plane = plane_row * left.strides.x + plane_column * left.strides.y;
+            let mut right_plane = plane_row * right.strides.x + plane_column * right.strides.y;
+            let mut out_plane = (task.slot * planes + plane) * rows * columns;
+            let mut row_bound = rows;
+            let mut chain_row = 0u32;
+            if segmented {
+                base_row = 0u32;
+                base_column = (tile % column_blocks) * MATMUL_COLUMNS;
+                plane_row = 0u32;
+                plane_column = 0u32;
+                chain_row = segment_start + (tile / column_blocks) * MATMUL_ROWS;
+                left_plane = chain_row * left.strides.z;
+                right_plane = task.plane * right.strides.x;
+                out_plane = (task.slot * rows + chain_row) * columns;
+                row_bound = task.keys;
+            }
+            for slot in stride(lid, walked, WORKGROUP_SIZE) {
+                let at = first_block * MATMUL_DEPTH + slot;
+                let staged = slot + (slot >> FOLDED_SHIFT);
+                for row in unroll(0u32, MATMUL_ROWS, 1u32) {
+                    let at_row = base_row + row;
+                    let inside = at_row < row_bound && at < depth;
+                    let address = select(
+                        0u32,
+                        left_plane + at_row * left.strides.z + at * left.strides.w,
+                        inside,
+                    );
+                    scratch[row * FOLDED_ROW_STRIDE + staged] =
+                        select(0.0, fetch(left, address), inside);
+                }
+            }
+            workgroup_barrier();
+            let mut acc = scalar_array(0.0, MATMUL_ROWS * MATMUL_FOLDS);
+            for fold in unroll(0u32, MATMUL_FOLDS, 1u32) {
+                let column = base_column + warp * MATMUL_FOLDS + fold;
+                let blocks = last_block - first_block;
+                for chunk in stride(0u32, (blocks + FOLDED_LANES - 1u32) / FOLDED_LANES, 1u32) {
+                    template_gate();
+                    let step = chunk * FOLDED_LANES + lane;
+                    let at = (first_block + step) * MATMUL_DEPTH;
+                    let staged = template_stage(
+                        right,
+                        right_plane + at * right.strides.z + column * right.strides.w,
+                        min(blocks - chunk * FOLDED_LANES, FOLDED_LANES),
+                        warp,
+                        lane,
+                    );
+                    template_gate();
+                    if step < blocks && at < depth {
+                        let last = min(at + MATMUL_DEPTH, depth) - at;
+                        let inside = base_row < row_bound && column < columns;
+                        let quad = template_dot_quad(
+                            right,
+                            left,
+                            staged,
+                            step * (MATMUL_DEPTH + 1u32),
+                            step * (MATMUL_DEPTH + 1u32) + FOLDED_ROW_STRIDE,
+                            step * (MATMUL_DEPTH + 1u32) + 2u32 * FOLDED_ROW_STRIDE,
+                            step * (MATMUL_DEPTH + 1u32) + 3u32 * FOLDED_ROW_STRIDE,
+                            last,
+                            inside,
+                        );
+                        acc[fold] = acc[fold] + quad.x;
+                        acc[MATMUL_FOLDS + fold] = acc[MATMUL_FOLDS + fold] + quad.y;
+                        acc[2u32 * MATMUL_FOLDS + fold] = acc[2u32 * MATMUL_FOLDS + fold] + quad.z;
+                        acc[3u32 * MATMUL_FOLDS + fold] = acc[3u32 * MATMUL_FOLDS + fold] + quad.w;
                     }
                 }
             }

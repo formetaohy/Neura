@@ -55,6 +55,14 @@ pub struct Fvec2 {
     pub y: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fvec4 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
 impl<T> Index<u32> for Read<T> {
     type Output = T;
 

@@ -19,7 +19,7 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
         let payload = pack(element, 1.0, &values);
         let shape = [u64::from(columns), u64::from(depth)];
         let weight = unpack(element, values.len(), &payload);
-        for rows in [1u32, 2u32] {
+        for rows in [1u32, 2u32, 4u32] {
             let graph = Graph::new();
             let left = graph.input(Shape::matrix(rows, depth), Element::Single);
             let stored = graph.named_block_quantized_parameter(
@@ -42,6 +42,16 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
                         .iter()
                         .any(|(tile, _)| tile.rows() == 2),
                     "a two row {} product folds both rows through one weight read",
+                    element.name(),
+                );
+            }
+            if rows == 4 && matches!(element, Element::Q4K | Element::Q5K | Element::Q6K) {
+                assert!(
+                    program
+                        .matmul_geometries()
+                        .iter()
+                        .any(|(tile, _)| tile.rows() == 4),
+                    "a four row {} product folds all four rows through one weight read",
                     element.name(),
                 );
             }

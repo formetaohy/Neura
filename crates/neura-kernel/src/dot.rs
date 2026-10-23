@@ -91,6 +91,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     }
     compiler.select("codes_by_element", "codes");
     crate::dot_pair::install(compiler, weights);
+    crate::dot_quad::install(compiler, weights);
 }
 
 fn dispatch(compiler: &mut Compiler, weights: &[Element], by_element: &str, family: &str) {

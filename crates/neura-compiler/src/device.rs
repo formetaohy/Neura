@@ -1,4 +1,4 @@
-use crate::resource::{AtomicU32, Fvec2, Uvec4};
+use crate::resource::{AtomicU32, Fvec2, Fvec4, Uvec4};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reach {
@@ -66,6 +66,7 @@ vocabulary! {
     Floor "floor" Kernel 1 true;
     Uvec4 "uvec4" Kernel 4 true;
     Fvec2 "fvec2" Kernel 2 true;
+    Fvec4 "fvec4" Kernel 4 true;
     BitcastU32 "bitcast_u32" Kernel 1 true;
     BitcastF32 "bitcast_f32" Kernel 1 true;
     UnpackHalf2x16 "unpack2x16float" Kernel 1 true;
@@ -194,6 +195,10 @@ pub fn uvec4(_x: u32, _y: u32, _z: u32, _w: u32) -> Uvec4 {
 }
 
 pub fn fvec2(_x: f32, _y: f32) -> Fvec2 {
+    unreachable!("a device intrinsic exists only on the device")
+}
+
+pub fn fvec4(_x: f32, _y: f32, _z: f32, _w: f32) -> Fvec4 {
     unreachable!("a device intrinsic exists only on the device")
 }
 

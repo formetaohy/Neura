@@ -2455,6 +2455,8 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
     let ceiling_one = u64::from(FOLDED_FOLDS).min(room_one / u64::from(warps * (FOLDED_LANES + 1)));
     let ceiling_two =
         u64::from(FOLDED_FOLDS).min(room_two / u64::from(2 * warps * (FOLDED_LANES + 1)));
+    let ceiling_four =
+        u64::from(FOLDED_FOLDS).min(words / u64::from(4 * warps * (FOLDED_LANES + 1)));
     let folds =
         u32::try_from(ceiling_one).expect("a folded tile folds fewer columns than a word holds");
     if folds == 0 {
@@ -2462,6 +2464,8 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
     }
     let fused_folds =
         u32::try_from(ceiling_two).expect("a folded tile folds fewer columns than a word holds");
+    let quad_folds =
+        u32::try_from(ceiling_four).expect("a folded tile folds fewer columns than a word holds");
     let mut tiles = Vec::new();
     let mut held = 1u64;
     while held <= u64::from(folds.max(fused_folds)) {
@@ -2486,6 +2490,12 @@ fn folded_tiles(workgroup: u32, pool: u64) -> Vec<FoldedTile> {
             let paired = FoldedTile::new(2, warps, fold, FOLDED_LANES);
             if paired.scratch_words() <= words {
                 tiles.push(paired);
+            }
+        }
+        if held <= u64::from(quad_folds) && columns >= FUSED_COLUMNS_FLOOR {
+            let quad = FoldedTile::new(4, warps, fold, FOLDED_LANES);
+            if quad.scratch_words() <= words {
+                tiles.push(quad);
             }
         }
         held = match held {

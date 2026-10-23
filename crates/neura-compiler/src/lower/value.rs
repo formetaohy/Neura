@@ -506,13 +506,13 @@ impl FunctionLower<'_> {
                     result,
                 })
             }
-            Intrinsic::Fvec2 => {
+            Intrinsic::Fvec2 | Intrinsic::Fvec4 => {
                 let ty = self.compiler.scalar("f32");
                 let constituents = args
                     .iter()
                     .map(|arg| self.value_with_hint(arg, Some(ty)).value)
                     .collect::<Vec<_>>();
-                let ty = self.compiler.ty("fvec2");
+                let ty = self.compiler.ty(intrinsic.name());
                 self.emit(ty, |result| DeviceInstruction::Compose {
                     constituents,
                     result,

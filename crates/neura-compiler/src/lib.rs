@@ -14,7 +14,7 @@ pub use neura_shader::{BindingSpec, ComputeProgram};
 use std::collections::{BTreeMap, HashMap};
 
 pub use neura_macro::{kernel, module};
-pub use resource::{AtomicU32, Fvec2, Read, ReadWrite, Uvec3, Uvec4, Workgroup};
+pub use resource::{AtomicU32, Fvec2, Fvec4, Read, ReadWrite, Uvec3, Uvec4, Workgroup};
 
 pub struct Compiler {
     module: Module,
@@ -44,8 +44,10 @@ impl Compiler {
             let ty = module.vector(scalar, length);
             scalars.insert(name.to_owned(), ty);
         }
-        let pair = module.vector(Scalar::F32, 2);
-        scalars.insert("fvec2".to_owned(), pair);
+        for (name, length) in [("fvec2", 2), ("fvec4", 4)] {
+            let held = module.vector(Scalar::F32, length);
+            scalars.insert(name.to_owned(), held);
+        }
         Self {
             module,
             records: HashMap::new(),

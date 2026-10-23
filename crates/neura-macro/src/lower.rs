@@ -63,6 +63,7 @@ fn ty(source: &syn::Type) -> syn::Result<TokenStream> {
             let name = match name.as_str() {
                 "Uvec3" => "uvec3",
                 "Fvec2" => "fvec2",
+                "Fvec4" => "fvec4",
                 _ => name.as_str(),
             };
             Ok(quote!(neura_ast::Type::Named(#name.into())))

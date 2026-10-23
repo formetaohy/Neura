@@ -6,7 +6,7 @@ use neura_profile::{
 pub(crate) const SPLITS_CEILING: u32 = 64;
 const MATMUL_SPLIT_BLOCKS: u32 = 4;
 pub(crate) const PARTIALS_CEILING: u64 = 1 << 20;
-const NARROW_ROWS: u32 = 2;
+const NARROW_ROWS: u32 = 4;
 const PLAIN_NARROW_ROWS: u32 = 1;
 const WIDE_COLUMNS: u32 = 64;
 const WIDE_RUN_ROWS: u32 = 8;
@@ -116,7 +116,7 @@ impl Product {
     }
 
     fn run_walk(self, profile: Profile) -> Option<MatmulTile> {
-        if self.rows <= NARROW_ROWS
+        if self.rows <= self.narrow_rows()
             || self.weight.contiguous != Contiguous::Reduction
             || !self.weight.element().stages_a_run() && !self.weight.element().packs_codes()
         {
@@ -302,12 +302,16 @@ impl Product {
         }
     }
 
+    fn narrow_rows(self) -> u32 {
+        match self.weight.element() {
+            Element::Q4K | Element::Q5K | Element::Q6K => NARROW_ROWS,
+            element if element.block().is_some() => 2,
+            _ => PLAIN_NARROW_ROWS,
+        }
+    }
+
     fn narrow(self, profile: Profile) -> bool {
-        let rows = match self.weight.element().block() {
-            Some(_) => NARROW_ROWS,
-            None => PLAIN_NARROW_ROWS,
-        };
-        self.rows <= rows
+        self.rows <= self.narrow_rows()
             && profile.tiles().iter().any(|tile| {
                 matches!(
                     tile.strategy(),
