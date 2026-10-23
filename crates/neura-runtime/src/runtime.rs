@@ -5,7 +5,7 @@ use crate::pool::{Pool, Recycled};
 use crate::program::{Dispatch, Program, Weights};
 use crate::spill::Spill;
 use crate::store::WeightStore;
-use neura_abi::{Kind, Refusal, Store, TENSOR, WORD_BYTES};
+use neura_abi::{Element, Kind, Refusal, Store, TENSOR, WORD_BYTES};
 use neura_gpu::{
     BufferUsages, Device, GpuBuffer, GpuContext, GpuRequest, GpuUnavailable, HostDevice, Queue,
     READBACK_TIMEOUT, Readback, ReadbackLease, Submission, SubmissionIndex,
@@ -295,12 +295,33 @@ impl Runtime {
         let plan = Plan::sketch(graph, self.alignment, balanced, self.encoding_bytes);
         let mut work = 0u64;
         let mut walked = 0u64;
+        let mut k_quant = true;
+        let mut narrowest = u32::MAX;
+        let mut widest = 0u32;
         for product in plan.products() {
             let weights = u64::from(product.planes())
                 * u64::from(product.columns())
                 * u64::from(product.depth());
             work += weights * u64::from(product.rows());
             walked += weights;
+            narrowest = narrowest.min(product.rows());
+            widest = widest.max(product.rows());
+            k_quant &= matches!(
+                product.weight().element(),
+                Element::Q4K | Element::Q5K | Element::Q6K
+            );
+        }
+        if widest > 0
+            && k_quant
+            && narrowest >= 16
+            && widest <= 32
+            && let Some(profile) = self
+                .profiles()
+                .into_iter()
+                .filter(|profile| profile.workgroup() == 512)
+                .min_by_key(|profile| profile.registers())
+        {
+            return profile;
         }
         match work / walked.max(1) > BLOCKING_REUSE {
             true => balanced,

@@ -161,14 +161,22 @@ impl Product {
         };
         let wide = self.columns >= WIDE_FLOOR
             || (self.columns >= SPLIT_COLUMNS_FLOOR && self.depth > SPLIT_DEPTH_FLOOR);
-        if strategy == MatmulStrategy::Folded && wide && self.weight.element().stages_a_run() {
+        let k_quant = matches!(
+            self.weight.element(),
+            Element::Q4K | Element::Q5K | Element::Q6K
+        );
+        let wide = wide && (!k_quant || self.columns >= 6144);
+        if strategy == MatmulStrategy::Folded
+            && wide
+            && (k_quant || self.weight.element().stages_a_run())
+        {
             let widest = profile
                 .tiles()
                 .iter()
                 .copied()
                 .filter(|tile| {
                     tile.strategy() == MatmulStrategy::Folded
-                        && tile.stages_a_run()
+                        && tile.stages_a_run() == self.weight.element().stages_a_run()
                         && tile.rows() <= self.rows
                         && tile.columns() <= WIDE_COLUMNS
                 })

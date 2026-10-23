@@ -54,6 +54,14 @@ pub(crate) fn section(runtime: &Runtime) {
     }
     rows.push(product(
         runtime,
+        Element::Q4K,
+        6144,
+        true,
+        measure::CHEAP,
+        format!("a 1x{DEPTH}x6144 product of q4_k in gguf order"),
+    ));
+    rows.push(product(
+        runtime,
         Element::Q6K,
         VOCABULARY,
         true,

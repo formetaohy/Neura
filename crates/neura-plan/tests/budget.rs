@@ -1,7 +1,9 @@
 use neura_abi::Element;
 use neura_graph::{AttentionOptions, Graph, Init, Shape};
 use neura_plan::{Contiguous, DEFAULT_ENCODING_BYTES, Plan, Product, Weight};
-use neura_profile::{CooperativeMatrix, CooperativeTile, MatmulTile, Profile};
+use neura_profile::{
+    Budget, CooperativeMatrix, CooperativeTile, MatmulStrategy, MatmulTile, Profile,
+};
 
 #[test]
 fn a_workgroup_holds_the_attention_beside_the_panels_its_cooperative_tiles_stage() {
@@ -60,4 +62,32 @@ fn a_workgroup_holds_the_attention_beside_the_panels_its_cooperative_tiles_stage
         plan.kinds().len(),
         geometry.budget(),
     );
+}
+
+#[test]
+fn a_k_quantized_narrow_product_widens_past_six_thousand_columns() {
+    let profile = Profile::derive(Budget::BASELINE, None)
+        .into_iter()
+        .find(|profile| profile.workgroup() == 256)
+        .expect("the baseline budget offers a balanced profile");
+    let narrow = Product::of(
+        1,
+        1,
+        4096,
+        1024,
+        Weight::of(Element::Q4K, Contiguous::Reduction),
+    )
+    .planned(profile);
+    let wide = Product::of(
+        1,
+        1,
+        6144,
+        1024,
+        Weight::of(Element::Q4K, Contiguous::Reduction),
+    )
+    .planned(profile);
+    assert_eq!(narrow.strategy(), MatmulStrategy::Folded);
+    assert_eq!(narrow.columns(), 32);
+    assert_eq!(wide.strategy(), MatmulStrategy::Folded);
+    assert_eq!(wide.columns(), 64);
 }
