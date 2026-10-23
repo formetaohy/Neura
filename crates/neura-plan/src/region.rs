@@ -610,8 +610,14 @@ fn narrow<W: Walk, V: Values>(
             softmax(values, task, first, count, &mut narrowed)
         }
         Kind::Norm if task.splits() > 1 => norm_section(values, task, first, count, &mut narrowed),
+        Kind::NormGrad if task.splits() > 1 && task.input(4) != NO_VALUE => {
+            norm_apply(values, task, first, count, &mut narrowed)
+        }
+        Kind::NormGrad if task.splits() > 1 => {
+            norm_grad_section(values, task, first, count, &mut narrowed)
+        }
         Kind::Norm | Kind::NormGrad => norm(values, task, first, count, &mut narrowed),
-        Kind::NormFold => norm_fold(values, task, first, count, &mut narrowed),
+        Kind::NormFold | Kind::NormGradFold => norm_fold(values, task, first, count, &mut narrowed),
         Kind::NormApply => norm_apply(values, task, first, count, &mut narrowed),
         Kind::Binary
         | Kind::Unary
@@ -1122,6 +1128,43 @@ fn norm_section<W: Walk, V: Values>(
     let section = u64::from(task.section());
     let at = (u64::from(first) * sections + section) * 2;
     narrowed.write(out, Region::band(at, 2, sections * 2, u64::from(count)));
+}
+
+fn norm_grad_section<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if matches!(task.split(), Split::Segment { .. } | Split::Ragged { .. })
+        || task.segments() != NO_VALUE
+        || task.queries() != NO_VALUE
+    {
+        return;
+    }
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let sections = u64::from(task.splits());
+    let section = u64::from(task.section());
+    let at = (u64::from(first) * sections + section) * 2;
+    narrowed.write(out, Region::band(at, 2, sections * 2, u64::from(count)));
+    let xhat = task.extra();
+    if xhat != NO_VALUE && values.owned(xhat) && values.dense(xhat) {
+        let columns = u64::from(task.axis());
+        let (start, span) = band_at(columns, sections, section);
+        narrowed.write(
+            xhat,
+            Region::band(
+                u64::from(first) * columns + start,
+                span,
+                columns,
+                u64::from(count),
+            ),
+        );
+    }
 }
 
 fn norm_fold<W: Walk, V: Values>(

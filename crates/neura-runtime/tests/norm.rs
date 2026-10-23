@@ -781,6 +781,73 @@ fn a_sectioned_rms_norm_opens_with_the_residual_it_reads() {
 }
 
 #[test]
+fn a_sectioned_rms_norm_descends_the_rows_it_scales() {
+    let runtime = runtime();
+    let held: Vec<f32> = (0..8192)
+        .map(|at| (at as f32 * 0.013).sin() * 1.2 + 0.1)
+        .collect();
+    let graph = Graph::new();
+    let source = graph.gradient_input(Shape::of([1, 1, 2, 4096]), Element::Single);
+    let weight = graph.parameter(
+        Shape::vector(4096),
+        Init::Uniform {
+            low: 0.5,
+            high: 1.5,
+        },
+        Element::Single,
+    );
+    let floor = graph.fill(Shape::scalar(), 1e-5);
+    let loss = graph.sum(graph.rms_norm(source, weight, floor));
+    let gradients = graph.backward(loss);
+    let source_gradient = gradients.of(source);
+    let weight_gradient = gradients.of(weight);
+    graph.retain(source_gradient);
+    graph.retain(weight_gradient);
+
+    let reference = Graph::new();
+    let source_ref = reference.gradient_input(Shape::of([1, 1, 2, 4096]), Element::Single);
+    let weight_ref = reference.parameter(
+        Shape::vector(4096),
+        Init::Uniform {
+            low: 0.5,
+            high: 1.5,
+        },
+        Element::Single,
+    );
+    let floor_ref = reference.fill(Shape::scalar(), 1e-5);
+    let loss_ref = reference.sum(composed_rms(&reference, source_ref, weight_ref, floor_ref));
+    let gradients_ref = reference.backward(loss_ref);
+    let source_gradient_ref = gradients_ref.of(source_ref);
+    let weight_gradient_ref = gradients_ref.of(weight_ref);
+    reference.retain(source_gradient_ref);
+    reference.retain(weight_gradient_ref);
+
+    let weights = runtime.weights(&graph);
+    let program = runtime.compile(&graph, &weights);
+    let reference_weights = runtime.weights(&reference);
+    let reference_program = runtime.compile(&reference, &reference_weights);
+    runtime.write(&program, source, &held);
+    runtime.write(&reference_program, source_ref, &held);
+    runtime.run(&program);
+    runtime.run(&reference_program);
+    runtime.context().drain();
+    compared(
+        &runtime,
+        &program,
+        source_gradient,
+        &reference_program,
+        source_gradient_ref,
+    );
+    compared(
+        &runtime,
+        &program,
+        weight_gradient,
+        &reference_program,
+        weight_gradient_ref,
+    );
+}
+
+#[test]
 fn a_norm_gradient_leaves_the_path_another_task_reads() {
     let runtime = runtime();
     let held: Vec<f32> = (0..12).map(|at| at as f32 * 0.25 - 0.5).collect();

@@ -2116,7 +2116,7 @@ impl Budget {
     }
 }
 
-pub const MAX_TILES: usize = 64;
+pub const MAX_TILES: usize = 128;
 const PLAINEST_BLOCKING: (u32, u32) = (1, 1);
 const WORKGROUP_SIZES: [u32; 5] = [64, 128, 256, 512, 1024];
 const BLOCKINGS: [(u32, u32); 11] = [

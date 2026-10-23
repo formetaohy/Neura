@@ -723,6 +723,14 @@ kinds! {
         chain: false,
         origin: false,
     };
+    NormGradFold NORM_GRAD_FOLD = "norm_grad_fold" {
+        entry: "run_norm_grad_fold",
+        modules: [Reduce],
+        geometry: None,
+        prelude: false,
+        chain: false,
+        origin: false,
+    };
     NormApply NORM_APPLY = "norm_apply" {
         entry: "run_norm_apply",
         modules: [Reduce],

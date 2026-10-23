@@ -368,7 +368,142 @@ mod device {
         }
     }
 
+    fn run_norm_grad_section(task: Task, lid: u32) {
+        let source = values[task.a];
+        let gradient = values[task.d];
+        let stats = values[task.c];
+        let partials = values[task.out];
+        let spans = norm_spans(task, source);
+        let columns = spans.x;
+        let band = norm_band(columns, task.splits, task.section);
+        let layer = task.op == NORM_LAYER || task.op == NORM_GROUP;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let mean = fetch(stats, row * 2u32);
+            let scale = fetch(stats, row * 2u32 + 1u32);
+            let mut dot = 0.0;
+            let mut first = 0.0;
+            let mut second = 0.0;
+            for column in stride(lid, band.y, WORKGROUP_SIZE) {
+                let at = band.x + column;
+                let value = norm_read(task, source, spans, row, at);
+                if task.extra != NO_VALUE {
+                    publish(
+                        values[task.extra],
+                        row * columns + at,
+                        (value - mean) * scale,
+                    );
+                }
+                let held = fetch(gradient, row * columns + at);
+                let mut weight = 1.0;
+                if task.b != NO_VALUE {
+                    weight = fetch(values[task.b], norm_channel(spans, row, at));
+                }
+                if layer {
+                    first = first + held * weight;
+                    second = second + held * weight * (value - mean);
+                } else {
+                    dot = dot + held * weight * value;
+                }
+            }
+            if layer {
+                first = workgroup_sum(lid, first);
+                second = workgroup_sum(lid, second);
+            } else {
+                dot = workgroup_sum(lid, dot);
+            }
+            if lid == 0u32 {
+                let at = (row * task.splits + task.section) * 2u32;
+                if layer {
+                    publish(partials, at, first);
+                    publish(partials, at + 1u32, second);
+                } else {
+                    publish(partials, at, dot);
+                    publish(partials, at + 1u32, 0.0);
+                }
+            }
+            workgroup_barrier();
+        }
+    }
+
+    fn run_norm_grad_fold(task: Task, lid: u32) {
+        let partials = values[task.a];
+        let stats = values[task.out];
+        let sections = task.splits;
+        let columns = task.axis;
+        let layer = task.op == NORM_LAYER || task.op == NORM_GROUP;
+        for row in stride(task.first + lid, task.first + task.count, WORKGROUP_SIZE) {
+            let mut first = 0.0;
+            let mut second = 0.0;
+            for section in stride(0u32, sections, 1u32) {
+                let at = (row * sections + section) * 2u32;
+                first = first + fetch(partials, at);
+                second = second + fetch(partials, at + 1u32);
+            }
+            if layer {
+                first = first / f32(columns);
+                second = second / f32(columns);
+            }
+            publish(stats, row * 2u32, first);
+            publish(stats, row * 2u32 + 1u32, second);
+        }
+    }
+
+    fn run_norm_grad_apply(task: Task, lid: u32) {
+        let source = values[task.a];
+        let gradient = values[task.d];
+        let stats = values[task.c];
+        let folded = values[task.e];
+        let output = values[task.out];
+        let spans = norm_spans(task, source);
+        let columns = spans.x;
+        let band = norm_band(columns, task.splits, task.section);
+        let layer = task.op == NORM_LAYER || task.op == NORM_GROUP;
+        for row in stride(task.first, task.first + task.count, 1u32) {
+            let mean = fetch(stats, row * 2u32);
+            let scale = fetch(stats, row * 2u32 + 1u32);
+            let first = fetch(folded, row * 2u32);
+            let second = fetch(folded, row * 2u32 + 1u32);
+            let cubed = scale * scale * scale;
+            let row_at = coordinates(row * columns, source.dims);
+            for column in stride(lid, band.y, WORKGROUP_SIZE) {
+                let at = band.x + column;
+                let value = norm_read(task, source, spans, row, at);
+                let held = fetch(gradient, row * columns + at);
+                let mut weight = 1.0;
+                if task.b != NO_VALUE {
+                    weight = fetch(values[task.b], norm_channel(spans, row, at));
+                }
+                let mut result = 0.0;
+                if layer {
+                    result =
+                        scale * weight * held - scale * first - cubed * (value - mean) * second;
+                } else {
+                    let factor = select(
+                        cubed * first,
+                        cubed * first / f32(columns),
+                        task.op == NORM_RMS,
+                    );
+                    result = scale * weight * held - factor * value;
+                }
+                let mut walked = row_at + uvec4(0u32, 0u32, 0u32, at);
+                if task.op == NORM_GROUP {
+                    walked = norm_at(spans, source, row, at);
+                }
+                publish(output, row * columns + at, chained(task, walked, result));
+            }
+            workgroup_barrier();
+        }
+    }
+
     fn run_norm_grad(task: Task, lid: u32) {
+        if task.splits > 1u32 {
+            if task.e != NO_VALUE {
+                run_norm_grad_apply(task, lid);
+            } else {
+                run_norm_grad_section(task, lid);
+            }
+            return;
+        }
         let source = values[task.a];
         let gradient = values[task.d];
         let output = values[task.out];

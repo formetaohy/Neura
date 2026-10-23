@@ -963,6 +963,7 @@ impl Graph {
             | Kind::SoftmaxGradFold
             | Kind::NormGrad
             | Kind::NormFold
+            | Kind::NormGradFold
             | Kind::NormApply
             | Kind::Convert
             | Kind::Scatter
