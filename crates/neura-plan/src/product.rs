@@ -163,7 +163,7 @@ impl Product {
             || (self.columns >= SPLIT_COLUMNS_FLOOR && self.depth > SPLIT_DEPTH_FLOOR);
         let k_quant = matches!(
             self.weight.element(),
-            Element::Q4K | Element::Q5K | Element::Q6K
+            Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K
         );
         let wide = wide && (!k_quant || self.columns >= 6144);
         if strategy == MatmulStrategy::Folded
@@ -312,7 +312,7 @@ impl Product {
 
     fn narrow_rows(self) -> u32 {
         match self.weight.element() {
-            Element::Q4K | Element::Q5K | Element::Q6K => NARROW_ROWS,
+            Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K => NARROW_ROWS,
             element if element.block().is_some() => 2,
             _ => PLAIN_NARROW_ROWS,
         }

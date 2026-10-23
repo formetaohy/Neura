@@ -38,7 +38,7 @@ fn convert_of(element: Element) -> &'static str {
         Element::Int8 => "run_convert_int8",
         Element::Q8_0 => "run_convert_q8_0",
         Element::Single => panic!("a single precision tensor holds one element per word"),
-        Element::Int4 | Element::Q4K | Element::Q5K | Element::Q6K => {
+        Element::Int4 | Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K => {
             panic!(
                 "{} storage packs numbers a device cannot quantize, and its host lays the block out",
                 element.name(),

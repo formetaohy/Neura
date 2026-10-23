@@ -74,6 +74,7 @@ fn ggml_kind(element: Element) -> u32 {
     match element {
         Element::Half => 1,
         Element::Q8_0 => 8,
+        Element::Q3K => 11,
         Element::Q4K => 12,
         Element::Q5K => 13,
         Element::Q6K => 14,

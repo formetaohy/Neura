@@ -317,7 +317,7 @@ impl Runtime {
             widest = widest.max(product.rows());
             k_quant &= matches!(
                 product.weight().element(),
-                Element::Q4K | Element::Q5K | Element::Q6K
+                Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K
             );
         }
         if widest > 0

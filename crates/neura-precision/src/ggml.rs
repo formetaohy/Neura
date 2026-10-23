@@ -46,6 +46,7 @@ fn block(element: Element) -> Block {
 fn encode(element: Element, values: &[f32], out: &mut Vec<u8>) {
     match element {
         Element::Q8_0 => q8_0(values, out),
+        Element::Q3K => q3_k(values, out),
         Element::Q4K => q4_k(values, out),
         Element::Q5K => q5_k(values, out),
         Element::Q6K => q6_k(values, out),
@@ -59,6 +60,7 @@ fn encode(element: Element, values: &[f32], out: &mut Vec<u8>) {
 fn decode(element: Element, field: &[u8], out: &mut Vec<f32>) {
     match element {
         Element::Q8_0 => q8_0_values(field, out),
+        Element::Q3K => q3_k_values(field, out),
         Element::Q4K => q4_k_values(field, out),
         Element::Q5K => q5_k_values(field, out),
         Element::Q6K => q6_k_values(field, out),
@@ -210,6 +212,98 @@ fn q8_0_values(field: &[u8], out: &mut Vec<f32>) {
     let quantum = half_at(field, 0);
     for at in 0..QUANT_BLOCK as usize {
         out.push((field[2 + at] as i8) as f32 * quantum);
+    }
+}
+
+const Q3_K_BLOCK: usize = SUPER_BLOCK as usize;
+const Q3_K_BYTES: usize = 110;
+const Q3_K_QS: usize = 32;
+const Q3_K_SCALES: usize = 96;
+const Q3_K_D: usize = 108;
+
+fn q3_k_scale(field: &[u8], at: usize) -> u32 {
+    let low = field[Q3_K_SCALES + at % 8];
+    let nibble = if at < 8 { low & 0x0f } else { low >> 4 };
+    let high = field[Q3_K_SCALES + 8 + at % 4];
+    u32::from(nibble) | (u32::from((high >> (2 * (at / 4))) & 3) << 4)
+}
+
+fn put_q3_k_scale(scales: &mut [u8; 12], at: usize, code: u32) {
+    let low = (code & 0x0f) as u8;
+    let high = ((code >> 4) & 3) as u8;
+    if at < 8 {
+        scales[at] |= low;
+    } else {
+        scales[at - 8] |= low << 4;
+    }
+    scales[8 + at % 4] |= high << (2 * (at / 4));
+}
+
+fn q3_k(values: &[f32], out: &mut Vec<u8>) {
+    let mut peaks = [0.0f32; 16];
+    for at in 0..16 {
+        peaks[at] = values[at * 16..(at + 1) * 16]
+            .iter()
+            .fold(0.0f32, |peak, value| greatest(peak, value.abs()));
+    }
+    let widest = peaks
+        .iter()
+        .copied()
+        .fold(0.0f32, greatest)
+        .max(f32::MIN_POSITIVE);
+    let d = widest / 4.0 / 31.0;
+    let mut codes = [0u32; 16];
+    for at in 0..16 {
+        codes[at] = (peaks[at] / 4.0 / d).round().clamp(0.0, 31.0) as u32 + 32;
+    }
+    let mut scales = [0u8; 12];
+    for (at, code) in codes.iter().copied().enumerate() {
+        put_q3_k_scale(&mut scales, at, code);
+    }
+    let mut high = [0u8; 32];
+    let mut quants = [0u8; 64];
+    for (at, value) in values.iter().copied().enumerate().take(Q3_K_BLOCK) {
+        let sub = at / 16;
+        let lane = at % 16;
+        let scale = codes[sub] - 32;
+        let quantum = d * scale as f32;
+        let quant = if quantum == 0.0 {
+            0i32
+        } else {
+            ((value / quantum).round().clamp(-4.0, 3.0)) as i32
+        };
+        let half = sub / 8;
+        let within = sub % 8;
+        let j = within / 2;
+        let second = within % 2;
+        let index = half * 32 + second * 16 + lane;
+        quants[index] |= (((quant as u32) & 3) as u8) << (2 * j);
+        if quant >= 0 {
+            high[second * 16 + lane] |= 1 << (half * 4 + j);
+        }
+    }
+    let mut field = [0u8; Q3_K_BYTES];
+    field[..32].copy_from_slice(&high);
+    field[32..96].copy_from_slice(&quants);
+    field[96..108].copy_from_slice(&scales);
+    put_half(&mut field, Q3_K_D, d);
+    out.extend_from_slice(&field);
+}
+
+fn q3_k_values(field: &[u8], out: &mut Vec<f32>) {
+    let d = half_at(field, Q3_K_D);
+    for at in 0..Q3_K_BLOCK {
+        let sub = at / 16;
+        let lane = at % 16;
+        let half = sub / 8;
+        let within = sub % 8;
+        let j = within / 2;
+        let second = within % 2;
+        let low = (field[Q3_K_QS + half * 32 + second * 16 + lane] >> (2 * j)) & 3;
+        let bit = 1 << (half * 4 + j);
+        let high = field[second * 16 + lane] & bit != 0;
+        let quant = i32::from(low) - if high { 0 } else { 4 };
+        out.push(d * (f32::from(q3_k_scale(field, sub) as u8) - 32.0) * quant as f32);
     }
 }
 

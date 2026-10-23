@@ -7,7 +7,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     device::define(compiler);
     compiler.specialize("template_dot_pair_element", "dot_pair_element_staged", &[]);
     compiler.specialize("template_dot_pair_q8_0_run", "dot_pair_q8_0_run", &[]);
-    for element in [Element::Q4K, Element::Q5K, Element::Q6K] {
+    for element in [Element::Q3K, Element::Q4K, Element::Q5K, Element::Q6K] {
         compiler.specialize(
             &format!("template_dot_pair_{}", symbol(element)),
             &format!("dot_pair_{}_staged", symbol(element)),
@@ -18,7 +18,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     for element in weights.iter().copied() {
         let target = match element {
             Element::Q8_0 => "dot_pair_q8_0_run".to_owned(),
-            Element::Q4K | Element::Q5K | Element::Q6K => {
+            Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K => {
                 format!("dot_pair_{}_staged", symbol(element))
             }
             _ => "dot_pair_element_staged".to_owned(),
@@ -72,6 +72,51 @@ mod device {
                     * select(0.0, fetch(right, right_address), keep);
         }
         return fvec2(total0, total1);
+    }
+
+    fn template_dot_pair_q3_k(
+        right: Value,
+        left: Value,
+        right_at: u32,
+        left_at: u32,
+        left_at2: u32,
+        last: u32,
+        valid: bool,
+    ) -> Fvec2 {
+        if right.strides.z == 1u32 && right_at % SUPER_SUB_BLOCK == 0u32 {
+            let base = (right_at / Q3_K_BLOCK) * Q3_K_BYTES;
+            let within = right_at % Q3_K_BLOCK;
+            let group = within / SUPER_SUB_BLOCK;
+            let half = group / 4u32;
+            let j = group % 4u32;
+            let width = ggml_half(right, base + 108u32);
+            let scale0 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32);
+            let scale1 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32 + 1u32);
+            let mut total0 = 0.0;
+            let mut total1 = 0.0;
+            for word in unroll(0u32, SUPER_SUB_BLOCK / 4u32, 1u32) {
+                let quants = ggml_run_word(right, base + 32u32 + half * 32u32, word);
+                let highs = ggml_run_word(right, base, word);
+                for lane in unroll(0u32, 4u32, 1u32) {
+                    let at = word * 4u32 + lane;
+                    let keep = valid && at < last;
+                    let low = (quants >> (lane * 8u32 + 2u32 * j)) & 3u32;
+                    let high = (highs >> (lane * 8u32 + half * 4u32 + j)) & 1u32;
+                    let scale = select(scale0, scale1, at >= 16u32);
+                    let weight = scale * (f32(low) - select(0.0, 4.0, high == 0u32));
+                    let left_address = select(0u32, left_at + at * left.strides.w, keep);
+                    let left_address2 = select(0u32, left_at2 + at * left.strides.w, keep);
+                    total0 = total0
+                        + select(0.0, template_left(left, left_address), keep)
+                            * select(0.0, weight, keep);
+                    total1 = total1
+                        + select(0.0, template_left(left, left_address2), keep)
+                            * select(0.0, weight, keep);
+                }
+            }
+            return fvec2(total0, total1);
+        }
+        return template_dot_pair_element(right, left, right_at, left_at, left_at2, last, valid);
     }
 
     fn template_dot_pair_q4_k(

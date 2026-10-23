@@ -6,10 +6,11 @@ const COLUMNS: u32 = 4096;
 const VOCABULARY: u32 = 151936;
 const LADDER: u32 = 1024;
 const SWEEP: [u32; 4] = [64, 1024, 16384, VOCABULARY];
-const NARROW: [Element; 6] = [
+const NARROW: [Element; 7] = [
     Element::Single,
     Element::Half,
     Element::Q8_0,
+    Element::Q3K,
     Element::Q4K,
     Element::Q5K,
     Element::Q6K,

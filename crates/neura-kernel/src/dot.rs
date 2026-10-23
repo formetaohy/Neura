@@ -33,6 +33,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     for generic in [
         "template_dot_element",
         "template_dot_q8_0",
+        "template_dot_q3_k",
         "template_dot_q4_k",
         "template_dot_q5_k",
         "template_dot_q6_k",
@@ -127,6 +128,7 @@ fn dot_arguments() -> Vec<ast::Expression> {
 pub(crate) fn symbol(element: Element) -> &'static str {
     match element {
         Element::Q8_0 => "q8_0",
+        Element::Q3K => "q3_k",
         Element::Q4K => "q4_k",
         Element::Q5K => "q5_k",
         Element::Q6K => "q6_k",
@@ -293,6 +295,33 @@ mod panel {
         if part == RUN_CODES {
             let scale = ggml_half(right, byte);
             panel_affine(slot, scale, scale, 0.0, inside);
+        }
+    }
+
+    fn codes_q3_k(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
+        let base = (address / Q3_K_BLOCK) * Q3_K_BYTES;
+        let within = address % Q3_K_BLOCK;
+        let group = within / SUPER_SUB_BLOCK;
+        let half = group / 4u32;
+        let j = group % 4u32;
+        let width = ggml_half(right, base + 108u32);
+        let scale0 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32);
+        let scale1 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32 + 1u32);
+        if part < RUN_CODES {
+            let quants = ggml_run_word(right, base + 32u32 + half * 32u32, part);
+            let highs = ggml_run_word(right, base, part);
+            let mut held = 0u32;
+            for lane in unroll(0u32, 4u32, 1u32) {
+                let low = (quants >> (lane * 8u32 + 2u32 * j)) & 3u32;
+                let high = (highs >> (lane * 8u32 + half * 4u32 + j)) & 1u32;
+                let quant = low - select(0u32, 4u32, high == 0u32);
+                held = held | (quant & 0xffu32) << (lane * 8u32);
+            }
+            scratch[slot + part] = select(0.0, bitcast_f32(held), inside);
+            return;
+        }
+        if part == RUN_CODES {
+            panel_affine(slot, scale0, scale1, 0.0, inside);
         }
     }
 
@@ -505,6 +534,45 @@ mod device {
                     total = total
                         + select(0.0, template_left(left, left_address), keep)
                             * select(0.0, ggml_signed(byte) * scale, keep);
+                }
+            }
+            return total;
+        }
+        return template_dot_element(right, left, right_at, left_at, last, valid);
+    }
+
+    fn template_dot_q3_k(
+        right: Value,
+        left: Value,
+        right_at: u32,
+        left_at: u32,
+        last: u32,
+        valid: bool,
+    ) -> f32 {
+        if right.strides.z == 1u32 && right_at % SUPER_SUB_BLOCK == 0u32 {
+            let base = (right_at / Q3_K_BLOCK) * Q3_K_BYTES;
+            let within = right_at % Q3_K_BLOCK;
+            let group = within / SUPER_SUB_BLOCK;
+            let half = group / 4u32;
+            let j = group % 4u32;
+            let width = ggml_half(right, base + 108u32);
+            let scale0 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32);
+            let scale1 = width * ggml_q3_scale(right, base + 96u32, half * 8u32 + j * 2u32 + 1u32);
+            let mut total = 0.0;
+            for word in unroll(0u32, SUPER_SUB_BLOCK / 4u32, 1u32) {
+                let quants = ggml_run_word(right, base + 32u32 + half * 32u32, word);
+                let highs = ggml_run_word(right, base, word);
+                for lane in unroll(0u32, 4u32, 1u32) {
+                    let at = word * 4u32 + lane;
+                    let keep = valid && at < last;
+                    let low = (quants >> (lane * 8u32 + 2u32 * j)) & 3u32;
+                    let high = (highs >> (lane * 8u32 + half * 4u32 + j)) & 1u32;
+                    let scale = select(scale0, scale1, at >= 16u32);
+                    let weight = scale * (f32(low) - select(0.0, 4.0, high == 0u32));
+                    let left_address = select(0u32, left_at + at * left.strides.w, keep);
+                    total = total
+                        + select(0.0, template_left(left, left_address), keep)
+                            * select(0.0, weight, keep);
                 }
             }
             return total;

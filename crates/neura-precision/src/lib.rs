@@ -16,7 +16,9 @@ pub fn pack(element: Element, quantum: f32, values: &[f32]) -> Vec<u8> {
         Element::Fp8E4M3 => words(values, |value| e4m3_bits(value) as u8),
         Element::Fp8E5M2 => words(values, |value| e5m2_bits(value) as u8),
         Element::Fp4E2M1 => fp4(values),
-        Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => ggml::pack(element, values),
+        Element::Q8_0 | Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K => {
+            ggml::pack(element, values)
+        }
     }
 }
 
@@ -57,7 +59,7 @@ pub fn unpack(element: Element, elements: usize, bytes: &[u8]) -> Vec<f32> {
             .flat_map(|word| (0..4).map(move |lane| e5m2_value((word >> (8 * lane)) as u8)))
             .collect(),
         Element::Fp4E2M1 => fp4_values(elements, bytes),
-        Element::Q8_0 | Element::Q4K | Element::Q5K | Element::Q6K => {
+        Element::Q8_0 | Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K => {
             ggml::unpack(element, elements, bytes)
         }
     };

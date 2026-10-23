@@ -144,9 +144,11 @@ fn every_numeric_format_declares_how_it_packs_into_a_word() {
     assert!(!Element::Single.narrow() && !Element::Single.quantized());
     assert_eq!(Element::Int8.storage_words(5), 3);
     assert_eq!(Element::Int4.storage_words(200), 27);
+    assert_eq!(Element::Q3K.payload_bytes(256), 110);
     assert_eq!(Element::Q4K.payload_bytes(256), 144);
     assert_eq!(Element::Q5K.payload_bytes(256), 176);
     assert_eq!(Element::Q6K.payload_bytes(256), 210);
+    assert_eq!(Element::Q3K.payload_bytes(256), 110);
     assert_eq!(Element::Q4K.payload_bytes(256), 144);
     assert_eq!(Element::Q5K.payload_bytes(256), 176);
     assert_eq!(Element::Q8_0.payload_bytes(32), 34);
@@ -210,6 +212,7 @@ fn every_float_grid_is_declared_once_for_the_host_and_the_device() {
             | Element::Int8
             | Element::Int4
             | Element::Q8_0
+            | Element::Q3K
             | Element::Q4K
             | Element::Q5K
             | Element::Q6K => {

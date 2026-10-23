@@ -60,6 +60,7 @@ fn fetch_of(element: Element) -> &'static str {
         Element::Q4K => "fetch_q4_k",
         Element::Q5K => "fetch_q5_k",
         Element::Q6K => "fetch_q6_k",
+        Element::Q3K => "fetch_q3_k",
         Element::Fp8E4M3 | Element::Fp8E5M2 | Element::Fp4E2M1 => panic!(
             "{} storage walks a float grid, and its fetch is specialized from the grid the ABI declares",
             element.name(),
@@ -193,6 +194,15 @@ mod device {
         return select(pair.x, pair.y, (at & 3u32) == 2u32);
     }
 
+    fn ggml_run_word(value: Value, start: u32, index: u32) -> u32 {
+        let shift = (start & 3u32) * 8u32;
+        let at = (start >> 2u32) + index;
+        let low = ggml_raw(value, at);
+        let high = ggml_raw(value, at + 1u32);
+        let joined = (low >> shift) | (high << ((32u32 - shift) & 31u32));
+        return select(low, joined, shift != 0u32);
+    }
+
     fn ggml_signed(byte: u32) -> f32 {
         return f32(i32(byte) - select(0i32, 256i32, byte >= 128u32));
     }
@@ -215,10 +225,32 @@ mod device {
         return low | select(0u32, (ggml_byte(value, base + at) >> 6u32) << 4u32, upper);
     }
 
+    fn ggml_q3_scale(value: Value, base: u32, at: u32) -> f32 {
+        let low = ggml_byte(value, base + at % 8u32);
+        let nibble = select(low & 0x0fu32, low >> 4u32, at >= 8u32);
+        let high = ggml_byte(value, base + 8u32 + at % 4u32);
+        let code = nibble | ((high >> (2u32 * (at / 4u32))) & 3u32) << 4u32;
+        return f32(code) - 32.0;
+    }
+
     fn fetch_q8_0(value: Value, at: u32) -> f32 {
         let base = (at / Q8_0_BLOCK) * Q8_0_BYTES;
         return ggml_signed(ggml_byte(value, base + 2u32 + (at % Q8_0_BLOCK)))
             * ggml_half(value, base);
+    }
+
+    fn fetch_q3_k(value: Value, at: u32) -> f32 {
+        let base = (at / Q3_K_BLOCK) * Q3_K_BYTES;
+        let within = at % Q3_K_BLOCK;
+        let half = within / 128u32;
+        let local = within % 128u32;
+        let j = local / 32u32;
+        let seat = local % 32u32;
+        let scale = ggml_q3_scale(value, base + 96u32, half * 8u32 + j * 2u32 + seat / 16u32);
+        let low = (ggml_byte(value, base + 32u32 + half * 32u32 + seat) >> (2u32 * j)) & 3u32;
+        let high = (ggml_byte(value, base + seat) >> (half * 4u32 + j)) & 1u32;
+        let quant = f32(low) - select(0.0, 4.0, high == 0u32);
+        return ggml_half(value, base + 108u32) * scale * quant;
     }
 
     fn fetch_q4_k(value: Value, at: u32) -> f32 {

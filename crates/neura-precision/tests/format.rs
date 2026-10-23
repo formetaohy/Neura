@@ -169,3 +169,78 @@ fn a_block_of_zeros_quantizes_to_zero_beside_a_block_that_does_not() {
     );
     assert_eq!(quantized[INT4_BLOCK as usize], -4.0);
 }
+
+fn q3_k_scales(field: &[u8]) -> [i8; 16] {
+    let mut aux = [0u8; 16];
+    aux[..12].copy_from_slice(&field[96..108]);
+    let words = std::array::from_fn::<u32, 4, _>(|at| {
+        u32::from_le_bytes(aux[at * 4..at * 4 + 4].try_into().expect("a word"))
+    });
+    let tmp = words[2];
+    let masks = (0x0303_0303u32, 0x0f0f_0f0fu32);
+    let packed = [
+        (words[0] & masks.1) | ((tmp & masks.0) << 4),
+        (words[1] & masks.1) | (((tmp >> 2) & masks.0) << 4),
+        ((words[0] >> 4) & masks.1) | (((tmp >> 4) & masks.0) << 4),
+        ((words[1] >> 4) & masks.1) | (((tmp >> 6) & masks.0) << 4),
+    ];
+    std::array::from_fn(|at| (packed[at / 4] >> ((at % 4) * 8)) as u8 as i8 - 32)
+}
+
+fn q3_k_reference(field: &[u8]) -> Vec<f32> {
+    let d = half::f16::from_bits(u16::from_le_bytes([field[108], field[109]])).to_f32();
+    let scales = q3_k_scales(field);
+    let mut out = Vec::with_capacity(256);
+    let mut is = 0usize;
+    let mut m = 1u8;
+    for half in 0..2 {
+        let q = &field[32 + half * 32..32 + half * 32 + 32];
+        let mut shift = 0u32;
+        for _ in 0..4 {
+            let low = d * f32::from(scales[is]);
+            is += 1;
+            for l in 0..16 {
+                let quant = ((q[l] >> shift) & 3) as i32 - if field[l] & m == 0 { 4 } else { 0 };
+                out.push(low * quant as f32);
+            }
+            let high = d * f32::from(scales[is]);
+            is += 1;
+            for l in 0..16 {
+                let quant =
+                    ((q[l + 16] >> shift) & 3) as i32 - if field[l + 16] & m == 0 { 4 } else { 0 };
+                out.push(high * quant as f32);
+            }
+            shift += 2;
+            m <<= 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn a_three_bit_super_block_walks_the_high_bits_and_scales_a_gguf_packs() {
+    let mut field = vec![0u8; 112];
+    for (at, byte) in field[..32].iter_mut().enumerate() {
+        *byte = (at as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    for (at, byte) in field[32..96].iter_mut().enumerate() {
+        *byte = (at as u8).wrapping_mul(53).wrapping_add(7);
+    }
+    for (at, byte) in field[96..108].iter_mut().enumerate() {
+        *byte = (at as u8).wrapping_mul(19).wrapping_add(3);
+    }
+    field[108..110].copy_from_slice(&half::f16::from_f32(0.25).to_bits().to_le_bytes());
+    let walked = unpack(Element::Q3K, 256, &field);
+    assert_eq!(walked, q3_k_reference(&field));
+
+    let values = (0..256)
+        .map(|at| (at as f32 * 0.031).sin() * 0.75)
+        .collect::<Vec<_>>();
+    let quantized = round_trip(Element::Q3K, &values);
+    let worst = values
+        .iter()
+        .zip(&quantized)
+        .map(|(value, quantized)| (value - quantized).abs())
+        .fold(0.0f32, f32::max);
+    assert!(worst <= 0.25, "a three bit block returned {worst} away");
+}

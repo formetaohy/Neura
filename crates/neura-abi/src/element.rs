@@ -13,6 +13,7 @@ pub enum Element {
     Q4K,
     Q5K,
     Q6K,
+    Q3K,
 }
 
 pub const SINGLE: u32 = Element::Single as u32;
@@ -27,6 +28,7 @@ pub const Q8_0: u32 = Element::Q8_0 as u32;
 pub const Q4_K: u32 = Element::Q4K as u32;
 pub const Q5_K: u32 = Element::Q5K as u32;
 pub const Q6_K: u32 = Element::Q6K as u32;
+pub const Q3_K: u32 = Element::Q3K as u32;
 
 pub const INT4_BLOCK: u32 = 128;
 pub const FP4_BLOCK: u32 = 32;
@@ -69,6 +71,7 @@ impl Element {
         Self::Q4K,
         Self::Q5K,
         Self::Q6K,
+        Self::Q3K,
     ];
     pub const COUNT: u32 = Self::ALL.len() as u32;
 
@@ -96,6 +99,7 @@ impl Element {
             Self::Q4K => "element::Q4_K",
             Self::Q5K => "element::Q5_K",
             Self::Q6K => "element::Q6_K",
+            Self::Q3K => "element::Q3_K",
         }
     }
 
@@ -113,13 +117,14 @@ impl Element {
             Self::Q4K => "q4_k",
             Self::Q5K => "q5_k",
             Self::Q6K => "q6_k",
+            Self::Q3K => "q3_k",
         }
     }
 
     pub const fn integral(self) -> bool {
         matches!(
             self,
-            Self::Int8 | Self::Int4 | Self::Q8_0 | Self::Q4K | Self::Q6K
+            Self::Int8 | Self::Int4 | Self::Q8_0 | Self::Q3K | Self::Q4K | Self::Q6K
         )
     }
 
@@ -163,6 +168,10 @@ impl Element {
                 elements: SUPER_BLOCK,
                 bytes: 2 + SUPER_BLOCK / 2 + SUPER_BLOCK / 4 + SUPER_BLOCK / 16,
             },
+            Self::Q3K => Block {
+                elements: SUPER_BLOCK,
+                bytes: 2 + SUPER_BLOCK / 8 + SUPER_BLOCK / 4 + SUPER_SCALE_BYTES,
+            },
             _ => return None,
         };
         Some(block)
@@ -190,6 +199,7 @@ impl Element {
                 | Self::Q4K
                 | Self::Q5K
                 | Self::Q6K
+                | Self::Q3K
         )
     }
 
@@ -206,7 +216,7 @@ impl Element {
     }
 
     pub const fn packs_codes(self) -> bool {
-        matches!(self, Self::Q4K | Self::Q5K | Self::Q6K)
+        matches!(self, Self::Q4K | Self::Q5K | Self::Q6K | Self::Q3K)
     }
 
     pub const fn quanta(self, elements: u64) -> u64 {

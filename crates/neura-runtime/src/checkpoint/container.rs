@@ -70,6 +70,7 @@ impl Dtype {
             Element::Int4
             | Element::Fp4E2M1
             | Element::Q8_0
+            | Element::Q3K
             | Element::Q4K
             | Element::Q5K
             | Element::Q6K => None,

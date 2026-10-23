@@ -12,7 +12,13 @@ mod support;
 #[test]
 fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
     let (depth, columns) = (2048u32, 1024u32);
-    for element in [Element::Q8_0, Element::Q4K, Element::Q5K, Element::Q6K] {
+    for element in [
+        Element::Q8_0,
+        Element::Q3K,
+        Element::Q4K,
+        Element::Q5K,
+        Element::Q6K,
+    ] {
         let runtime = open();
         let profile = runtime.default_profile();
         let values = random(columns * depth, 23);
@@ -45,7 +51,12 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
                     element.name(),
                 );
             }
-            if rows == 4 && matches!(element, Element::Q4K | Element::Q5K | Element::Q6K) {
+            if rows == 4
+                && matches!(
+                    element,
+                    Element::Q3K | Element::Q4K | Element::Q5K | Element::Q6K
+                )
+            {
                 assert!(
                     program
                         .matmul_geometries()
@@ -77,7 +88,13 @@ fn a_narrow_product_walks_the_quantized_weight_a_gguf_stores() {
 #[test]
 fn a_wide_product_walks_the_quantized_weight_a_gguf_stores() {
     let (rows, depth, columns) = (8u32, 512u32, 4096u32);
-    for element in [Element::Q8_0, Element::Q4K, Element::Q5K, Element::Q6K] {
+    for element in [
+        Element::Q8_0,
+        Element::Q3K,
+        Element::Q4K,
+        Element::Q5K,
+        Element::Q6K,
+    ] {
         let runtime = open();
         let graph = Graph::new();
         let left = graph.input(Shape::matrix(rows, depth), Element::Single);
