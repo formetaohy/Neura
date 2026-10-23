@@ -834,7 +834,7 @@ impl Runtime {
             program.write_records(self.context.queue());
             program.records_written();
         }
-        if program.windows().is_empty() {
+        if program.windows().groups().is_empty() {
             let device = self.context.device();
             let queue = self.context.queue();
             let encoding = program.encoding();
@@ -873,10 +873,11 @@ impl Runtime {
     fn stream(&self, program: &Program) -> Run {
         let queue = self.context.queue();
         let device = self.context.device();
-        let windows = program.windows();
+        let schedule = program.windows();
         let encoding = program.encoding();
-        let mut submissions = Vec::with_capacity(windows.len());
-        for window in windows.iter() {
+        program.store().pin(schedule.pins());
+        let mut submissions = Vec::with_capacity(schedule.groups().len());
+        for window in schedule.groups() {
             submissions.extend(program.store().ensure(queue, window.pages()));
             let (generation, clear) = program.begin();
             program.write_dispatch(

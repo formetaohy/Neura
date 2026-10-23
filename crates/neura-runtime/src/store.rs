@@ -174,6 +174,8 @@ struct Mirror {
     page_of: Vec<u32>,
     slot_of: Vec<u32>,
     dirty: Vec<bool>,
+    pinned: Vec<bool>,
+    pins: Vec<u32>,
     order: Vec<(u32, u32)>,
     deferred: Vec<(u32, u32)>,
     free: Vec<u32>,
@@ -283,6 +285,8 @@ impl Mirror {
             page_of: vec![NO_PAGE; slots as usize],
             slot_of: vec![NO_PAGE; pages as usize],
             dirty: vec![false; slots as usize],
+            pinned: vec![false; pages as usize],
+            pins: Vec::new(),
             order: Vec::with_capacity(slots as usize),
             deferred: Vec::new(),
             free: (0..slots).rev().collect(),
@@ -310,10 +314,42 @@ impl Mirror {
             self.page_of[slot] = NO_PAGE;
             self.dirty[slot] = false;
         }
+        self.pinned.fill(false);
+        self.pins.clear();
         self.order.clear();
         self.deferred.clear();
         self.free.clear();
         self.free.extend((0..self.page_of.len() as u32).rev());
+    }
+
+    fn pin(&mut self, pages: &[u32]) {
+        if self.pins == pages {
+            return;
+        }
+        assert!(
+            pages.windows(2).all(|pair| pair[0] < pair[1]),
+            "a pinned set names every page once, in order",
+        );
+        assert!(
+            pages.len() <= self.page_of.len(),
+            "a pinned set of {} pages outruns the {} slots of this store",
+            pages.len(),
+            self.page_of.len(),
+        );
+        let held = std::mem::take(&mut self.pins);
+        self.pinned.fill(false);
+        for page in pages {
+            self.pinned[*page as usize] = true;
+        }
+        self.pins = pages.to_vec();
+        self.order.retain(|(_, page)| !self.pinned[*page as usize]);
+        for page in held {
+            if !self.pinned[page as usize]
+                && let Some(slot) = self.resident(page)
+            {
+                self.order.push((slot, page));
+            }
+        }
     }
 
     fn table(&self) -> Vec<u32> {
@@ -410,6 +446,24 @@ impl WeightStore {
 
     pub(crate) fn paged(&self) -> bool {
         self.mirror.is_some()
+    }
+
+    pub(crate) fn pin(&self, pages: &[u32]) {
+        let Some(mirror) = &self.mirror else {
+            return;
+        };
+        let mut mirror = mirror.lock().unwrap_or_else(PoisonError::into_inner);
+        mirror.pin(pages);
+    }
+
+    pub(crate) fn pinned_pages(&self) -> u32 {
+        self.mirror.as_ref().map_or(0, |mirror| {
+            mirror
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pins
+                .len() as u32
+        })
     }
 
     pub(crate) fn buffer(&self) -> &GpuBuffer {
@@ -660,7 +714,11 @@ impl WeightStore {
         let mut deferred = std::mem::take(&mut mirror.deferred);
         deferred.reverse();
         mirror.order.extend(deferred);
-        mirror.order.extend(loaded);
+        for (slot, page) in loaded {
+            if !mirror.pinned[page as usize] {
+                mirror.order.push((slot, page));
+            }
+        }
         if matches!(mirror.backing, Backing::Mapped(_))
             && let Some(submission) = transfer.take()
         {
@@ -771,6 +829,9 @@ impl WeightStore {
         }
         while let Some((slot, kept)) = mirror.order.pop() {
             if kept == NO_PAGE || mirror.page_of[slot as usize] != kept {
+                continue;
+            }
+            if mirror.pinned[kept as usize] {
                 continue;
             }
             if kept == page || pages.binary_search(&kept).is_ok() {

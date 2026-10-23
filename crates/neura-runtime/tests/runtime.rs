@@ -1226,3 +1226,122 @@ fn a_measured_plan_restores_the_state_it_timed() {
     runtime.run(&program);
     assert_eq!(runtime.read(&program, state), vec![1.0; 1024]);
 }
+
+#[test]
+fn a_pinned_schedule_streams_only_the_pages_it_does_not_hold() {
+    let plain = crate::support::open();
+    let paged = crate::support::opened(neura_runtime::MemoryRequest {
+        resident_weight_bytes: Some(64 << 14),
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 1, 128]), Element::Single);
+    let mut value = input;
+    let mut weights = Vec::new();
+    for layer in 0..40u32 {
+        let weight = graph.parameter(Shape::of([1, 1, 128, 128]), Init::Zero, Element::Single);
+        weights.push((weight, crate::support::random(128 * 128, layer + 3)));
+        value = graph.matmul(value, weight);
+    }
+    graph.retain(value);
+    let plain_weights = plain.weights(&graph);
+    let plain_program = plain.compile(&graph, &plain_weights);
+    let paged_weights = paged.weights(&graph);
+    let paged_program = paged.compile(&graph, &paged_weights);
+    assert!(
+        paged_program.weight_windows() > 1,
+        "the weights outrun the store"
+    );
+    let input_values = crate::support::random(128, 7);
+    for (weight, held) in &weights {
+        plain.write(&plain_program, *weight, held);
+        paged.write(&paged_program, *weight, held);
+    }
+    plain.write(&plain_program, input, &input_values);
+    paged.write(&paged_program, input, &input_values);
+    paged.run(&paged_program);
+    assert!(
+        paged_program.pinned_pages() > 0,
+        "the paged schedule pins no page",
+    );
+    for _ in 0..3 {
+        plain.run(&plain_program);
+        paged.run(&paged_program);
+        assert_close(
+            &paged.read(&paged_program, value),
+            &plain.read(&plain_program, value),
+            1e-4,
+        );
+    }
+}
+
+#[test]
+fn a_pinned_schedule_updates_the_pages_it_holds() {
+    const WIDTH: u32 = 128;
+    const LAYERS: u32 = 24;
+    let plain = crate::support::open();
+    let paged = crate::support::opened(neura_runtime::MemoryRequest {
+        resident_weight_bytes: Some(64 << 14),
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    let target = graph.input(Shape::of([1, 1, 1, WIDTH]), Element::Single);
+    let mut value = input;
+    let mut parameters = Vec::new();
+    for layer in 0..LAYERS {
+        let weight = graph.parameter(Shape::of([1, 1, WIDTH, WIDTH]), Init::Zero, Element::Single);
+        let mut held = crate::support::random(WIDTH * WIDTH, layer + 13);
+        for (at, number) in held.iter_mut().enumerate() {
+            let (row, column) = (at as u32 / WIDTH, at as u32 % WIDTH);
+            *number = if row == column { 0.9 } else { *number * 0.005 };
+        }
+        parameters.push((weight, held));
+        value = graph.matmul(value, weight);
+    }
+    let difference = graph.sub(value, target);
+    let loss = graph.sum(graph.mul(difference, difference));
+    let gradients = graph.backward(loss);
+    let rate = graph.fill(Shape::scalar(), -1e-3);
+    for (parameter, _) in &parameters {
+        graph.add_into(*parameter, graph.mul(gradients.of(*parameter), rate));
+    }
+    graph.retain(loss);
+    let plain_weights = plain.weights(&graph);
+    let plain_program = plain.compile(&graph, &plain_weights);
+    let paged_weights = paged.weights(&graph);
+    let paged_program = paged.compile(&graph, &paged_weights);
+    assert!(
+        paged_program.weight_windows() > 1,
+        "the weights outrun the store"
+    );
+    let input_values = crate::support::random(WIDTH, 19);
+    let target_values = crate::support::random(WIDTH, 23);
+    for (parameter, held) in &parameters {
+        plain.write(&plain_program, *parameter, held);
+        paged.write(&paged_program, *parameter, held);
+    }
+    plain.write(&plain_program, input, &input_values);
+    paged.write(&paged_program, input, &input_values);
+    plain.write(&plain_program, target, &target_values);
+    paged.write(&paged_program, target, &target_values);
+    for _ in 0..3 {
+        plain.run(&plain_program);
+        paged.run(&paged_program);
+    }
+    assert!(
+        paged_program.pinned_pages() > 0,
+        "the paged schedule pins no page",
+    );
+    assert_close(
+        &paged.read(&paged_program, loss),
+        &plain.read(&plain_program, loss),
+        1e-4,
+    );
+    let (held, _) = parameters[0];
+    assert_close(
+        &paged.read(&paged_program, held),
+        &plain.read(&plain_program, held),
+        1e-4,
+    );
+}

@@ -10,11 +10,16 @@ use neura_gpu::{
 };
 use neura_graph::{GraphStamp, Revision, Value};
 use neura_kernel::{HEAP, TASKS, Tables, VALUES};
-use neura_plan::{Arena, Encoding, Plan, Span, TableRows, WeightPages};
+use neura_plan::{Arena, Encoding, Plan, Span, TableRows};
 use neura_profile::{MatmulTile, Profile};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+mod window;
+
+pub(crate) use window::WeightSchedule;
+use window::weight_schedule;
 
 const REMEMBERED_WINDOWS: usize = 8;
 static INSTANCES: AtomicU64 = AtomicU64::new(1);
@@ -61,6 +66,10 @@ impl Weights {
 
     pub fn resident_bytes(&self) -> u64 {
         self.store.resident_bytes()
+    }
+
+    pub fn pinned_pages(&self) -> u32 {
+        self.store.pinned_pages()
     }
 
     pub fn readback_pages(&self) -> u64 {
@@ -165,7 +174,7 @@ impl Tensors {
 struct Windows {
     extents: Vec<u32>,
     rows: Vec<(u32, Vec<u32>)>,
-    groups: Arc<Vec<WeightGroup>>,
+    schedule: Arc<WeightSchedule>,
 }
 
 pub(crate) struct Dispatch<'a> {
@@ -210,149 +219,6 @@ impl Successors {
             .push(std::mem::replace(&mut self.active, fresh));
         self.write(queue, bytes);
     }
-}
-
-pub(crate) struct WeightGroup {
-    first_segment: u32,
-    segments: u32,
-    pages: Vec<u32>,
-    writes: Vec<u32>,
-    roots: Vec<u32>,
-    counts: Vec<u32>,
-}
-
-impl WeightGroup {
-    fn of(
-        encoding: &Encoding,
-        first: usize,
-        end: usize,
-        pages: Vec<u32>,
-        writes: Vec<u32>,
-    ) -> Self {
-        let mut roots = Vec::new();
-        let mut counts = Vec::with_capacity(end - first);
-        for segment in first..end {
-            let count = encoding.predecessors(segment, first);
-            if count == 0 {
-                roots.push(segment as u32);
-            }
-            counts.push(count);
-        }
-        Self {
-            first_segment: first as u32,
-            segments: (end - first) as u32,
-            pages,
-            writes,
-            roots,
-            counts,
-        }
-    }
-
-    pub(crate) fn first_segment(&self) -> u32 {
-        self.first_segment
-    }
-
-    pub(crate) fn segments(&self) -> u32 {
-        self.segments
-    }
-
-    pub(crate) fn pages(&self) -> &[u32] {
-        &self.pages
-    }
-
-    pub(crate) fn writes(&self) -> &[u32] {
-        &self.writes
-    }
-
-    pub(crate) fn roots(&self) -> &[u32] {
-        &self.roots
-    }
-
-    pub(crate) fn counts(&self) -> &[u32] {
-        &self.counts
-    }
-}
-
-fn raise_or_declare(plan: &Plan) -> &'static str {
-    match plan.gather_tables().is_empty() {
-        true => "raise the resident weight budget",
-        false => {
-            "raise the resident weight budget, or name the rows a table walk reads with Runtime::declare_rows"
-        }
-    }
-}
-
-fn weight_groups(
-    plan: &Plan,
-    encoding: &Encoding,
-    slots: u32,
-    tasks: &[WeightPages],
-) -> Vec<WeightGroup> {
-    let mut groups = Vec::new();
-    let mut pages = Vec::<u32>::new();
-    let mut writes = Vec::<u32>::new();
-    let mut start = 0usize;
-    for (segment, record) in encoding.segments().iter().enumerate() {
-        let first = record.first as usize;
-        let end = first + record.count as usize;
-        let mut walking = Vec::<u32>::new();
-        let mut writing = Vec::<u32>::new();
-        for task in &tasks[first..end] {
-            walking.extend_from_slice(task.pages());
-            writing.extend_from_slice(task.writes());
-        }
-        walking.sort_unstable();
-        walking.dedup();
-        writing.sort_unstable();
-        writing.dedup();
-        let added = walking
-            .iter()
-            .filter(|page| pages.binary_search(page).is_err())
-            .count();
-        if pages.len() + added > slots as usize {
-            if pages.is_empty() {
-                panic!(
-                    "segment {segment} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose segments walk no more pages than it holds",
-                    walking.len(),
-                    raise_or_declare(plan),
-                );
-            }
-            groups.push(WeightGroup::of(
-                encoding,
-                start,
-                segment,
-                std::mem::take(&mut pages),
-                std::mem::take(&mut writes),
-            ));
-            start = segment;
-        }
-        for page in walking {
-            match pages.binary_search(&page) {
-                Ok(_) => {}
-                Err(at) => pages.insert(at, page),
-            }
-        }
-        assert!(
-            pages.len() <= slots as usize,
-            "segment {segment} of this plan walks {} weight pages, and the resident weights of {slots} pages cannot hold them; {}, or bind a graph whose tasks walk no more pages than it holds",
-            pages.len(),
-            raise_or_declare(plan),
-        );
-        for write in writing {
-            match writes.binary_search(&write) {
-                Ok(_) => {}
-                Err(at) => writes.insert(at, write),
-            }
-        }
-    }
-    groups.push(WeightGroup::of(
-        encoding,
-        start,
-        encoding.segments().len(),
-        pages,
-        writes,
-    ));
-    groups
 }
 
 fn counters(encoding: &Encoding, first: usize, count: usize) -> Vec<u32> {
@@ -527,16 +393,17 @@ impl Program {
         let bound = plan.host_extents();
         let preview = match paged && !plan.dynamic() && plan.gather_tables().is_empty() {
             true => {
-                let groups = weight_groups(
+                let schedule = weight_schedule(
                     &plan,
                     &bound_encoding,
                     weights.resident_pages(),
+                    weights.pages(),
                     &plan.weight_pages(&bound_encoding, &[]),
                 );
                 Some(Windows {
                     extents: bound,
                     rows: Vec::new(),
-                    groups: Arc::new(groups),
+                    schedule: Arc::new(schedule),
                 })
             }
             false => None,
@@ -984,7 +851,7 @@ impl Program {
         *self.last.lock().unwrap_or_else(PoisonError::into_inner) = Some(submission);
     }
 
-    pub(crate) fn windows(&self) -> Arc<Vec<WeightGroup>> {
+    pub(crate) fn windows(&self) -> Arc<WeightSchedule> {
         let extents = self.host_extents();
         let declared = self.declared_rows();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
@@ -993,26 +860,27 @@ impl Program {
             .position(|kept| kept.extents == extents && kept.rows == declared)
         {
             let kept = windows.remove(position);
-            let groups = kept.groups.clone();
+            let schedule = kept.schedule.clone();
             windows.push(kept);
-            return groups;
+            return schedule;
         }
         let rows = declared
             .iter()
             .map(|(table, rows)| TableRows::new(*table, rows))
             .collect::<Vec<TableRows<'_>>>();
         let encoding = self.encoding();
-        let groups = Arc::new(match self.weights.paged() {
+        let schedule = Arc::new(match self.weights.paged() {
             true => {
                 self.planned_windows.fetch_add(1, Ordering::Relaxed);
-                weight_groups(
+                weight_schedule(
                     &self.plan,
                     &encoding,
                     self.weights.resident_pages(),
+                    self.weights.pages(),
                     &self.plan.weight_pages(&encoding, &rows),
                 )
             }
-            false => Vec::new(),
+            false => WeightSchedule::empty(),
         });
         while windows.len() >= REMEMBERED_WINDOWS {
             windows.remove(0);
@@ -1020,9 +888,9 @@ impl Program {
         windows.push(Windows {
             extents,
             rows: declared,
-            groups: groups.clone(),
+            schedule: schedule.clone(),
         });
-        groups
+        schedule
     }
 
     pub fn planned_windows(&self) -> usize {
@@ -1220,7 +1088,15 @@ impl Program {
     }
 
     pub fn weight_windows(&self) -> u32 {
-        self.windows().len() as u32
+        self.windows().groups().len() as u32
+    }
+
+    pub fn pinned_pages(&self) -> u32 {
+        self.weights.pinned_pages()
+    }
+
+    pub(crate) fn streams_weights(&self) -> bool {
+        self.weights.paged()
     }
 
     pub fn workgroups(&self) -> u32 {

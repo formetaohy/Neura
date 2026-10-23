@@ -89,10 +89,16 @@ fn main() {
         path, config.layers, config.hidden, context,
     );
 
+    let resident = std::env::var("NEURA_RESIDENT_MB").ok().map(|held| {
+        held.parse::<u64>()
+            .expect("NEURA_RESIDENT_MB holds whole megabytes")
+            << 20
+    });
     let runtime = Runtime::open(RuntimeRequest {
         memory: MemoryRequest {
             heap_bytes: HEAP,
             readback_bytes: READBACK,
+            resident_weight_bytes: resident,
             ..Default::default()
         },
         ..Default::default()

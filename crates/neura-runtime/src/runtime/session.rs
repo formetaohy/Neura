@@ -86,9 +86,8 @@ impl Runtime {
             "a session walks a plan a compile has compiled",
         );
         assert!(
-            program.windows().is_empty(),
-            "a session walks a plan whose weights stay resident, and this plan streams {} weight windows",
-            program.windows().len(),
+            !program.streams_weights(),
+            "a session walks a plan whose weights stay resident, and this plan streams its weights",
         );
         assert!(
             program.wave_count() > 0,
