@@ -49,6 +49,7 @@ pub struct BatchStep {
     pub reset: Value,
     pub logits: Value,
     pub states: Vec<PlaneState>,
+    pub gathers: Vec<GatherRows>,
 }
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ pub struct BatchFill {
     pub cursor: Value,
     pub mask: Value,
     pub states: Vec<PlaneState>,
+    pub gathers: Vec<GatherRows>,
 }
 
 pub struct BatchPrefix {
@@ -65,6 +67,27 @@ pub struct BatchPrefix {
     pub mask: Value,
     pub reset: Value,
     pub states: Vec<PlaneState>,
+    pub gathers: Vec<GatherRows>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GatherRows {
+    table: Value,
+    rows: Value,
+}
+
+impl GatherRows {
+    pub fn new(table: Value, rows: Value) -> Self {
+        Self { table, rows }
+    }
+
+    pub const fn table(self) -> Value {
+        self.table
+    }
+
+    pub const fn rows(self) -> Value {
+        self.rows
+    }
 }
 
 pub struct BatchSeed {
@@ -922,14 +945,13 @@ impl Batch {
                 .iter()
                 .map(|token| *token as f32)
                 .collect::<Vec<f32>>();
+            let cursor = [start as f32];
+            let mask = [1.0];
+            let reset = [if index == 0 { 1.0 } else { 0.0 }];
             runtime.write(&entry.program, entry.step.token, &ids);
-            runtime.write(&entry.program, entry.step.cursor, &[start as f32]);
-            runtime.write(&entry.program, entry.step.mask, &[1.0]);
-            runtime.write(
-                &entry.program,
-                entry.step.reset,
-                &[if index == 0 { 1.0 } else { 0.0 }],
-            );
+            runtime.write(&entry.program, entry.step.cursor, &cursor);
+            runtime.write(&entry.program, entry.step.mask, &mask);
+            runtime.write(&entry.program, entry.step.reset, &reset);
             write_program_states(
                 runtime,
                 &entry.program,
@@ -937,6 +959,19 @@ impl Batch {
                 &self.states,
                 &self.state_values,
             );
+            let mut inputs = vec![
+                (entry.step.token, ids.as_slice()),
+                (entry.step.cursor, cursor.as_slice()),
+                (entry.step.mask, mask.as_slice()),
+                (entry.step.reset, reset.as_slice()),
+            ];
+            inputs.extend(
+                self.states
+                    .iter()
+                    .zip(self.state_values.iter())
+                    .map(|(state, values)| (state.value(), values.as_slice())),
+            );
+            declare_gathers(runtime, &entry.program, &entry.step.gathers, &inputs);
             runtime.run(&entry.program);
         }
         self.prefix = Some(tokens.to_vec());
@@ -1418,6 +1453,18 @@ impl Batch {
             states,
             state_values,
         );
+        let mut inputs = vec![
+            (fill.step.token, tokens.as_slice()),
+            (fill.step.cursor, cursors.as_slice()),
+            (fill.step.mask, mask.as_slice()),
+        ];
+        inputs.extend(
+            states
+                .iter()
+                .zip(state_values.iter())
+                .map(|(state, values)| (state.value(), values.as_slice())),
+        );
+        declare_gathers(runtime, &fill.program, &fill.step.gathers, &inputs);
     }
 
     fn complete_fill(&mut self, index: usize, group: &[u32]) {
@@ -1587,11 +1634,31 @@ impl Batch {
         let reset_value = step.reset;
         let reset = vec![0.0f32; self.batch as usize];
         self.write_seeds(runtime);
-        let answer = self.answer.entry(runtime, &self.store, self.compile);
+        let Self {
+            answer,
+            states,
+            state_values,
+            ..
+        } = self;
+        let gathers = answer.step.gathers.clone();
+        let answer = answer.entry(runtime, &self.store, self.compile);
         runtime.write(&answer.program, token, tokens);
         runtime.write(&answer.program, cursor_value, cursor);
         runtime.write(&answer.program, mask_value, mask);
         runtime.write(&answer.program, reset_value, &reset);
+        let mut inputs = vec![
+            (token, tokens),
+            (cursor_value, cursor),
+            (mask_value, mask),
+            (reset_value, reset.as_slice()),
+        ];
+        inputs.extend(
+            states
+                .iter()
+                .zip(state_values.iter())
+                .map(|(state, values)| (state.value(), values.as_slice())),
+        );
+        declare_gathers(runtime, &answer.program, &gathers, &inputs);
     }
 
     fn complete_answer(&mut self, chosen: &[f32]) -> Vec<Emitted> {
@@ -1923,6 +1990,50 @@ fn known_states(registered: &[PlaneState], states: &[PlaneState], what: &str) {
             "a {what} names state {} that the answer registers no state for",
             state.name(),
         );
+    }
+}
+
+fn declare_gathers(
+    runtime: &Runtime,
+    program: &Program,
+    gathers: &[GatherRows],
+    inputs: &[(Value, &[f32])],
+) {
+    let mut declared = Vec::<(Value, Vec<u32>)>::new();
+    for gather in gathers {
+        let rows = inputs
+            .iter()
+            .find(|(value, _)| *value == gather.rows())
+            .map(|(_, rows)| *rows)
+            .unwrap_or_else(|| {
+                panic!(
+                    "a gather of table {} declares the rows of value {}, and the batch writes no such value this step",
+                    gather.table().id(),
+                    gather.rows().id(),
+                )
+            });
+        let rows = rows
+            .iter()
+            .map(|row| {
+                assert!(
+                    row.is_finite() && *row >= 0.0 && row.fract() == 0.0,
+                    "a gathered row is a whole number, and the batch feeds {row}",
+                );
+                *row as u32
+            })
+            .collect::<Vec<u32>>();
+        match declared
+            .iter_mut()
+            .find(|(table, _)| table.id() == gather.table().id())
+        {
+            Some((_, held)) => held.extend_from_slice(&rows),
+            None => declared.push((gather.table(), rows)),
+        }
+    }
+    for (table, mut rows) in declared {
+        rows.sort_unstable();
+        rows.dedup();
+        runtime.declare_rows(program, table, &rows);
     }
 }
 

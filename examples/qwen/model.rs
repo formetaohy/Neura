@@ -61,6 +61,10 @@ impl Model {
         }
     }
 
+    pub fn embedding(&self) -> Value {
+        self.embedding
+    }
+
     pub fn reset(&self, graph: &Graph, reset: Value) {
         for layer in &self.layers {
             match layer {

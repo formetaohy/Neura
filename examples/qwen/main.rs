@@ -9,7 +9,7 @@ mod tokenizer;
 
 use config::Config;
 use model::{Model, Planes};
-use neura::generate::{Batch, BatchFill, BatchSeed, BatchShape, BatchSpec, BatchStep};
+use neura::generate::{Batch, BatchFill, BatchSeed, BatchShape, BatchSpec, BatchStep, GatherRows};
 use neura::gguf::GgufFile;
 use neura::template::{Message, Template, Value};
 use neura::tokenizer::Text;
@@ -125,6 +125,7 @@ fn main() {
             reset,
             logits: model.step(graph, token, cursor, mask),
             states: Vec::new(),
+            gathers: vec![GatherRows::new(model.embedding(), token)],
         }
     };
     let fill = |graph: &neura::Graph, shape: BatchShape| {
@@ -138,6 +139,7 @@ fn main() {
             cursor,
             mask,
             states: Vec::new(),
+            gathers: vec![GatherRows::new(model.embedding(), token)],
         }
     };
     let reset = |graph: &neura::Graph, shape: BatchShape| {

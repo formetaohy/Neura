@@ -73,6 +73,7 @@ fn batch_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
             Shape::of([1, 1, shape.batch, CLASSES]),
         ),
         states: Vec::new(),
+        gathers: Vec::new(),
     }
 }
 
@@ -91,6 +92,7 @@ fn batch_fill(graph: &neura_graph::Graph, shape: BatchShape) -> BatchFill {
         cursor,
         mask,
         states: Vec::new(),
+        gathers: Vec::new(),
     }
 }
 
@@ -151,6 +153,7 @@ fn batch_prefix(graph: &neura_graph::Graph, shape: BatchShape) -> BatchPrefix {
         mask,
         reset,
         states: Vec::new(),
+        gathers: Vec::new(),
     }
 }
 
@@ -582,6 +585,7 @@ fn a_temperature_the_host_writes_steers_the_next_draw_without_recompiling() {
             reset,
             logits: graph.concat(&parts, 3),
             states: Vec::new(),
+            gathers: Vec::new(),
         }
     };
     let spec = BatchSpec::new(512, 1, &[]).sampled(Sampling::sampled(1.0, CLASSES, 1.0));
@@ -693,6 +697,7 @@ fn state_answer(graph: &neura_graph::Graph, shape: BatchShape) -> BatchStep {
             graph.fill(Shape::scalar(), 1e6),
         ),
         states: vec![PlaneState::new("route", route, 0.0)],
+        gathers: Vec::new(),
     }
 }
 

@@ -870,15 +870,51 @@ impl Runtime {
         self.stream(program)
     }
 
+    fn merge_pages(left: &[u32], right: &[u32]) -> Vec<u32> {
+        if right.is_empty() {
+            return left.to_vec();
+        }
+        let mut merged = Vec::with_capacity(left.len() + right.len());
+        let (mut at, mut kept) = (0usize, 0usize);
+        while at < left.len() && kept < right.len() {
+            match left[at].cmp(&right[kept]) {
+                std::cmp::Ordering::Less => {
+                    merged.push(left[at]);
+                    at += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    merged.push(right[kept]);
+                    kept += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    merged.push(left[at]);
+                    at += 1;
+                    kept += 1;
+                }
+            }
+        }
+        merged.extend_from_slice(&left[at..]);
+        merged.extend_from_slice(&right[kept..]);
+        merged
+    }
+
     fn stream(&self, program: &Program) -> Run {
         let queue = self.context.queue();
         let device = self.context.device();
         let schedule = program.windows();
         let encoding = program.encoding();
+        let rows = program.row_pages();
+        let allowance = program.row_page_allowance();
+        assert!(
+            rows.len() <= allowance as usize,
+            "a host declares {} weight pages for the rows it gathers, and the window schedule reserves {allowance}; raise the resident weight budget",
+            rows.len(),
+        );
         program.store().pin(schedule.pins());
         let mut submissions = Vec::with_capacity(schedule.groups().len());
         for window in schedule.groups() {
-            submissions.extend(program.store().ensure(queue, window.pages()));
+            let pages = Self::merge_pages(window.pages(), &rows);
+            submissions.extend(program.store().ensure(queue, &pages));
             let (generation, clear) = program.begin();
             program.write_dispatch(
                 queue,

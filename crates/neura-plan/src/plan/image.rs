@@ -245,6 +245,7 @@ impl Plan {
         }
         let patches = Patches::of_image_parts(owners, counted);
         let gather_tables = held.words()?;
+        let gather_rows = super::gather_rows(&tasks, values);
         let bound = read_encoding(&mut held)?;
         if !held.done() {
             return None;
@@ -278,6 +279,7 @@ impl Plan {
             patches,
             declared_waves: Vec::new(),
             gather_tables,
+            gather_rows,
             shapes,
             alignment,
             bound: Arc::new(Encoding::empty()),

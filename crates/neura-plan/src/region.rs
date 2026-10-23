@@ -366,7 +366,7 @@ pub(crate) fn touches<W: Walk, V: Values>(
     touched: &mut Touches,
 ) {
     if task.kind() == Kind::SegmentSum || exact(values, task) || bounded(values, task) {
-        walked(touched, task, values, tiles, span, &[]);
+        walked(touched, task, values, tiles, span, &[], &[]);
     } else {
         whole(touched, task, values);
     }
@@ -402,6 +402,7 @@ pub(crate) fn walked<W: Walk, V: Values>(
     tiles: GeometryTiles<'_>,
     span: (u32, u32),
     rows: &[TableRows<'_>],
+    skipped: &[u32],
 ) {
     touched.clear();
     let (first, count) = span;
@@ -409,28 +410,24 @@ pub(crate) fn walked<W: Walk, V: Values>(
         empty(touched, task, values);
         return;
     }
-    let Touches {
-        writes,
-        reads,
-        narrowed,
-        narrowed_reads,
-    } = touched;
-    narrow(
-        task,
-        values,
-        tiles,
-        (first, count),
-        rows,
-        narrowed,
-        narrowed_reads,
-    );
+    narrow(task, values, tiles, (first, count), rows, skipped, touched);
     for value in task.writes() {
-        push_regions(writes, narrowed, value, values.storage(value));
+        push_regions(
+            &mut touched.writes,
+            &touched.narrowed,
+            value,
+            values.storage(value),
+        );
     }
     for value in task.reads() {
-        push_regions(reads, narrowed_reads, value, values.storage(value));
+        push_regions(
+            &mut touched.reads,
+            &touched.narrowed_reads,
+            value,
+            values.storage(value),
+        );
     }
-    assert_names_held_numbers(values, task, writes, reads);
+    assert_names_held_numbers(values, task, &touched.writes, &touched.reads);
 }
 
 fn empty<W: Walk, V: Values>(touched: &mut Touches, task: &W, values: &V) {
@@ -548,11 +545,14 @@ fn narrow<W: Walk, V: Values>(
     tiles: GeometryTiles<'_>,
     span: (u32, u32),
     rows: &[TableRows<'_>],
-    writes: &mut Vec<(u32, Region)>,
-    reads: &mut Vec<(u32, Region)>,
+    skipped: &[u32],
+    touched: &mut Touches,
 ) {
     let (first, count) = span;
-    let mut narrowed = Narrowed { writes, reads };
+    let mut narrowed = Narrowed {
+        writes: &mut touched.narrowed,
+        reads: &mut touched.narrowed_reads,
+    };
     match task.kind() {
         Kind::Matmul => product(values, tiles.matmul, task, first, count, &mut narrowed),
         Kind::MatmulFold => fold(values, task, first, count, &mut narrowed),
@@ -580,7 +580,7 @@ fn narrow<W: Walk, V: Values>(
             convolution_weight_grad(values, task, first, count, &mut narrowed)
         }
         Kind::Convert => convert(values, task, first, count, &mut narrowed),
-        Kind::Gather => gather(values, task, first, count, rows, &mut narrowed),
+        Kind::Gather => gather(values, task, first, count, rows, skipped, &mut narrowed),
         Kind::Rope | Kind::RopeGrad => rope(values, task, first, count, &mut narrowed),
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad
             if task.splits() > 1 && task.input(2) != NO_VALUE =>
@@ -1029,10 +1029,15 @@ fn gather<W: Walk, V: Values>(
     first: u32,
     count: u32,
     rows: &[TableRows<'_>],
+    skipped: &[u32],
     narrowed: &mut Narrowed<'_>,
 ) {
     element_run(values, task, first, count, narrowed);
     let table = task.input(0);
+    if skipped.binary_search(&table).is_ok() {
+        narrowed.read(table, Region::Empty);
+        return;
+    }
     let Some(declared) = rows
         .iter()
         .find(|declared| declared.value() == table)

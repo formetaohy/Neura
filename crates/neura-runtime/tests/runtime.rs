@@ -1345,3 +1345,39 @@ fn a_pinned_schedule_updates_the_pages_it_holds() {
         1e-4,
     );
 }
+
+#[test]
+fn a_paged_program_loads_the_rows_a_host_declares() {
+    const ROWS: u32 = 512;
+    const WIDTH: u32 = 128;
+    let plain = crate::support::open();
+    let paged = crate::support::opened(neura_runtime::MemoryRequest {
+        resident_weight_bytes: Some(160 << 10),
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let table = graph.parameter(Shape::of([1, 1, ROWS, WIDTH]), Init::Zero, Element::Single);
+    let indices = graph.input(Shape::of([1, 1, 2, 1]), Element::Single);
+    let gathered = graph.gather(table, indices);
+    graph.retain(gathered);
+    let held = crate::support::random(ROWS * WIDTH, 31);
+    let plain_weights = plain.weights(&graph);
+    let plain_program = plain.compile(&graph, &plain_weights);
+    let paged_weights = paged.weights(&graph);
+    let paged_program = paged.compile(&graph, &paged_weights);
+    plain.write(&plain_program, table, &held);
+    paged.write(&paged_program, table, &held);
+    for rows in [[7u32, 300u32], [1, 511], [64, 64]] {
+        let wanted = rows.map(|row| row as f32);
+        plain.write(&plain_program, indices, &wanted);
+        paged.write(&paged_program, indices, &wanted);
+        paged.declare_rows(&paged_program, table, &rows);
+        plain.run(&plain_program);
+        paged.run(&paged_program);
+        assert_close(
+            &paged.read(&paged_program, gathered),
+            &plain.read(&plain_program, gathered),
+            1e-6,
+        );
+    }
+}

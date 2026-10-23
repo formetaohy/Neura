@@ -84,7 +84,7 @@ fn collect<V: Values>(
     }
 }
 
-fn span(base: u64, first: u64, end: u64, pages: &mut Vec<u32>) {
+pub(crate) fn span(base: u64, first: u64, end: u64, pages: &mut Vec<u32>) {
     if end <= first {
         return;
     }

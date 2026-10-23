@@ -13,7 +13,7 @@ use crate::schedule;
 use crate::span::{self, Extents, Split};
 use neura_abi::{
     Element, Geometry, Kind, MAX_RANK, NO_SLOT, NO_VALUE, Placement, SegmentRecord, StepRecord,
-    Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES,
+    Store, TaskFields, TaskRecord, ValueFields, ValueRecord, WORD_BYTES, pages_of,
 };
 use neura_graph::{Graph, GraphSnapshot, Residency, Shape, Value, ValueInfo, Window};
 use neura_profile::{
@@ -359,6 +359,7 @@ pub struct Plan {
     patches: authored::Patches,
     declared_waves: Vec<u32>,
     gather_tables: Vec<u32>,
+    gather_rows: Vec<(u32, u32)>,
     shapes: Arc<Vec<ValueInfo>>,
     alignment: u64,
     bound: Arc<Encoding>,
@@ -752,6 +753,7 @@ impl Plan {
             depends.extend_from_slice(&task.depends);
         }
         depends_at.push(depends.len() as u32);
+        let gather_rows = gather_rows(&task_bytes, values);
         let mut plan = Self {
             profile,
             fingerprint,
@@ -780,6 +782,7 @@ impl Plan {
             patches,
             declared_waves: Vec::new(),
             gather_tables,
+            gather_rows,
             shapes,
             alignment,
             bound: Arc::new(Encoding::empty()),
@@ -1429,6 +1432,15 @@ impl Plan {
     }
 
     pub fn weight_pages(&self, encoding: &Encoding, rows: &[TableRows<'_>]) -> Vec<WeightPages> {
+        self.weight_pages_scheduled(encoding, rows, &[])
+    }
+
+    pub fn weight_pages_scheduled(
+        &self,
+        encoding: &Encoding,
+        rows: &[TableRows<'_>],
+        skipped: &[u32],
+    ) -> Vec<WeightPages> {
         let values = Resolved::of(
             encoding.values(),
             &self.extents,
@@ -1452,6 +1464,7 @@ impl Plan {
                         tiles,
                         task.walked(&self.extents, encoding.lengths()),
                         rows,
+                        skipped,
                     ),
                     false => region::whole(&mut touched, &task, &values),
                 }
@@ -1462,6 +1475,84 @@ impl Plan {
 
     pub fn weight_pages_at(&self, extents: &[u32], rows: &[TableRows<'_>]) -> Vec<WeightPages> {
         self.weight_pages(&self.encode(extents), rows)
+    }
+
+    pub fn table_pages(&self, table: u32, rows: &[u32]) -> Vec<u32> {
+        let info = &self.shapes[table as usize];
+        assert_eq!(
+            info.storage, table,
+            "value {table} gathers rows of a view, and a table walks the storage it owns",
+        );
+        let columns = info.shape.dims()[3];
+        assert!(
+            columns > 0,
+            "table {table} walks no column, and a row of it holds no number",
+        );
+        let elements = u64::from(info.shape.elements());
+        let held = elements / u64::from(columns);
+        assert!(
+            held > 0,
+            "table {table} holds {elements} numbers, fewer than one row of {columns}",
+        );
+        let arena = match info.residency {
+            Residency::Parameter => self.layout.weights(),
+            Residency::State => self.layout.state(),
+            _ => panic!(
+                "value {table} lives in the tensor arena, and no page of the weight store holds it",
+            ),
+        };
+        let base = arena.address(table);
+        let mut pages = Vec::new();
+        for row in rows {
+            assert!(
+                u64::from(*row) < held,
+                "table {table} holds {held} rows, and a declared row names row {row}",
+            );
+            let first = u64::from(*row) * u64::from(columns);
+            let (first, end) = info.element.word_span(first, u64::from(columns));
+            pages::span(base, first, end, &mut pages);
+        }
+        if info.element.quantized() {
+            let first = info.element.payload_words(elements);
+            let end = info.element.storage_words(elements);
+            pages::span(base, first, end, &mut pages);
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+    }
+
+    pub fn gather_page_bound(&self, tables: &[u32]) -> u32 {
+        let mut bound = 0u64;
+        for table in tables {
+            let Some(rows) = self
+                .gather_rows
+                .iter()
+                .find(|(held, _)| held == table)
+                .map(|(_, rows)| *rows)
+            else {
+                continue;
+            };
+            let info = &self.shapes[*table as usize];
+            let columns = info.shape.dims()[3];
+            if columns == 0 {
+                continue;
+            }
+            let elements = u64::from(info.shape.elements());
+            let held = elements / u64::from(columns);
+            if held == 0 {
+                continue;
+            }
+            let rows = u64::from(rows).min(held);
+            let row_words = info.element.payload_words(u64::from(columns));
+            bound = bound.saturating_add(rows.saturating_mul(pages_of(row_words) + 1));
+            bound = bound.saturating_add(pages_of(
+                info.element
+                    .storage_words(elements)
+                    .saturating_sub(info.element.payload_words(elements)),
+            ));
+        }
+        u32::try_from(bound.saturating_add(4)).unwrap_or(u32::MAX)
     }
 
     pub fn store_words(&self) -> u64 {
@@ -2445,6 +2536,25 @@ fn touch(
             });
         }
     }
+}
+
+pub(crate) fn gather_rows(tasks: &[u8], values: &[ValueInfo]) -> Vec<(u32, u32)> {
+    let mut walks = std::collections::BTreeMap::<(u32, u32), u64>::new();
+    for task in bytemuck::cast_slice::<u8, TaskRecord>(tasks) {
+        if task.kind != Kind::Gather as u32 || values[task.a as usize].storage != task.a {
+            continue;
+        }
+        let held = u64::from(values[task.b as usize].shape.elements());
+        let walk = walks.entry((task.a, task.b)).or_default();
+        *walk = (*walk).max(held);
+    }
+    let mut rows = std::collections::BTreeMap::<u32, u64>::new();
+    for ((table, _), held) in walks {
+        *rows.entry(table).or_default() += held;
+    }
+    rows.into_iter()
+        .map(|(table, rows)| (table, u32::try_from(rows).unwrap_or(u32::MAX)))
+        .collect()
 }
 
 fn declared_waves(encoding: &Encoding) -> Vec<u32> {

@@ -173,7 +173,7 @@ impl Tensors {
 
 struct Windows {
     extents: Vec<u32>,
-    rows: Vec<(u32, Vec<u32>)>,
+    tables: Vec<u32>,
     schedule: Arc<WeightSchedule>,
 }
 
@@ -402,7 +402,7 @@ impl Program {
                 );
                 Some(Windows {
                     extents: bound,
-                    rows: Vec::new(),
+                    tables: Vec::new(),
                     schedule: Arc::new(schedule),
                 })
             }
@@ -854,10 +854,14 @@ impl Program {
     pub(crate) fn windows(&self) -> Arc<WeightSchedule> {
         let extents = self.host_extents();
         let declared = self.declared_rows();
+        let tables = declared
+            .iter()
+            .map(|(table, _)| *table)
+            .collect::<Vec<u32>>();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(position) = windows
             .iter()
-            .position(|kept| kept.extents == extents && kept.rows == declared)
+            .position(|kept| kept.extents == extents && kept.tables == tables)
         {
             let kept = windows.remove(position);
             let schedule = kept.schedule.clone();
@@ -871,13 +875,23 @@ impl Program {
         let encoding = self.encoding();
         let schedule = Arc::new(match self.weights.paged() {
             true => {
+                let allowance = match tables.is_empty() {
+                    true => 0,
+                    false => self.plan.gather_page_bound(&tables),
+                };
+                let slots = self.weights.resident_pages().checked_sub(allowance).unwrap_or_else(|| {
+                    panic!(
+                        "the {} resident weight pages of this store cannot hold the {allowance} pages a host declares for the rows it gathers; raise the resident weight budget",
+                        self.weights.resident_pages(),
+                    )
+                });
                 self.planned_windows.fetch_add(1, Ordering::Relaxed);
                 weight_schedule(
                     &self.plan,
                     &encoding,
-                    self.weights.resident_pages(),
+                    slots,
                     self.weights.pages(),
-                    &self.plan.weight_pages(&encoding, &rows),
+                    &self.plan.weight_pages_scheduled(&encoding, &rows, &tables),
                 )
             }
             false => WeightSchedule::empty(),
@@ -887,10 +901,33 @@ impl Program {
         }
         windows.push(Windows {
             extents,
-            rows: declared,
+            tables,
             schedule: schedule.clone(),
         });
         schedule
+    }
+
+    pub(crate) fn row_pages(&self) -> Vec<u32> {
+        let declared = self.declared_rows();
+        let mut pages = Vec::new();
+        for (table, rows) in declared {
+            pages.extend_from_slice(&self.plan.table_pages(table, &rows));
+        }
+        pages.sort_unstable();
+        pages.dedup();
+        pages
+    }
+
+    pub(crate) fn row_page_allowance(&self) -> u32 {
+        let declared = self.declared_rows();
+        let tables = declared
+            .iter()
+            .map(|(table, _)| *table)
+            .collect::<Vec<u32>>();
+        match tables.is_empty() {
+            true => 0,
+            false => self.plan.gather_page_bound(&tables),
+        }
     }
 
     pub fn planned_windows(&self) -> usize {
