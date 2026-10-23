@@ -460,7 +460,22 @@ impl Batch {
         };
         held.write_seeds(runtime);
         held.write_states(runtime);
+        held.prewarm(runtime);
         held
+    }
+
+    fn prewarm(&self, runtime: &Runtime) {
+        if let Some(entry) = &self.answer.entry {
+            plan_windows(runtime, &entry.program, &self.answer.step.gathers);
+        }
+        for (_, fill) in &self.fills {
+            if let Some(entry) = &fill.entry {
+                plan_windows(runtime, &entry.program, &entry.step.gathers);
+            }
+        }
+        for (_, prefix) in &self.prefix_fills {
+            plan_windows(runtime, &prefix.program, &prefix.step.gathers);
+        }
     }
 
     pub fn batch(&self) -> u32 {
@@ -935,6 +950,7 @@ impl Batch {
                         cumulative_state(&graph, self.batch, 1.0);
                     }
                     let program = (self.compile)(runtime, &graph, &self.store);
+                    plan_windows(runtime, &program, &step.gathers);
                     self.prefix_fills
                         .push((rows, PrefixEntry { program, step }));
                     self.prefix_fills.len() - 1
@@ -1376,7 +1392,8 @@ impl Batch {
                 compile,
                 ..
             } = self;
-            fills[index].1.entry(runtime, store, *compile);
+            let entry = fills[index].1.entry(runtime, store, *compile);
+            plan_windows(runtime, &entry.program, &entry.step.gathers);
             left -= fills[index].0 as usize;
         }
     }
@@ -1991,6 +2008,22 @@ fn known_states(registered: &[PlaneState], states: &[PlaneState], what: &str) {
             state.name(),
         );
     }
+}
+
+fn plan_windows(runtime: &Runtime, program: &Program, gathers: &[GatherRows]) {
+    if gathers.is_empty() {
+        return;
+    }
+    let rows = gathers
+        .iter()
+        .map(|gather| (gather.rows(), vec![0.0]))
+        .collect::<Vec<_>>();
+    let inputs = rows
+        .iter()
+        .map(|(value, rows)| (*value, rows.as_slice()))
+        .collect::<Vec<_>>();
+    declare_gathers(runtime, program, gathers, &inputs);
+    program.weight_windows();
 }
 
 fn declare_gathers(

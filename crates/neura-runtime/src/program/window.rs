@@ -20,11 +20,26 @@ impl WeightSchedule {
     pub(crate) fn groups(&self) -> &[WeightGroup] {
         &self.groups
     }
+
+    pub(crate) fn group_of(&self, segment: u32) -> &WeightGroup {
+        let at = self
+            .groups
+            .partition_point(|group| group.end_segment() <= segment);
+        let group = self
+            .groups
+            .get(at)
+            .unwrap_or_else(|| panic!("segment {segment} of a plan walks no weight window"));
+        assert!(
+            segment >= group.first_segment() && segment < group.end_segment(),
+            "segment {segment} lies outside the weight window a schedule names for it",
+        );
+        group
+    }
 }
 
 pub(crate) struct WeightGroup {
     first_segment: u32,
-    segments: u32,
+    end_segment: u32,
     pages: Vec<u32>,
     writes: Vec<u32>,
     roots: Vec<u32>,
@@ -50,7 +65,7 @@ impl WeightGroup {
         }
         Self {
             first_segment: first as u32,
-            segments: (end - first) as u32,
+            end_segment: end as u32,
             pages,
             writes,
             roots,
@@ -62,8 +77,8 @@ impl WeightGroup {
         self.first_segment
     }
 
-    pub(crate) fn segments(&self) -> u32 {
-        self.segments
+    pub(crate) fn end_segment(&self) -> u32 {
+        self.end_segment
     }
 
     pub(crate) fn pages(&self) -> &[u32] {

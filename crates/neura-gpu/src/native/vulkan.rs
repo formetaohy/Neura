@@ -1226,7 +1226,7 @@ impl Device {
                 continue;
             }
             let key = index as usize % TIME_SLOTS;
-            if state.times[key].is_some_and(|(kept, _)| kept == index) {
+            if state.times[key].is_some_and(|(kept, _)| kept >= index) {
                 continue;
             }
             let mut stamps = [0u64; 2];

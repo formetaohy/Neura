@@ -1276,6 +1276,52 @@ fn a_pinned_schedule_streams_only_the_pages_it_does_not_hold() {
 }
 
 #[test]
+fn a_session_walks_the_weight_pages_a_slice_at_a_time() {
+    let plain = crate::support::open();
+    let paged = crate::support::opened(neura_runtime::MemoryRequest {
+        resident_weight_bytes: Some(64 << 14),
+        ..Default::default()
+    });
+    let graph = Graph::new();
+    let input = graph.input(Shape::of([1, 1, 1, 128]), Element::Single);
+    let mut value = input;
+    let mut weights = Vec::new();
+    for layer in 0..40u32 {
+        let weight = graph.parameter(Shape::of([1, 1, 128, 128]), Init::Zero, Element::Single);
+        weights.push((weight, crate::support::random(128 * 128, layer + 5)));
+        value = graph.matmul(value, weight);
+    }
+    graph.retain(value);
+    let plain_weights = plain.weights(&graph);
+    let plain_program = plain.compile(&graph, &plain_weights);
+    let paged_weights = paged.weights(&graph);
+    let mut paged_program = paged.compile(&graph, &paged_weights);
+    assert!(
+        paged_program.weight_windows() > 1,
+        "the weights outrun the store",
+    );
+    let input_values = crate::support::random(128, 11);
+    for (weight, held) in &weights {
+        plain.write(&plain_program, *weight, held);
+        paged.write(&paged_program, *weight, held);
+    }
+    plain.write(&plain_program, input, &input_values);
+    paged.write(&paged_program, input, &input_values);
+    plain.run(&plain_program);
+    let expected = plain.read(&plain_program, value);
+    let waves = paged_program.wave_count();
+    for budget in [1, 2, 7] {
+        {
+            let mut session = paged.session(&mut paged_program);
+            while session.submit(budget) {}
+            session.wait();
+            assert_eq!(session.wave(), waves);
+        }
+        assert_close(&paged.read(&paged_program, value), &expected, 1e-4);
+    }
+}
+
+#[test]
 fn a_pinned_schedule_updates_the_pages_it_holds() {
     const WIDTH: u32 = 128;
     const LAYERS: u32 = 24;
@@ -1364,7 +1410,7 @@ fn a_paged_program_loads_the_rows_a_host_declares() {
     let plain_weights = plain.weights(&graph);
     let plain_program = plain.compile(&graph, &plain_weights);
     let paged_weights = paged.weights(&graph);
-    let paged_program = paged.compile(&graph, &paged_weights);
+    let mut paged_program = paged.compile(&graph, &paged_weights);
     plain.write(&plain_program, table, &held);
     paged.write(&paged_program, table, &held);
     for rows in [[7u32, 300u32], [1, 511], [64, 64]] {
@@ -1373,7 +1419,11 @@ fn a_paged_program_loads_the_rows_a_host_declares() {
         paged.write(&paged_program, indices, &wanted);
         paged.declare_rows(&paged_program, table, &rows);
         plain.run(&plain_program);
-        paged.run(&paged_program);
+        {
+            let mut session = paged.session(&mut paged_program);
+            while session.submit(1) {}
+            session.wait();
+        }
         assert_close(
             &paged.read(&paged_program, gathered),
             &plain.read(&plain_program, gathered),

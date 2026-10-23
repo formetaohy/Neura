@@ -986,7 +986,7 @@ impl Device {
                 continue;
             }
             let key = index as usize % TIME_SLOTS;
-            if state.times[key].is_some_and(|(kept, _)| kept == index) {
+            if state.times[key].is_some_and(|(kept, _)| kept >= index) {
                 continue;
             }
             state.times[key] = Some((index, self.read_clock(slot)));

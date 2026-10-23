@@ -1,23 +1,36 @@
-use super::{Program, Run, Runtime};
-use neura_gpu::Submission;
+use super::{Program, Run, Runtime, SegmentSlice};
+use crate::program::WeightSchedule;
 use neura_plan::{Encoding, Plan};
 use std::sync::Arc;
+
+fn wave_at(encoding: &Encoding, position: u32) -> u32 {
+    encoding
+        .segments()
+        .get(position as usize)
+        .map_or_else(|| encoding.wave_count(), |segment| segment.wave)
+}
+
+fn segment_of_wave(encoding: &Encoding, wave: u32) -> u32 {
+    encoding
+        .segments()
+        .partition_point(|segment| segment.wave < wave) as u32
+}
 
 pub struct Cursor {
     program: u64,
     plan: Arc<Plan>,
     encoding: Arc<Encoding>,
-    wave: u32,
+    position: u32,
     held: Option<Run>,
 }
 
 impl Cursor {
     pub fn wave(&self) -> u32 {
-        self.wave
+        wave_at(&self.encoding, self.position)
     }
 
     pub fn done(&self) -> bool {
-        self.wave >= self.encoding.wave_count()
+        self.position as usize >= self.encoding.segments().len()
     }
 
     pub fn ready(&self) -> bool {
@@ -37,7 +50,8 @@ pub struct Session<'a> {
     runtime: &'a Runtime,
     program: &'a mut Program,
     encoding: Arc<Encoding>,
-    wave: u32,
+    schedule: Option<Arc<WeightSchedule>>,
+    position: u32,
     held: Option<Run>,
 }
 
@@ -61,12 +75,12 @@ impl Runtime {
             "a session resumes the slice it paused after that slice completes; poll Cursor::ready before resuming",
         );
         assert!(
-            cursor.wave <= cursor.encoding.wave_count(),
-            "a session resumes at wave {} of a plan that walks {} waves",
-            cursor.wave,
-            cursor.encoding.wave_count(),
+            cursor.position as usize <= cursor.encoding.segments().len(),
+            "a session resumes at segment {} of a plan that walks {}",
+            cursor.position,
+            cursor.encoding.segments().len(),
         );
-        self.own(program, Some(cursor.encoding), cursor.wave)
+        self.own(program, Some(cursor.encoding), cursor.position)
     }
 
     pub fn session<'a>(&'a self, program: &'a mut Program) -> Session<'a> {
@@ -77,17 +91,13 @@ impl Runtime {
         &'a self,
         program: &'a mut Program,
         encoding: Option<Arc<Encoding>>,
-        wave: u32,
+        position: u32,
     ) -> Session<'a> {
         self.assert_owns(program);
         program.assert_current();
         assert!(
             program.is_compiled(),
             "a session walks a plan a compile has compiled",
-        );
-        assert!(
-            !program.streams_weights(),
-            "a session walks a plan whose weights stay resident, and this plan streams its weights",
         );
         assert!(
             program.wave_count() > 0,
@@ -101,11 +111,21 @@ impl Runtime {
             program.wave_count(),
             encoding.wave_count(),
         );
+        assert!(
+            position as usize <= encoding.segments().len(),
+            "a session starts at segment {position} of a plan that walks {}",
+            encoding.segments().len(),
+        );
+        let schedule = program.streams_weights().then(|| program.windows());
+        if let Some(schedule) = &schedule {
+            program.store().pin(schedule.pins());
+        }
         Session {
             runtime: self,
             program,
             encoding,
-            wave,
+            schedule,
+            position,
             held: None,
         }
     }
@@ -113,7 +133,7 @@ impl Runtime {
 
 impl Session<'_> {
     pub fn wave(&self) -> u32 {
-        self.wave
+        wave_at(&self.encoding, self.position)
     }
 
     pub fn pause(mut self) -> Cursor {
@@ -121,17 +141,17 @@ impl Session<'_> {
             program: self.program.instance(),
             plan: self.program.plan(),
             encoding: self.encoding.clone(),
-            wave: self.wave,
+            position: self.position,
             held: self.held.take(),
         }
     }
 
     pub fn remaining(&self) -> u32 {
-        self.encoding.wave_count() - self.wave
+        self.encoding.wave_count() - self.wave()
     }
 
     pub fn done(&self) -> bool {
-        self.wave >= self.encoding.wave_count()
+        self.position as usize >= self.encoding.segments().len()
     }
 
     pub fn submit(&mut self, waves: u32) -> bool {
@@ -143,48 +163,41 @@ impl Session<'_> {
             Arc::ptr_eq(&self.encoding, &self.program.encoding()),
             "a session walks the binding it started with, and this program was bound again inside the session",
         );
-        let encoding = self.encoding.clone();
-        let total = encoding.wave_count();
-        let sizes = encoding.wave_segments();
-        let table = encoding.wave_table();
-        let waits_for_the_wave_before = |wave: u32| table[1 + wave as usize * 4 + 2] != 0;
-        let mut start = self.wave;
-        while start < total && sizes[start as usize] == 0 {
-            start += 1;
-        }
-        if start >= total {
-            self.wave = total;
+        let segments = self.encoding.segments();
+        if self.position as usize >= segments.len() {
             return false;
         }
-        let end = start.saturating_add(waves).min(total);
-        let first = sizes.iter().take(start as usize).sum::<u32>();
-        let last = first + sizes[start as usize..end as usize].iter().sum::<u32>();
-        assert!(
-            last > first,
-            "a session walks waves {start} to {end} of a plan that holds no task there",
-        );
-        let segments = encoding.segments();
-        let mut roots = Vec::new();
-        let mut counts = Vec::with_capacity((last - first) as usize);
-        let mut waves = vec![0u32; total as usize];
-        for (offset, held) in segments[first as usize..last as usize].iter().enumerate() {
-            let segment = first as usize + offset;
-            assert!(
-                held.wave >= start && held.wave < end,
-                "a session walks segment {segment} of wave {} outside the waves {start} to {end} it submits",
-                held.wave,
-            );
-            let count = encoding.predecessors(segment, first as usize);
-            if count == 0 && (held.wave == start || !waits_for_the_wave_before(held.wave)) {
-                roots.push(segment as u32);
+        let start_wave = segments[self.position as usize].wave;
+        let wanted_wave = start_wave
+            .saturating_add(waves)
+            .min(self.encoding.wave_count());
+        let wanted = segment_of_wave(&self.encoding, wanted_wave);
+        let (end, pages, writes) = match &self.schedule {
+            Some(schedule) => {
+                assert!(
+                    Arc::ptr_eq(schedule, &self.program.windows()),
+                    "a session walks the weight windows it started with, and this program declared other gather rows inside the session",
+                );
+                let window = schedule.group_of(self.position);
+                let rows = self.program.row_pages();
+                let allowance = self.program.row_page_allowance();
+                assert!(
+                    rows.len() <= allowance as usize,
+                    "a host declares {} weight pages for the rows it gathers, and the window schedule reserves {allowance}; raise the resident weight budget",
+                    rows.len(),
+                );
+                (
+                    wanted.min(window.end_segment()),
+                    Runtime::merge_pages(window.pages(), &rows),
+                    window.writes().to_vec(),
+                )
             }
-            counts.push(count);
-            waves[held.wave as usize] += 1;
-        }
+            None => (wanted, Vec::new(), Vec::new()),
+        };
         assert!(
-            waves.iter().take(start as usize).all(|held| *held == 0)
-                && waves.iter().skip(end as usize).all(|held| *held == 0),
-            "a session submits the tasks of the waves it walks alone",
+            end > self.position,
+            "a session submits segments {} to {end} of a plan that holds no task there",
+            self.position,
         );
         let queue = self.runtime.context.queue();
         self.program.write_extents(queue);
@@ -192,35 +205,22 @@ impl Session<'_> {
             self.program.write_records(queue);
             self.program.records_written();
         }
-        let (generation, clear) = self.program.begin();
-        self.program.write_dispatch(
-            queue,
-            super::Dispatch {
-                generation,
-                clear,
-                first,
-                count: last - first,
-                counts: Some(&counts),
-                roots: &roots,
-                waves: &waves,
-                wave_table: encoding.successors().len() as u32,
-                wave: start,
+        let submissions = self.runtime.dispatch(
+            &*self.program,
+            SegmentSlice {
+                first: self.position,
+                end,
+                wave: start_wave,
+                pages: &pages,
+                writes: &writes,
+                precomputed: None,
             },
         );
-        let group = self.program.group();
-        let mut submission = Submission::new(self.runtime.context.device(), "neura session");
-        submission.dispatch(
-            &self.program.resident.kernel,
-            &group,
-            [self.program.workgroups(), 1, 1],
-        );
-        let submission = submission.submit(queue);
-        self.program.used(submission);
+        self.position = end;
         self.held = Some(Run {
             queue: queue.clone(),
-            submissions: vec![submission],
+            submissions,
         });
-        self.wave = end;
         true
     }
 

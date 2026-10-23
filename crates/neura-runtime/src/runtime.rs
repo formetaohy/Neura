@@ -36,6 +36,15 @@ const TUNE_ROUNDS: u32 = 8;
 const BLOCKING_REUSE: u64 = 8;
 const ENTROPY_SEED: u32 = 0x9e37_79b9;
 
+pub(crate) struct SegmentSlice<'a> {
+    pub(crate) first: u32,
+    pub(crate) end: u32,
+    pub(crate) wave: u32,
+    pub(crate) pages: &'a [u32],
+    pub(crate) writes: &'a [u32],
+    pub(crate) precomputed: Option<(&'a [u32], &'a [u32])>,
+}
+
 pub struct Readout {
     lease: ReadbackLease,
     queue: Queue,
@@ -898,9 +907,84 @@ impl Runtime {
         merged
     }
 
+    fn dispatch(&self, program: &Program, slice: SegmentSlice<'_>) -> Vec<SubmissionIndex> {
+        let SegmentSlice {
+            first,
+            end,
+            wave,
+            pages,
+            writes,
+            precomputed,
+        } = slice;
+        let queue = self.context.queue();
+        let encoding = program.encoding();
+        let segments = encoding.segments();
+        assert!(
+            first < end && end as usize <= segments.len(),
+            "a dispatch walks segments {first} to {end} of a plan that holds {}",
+            segments.len(),
+        );
+        let mut computed_counts = Vec::new();
+        let mut computed_roots = Vec::new();
+        let (counts, roots): (&[u32], &[u32]) = match precomputed {
+            Some((counts, roots)) => (counts, roots),
+            None => {
+                let table = encoding.wave_table();
+                computed_counts.reserve((end - first) as usize);
+                for segment in first..end {
+                    let count = encoding.predecessors(segment as usize, first as usize);
+                    let held = segments[segment as usize].wave;
+                    let gated = table.get(1 + held as usize * 4 + 2).copied().unwrap_or(0) != 0;
+                    if count == 0 && (held == wave || !gated) {
+                        computed_roots.push(segment);
+                    }
+                    computed_counts.push(count);
+                }
+                (&computed_counts, &computed_roots)
+            }
+        };
+        assert_eq!(
+            counts.len(),
+            (end - first) as usize,
+            "a dispatch of {} segments carries {} predecessor counts",
+            end - first,
+            counts.len(),
+        );
+        let mut submissions = Vec::new();
+        if program.streams_weights() {
+            submissions.extend(program.store().ensure(queue, pages));
+            program.store().mark_dirty(writes);
+        }
+        let (generation, clear) = program.begin();
+        program.write_dispatch(
+            queue,
+            Dispatch {
+                generation,
+                clear,
+                first,
+                count: end - first,
+                counts: Some(counts),
+                roots,
+                waves: encoding.wave_segments(),
+                wave_table: encoding.successors().len() as u32,
+                wave,
+            },
+        );
+        let group = program.group();
+        let mut submission = Submission::new(self.context.device(), "neura program");
+        submission.dispatch(
+            &program.resident.kernel,
+            &group,
+            [program.workgroups(), 1, 1],
+        );
+        let submission = submission.submit(queue);
+        program.used(submission);
+        submissions.push(submission);
+        submissions
+    }
+
     fn stream(&self, program: &Program) -> Run {
         let queue = self.context.queue();
-        let device = self.context.device();
         let schedule = program.windows();
         let encoding = program.encoding();
         let rows = program.row_pages();
@@ -914,33 +998,18 @@ impl Runtime {
         let mut submissions = Vec::with_capacity(schedule.groups().len());
         for window in schedule.groups() {
             let pages = Self::merge_pages(window.pages(), &rows);
-            submissions.extend(program.store().ensure(queue, &pages));
-            let (generation, clear) = program.begin();
-            program.write_dispatch(
-                queue,
-                Dispatch {
-                    generation,
-                    clear,
+            let wave = encoding.segments()[window.first_segment() as usize].wave;
+            submissions.extend(self.dispatch(
+                program,
+                SegmentSlice {
                     first: window.first_segment(),
-                    count: window.segments(),
-                    counts: Some(window.counts()),
-                    roots: window.roots(),
-                    waves: encoding.wave_segments(),
-                    wave_table: encoding.successors().len() as u32,
-                    wave: 0,
+                    end: window.end_segment(),
+                    wave,
+                    pages: &pages,
+                    writes: window.writes(),
+                    precomputed: Some((window.counts(), window.roots())),
                 },
-            );
-            let group = program.group();
-            let mut submission = Submission::new(device, "neura program");
-            submission.dispatch(
-                &program.resident.kernel,
-                &group,
-                [program.workgroups(), 1, 1],
-            );
-            let submission = submission.submit(queue);
-            program.used(submission);
-            submissions.push(submission);
-            program.store().mark_dirty(window.writes());
+            ));
         }
         Run {
             queue: queue.clone(),
