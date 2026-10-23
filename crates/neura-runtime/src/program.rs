@@ -854,10 +854,11 @@ impl Program {
     pub(crate) fn windows(&self) -> Arc<WeightSchedule> {
         let extents = self.host_extents();
         let declared = self.declared_rows();
-        let tables = declared
+        let mut tables = declared
             .iter()
             .map(|(table, _)| *table)
             .collect::<Vec<u32>>();
+        tables.sort_unstable();
         let mut windows = self.windows.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(position) = windows
             .iter()
@@ -920,10 +921,11 @@ impl Program {
 
     pub(crate) fn row_page_allowance(&self) -> u32 {
         let declared = self.declared_rows();
-        let tables = declared
+        let mut tables = declared
             .iter()
             .map(|(table, _)| *table)
             .collect::<Vec<u32>>();
+        tables.sort_unstable();
         match tables.is_empty() {
             true => 0,
             false => self.plan.gather_page_bound(&tables),
