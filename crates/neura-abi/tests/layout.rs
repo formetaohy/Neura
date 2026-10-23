@@ -291,7 +291,7 @@ fn every_task_kind_declares_the_device_code_it_runs() {
 }
 
 #[test]
-fn only_a_reduction_that_reads_its_source_once_opens_a_prelude() {
+fn only_a_task_that_reads_its_source_once_opens_a_prelude() {
     let opening = Kind::ALL
         .iter()
         .copied()
@@ -305,6 +305,9 @@ fn only_a_reduction_that_reads_its_source_once_opens_a_prelude() {
             Kind::Argmax,
             Kind::Categorical,
             Kind::SegmentSum,
+            Kind::Norm,
+            Kind::NormGrad,
+            Kind::NormApply,
         ],
         "a prelude replaces the tensor a task would have read, so only a task that reads it once opens one",
     );

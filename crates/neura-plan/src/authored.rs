@@ -95,6 +95,7 @@ pub(crate) fn analyse(
             match *measure {
                 Measure::Elements(value)
                 | Measure::Rows(value)
+                | Measure::Groups { value, .. }
                 | Measure::Words(value)
                 | Measure::Tokens(value)
                 | Measure::Tiles { value, .. }
@@ -367,6 +368,7 @@ fn measure_records(
         .map(|measure| match *measure {
             Measure::Elements(value) => record(measure::ELEMENTS, value, 0, 0),
             Measure::Rows(value) => record(measure::ROWS, value, 0, 0),
+            Measure::Groups { value, groups } => record(measure::GROUPS, value, groups, 0),
             Measure::Words(value) => record(measure::WORDS, value, 0, 0),
             Measure::Tokens(value) => record(measure::TOKENS, value, 0, 0),
             Measure::Tiles { value, geometry } => {

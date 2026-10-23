@@ -1071,22 +1071,72 @@ impl Graph {
     }
 
     pub fn rms_norm(&self, value: Value, weight: Value, floor: Value) -> Value {
-        self.norm(neura_abi::NORM_RMS, value, Some(weight), floor)
+        self.norm(neura_abi::NORM_RMS, value, Some(weight), None, floor, 1)
     }
 
     pub fn l2_norm(&self, value: Value, floor: Value) -> Value {
-        self.norm(neura_abi::NORM_L2, value, None, floor)
+        self.norm(neura_abi::NORM_L2, value, None, None, floor, 1)
     }
 
-    fn norm(&self, mode: u32, value: Value, weight: Option<Value>, floor: Value) -> Value {
+    pub fn layer_norm(&self, value: Value, weight: Value, shift: Value, floor: Value) -> Value {
+        self.norm(
+            neura_abi::NORM_LAYER,
+            value,
+            Some(weight),
+            Some(shift),
+            floor,
+            1,
+        )
+    }
+
+    pub fn group_norm(
+        &self,
+        value: Value,
+        weight: Value,
+        shift: Value,
+        floor: Value,
+        groups: u32,
+    ) -> Value {
+        self.norm(
+            neura_abi::NORM_GROUP,
+            value,
+            Some(weight),
+            Some(shift),
+            floor,
+            groups,
+        )
+    }
+
+    fn norm(
+        &self,
+        mode: u32,
+        value: Value,
+        weight: Option<Value>,
+        shift: Option<Value>,
+        floor: Value,
+        groups: u32,
+    ) -> Value {
         let value = self.own(value);
         let floor = self.own(floor);
         let shape = self.shape(value);
-        let columns = shape.columns();
+        let dims = shape.dims();
+        let grouped = mode == neura_abi::NORM_GROUP;
         assert!(
-            shape.free(MAX_RANK - 1).is_none(),
-            "a norm folds {} numbers of a row whose length a binding names, and a free extent takes a length no norm holds",
-            columns,
+            groups > 0 && (!grouped || dims[1].is_multiple_of(groups)),
+            "a norm of {groups} groups folds {} channels, and a group holds no channel",
+            dims[1],
+        );
+        let columns = match grouped {
+            true => (dims[1] / groups) * dims[2] * dims[3],
+            false => dims[3],
+        };
+        assert!(
+            match grouped {
+                true => (0..MAX_RANK as usize)
+                    .all(|axis| axis == 0 || shape.free(axis as u32).is_none()),
+                false => shape.free(MAX_RANK - 1).is_none(),
+            },
+            "a norm folds {columns} numbers of a row whose length a binding names, and a free extent takes a length no norm holds",
         );
         assert!(
             self.shape(floor).is_scalar(),
@@ -1094,25 +1144,44 @@ impl Graph {
             floor.id(),
             self.shape(floor).elements(),
         );
-        let weight = weight.map(|weight| {
-            let weight = self.own(weight);
+        let wanted = match grouped {
+            true => [1, dims[1], 1, 1],
+            false => [1, 1, 1, columns],
+        };
+        let affine = |held: Value| {
+            let held = self.own(held);
             assert!(
-                self.contiguous(weight) && self.shape(weight).dims() == [1, 1, 1, columns],
-                "a norm of {columns} numbers weighs a vector of {columns} numbers, and value {} walks {:?}",
-                weight.id(),
-                self.shape(weight).dims(),
+                self.contiguous(held) && self.shape(held).dims() == wanted,
+                "a norm of {columns} numbers walks {:?}, and value {} walks {:?}",
+                wanted,
+                held.id(),
+                self.shape(held).dims(),
             );
-            weight
-        });
+            held
+        };
+        let weight = weight.map(affine);
+        let shift = shift.map(affine);
+        assert!(
+            !(mode == neura_abi::NORM_L2 && (weight.is_some() || shift.is_some())),
+            "an l2 norm scales the length of a row and holds no affine, and this norm holds {} weights beside {} shifts",
+            weight.is_some(),
+            shift.is_some(),
+        );
+        assert!(
+            !(mode != neura_abi::NORM_L2 && weight.is_none()),
+            "a weighted norm weighs the numbers it normalizes, and this norm holds no weight",
+        );
         let mut sources = vec![value];
-        if let Some(weight) = weight {
-            sources.push(weight);
-        }
+        sources.extend(weight);
+        sources.extend(shift);
         let tracked = self.tracked(&sources);
         let out = self.stored(shape, Element::Single, 1.0, Residency::Derived, tracked);
-        let rows = shape.rows();
-        let scale = self.stored(
-            Shape::of([1, 1, rows, 1]),
+        let rows = match grouped {
+            true => dims[0] * groups,
+            false => shape.rows(),
+        };
+        let stats = self.stored(
+            Shape::of([1, 1, rows, 2]),
             Element::Single,
             1.0,
             Residency::Derived,
@@ -1126,12 +1195,14 @@ impl Graph {
                 value.id(),
                 weight.map_or(NO_VALUE, |weight| weight.id()),
                 floor.id(),
-                NO_VALUE,
+                shift.map_or(NO_VALUE, |shift| shift.id()),
                 NO_VALUE,
                 NO_VALUE,
             ],
         );
-        task.extra = scale.id();
+        task.slot = groups;
+        task.axis = columns;
+        task.extra = stats.id();
         self.push(task);
         out
     }

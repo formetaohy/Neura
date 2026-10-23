@@ -12,4 +12,5 @@ pub mod measure {
     pub const WORDS: u32 = 2;
     pub const TOKENS: u32 = 3;
     pub const TILES: u32 = 4;
+    pub const GROUPS: u32 = 5;
 }

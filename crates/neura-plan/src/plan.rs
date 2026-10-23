@@ -2283,6 +2283,8 @@ pub(crate) fn assert_a_task_needs_exact_lengths_the_plan_froze(
             | Kind::SoftmaxGrad
             | Kind::Norm
             | Kind::NormGrad
+            | Kind::NormFold
+            | Kind::NormApply
             | Kind::LogSoftmax
             | Kind::LogSoftmaxGrad
             | Kind::ClassLogSoftmax

@@ -110,6 +110,9 @@ mod device {
             let dims = bounds_of(tensor);
             return dims.x * dims.y * dims.z;
         }
+        if kind == measure::GROUPS {
+            return bounds_of(tensor).x * rows;
+        }
         if kind == measure::TOKENS {
             return bounds_of(tensor).z;
         }

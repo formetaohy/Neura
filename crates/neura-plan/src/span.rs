@@ -7,6 +7,10 @@ use neura_profile::{ConvolutionTile, MatmulTile};
 pub(crate) enum Measure {
     Elements(u32),
     Rows(u32),
+    Groups {
+        value: u32,
+        groups: u32,
+    },
     Words(u32),
     Tiles {
         value: u32,
@@ -154,6 +158,7 @@ impl Extents {
         match self.measures[measure as usize] {
             Measure::Elements(value) => self.elements(value, extents),
             Measure::Rows(value) => self.rows(value, extents),
+            Measure::Groups { value, groups } => self.dims(value, extents)[0] * groups,
             Measure::Words(value) => self.words(value, extents),
             Measure::Tokens(value) => self.dims(value, extents)[2],
             Measure::Tiles { value, geometry } => self.tiles(value, geometry, extents),

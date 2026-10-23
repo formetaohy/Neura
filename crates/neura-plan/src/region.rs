@@ -609,7 +609,10 @@ fn narrow<W: Walk, V: Values>(
         Kind::Softmax | Kind::SoftmaxGrad | Kind::LogSoftmax | Kind::LogSoftmaxGrad => {
             softmax(values, task, first, count, &mut narrowed)
         }
-        Kind::Norm | Kind::NormGrad => rowed(values, task, first, count, &mut narrowed),
+        Kind::Norm if task.splits() > 1 => norm_section(values, task, first, count, &mut narrowed),
+        Kind::Norm | Kind::NormGrad => norm(values, task, first, count, &mut narrowed),
+        Kind::NormFold => norm_fold(values, task, first, count, &mut narrowed),
+        Kind::NormApply => norm_apply(values, task, first, count, &mut narrowed),
         Kind::Binary
         | Kind::Unary
         | Kind::Select
@@ -1092,6 +1095,104 @@ fn rowed<W: Walk, V: Values>(
         narrowed.write(
             statistic,
             Region::run(u64::from(first) * columns, u64::from(count) * columns),
+        );
+    }
+}
+
+fn band_at(columns: u64, sections: u64, section: u64) -> (u64, u64) {
+    let shared = columns / sections;
+    let rest = columns % sections;
+    let start = section * shared + section.min(rest);
+    let end = (section + 1) * shared + (section + 1).min(rest);
+    (start, end - start)
+}
+
+fn norm_section<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let sections = u64::from(task.splits());
+    let section = u64::from(task.section());
+    let at = (u64::from(first) * sections + section) * 2;
+    narrowed.write(out, Region::band(at, 2, sections * 2, u64::from(count)));
+}
+
+fn norm_fold<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    narrowed.write(out, Region::run(u64::from(first) * 2, u64::from(count) * 2));
+}
+
+fn norm_apply<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let columns = u64::from(task.axis());
+    let (start, span) = band_at(columns, u64::from(task.splits()), u64::from(task.section()));
+    narrowed.write(
+        out,
+        Region::band(
+            u64::from(first) * columns + start,
+            span,
+            columns,
+            u64::from(count),
+        ),
+    );
+}
+
+fn norm<W: Walk, V: Values>(
+    values: &V,
+    task: &W,
+    first: u32,
+    count: u32,
+    narrowed: &mut Narrowed<'_>,
+) {
+    if matches!(task.split(), Split::Segment { .. } | Split::Ragged { .. })
+        || task.segments() != NO_VALUE
+        || task.queries() != NO_VALUE
+    {
+        return;
+    }
+    let out = task.out();
+    if count == 0 || !values.owned(out) || !values.dense(out) {
+        return;
+    }
+    let columns = u64::from(task.axis());
+    narrowed.write(
+        out,
+        Region::run(u64::from(first) * columns, u64::from(count) * columns),
+    );
+    let statistic = task.extra();
+    if statistic != NO_VALUE && values.owned(statistic) && values.dense(statistic) {
+        let width = match task.kind() {
+            Kind::Norm => u64::from(values.dims(statistic)[3]),
+            _ => columns,
+        };
+        narrowed.write(
+            statistic,
+            Region::run(u64::from(first) * width, u64::from(count) * width),
         );
     }
 }

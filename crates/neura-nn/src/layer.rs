@@ -1,4 +1,4 @@
-use neura_abi::{Element, MAX_RANK};
+use neura_abi::Element;
 use neura_graph::{AttentionOptions, Fan, Graph, Init, Shape, Value, Window};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -496,12 +496,7 @@ impl LayerNorm {
             self.columns,
             graph.shape(input).dims(),
         );
-        let mean = graph.mean_axis(input, MAX_RANK - 1);
-        let centered = graph.sub(input, mean);
-        let spread = graph.mean_axis(graph.mul(centered, centered), MAX_RANK - 1);
-        let deviation = graph.sqrt(graph.add(spread, self.floor));
-        let sharpened = graph.mul(centered, graph.recip(deviation));
-        graph.add(graph.mul(sharpened, self.scale), self.shift)
+        graph.layer_norm(input, self.scale, self.shift, self.floor)
     }
 
     pub fn scale(&self) -> Value {
@@ -916,25 +911,7 @@ impl GroupNorm {
             "a normalization of {} channels reads {:?}",
             self.channels, dims,
         );
-        let grouped = graph.reshape(
-            input,
-            Shape::of([
-                dims[0] * self.groups,
-                self.channels / self.groups,
-                dims[2],
-                dims[3],
-            ]),
-        );
-        let mean = graph.mean_axis(graph.mean_axis(graph.mean_axis(grouped, 3), 2), 1);
-        let centered = graph.sub(grouped, mean);
-        let spread = graph.mean_axis(
-            graph.mean_axis(graph.mean_axis(graph.mul(centered, centered), 3), 2),
-            1,
-        );
-        let deviation = graph.sqrt(graph.add(spread, self.floor));
-        let normalized = graph.mul(centered, graph.recip(deviation));
-        let whole = graph.reshape(normalized, Shape::of(dims));
-        graph.add(graph.mul(whole, self.scale), self.shift)
+        graph.group_norm(input, self.scale, self.shift, self.floor, self.groups)
     }
 
     pub fn scale(&self) -> Value {

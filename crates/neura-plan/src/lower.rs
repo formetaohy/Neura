@@ -556,6 +556,10 @@ fn schedule_unit(
             softmax(plan, unit, profile);
         }
         Kind::Norm | Kind::NormGrad => norm(plan, unit, profile),
+        Kind::NormFold | Kind::NormApply => panic!(
+            "a graph holds no {} task, and only the lowering of a norm builds one",
+            unit.kind.name(),
+        ),
         Kind::ClassLogSoftmax | Kind::ClassLogSoftmaxGrad => {
             class_log_softmax(plan, unit, profile);
         }
@@ -1337,26 +1341,165 @@ fn tiled_conv_weight_grad(plan: &mut Plan, unit: &TaskInfo, profile: Profile) ->
     true
 }
 
+const NORM_SECTION_COLUMNS: u32 = 1024;
+const NORM_SECTIONS_CEILING: u32 = 64;
+
 fn norm(plan: &mut Plan, unit: &TaskInfo, profile: Profile) {
     let out = plan.shape(unit.out);
-    let rows = out.rows();
-    let columns = out.columns();
+    let dims = out.dims();
+    let grouped = unit.op == neura_abi::NORM_GROUP;
+    let (rows, columns) = norm_extents(dims, unit);
     if rows == 0 || columns == 0 {
         return;
     }
     let target = device_workgroups(profile);
+    let measure = measured(plan, unit.out, |value| match grouped {
+        true => Measure::Groups {
+            value,
+            groups: unit.slot,
+        },
+        false => Measure::Rows(value),
+    });
+    let sections = match unit.kind {
+        Kind::Norm => norm_sections(rows, columns, target),
+        _ => 1,
+    };
+    if sections > 1 {
+        norm_sectioned(plan, unit, profile, rows, columns, measure);
+        return;
+    }
     let per_task = rows.div_ceil(target).max(1);
-    let measure = measured(plan, unit.out, Measure::Rows);
+    let passes = norm_passes(unit);
     for (first, count, split) in span::chunks(rows, per_task, measure) {
         let mut task = Task::span(
             unit,
             first,
             count,
-            u64::from(count) * u64::from(columns) * 2,
+            u64::from(count) * u64::from(columns) * passes,
         );
         task.geometry = strategy::WORKGROUP_ROW;
         task.split = split;
         plan.tasks.push(task);
+    }
+}
+
+fn norm_extents(dims: [u32; 4], unit: &TaskInfo) -> (u32, u32) {
+    match unit.op == neura_abi::NORM_GROUP {
+        true => (
+            dims[0] * unit.slot,
+            (dims[1] / unit.slot) * dims[2] * dims[3],
+        ),
+        false => (dims[0] * dims[1] * dims[2], dims[3]),
+    }
+}
+
+fn norm_passes(unit: &TaskInfo) -> u64 {
+    match unit.op == neura_abi::NORM_LAYER || unit.op == neura_abi::NORM_GROUP {
+        true => 3,
+        false => 2,
+    }
+}
+
+fn norm_sections(rows: u32, columns: u32, target: u32) -> u32 {
+    if rows == 0 || columns < 2 * NORM_SECTION_COLUMNS {
+        return 1;
+    }
+    let wanted = target.div_ceil(rows).min(NORM_SECTIONS_CEILING);
+    let room = columns / NORM_SECTION_COLUMNS;
+    wanted.min(room).max(1)
+}
+
+fn norm_sectioned(
+    plan: &mut Plan,
+    unit: &TaskInfo,
+    profile: Profile,
+    rows: u32,
+    columns: u32,
+    measure: Option<u32>,
+) {
+    let target = device_workgroups(profile);
+    let sections = norm_sections(rows, columns, target);
+    let partials = plan.publish(Shape::of([1, 1, rows, sections * 2]));
+    let bands = columns.div_ceil(sections);
+    let per_task = rows.div_ceil(target).max(1);
+    let spans = span::chunks(rows, per_task, measure);
+    let passes = norm_passes(unit);
+    for section in 0..sections {
+        for (first, count, split) in spans.iter().copied() {
+            let mut task = Task::span(
+                unit,
+                first,
+                count,
+                u64::from(count) * u64::from(bands) * passes,
+            );
+            task.out = partials;
+            task.extra = NO_VALUE;
+            task.inputs = [
+                unit.inputs[0],
+                NO_VALUE,
+                unit.inputs[2],
+                NO_VALUE,
+                NO_VALUE,
+                NO_VALUE,
+            ];
+            task.splits = sections;
+            task.section = section;
+            task.geometry = strategy::WORKGROUP_ROW;
+            task.split = split;
+            task.chain.clear();
+            plan.tasks.push(task);
+        }
+    }
+    let fold = rows.div_ceil(target).max(target);
+    let fold_spans = span::chunks(rows, fold, measure);
+    for (first, count, split) in fold_spans {
+        let mut task = Task::span(
+            unit,
+            first,
+            count,
+            u64::from(count) * u64::from(sections) * 2,
+        );
+        task.kind = Kind::NormFold;
+        task.out = unit.extra;
+        task.extra = NO_VALUE;
+        task.inputs = [
+            partials,
+            NO_VALUE,
+            unit.inputs[2],
+            NO_VALUE,
+            NO_VALUE,
+            NO_VALUE,
+        ];
+        task.splits = sections;
+        task.axis = columns;
+        task.split = split;
+        task.prelude.clear();
+        task.chain.clear();
+        plan.tasks.push(task);
+    }
+    for section in 0..sections {
+        for (first, count, split) in spans.iter().copied() {
+            let mut task = Task::span(unit, first, count, u64::from(count) * u64::from(bands) * 2);
+            task.kind = Kind::NormApply;
+            task.out = unit.out;
+            task.extra = NO_VALUE;
+            task.inputs = [
+                unit.inputs[0],
+                unit.inputs[1],
+                unit.extra,
+                unit.inputs[3],
+                NO_VALUE,
+                NO_VALUE,
+            ];
+            task.splits = sections;
+            task.section = section;
+            task.axis = columns;
+            task.geometry = strategy::WORKGROUP_ROW;
+            task.split = split;
+            task.prelude = unit.prelude.clone();
+            task.chain = unit.chain.clone();
+            plan.tasks.push(task);
+        }
     }
 }
 

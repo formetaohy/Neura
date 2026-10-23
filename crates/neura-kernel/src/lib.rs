@@ -301,6 +301,7 @@ impl Kernel {
         for (name, value) in [
             ("measure::ELEMENTS", measure::ELEMENTS),
             ("measure::ROWS", measure::ROWS),
+            ("measure::GROUPS", measure::GROUPS),
             ("measure::WORDS", measure::WORDS),
             ("measure::TOKENS", measure::TOKENS),
             ("measure::TILES", measure::TILES),

@@ -703,7 +703,7 @@ kinds! {
         entry: "run_norm",
         modules: [Reduce],
         geometry: Strategy,
-        prelude: false,
+        prelude: true,
         chain: true,
         origin: false,
     };
@@ -711,7 +711,23 @@ kinds! {
         entry: "run_norm_grad",
         modules: [Reduce],
         geometry: Strategy,
+        prelude: true,
+        chain: true,
+        origin: false,
+    };
+    NormFold NORM_FOLD = "norm_fold" {
+        entry: "run_norm_fold",
+        modules: [Reduce],
+        geometry: None,
         prelude: false,
+        chain: false,
+        origin: false,
+    };
+    NormApply NORM_APPLY = "norm_apply" {
+        entry: "run_norm_apply",
+        modules: [Reduce],
+        geometry: Strategy,
+        prelude: true,
         chain: true,
         origin: false,
     };

@@ -474,6 +474,7 @@ fn write_measures(out: &mut Writer, measures: &[Measure]) {
             Measure::Words(value) => (2, value, 0, 0, 0),
             Measure::Tiles { value, geometry } => (3, value, 0, 0, geometry),
             Measure::Tokens(value) => (4, value, 0, 0, 0),
+            Measure::Groups { value, groups } => (6, value, groups, 0, 0),
             Measure::Windows {
                 value,
                 input,
@@ -508,6 +509,10 @@ fn read_measures(held: &mut Reader<'_>) -> Option<Vec<Measure>> {
                 input,
                 filter,
                 geometry,
+            },
+            6 => Measure::Groups {
+                value,
+                groups: input,
             },
             _ => return None,
         });

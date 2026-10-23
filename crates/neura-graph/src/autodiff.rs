@@ -3,7 +3,7 @@ use crate::graph::{
 };
 use crate::layout::Layout;
 use crate::shape::{Free, Shape};
-use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE};
+use neura_abi::{Element, Kind, MAX_RANK, NO_VALUE, NORM_GROUP, NORM_LAYER, NORM_RMS};
 use neura_pointwise as op;
 use std::collections::{BTreeMap, HashMap};
 
@@ -566,14 +566,27 @@ impl Graph {
             }
             Kind::Norm => {
                 let source = self.value_of(task.inputs[0]);
-                if self.tracked(&[source]) {
+                let weight = (task.inputs[1] != NO_VALUE).then(|| self.value_of(task.inputs[1]));
+                let shift = (task.inputs[3] != NO_VALUE).then(|| self.value_of(task.inputs[3]));
+                let stats = self.value_of(task.extra);
+                let centered = task.op == NORM_LAYER || task.op == NORM_GROUP;
+                let weighted = weight.is_some_and(|weight| self.tracked(&[weight]));
+                let xhat = (centered && weighted).then(|| {
+                    self.fresh(
+                        self.shape(source),
+                        Element::Single,
+                        Residency::Derived,
+                        false,
+                    )
+                });
+                if self.tracked(&[source]) || xhat.is_some() {
                     let out = self.fresh(
                         self.shape(source),
                         Element::Single,
                         Residency::Derived,
                         false,
                     );
-                    self.push(TaskInfo::of(
+                    let mut grad = TaskInfo::of(
                         Kind::NormGrad,
                         task.op,
                         out.id(),
@@ -585,18 +598,52 @@ impl Graph {
                             NO_VALUE,
                             NO_VALUE,
                         ],
-                    ));
-                    self.accumulate(grads, source, out);
-                }
-                if task.inputs[1] != NO_VALUE {
-                    let weight = self.value_of(task.inputs[1]);
-                    if self.tracked(&[weight]) {
-                        let scale = self.value_of(task.extra);
-                        let product = self.mul(gradient, source);
-                        let scaled = self.mul(product, scale);
-                        let folded = self.sum_axis(self.sum_axis(self.sum_axis(scaled, 0), 1), 2);
-                        self.accumulate(grads, weight, folded);
+                    );
+                    grad.slot = task.slot;
+                    grad.axis = task.axis;
+                    grad.extra = xhat.map_or(NO_VALUE, |xhat| xhat.id());
+                    self.push(grad);
+                    if self.tracked(&[source]) {
+                        self.accumulate(grads, source, out);
                     }
+                }
+                if let Some(weight) = weight
+                    && weighted
+                {
+                    let folded = match task.op {
+                        NORM_RMS => {
+                            let scale = self.slice(stats, 3, 1, 1);
+                            let product = self.mul(self.mul(gradient, source), scale);
+                            self.sum_axis(self.sum_axis(self.sum_axis(product, 0), 1), 2)
+                        }
+                        NORM_LAYER | NORM_GROUP => {
+                            let xhat = xhat.expect("a centered norm holds xhat");
+                            let product = self.mul(gradient, xhat);
+                            match task.op {
+                                NORM_GROUP => {
+                                    self.sum_axis(self.sum_axis(self.sum_axis(product, 3), 2), 0)
+                                }
+                                _ => self.sum_axis(self.sum_axis(self.sum_axis(product, 0), 1), 2),
+                            }
+                        }
+                        _ => panic!(
+                            "the {} norm of {} numbers holds no weight to descend",
+                            Kind::Norm.name(),
+                            self.shape(source).elements(),
+                        ),
+                    };
+                    self.accumulate(grads, weight, folded);
+                }
+                if let Some(shift) = shift
+                    && self.tracked(&[shift])
+                {
+                    let folded = match task.op {
+                        NORM_GROUP => {
+                            self.sum_axis(self.sum_axis(self.sum_axis(gradient, 3), 2), 0)
+                        }
+                        _ => self.sum_axis(self.sum_axis(self.sum_axis(gradient, 0), 1), 2),
+                    };
+                    self.accumulate(grads, shift, folded);
                 }
             }
             Kind::Rope => {
@@ -915,6 +962,8 @@ impl Graph {
             | Kind::SoftmaxFold
             | Kind::SoftmaxGradFold
             | Kind::NormGrad
+            | Kind::NormFold
+            | Kind::NormApply
             | Kind::Convert
             | Kind::Scatter
             | Kind::ScatterWrite
