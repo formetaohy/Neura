@@ -29,6 +29,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
     compiler.constant("RUN_SCALES", neura_profile::RUN_SCALES);
     compiler.constant("RUN_OFFSET", neura_profile::RUN_OFFSET);
     compiler.constant("RUN_SLOT", neura_profile::RUN_SLOT);
+    compiler.constant("PANEL_PARTS", neura_profile::RUN_CODES + 1);
     for generic in [
         "template_dot_element",
         "template_dot_q8_0",
@@ -81,7 +82,7 @@ pub(crate) fn install(compiler: &mut Compiler, weights: &[Element]) {
                 pattern: ast::Pattern::Integer(element.code()),
                 body: vec![ast::Statement::Expression(ast::Expression::call(
                     format!("codes_{}", symbol(element)),
-                    ["right", "address", "inside", "slot"]
+                    ["right", "address", "inside", "slot", "part"]
                         .into_iter()
                         .map(ast::Expression::name)
                         .collect(),
@@ -263,7 +264,7 @@ mod run {
 
 #[neura_compiler::module]
 mod panel {
-    fn generic_codes_by_element(right: Value, address: u32, inside: bool, slot: u32) {
+    fn generic_codes_by_element(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
         match right.element {
             _ => refuse(refusal::TENSOR, refusal::ELEMENT, right.element),
         }
@@ -281,92 +282,85 @@ mod panel {
         return select(low, (low >> 16u32) | (high << 16u32), odd);
     }
 
-    fn codes_q8_0(right: Value, address: u32, inside: bool, slot: u32) {
+    fn codes_q8_0(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
         let byte = (address / Q8_0_BLOCK) * Q8_0_BYTES;
-        let scale = ggml_half(right, byte);
-        for word in unroll(0u32, RUN_CODES, 1u32) {
-            let at = byte + 2u32 + word * 4u32;
+        if part < RUN_CODES {
+            let at = byte + 2u32 + part * 4u32;
             let held = panel_word(right, at >> 2u32, (at & 3u32) == 2u32);
-            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+            scratch[slot + part] = select(0.0, bitcast_f32(held), inside);
+            return;
         }
-        panel_affine(slot, scale, scale, 0.0, inside);
+        if part == RUN_CODES {
+            let scale = ggml_half(right, byte);
+            panel_affine(slot, scale, scale, 0.0, inside);
+        }
     }
 
-    fn codes_q4_k(right: Value, address: u32, inside: bool, slot: u32) {
+    fn codes_q4_k(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
         let base = (address / Q4_K_BLOCK) * Q4_K_BYTES;
         let within = address % Q4_K_BLOCK;
         let group = within / 64u32;
         let seat = (within % 64u32) / SUPER_SUB_BLOCK;
-        let sub = group * 2u32 + seat;
-        let quantum = ggml_half(right, base);
-        let floor = ggml_half(right, base + 2u32);
-        let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
-        let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
-        for word in unroll(0u32, RUN_CODES, 1u32) {
-            let packed = ggml_raw(right, base / 4u32 + 4u32 + group * 8u32 + word);
+        if part < RUN_CODES {
+            let packed = ggml_raw(right, base / 4u32 + 4u32 + group * 8u32 + part);
             let mut held = 0u32;
             for lane in unroll(0u32, 4u32, 1u32) {
                 held = held | (((packed >> (lane * 8u32 + seat * 4u32)) & 0xfu32) << (lane * 8u32));
             }
-            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+            scratch[slot + part] = select(0.0, bitcast_f32(held), inside);
+            return;
         }
-        panel_affine(slot, scale, scale, offset, inside);
+        if part == RUN_CODES {
+            let sub = group * 2u32 + seat;
+            let quantum = ggml_half(right, base);
+            let floor = ggml_half(right, base + 2u32);
+            let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
+            let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
+            panel_affine(slot, scale, scale, offset, inside);
+        }
     }
 
-    fn codes_q5_k(right: Value, address: u32, inside: bool, slot: u32) {
+    fn codes_q5_k(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
         let base = (address / Q5_K_BLOCK) * Q5_K_BYTES;
         let within = address % Q5_K_BLOCK;
         let group = within / 64u32;
         let seat = (within % 64u32) / SUPER_SUB_BLOCK;
-        let sub = group * 2u32 + seat;
-        let fifth_shift = 2u32 * group + seat;
-        let quantum = ggml_half(right, base);
-        let floor = ggml_half(right, base + 2u32);
-        let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
-        let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
-        for word in unroll(0u32, RUN_CODES, 1u32) {
-            let packed = ggml_raw(right, base / 4u32 + 12u32 + group * 8u32 + word);
-            let fifth = ggml_raw(right, base / 4u32 + 4u32 + word);
+        if part < RUN_CODES {
+            let fifth_shift = 2u32 * group + seat;
+            let packed = ggml_raw(right, base / 4u32 + 12u32 + group * 8u32 + part);
+            let fifth = ggml_raw(right, base / 4u32 + 4u32 + part);
             let mut held = 0u32;
             for lane in unroll(0u32, 4u32, 1u32) {
                 let nibble = (packed >> (lane * 8u32 + seat * 4u32)) & 0xfu32;
                 let bit = (fifth >> (lane * 8u32 + fifth_shift)) & 1u32;
                 held = held | ((nibble | (bit << 4u32)) << (lane * 8u32));
             }
-            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+            scratch[slot + part] = select(0.0, bitcast_f32(held), inside);
+            return;
         }
-        panel_affine(slot, scale, scale, offset, inside);
+        if part == RUN_CODES {
+            let sub = group * 2u32 + seat;
+            let quantum = ggml_half(right, base);
+            let floor = ggml_half(right, base + 2u32);
+            let scale = quantum * f32(ggml_k4_scale(right, base + 4u32, sub));
+            let offset = 0.0 - floor * f32(ggml_k4_min(right, base + 4u32, sub));
+            panel_affine(slot, scale, scale, offset, inside);
+        }
     }
 
-    fn codes_q6_k(right: Value, address: u32, inside: bool, slot: u32) {
+    fn codes_q6_k(right: Value, address: u32, inside: bool, slot: u32, part: u32) {
         let base = (address / Q6_K_BLOCK) * Q6_K_BYTES;
         let within = address % Q6_K_BLOCK;
         let side = within / 128u32;
         let group = (within % 128u32) / SUPER_SUB_BLOCK;
-        let nibble_shift = select(0u32, 4u32, group >= 2u32);
-        let bit_shift = 2u32 * group;
         let odd = (base & 2u32) == 2u32;
-        let scale_at = base + 192u32 + side * 8u32 + group * 2u32;
-        let held_scale = ggml_raw(right, scale_at >> 2u32);
-        let scale_half = (scale_at & 2u32) == 2u32;
-        let width = ggml_half(right, base + 208u32);
-        let lower = width
-            * ggml_signed(select(
-                held_scale & 0xffu32,
-                (held_scale >> 16u32) & 0xffu32,
-                scale_half,
-            ));
-        let upper = width
-            * ggml_signed(select(
-                (held_scale >> 8u32) & 0xffu32,
-                (held_scale >> 24u32) & 0xffu32,
-                scale_half,
-            ));
         let low_start = (base + side * 64u32 + (group % 2u32) * 32u32) >> 2u32;
         let high_start = (base + 128u32 + side * 32u32) >> 2u32;
-        for word in unroll(0u32, RUN_CODES, 1u32) {
-            let low = panel_word(right, low_start + word, odd);
-            let high = panel_word(right, high_start + word, odd);
+        if part < RUN_CODES {
+            let nibble_shift = select(0u32, 4u32, group >= 2u32);
+            let bit_shift = 2u32 * group;
+            let low = panel_word(right, low_start + part, odd);
+            let high = panel_word(right, high_start + part, odd);
             let mut held = 0u32;
             for lane in unroll(0u32, 4u32, 1u32) {
                 let nibble = (low >> (lane * 8u32 + nibble_shift)) & 0xfu32;
@@ -374,9 +368,28 @@ mod panel {
                 let biased = (nibble | (bit << 4u32)) + 224u32;
                 held = held | (biased & 0xffu32) << (lane * 8u32);
             }
-            scratch[slot + word] = select(0.0, bitcast_f32(held), inside);
+            scratch[slot + part] = select(0.0, bitcast_f32(held), inside);
+            return;
         }
-        panel_affine(slot, lower, upper, 0.0, inside);
+        if part == RUN_CODES {
+            let scale_at = base + 192u32 + side * 8u32 + group * 2u32;
+            let held_scale = ggml_raw(right, scale_at >> 2u32);
+            let scale_half = (scale_at & 2u32) == 2u32;
+            let width = ggml_half(right, base + 208u32);
+            let lower = width
+                * ggml_signed(select(
+                    held_scale & 0xffu32,
+                    (held_scale >> 16u32) & 0xffu32,
+                    scale_half,
+                ));
+            let upper = width
+                * ggml_signed(select(
+                    (held_scale >> 8u32) & 0xffu32,
+                    (held_scale >> 24u32) & 0xffu32,
+                    scale_half,
+                ));
+            panel_affine(slot, lower, upper, 0.0, inside);
+        }
     }
 
     fn run_codes(slot: u32, within: u32) -> f32 {

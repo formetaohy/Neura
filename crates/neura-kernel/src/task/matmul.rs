@@ -350,8 +350,9 @@ mod device {
         let right_slot = buffer * MATMUL_RUN_STRIDE * MATMUL_RUN_BLOCKS;
         for block in unroll(0u32, MATMUL_RUN_BLOCKS, 1u32) {
             let at_depth = base_depth + block * QUANT_BLOCK;
-            for unit in stride(lid, MATMUL_COLUMNS, WORKGROUP_SIZE) {
-                let column = base_column + unit;
+            for unit in stride(lid, MATMUL_COLUMNS * PANEL_PARTS, WORKGROUP_SIZE) {
+                let column = base_column + unit / PANEL_PARTS;
+                let part = unit % PANEL_PARTS;
                 let inside = at_depth < depth && column < columns;
                 let address = select(
                     0u32,
@@ -362,7 +363,11 @@ mod device {
                     right,
                     address,
                     inside,
-                    SCRATCH_MATMUL_RIGHT + right_slot + block * MATMUL_RUN_STRIDE + unit * RUN_SLOT,
+                    SCRATCH_MATMUL_RIGHT
+                        + right_slot
+                        + block * MATMUL_RUN_STRIDE
+                        + (unit / PANEL_PARTS) * RUN_SLOT,
+                    part,
                 );
             }
         }

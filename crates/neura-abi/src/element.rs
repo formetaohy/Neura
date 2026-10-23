@@ -206,7 +206,7 @@ impl Element {
     }
 
     pub const fn packs_codes(self) -> bool {
-        matches!(self, Self::Q4K | Self::Q5K)
+        matches!(self, Self::Q4K | Self::Q5K | Self::Q6K)
     }
 
     pub const fn quanta(self, elements: u64) -> u64 {
