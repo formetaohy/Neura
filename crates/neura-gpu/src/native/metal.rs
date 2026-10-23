@@ -357,7 +357,10 @@ impl Device {
         size: u64,
         usage: BufferUsages,
     ) -> Buffer {
-        let resource = self.allocate(size, usage.contains(BufferUsages::MAP_READ));
+        let resource = self.allocate(
+            size,
+            usage.contains(BufferUsages::MAP_READ) || usage.contains(BufferUsages::MAP_WRITE),
+        );
         resource.raw.setLabel(Some(&NSString::from_str(label)));
         Buffer { resource }
     }
@@ -760,6 +763,38 @@ impl Device {
         for index in indices {
             let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
         }
+    }
+
+    pub(crate) fn write_host(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                buffer
+                    .resource
+                    .raw
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset as usize),
+                bytes.len(),
+            )
+        };
+    }
+
+    pub(crate) fn read_host(&self, buffer: &Buffer, offset: u64, bytes: u64) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                buffer
+                    .resource
+                    .raw
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(offset as usize),
+                bytes as usize,
+            )
+        }
+        .to_vec()
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

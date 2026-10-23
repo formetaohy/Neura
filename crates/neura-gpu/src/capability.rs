@@ -9,6 +9,7 @@ bitflags! {
         const COPY_SRC = 2;
         const COPY_DST = 4;
         const MAP_READ = 8;
+        const MAP_WRITE = 16;
     }
 }
 

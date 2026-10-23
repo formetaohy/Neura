@@ -654,7 +654,9 @@ impl Device {
             resource: allocate(
                 &self.raw,
                 size,
-                if usage.contains(BufferUsages::MAP_READ) {
+                if usage.contains(BufferUsages::MAP_WRITE) {
+                    D3D12_HEAP_TYPE_UPLOAD
+                } else if usage.contains(BufferUsages::MAP_READ) {
                     D3D12_HEAP_TYPE_READBACK
                 } else {
                     D3D12_HEAP_TYPE_DEFAULT
@@ -1101,6 +1103,58 @@ impl Device {
             .expect("the D3D12 compute queue is never poisoned");
         let index = state.next;
         let _ = self.await_completion(&mut state, index, RELEASE_TIMEOUT);
+    }
+
+    pub(crate) fn write_host(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) {
+        let mut mapped = ptr::null_mut();
+        unsafe {
+            buffer.resource.raw.Map(
+                0,
+                Some(&D3D12_RANGE { Begin: 0, End: 0 }),
+                Some(&raw mut mapped),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a D3D12 upload: {error}"));
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                mapped.cast::<u8>().add(offset as usize),
+                bytes.len(),
+            );
+            buffer.resource.raw.Unmap(
+                0,
+                Some(&D3D12_RANGE {
+                    Begin: offset as usize,
+                    End: (offset + bytes.len() as u64) as usize,
+                }),
+            );
+        }
+    }
+
+    pub(crate) fn read_host(&self, buffer: &Buffer, offset: u64, bytes: u64) -> Vec<u8> {
+        let mut mapped = ptr::null_mut();
+        unsafe {
+            buffer.resource.raw.Map(
+                0,
+                Some(&D3D12_RANGE {
+                    Begin: offset as usize,
+                    End: (offset + bytes) as usize,
+                }),
+                Some(&raw mut mapped),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a D3D12 mirror: {error}"));
+        let result = unsafe {
+            std::slice::from_raw_parts(mapped.cast::<u8>().add(offset as usize), bytes as usize)
+                .to_vec()
+        };
+        unsafe {
+            buffer
+                .resource
+                .raw
+                .Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }))
+        };
+        result
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

@@ -18,6 +18,7 @@ use neura_shader::{ComputeProgram, MAX_BINDING_BYTES};
 use std::any::Any;
 use std::cmp::Reverse;
 use std::ffi::{CStr, CString};
+use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -909,7 +910,11 @@ impl Device {
             flags |= vk::BufferUsageFlags::TRANSFER_DST;
         }
         Buffer {
-            resource: self.allocate(size, flags, usage.contains(BufferUsages::MAP_READ)),
+            resource: self.allocate(
+                size,
+                flags,
+                usage.contains(BufferUsages::MAP_READ) || usage.contains(BufferUsages::MAP_WRITE),
+            ),
         }
     }
 
@@ -1382,6 +1387,44 @@ impl Device {
         for frame in frames {
             unsafe { self.raw.destroy_fence(frame.fence, None) };
         }
+    }
+
+    pub(crate) fn write_host(&self, buffer: &Buffer, offset: u64, bytes: &[u8]) {
+        let mapped = unsafe {
+            self.raw.map_memory(
+                buffer.resource.memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a Vulkan mirror: {error:?}"));
+        unsafe {
+            ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                mapped.cast::<u8>().add(offset as usize),
+                bytes.len(),
+            );
+            self.raw.unmap_memory(buffer.resource.memory);
+        }
+    }
+
+    pub(crate) fn read_host(&self, buffer: &Buffer, offset: u64, bytes: u64) -> Vec<u8> {
+        let mapped = unsafe {
+            self.raw.map_memory(
+                buffer.resource.memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .unwrap_or_else(|error| panic!("mapping a Vulkan mirror: {error:?}"));
+        let result = unsafe {
+            std::slice::from_raw_parts(mapped.cast::<u8>().add(offset as usize), bytes as usize)
+                .to_vec()
+        };
+        unsafe { self.raw.unmap_memory(buffer.resource.memory) };
+        result
     }
 
     pub(crate) fn read(&self, buffer: &Buffer, bytes: u64) -> Vec<u8> {

@@ -42,6 +42,16 @@ impl GpuBuffer {
                     && !usage.contains(BufferUsages::STORAGE)),
             "a host readback must accept copies and cannot be shader storage",
         );
+        assert!(
+            !usage.contains(BufferUsages::MAP_READ) || !usage.contains(BufferUsages::MAP_WRITE),
+            "a buffer answers the host one way",
+        );
+        assert!(
+            !usage.contains(BufferUsages::MAP_WRITE)
+                || (usage.contains(BufferUsages::COPY_SRC)
+                    && !usage.contains(BufferUsages::STORAGE)),
+            "a host write must feed copies and cannot be shader storage",
+        );
         Self {
             inner: Arc::new(BufferState {
                 native: device.native().create_buffer(label, size, usage),
@@ -105,6 +115,49 @@ impl GpuBuffer {
                 bytes: bytes.to_vec(),
             });
         }
+    }
+
+    pub fn write_host_at(&self, offset: u64, bytes: &[u8]) {
+        assert!(
+            self.usage().contains(BufferUsages::MAP_WRITE),
+            "the buffer is not host writable"
+        );
+        assert!(
+            offset.is_multiple_of(4) && bytes.len().is_multiple_of(4),
+            "a host write must cover whole words",
+        );
+        assert!(
+            offset
+                .checked_add(bytes.len() as u64)
+                .is_some_and(|end| end <= self.size()),
+            "writing {} bytes at {offset} exceeds a buffer of {} bytes",
+            bytes.len(),
+            self.size(),
+        );
+        if !bytes.is_empty() {
+            self.device()
+                .native()
+                .write_host(self.native(), offset, bytes);
+        }
+    }
+
+    pub fn read_host(&self, offset: u64, bytes: u64) -> Vec<u8> {
+        assert!(
+            self.usage().contains(BufferUsages::MAP_WRITE),
+            "the buffer is not host readable"
+        );
+        assert!(
+            offset.is_multiple_of(4)
+                && bytes.is_multiple_of(4)
+                && offset
+                    .checked_add(bytes)
+                    .is_some_and(|end| end <= self.size()),
+            "reading {bytes} bytes at {offset} exceeds a buffer of {} bytes",
+            self.size(),
+        );
+        self.device()
+            .native()
+            .read_host(self.native(), offset, bytes)
     }
 
     pub fn binding(&self, offset: u64, size: u64) -> BufferBinding<'_> {

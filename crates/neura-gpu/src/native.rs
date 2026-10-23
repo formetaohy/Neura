@@ -374,6 +374,44 @@ impl NativeDevice {
         }
     }
 
+    pub(crate) fn write_host(&self, buffer: &NativeBuffer, offset: u64, bytes: &[u8]) {
+        match (self, buffer) {
+            #[cfg(vulkan_backend)]
+            (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => {
+                device.write_host(buffer, offset, bytes)
+            }
+            #[cfg(dx12_backend)]
+            (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => {
+                device.write_host(buffer, offset, bytes)
+            }
+            #[cfg(metal_backend)]
+            (Self::Metal(device), NativeBuffer::Metal(buffer)) => {
+                device.write_host(buffer, offset, bytes)
+            }
+            #[cfg(multiple_backends)]
+            _ => panic!("a buffer belongs to another backend"),
+        }
+    }
+
+    pub(crate) fn read_host(&self, buffer: &NativeBuffer, offset: u64, bytes: u64) -> Vec<u8> {
+        match (self, buffer) {
+            #[cfg(vulkan_backend)]
+            (Self::Vulkan(device), NativeBuffer::Vulkan(buffer)) => {
+                device.read_host(buffer, offset, bytes)
+            }
+            #[cfg(dx12_backend)]
+            (Self::Dx12(device), NativeBuffer::Dx12(buffer)) => {
+                device.read_host(buffer, offset, bytes)
+            }
+            #[cfg(metal_backend)]
+            (Self::Metal(device), NativeBuffer::Metal(buffer)) => {
+                device.read_host(buffer, offset, bytes)
+            }
+            #[cfg(multiple_backends)]
+            _ => panic!("a buffer belongs to another backend"),
+        }
+    }
+
     pub(crate) fn assert_alive(&self) {
         match self {
             #[cfg(vulkan_backend)]

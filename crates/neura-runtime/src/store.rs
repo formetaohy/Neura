@@ -174,8 +174,9 @@ struct Mirror {
     page_of: Vec<u32>,
     slot_of: Vec<u32>,
     dirty: Vec<bool>,
-    used: Vec<u64>,
-    clock: u64,
+    order: Vec<(u32, u32)>,
+    deferred: Vec<(u32, u32)>,
+    free: Vec<u32>,
     chunks: Vec<Option<Recycled>>,
     spare: Vec<usize>,
     writebacks: Vec<Writeback>,
@@ -202,18 +203,24 @@ pub(crate) const fn page_bytes() -> u64 {
 const WRITEBACK_CHUNKS: usize = 64;
 const CAPTURE_PAGES: usize = 64;
 const UPLOAD_PAGES: usize = (neura_gpu::STAGING_BYTES / (PAGE_WORDS * WORD_BYTES)) as usize;
+const COPY_PAGES: usize = 1024;
 const STREAM_BYTES: u64 = 1 << 16;
 const WRITEBACK_USAGE: BufferUsages = BufferUsages::COPY_SRC.union(BufferUsages::COPY_DST);
 const READBACK_USAGE: BufferUsages = BufferUsages::COPY_DST.union(BufferUsages::MAP_READ);
 
 enum Backing {
-    Memory(Vec<u8>),
+    Mapped(GpuBuffer),
     Spilled(SpillFile),
 }
 
 impl Backing {
-    fn memory(pages: u32) -> Self {
-        Self::Memory(vec![0; pages as usize * page_bytes() as usize])
+    fn mapped(device: &neura_gpu::Device, pages: u32) -> Self {
+        Self::Mapped(GpuBuffer::new(
+            device,
+            "neura weight mirror",
+            u64::from(pages) * page_bytes(),
+            BufferUsages::MAP_WRITE | BufferUsages::COPY_SRC,
+        ))
     }
 
     fn spilled(spill: &Spill, pages: u32) -> Self {
@@ -222,36 +229,36 @@ impl Backing {
 
     fn host_bytes(&self) -> u64 {
         match self {
-            Self::Memory(image) => image.len() as u64,
+            Self::Mapped(buffer) => buffer.size(),
             Self::Spilled(_) => 0,
         }
     }
 
     fn path(&self) -> Option<PathBuf> {
         match self {
-            Self::Memory(_) => None,
+            Self::Mapped(_) => None,
             Self::Spilled(file) => Some(file.path()),
         }
     }
 
     fn read_bytes(&self) -> u64 {
         match self {
-            Self::Memory(_) => 0,
+            Self::Mapped(_) => 0,
             Self::Spilled(file) => file.read_bytes(),
         }
     }
 
     fn written_bytes(&self) -> u64 {
         match self {
-            Self::Memory(_) => 0,
+            Self::Mapped(_) => 0,
             Self::Spilled(file) => file.written_bytes(),
         }
     }
 
     fn read(&mut self, at: u64, bytes: &mut [u8]) {
         match self {
-            Self::Memory(image) => {
-                bytes.copy_from_slice(&image[at as usize..at as usize + bytes.len()])
+            Self::Mapped(buffer) => {
+                bytes.copy_from_slice(&buffer.read_host(at, bytes.len() as u64))
             }
             Self::Spilled(file) => file.read(at, bytes),
         }
@@ -259,27 +266,26 @@ impl Backing {
 
     fn write(&mut self, at: u64, bytes: &[u8]) {
         match self {
-            Self::Memory(image) => {
-                image[at as usize..at as usize + bytes.len()].copy_from_slice(bytes)
-            }
+            Self::Mapped(buffer) => buffer.write_host_at(at, bytes),
             Self::Spilled(file) => file.write(at, bytes),
         }
     }
 }
 
 impl Mirror {
-    fn new(pages: u32, slots: u32, spill: Option<&Spill>) -> Self {
+    fn new(device: &neura_gpu::Device, pages: u32, slots: u32, spill: Option<&Spill>) -> Self {
         let backing = match spill {
             Some(spill) => Backing::spilled(spill, pages),
-            None => Backing::memory(pages),
+            None => Backing::mapped(device, pages),
         };
         Self {
             backing,
             page_of: vec![NO_PAGE; slots as usize],
             slot_of: vec![NO_PAGE; pages as usize],
             dirty: vec![false; slots as usize],
-            used: vec![0; slots as usize],
-            clock: 0,
+            order: Vec::with_capacity(slots as usize),
+            deferred: Vec::new(),
+            free: (0..slots).rev().collect(),
             chunks: Vec::new(),
             spare: Vec::new(),
             writebacks: Vec::new(),
@@ -295,11 +301,6 @@ impl Mirror {
         }
     }
 
-    fn touch(&mut self, slot: u32) {
-        self.clock += 1;
-        self.used[slot as usize] = self.clock;
-    }
-
     fn vacuum(&mut self) {
         for slot in 0..self.page_of.len() {
             let held = self.page_of[slot];
@@ -309,6 +310,10 @@ impl Mirror {
             self.page_of[slot] = NO_PAGE;
             self.dirty[slot] = false;
         }
+        self.order.clear();
+        self.deferred.clear();
+        self.free.clear();
+        self.free.extend((0..self.page_of.len() as u32).rev());
     }
 
     fn table(&self) -> Vec<u32> {
@@ -367,7 +372,7 @@ impl WeightStore {
                 BufferUsages::STORAGE | BufferUsages::COPY_DST,
             )
         });
-        let mirror = paged.then(|| Mutex::new(Mirror::new(pages, slots, spill)));
+        let mirror = paged.then(|| Mutex::new(Mirror::new(context.device(), pages, slots, spill)));
         let store = Arc::new(Self {
             device: context.device().clone(),
             upload: std::sync::OnceLock::new(),
@@ -528,7 +533,6 @@ impl WeightStore {
                         &bytes[at as usize..(at + chunk) as usize],
                     );
                     mirror.dirty[slot as usize] = true;
-                    mirror.touch(slot);
                 }
                 None => mirror
                     .backing
@@ -605,10 +609,10 @@ impl WeightStore {
         let mut transfer: Option<Submission> = None;
         let mut submitted: Vec<SubmissionIndex> = Vec::new();
         let mut uploads: Vec<(u32, u32)> = Vec::new();
+        let mut loaded: Vec<(u32, u32)> = Vec::new();
         let mut changed = false;
         for page in pages {
-            if let Some(slot) = mirror.resident(*page) {
-                mirror.touch(slot);
+            if mirror.resident(*page).is_some() {
                 continue;
             }
             changed = true;
@@ -651,45 +655,86 @@ impl WeightStore {
             }
             mirror.page_of[slot as usize] = *page;
             mirror.slot_of[*page as usize] = slot;
-            mirror.touch(slot);
+            loaded.push((slot, *page));
         }
-        let mut batches = uploads.chunks(self.batch_pages());
-        loop {
-            let batch = batches.next();
-            if batch.is_none() && transfer.is_none() {
-                break;
-            }
-            let carried = transfer.is_some();
-            let mut submission = transfer
-                .take()
-                .unwrap_or_else(|| Submission::new(queue.device(), "neura weight upload"));
-            if let Some(batch) = batch {
-                let mut bytes = Vec::with_capacity(batch.len() * page_bytes() as usize);
-                for (page, _) in batch {
-                    let start = bytes.len();
-                    bytes.resize(start + page_bytes() as usize, 0);
-                    mirror
-                        .backing
-                        .read(u64::from(*page) * page_bytes(), &mut bytes[start..]);
-                }
-                self.upload_buffer().write_at(queue, 0, &bytes);
-                for (at, (_, slot)) in batch.iter().enumerate() {
-                    submission.copy(
-                        self.upload_buffer(),
-                        at as u64 * page_bytes(),
-                        self.store.buffer(),
-                        self.store.offset() + u64::from(*slot) * page_bytes(),
-                        page_bytes(),
-                    );
-                }
-            }
+        let mut deferred = std::mem::take(&mut mirror.deferred);
+        deferred.reverse();
+        mirror.order.extend(deferred);
+        mirror.order.extend(loaded);
+        if matches!(mirror.backing, Backing::Mapped(_))
+            && let Some(submission) = transfer.take()
+        {
             let index = submission.submit(queue);
-            if carried {
-                for writeback in &mut mirror.writebacks {
-                    writeback.submission.get_or_insert(index);
-                }
+            for writeback in &mut mirror.writebacks {
+                writeback.submission.get_or_insert(index);
             }
             submitted.push(index);
+        }
+        match &mirror.backing {
+            Backing::Mapped(mirror_pages) => {
+                for batch in uploads.chunks(COPY_PAGES) {
+                    let mut submission = Submission::new(queue.device(), "neura weight copy");
+                    let mut at = 0usize;
+                    while at < batch.len() {
+                        let mut end = at + 1;
+                        while end < batch.len()
+                            && batch[end].0 == batch[end - 1].0 + 1
+                            && batch[end].1 == batch[end - 1].1 + 1
+                        {
+                            end += 1;
+                        }
+                        submission.copy(
+                            mirror_pages,
+                            u64::from(batch[at].0) * page_bytes(),
+                            self.store.buffer(),
+                            self.store.offset() + u64::from(batch[at].1) * page_bytes(),
+                            (end - at) as u64 * page_bytes(),
+                        );
+                        at = end;
+                    }
+                    submitted.push(submission.submit(queue));
+                }
+            }
+            Backing::Spilled(_) => {
+                let mut batches = uploads.chunks(self.batch_pages());
+                loop {
+                    let batch = batches.next();
+                    if batch.is_none() && transfer.is_none() {
+                        break;
+                    }
+                    let carried = transfer.is_some();
+                    let mut submission = transfer
+                        .take()
+                        .unwrap_or_else(|| Submission::new(queue.device(), "neura weight upload"));
+                    if let Some(batch) = batch {
+                        let mut bytes = Vec::with_capacity(batch.len() * page_bytes() as usize);
+                        for (page, _) in batch {
+                            let start = bytes.len();
+                            bytes.resize(start + page_bytes() as usize, 0);
+                            mirror
+                                .backing
+                                .read(u64::from(*page) * page_bytes(), &mut bytes[start..]);
+                        }
+                        self.upload_buffer().write_at(queue, 0, &bytes);
+                        for (at, (_, slot)) in batch.iter().enumerate() {
+                            submission.copy(
+                                self.upload_buffer(),
+                                at as u64 * page_bytes(),
+                                self.store.buffer(),
+                                self.store.offset() + u64::from(*slot) * page_bytes(),
+                                page_bytes(),
+                            );
+                        }
+                    }
+                    let index = submission.submit(queue);
+                    if carried {
+                        for writeback in &mut mirror.writebacks {
+                            writeback.submission.get_or_insert(index);
+                        }
+                    }
+                    submitted.push(index);
+                }
+            }
         }
         if changed {
             self.reload(queue, &mut mirror);
@@ -721,33 +766,30 @@ impl WeightStore {
         pages: &[u32],
         page: u32,
     ) -> u32 {
-        let free = (0..self.slots).find(|slot| mirror.page_of[*slot as usize] == NO_PAGE);
-        let victim = free
-            .or_else(|| {
-                (0..self.slots)
-                    .filter(|slot| {
-                        let kept = mirror.page_of[*slot as usize];
-                        kept != NO_PAGE && kept != page && pages.binary_search(&kept).is_err()
-                    })
-                    .min_by_key(|slot| mirror.used[*slot as usize])
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "the resident weights of {} pages cannot hold the {} pages one step of this plan walks; raise the resident weight budget, or bind a graph whose waves walk no more pages than it holds",
-                    self.slots,
-                    pages.len(),
-                )
-            });
-        let kept = mirror.page_of[victim as usize];
-        if kept != NO_PAGE {
-            if mirror.dirty[victim as usize] {
-                self.write_back(mirror, queue, transfer, submitted, victim, kept);
+        if let Some(slot) = mirror.free.pop() {
+            return slot;
+        }
+        while let Some((slot, kept)) = mirror.order.pop() {
+            if kept == NO_PAGE || mirror.page_of[slot as usize] != kept {
+                continue;
+            }
+            if kept == page || pages.binary_search(&kept).is_ok() {
+                mirror.deferred.push((slot, kept));
+                continue;
+            }
+            if mirror.dirty[slot as usize] {
+                self.write_back(mirror, queue, transfer, submitted, slot, kept);
             }
             mirror.slot_of[kept as usize] = NO_PAGE;
+            mirror.page_of[slot as usize] = NO_PAGE;
+            mirror.dirty[slot as usize] = false;
+            return slot;
         }
-        mirror.page_of[victim as usize] = NO_PAGE;
-        mirror.dirty[victim as usize] = false;
-        victim
+        panic!(
+            "the resident weights of {} pages cannot hold the {} pages one step of this plan walks; raise the resident weight budget, or bind a graph whose waves walk no more pages than it holds",
+            self.slots,
+            pages.len(),
+        )
     }
 
     fn write_back(
